@@ -228,6 +228,13 @@ class SignalTUI(App):
         color: $text-muted;
     }
 
+    .msg-quote {
+        text-align: left;
+        padding: 0 1 0 3;
+        color: $text-muted;
+        text-style: italic;
+    }
+
     #message-input {
         dock: bottom;
         margin: 1 1;
@@ -271,9 +278,22 @@ class SignalTUI(App):
 
     # ─── Metodi helper per la chat ──────────────────────────────────────────
 
-    def _add_message(self, text: str, is_mine: bool = False, is_info: bool = False):
-        """Aggiunge un messaggio alla chat con allineamento corretto."""
+    def _add_message(
+        self,
+        text: str,
+        is_mine: bool = False,
+        is_info: bool = False,
+        quote_text: str | None = None,
+    ):
+        """Aggiunge un messaggio alla chat con allineamento corretto.
+        Se quote_text è presente, mostra prima la citazione in stile quote."""
         chat_log = self.query_one("#chat-log", Vertical)
+
+        # Se c'è una citazione, mostrala prima
+        if quote_text:
+            quote_widget = Static(f"▎ {quote_text}", classes="msg-quote")
+            chat_log.mount(quote_widget)
+
         if is_info:
             widget = Static(text, classes="msg-info")
         elif is_mine:
@@ -487,9 +507,10 @@ class SignalTUI(App):
 
         return False
 
-    def _extract_message_text(self, envelope: dict) -> tuple[str, str, bool] | None:
-        """Estrae (sender_label, text, is_mine) da un envelope.
-        is_mine=True per messaggi inviati da noi (sync), False per messaggi ricevuti."""
+    def _extract_message_text(self, envelope: dict) -> tuple[str, str, bool, str | None] | None:
+        """Estrae (sender_label, text, is_mine, quote_text) da un envelope.
+        is_mine=True per messaggi inviati da noi (sync), False per messaggi ricevuti.
+        quote_text è il testo del messaggio citato, se presente."""
         source_name = envelope.get("sourceName", "")
         source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
 
@@ -499,7 +520,10 @@ class SignalTUI(App):
             text = data_msg.get("message", "")
             if text:
                 sender = source_name or source_number
-                return (sender, text, False)
+                # Estrai citazione (quote)
+                quote = data_msg.get("quote", {})
+                quote_text = quote.get("text", "") if quote else None
+                return (sender, text, False, quote_text)
 
         # syncMessage.sentMessage — messaggio inviato da altro dispositivo
         sync = envelope.get("syncMessage", {})
@@ -507,7 +531,10 @@ class SignalTUI(App):
         if sent:
             text = sent.get("message", "")
             if text:
-                return ("Tu", text, True)
+                # Estrai citazione anche dai syncMessage
+                quote = sent.get("quote", {})
+                quote_text = quote.get("text", "") if quote else None
+                return ("Tu", text, True, quote_text)
 
         return None
 
@@ -547,12 +574,14 @@ class SignalTUI(App):
                 result = self._extract_message_text(envelope)
                 if result:
                     found += 1
-                    sender, text, is_mine = result
+                    sender, text, is_mine, quote_text = result
                     if is_mine:
                         line = f"Tu: {text}"
                     else:
                         line = f"{sender}: {text}"
-                    self.call_from_thread(self._add_message, line, is_mine=is_mine)
+                    self.call_from_thread(
+                        self._add_message, line, is_mine=is_mine, quote_text=quote_text
+                    )
 
             if found == 0:
                 self.call_from_thread(
@@ -595,13 +624,13 @@ class SignalTUI(App):
 
                         result = self._extract_message_text(envelope)
                         if result:
-                            sender, text, is_mine = result
+                            sender, text, is_mine, quote_text = result
                             if is_mine:
                                 line = f"Tu: {text}"
                             else:
                                 line = f"{sender}: {text}"
                             self.call_from_thread(
-                                self._add_message, line, is_mine=is_mine
+                                self._add_message, line, is_mine=is_mine, quote_text=quote_text
                             )
             except Exception:
                 pass
