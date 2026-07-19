@@ -2,6 +2,7 @@
 Signal TUI Client — Interfaccia Textual integrata con signal-cli via JSON-RPC.
 Usa signal-cli daemon su HTTP (localhost) per operazioni veloci (millisecondi).
 Se il daemon non è disponibile, ricade su subprocess (più lento ma funziona).
+I messaggi vengono salvati in cache locale per persistenza tra sessioni.
 """
 
 import json
@@ -32,6 +33,8 @@ PROJECT_DIR = Path(__file__).parent
 USER_NUMBER = "+393482581393"
 DAEMON_HTTP_PORT = 8080
 DAEMON_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/rpc"
+CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
+CACHE_FILE = CACHE_DIR / "messages.json"
 
 
 def _find_signal_cli() -> Path:
@@ -71,6 +74,60 @@ def _run_subprocess(args: list[str]) -> str:
             f"signal-cli error (code {result.returncode}): {result.stderr.strip()}"
         )
     return result.stdout
+
+
+# ─── Cache messaggi ──────────────────────────────────────────────────────────
+
+def _ensure_cache_dir():
+    """Crea la directory della cache se non esiste."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_cache() -> dict[str, list[dict]]:
+    """Carica tutti i messaggi dalla cache."""
+    _ensure_cache_dir()
+    if not CACHE_FILE.exists():
+        return {}
+    try:
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_cache(data: dict[str, list[dict]]):
+    """Salva tutti i messaggi nella cache."""
+    _ensure_cache_dir()
+    with open(CACHE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def _get_cached_messages(contact_number: str) -> list[dict]:
+    """Restituisce i messaggi in cache per un contatto."""
+    cache = _load_cache()
+    return cache.get(contact_number, [])
+
+
+def _add_message_to_cache(
+    contact_number: str,
+    text: str,
+    is_mine: bool,
+    sender: str,
+    timestamp: int,
+    quote_text: str | None = None,
+):
+    """Aggiunge un messaggio alla cache."""
+    cache = _load_cache()
+    if contact_number not in cache:
+        cache[contact_number] = []
+    cache[contact_number].append({
+        "text": text,
+        "is_mine": is_mine,
+        "sender": sender,
+        "timestamp": timestamp,
+        "quote_text": quote_text,
+    })
+    _save_cache(cache)
 
 
 # ─── JSON-RPC Client via HTTP ────────────────────────────────────────────────
@@ -308,6 +365,123 @@ class SignalTUI(App):
         chat_log = self.query_one("#chat-log", Vertical)
         chat_log.remove_children()
 
+    # ─── Identificazione contatto per envelope ──────────────────────────────
+
+    def _identify_contact_for_envelope(self, envelope: dict) -> Optional[Contact]:
+        """Identifica a quale contatto (tra quelli in rubrica) appartiene un envelope.
+        Confronto esatto con ==, nessun substring match."""
+        source = envelope.get("source", "")
+        source_number = envelope.get("sourceNumber", "")
+        source_uuid = envelope.get("sourceUuid", "")
+
+        # Cerca tra i contatti
+        for contact in self.contacts:
+            # Messaggio diretto dal contatto
+            if source == contact.number or source_number == contact.number:
+                return contact
+            if source_uuid and contact.aci and source_uuid == contact.aci:
+                return contact
+
+        # SyncMessage (messaggio inviato da noi a un contatto)
+        sync = envelope.get("syncMessage", {})
+        sent = sync.get("sentMessage", {})
+        if sent:
+            dest = sent.get("destination", "")
+            dest_number = sent.get("destinationNumber", "")
+            dest_uuid = sent.get("destinationUuid", "")
+            for contact in self.contacts:
+                if dest == contact.number or dest_number == contact.number:
+                    return contact
+                if dest_uuid and contact.aci and dest_uuid == contact.aci:
+                    return contact
+
+        return None
+
+    def _extract_message_text(self, envelope: dict) -> tuple[str, str, bool, str | None] | None:
+        """Estrae (sender_label, text, is_mine, quote_text) da un envelope.
+        is_mine=True per messaggi inviati da noi (sync), False per messaggi ricevuti.
+        quote_text è il testo del messaggio citato, se presente."""
+        source_name = envelope.get("sourceName", "")
+        source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
+
+        # dataMessage — messaggio ricevuto
+        data_msg = envelope.get("dataMessage", {})
+        if data_msg:
+            text = data_msg.get("message", "")
+            if text:
+                sender = source_name or source_number
+                # Estrai citazione (quote)
+                quote = data_msg.get("quote", {})
+                quote_text = quote.get("text", "") if quote else None
+                return (sender, text, False, quote_text)
+
+        # syncMessage.sentMessage — messaggio inviato da altro dispositivo
+        sync = envelope.get("syncMessage", {})
+        sent = sync.get("sentMessage", {})
+        if sent:
+            text = sent.get("message", "")
+            if text:
+                # Estrai citazione anche dai syncMessage
+                quote = sent.get("quote", {})
+                quote_text = quote.get("text", "") if quote else None
+                return ("Tu", text, True, quote_text)
+
+        return None
+
+    def _get_message_timestamp(self, envelope: dict) -> int:
+        """Restituisce il timestamp del messaggio."""
+        ts = envelope.get("timestamp", 0)
+        if not ts:
+            data = envelope.get("dataMessage", {})
+            ts = data.get("timestamp", 0)
+        if not ts:
+            sync = envelope.get("syncMessage", {})
+            sent = sync.get("sentMessage", {})
+            ts = sent.get("timestamp", 0)
+        return ts
+
+    # ─── Processamento envelope (salva in cache + mostra se contatto corrente) ─
+
+    def _process_envelope(self, envelope: dict) -> bool:
+        """Processa un envelope: identifica il contatto, salva in cache,
+        e se è il contatto corrente, mostra nella UI.
+        Restituisce True se il messaggio è stato mostrato."""
+        contact = self._identify_contact_for_envelope(envelope)
+        if contact is None:
+            return False
+
+        ts = self._get_message_timestamp(envelope)
+        result = self._extract_message_text(envelope)
+        if result is None:
+            return False
+
+        sender, text, is_mine, quote_text = result
+
+        # Salva in cache (sempre, per qualsiasi contatto)
+        _add_message_to_cache(
+            contact_number=contact.number,
+            text=text,
+            is_mine=is_mine,
+            sender=sender,
+            timestamp=ts,
+            quote_text=quote_text,
+        )
+
+        # Mostra nella UI solo se è il contatto corrente
+        if self.selected_contact and contact.number == self.selected_contact.number:
+            if ts:
+                self._seen_timestamps.add(ts)
+            if is_mine:
+                line = f"Tu: {text}"
+            else:
+                line = f"{sender}: {text}"
+            self.call_from_thread(
+                self._add_message, line, is_mine=is_mine, quote_text=quote_text
+            )
+            return True
+
+        return False
+
     # ─── Startup ────────────────────────────────────────────────────────────
 
     def _startup(self):
@@ -472,7 +646,7 @@ class SignalTUI(App):
             # Ferma polling precedente se attivo
             self._polling_active = False
 
-            # Carica messaggi esistenti
+            # Carica messaggi dalla cache + nuovi
             self.run_worker(
                 self._load_messages_worker, exclusive=False, thread=True
             )
@@ -485,153 +659,70 @@ class SignalTUI(App):
 
     # ─── Logica messaggi ────────────────────────────────────────────────────
 
-    def _is_message_for_contact(self, envelope: dict, contact: Contact) -> bool:
-        """Verifica se un envelope riguarda il contatto selezionato."""
-        source = envelope.get("source", "")
-        source_number = envelope.get("sourceNumber", "")
-        source_uuid = envelope.get("sourceUuid", "")
-
-        # Messaggio diretto dal contatto
-        if contact.number in source or contact.number in source_number or contact.aci in source_uuid:
-            return True
-
-        # SyncMessage (messaggio inviato da noi al contatto)
-        sync = envelope.get("syncMessage", {})
-        sent = sync.get("sentMessage", {})
-        if sent:
-            dest = sent.get("destination", "")
-            dest_number = sent.get("destinationNumber", "")
-            dest_uuid = sent.get("destinationUuid", "")
-            if contact.number in dest or contact.number in dest_number or contact.aci in dest_uuid:
-                return True
-
-        return False
-
-    def _extract_message_text(self, envelope: dict) -> tuple[str, str, bool, str | None] | None:
-        """Estrae (sender_label, text, is_mine, quote_text) da un envelope.
-        is_mine=True per messaggi inviati da noi (sync), False per messaggi ricevuti.
-        quote_text è il testo del messaggio citato, se presente."""
-        source_name = envelope.get("sourceName", "")
-        source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
-
-        # dataMessage — messaggio ricevuto
-        data_msg = envelope.get("dataMessage", {})
-        if data_msg:
-            text = data_msg.get("message", "")
-            if text:
-                sender = source_name or source_number
-                # Estrai citazione (quote)
-                quote = data_msg.get("quote", {})
-                quote_text = quote.get("text", "") if quote else None
-                return (sender, text, False, quote_text)
-
-        # syncMessage.sentMessage — messaggio inviato da altro dispositivo
-        sync = envelope.get("syncMessage", {})
-        sent = sync.get("sentMessage", {})
-        if sent:
-            text = sent.get("message", "")
-            if text:
-                # Estrai citazione anche dai syncMessage
-                quote = sent.get("quote", {})
-                quote_text = quote.get("text", "") if quote else None
-                return ("Tu", text, True, quote_text)
-
-        return None
-
-    def _get_message_timestamp(self, envelope: dict) -> int:
-        """Restituisce il timestamp del messaggio."""
-        ts = envelope.get("timestamp", 0)
-        if not ts:
-            data = envelope.get("dataMessage", {})
-            ts = data.get("timestamp", 0)
-        if not ts:
-            sync = envelope.get("syncMessage", {})
-            sent = sync.get("sentMessage", {})
-            ts = sent.get("timestamp", 0)
-        return ts
-
     def _load_messages_worker(self):
-        """Carica i messaggi recenti in un thread worker."""
+        """Carica i messaggi: prima dalla cache, poi receive() per nuovi."""
         if not self.selected_contact:
             return
 
-        self.call_from_thread(self._add_message, "⏳ Caricamento messaggi...", is_info=True)
+        contact = self.selected_contact
 
-        if self._use_daemon and self.rpc:
-            messages = self.rpc.receive()
-            contact = self.selected_contact
-            found = 0
+        # 1. Carica messaggi dalla cache
+        cached = _get_cached_messages(contact.number)
+        if cached:
+            for msg in cached:
+                text = msg.get("text", "")
+                is_mine = msg.get("is_mine", False)
+                sender = msg.get("sender", "")
+                quote_text = msg.get("quote_text")
+                ts = msg.get("timestamp", 0)
 
-            for msg in messages:
-                envelope = msg.get("envelope", {})
-                if not self._is_message_for_contact(envelope, contact):
-                    continue
-
-                ts = self._get_message_timestamp(envelope)
                 if ts:
                     self._seen_timestamps.add(ts)
 
-                result = self._extract_message_text(envelope)
-                if result:
-                    found += 1
-                    sender, text, is_mine, quote_text = result
-                    if is_mine:
-                        line = f"Tu: {text}"
-                    else:
-                        line = f"{sender}: {text}"
-                    self.call_from_thread(
-                        self._add_message, line, is_mine=is_mine, quote_text=quote_text
-                    )
-
-            if found == 0:
+                if is_mine:
+                    line = f"Tu: {text}"
+                else:
+                    line = f"{sender}: {text}"
                 self.call_from_thread(
-                    self._add_message,
-                    "Nessun messaggio recente per questo contatto",
-                    is_info=True,
+                    self._add_message, line, is_mine=is_mine, quote_text=quote_text
                 )
+
+            self.call_from_thread(
+                self._add_message,
+                f"📋 Caricati {len(cached)} messaggi dalla cronologia",
+                is_info=True,
+            )
         else:
-            try:
-                output = _run_subprocess(["receive"])
-                for line in output.strip().split("\n"):
-                    if self.selected_contact.number in line:
-                        self.call_from_thread(
-                            self._add_message, line[:200], is_info=True
-                        )
-            except Exception as e:
+            self.call_from_thread(
+                self._add_message, "Nessun messaggio in cronologia per questo contatto", is_info=True
+            )
+
+        # 2. Receive per eventuali nuovi messaggi
+        if self._use_daemon and self.rpc:
+            messages = self.rpc.receive()
+            nuovi = 0
+            for msg in messages:
+                envelope = msg.get("envelope", {})
+                if self._process_envelope(envelope):
+                    nuovi += 1
+
+            if nuovi > 0:
                 self.call_from_thread(
-                    self._add_message,
-                    f"⚠️ Errore ricezione: {e}",
-                    is_info=True,
+                    self._add_message, f"📨 {nuovi} nuovi messaggi", is_info=True
                 )
 
-        self.call_from_thread(self._add_message, "✅ Messaggi caricati", is_info=True)
+        self.call_from_thread(self._add_message, "✅ Pronto", is_info=True)
 
     def _poll_worker(self):
-        """Thread worker che fa polling ogni 1 secondo (non blocca la UI)."""
+        """Thread worker che fa polling ogni 1 secondo (non blocca la UI).
+        Processa TUTTI i messaggi: li salva in cache e mostra solo quelli
+        per il contatto corrente."""
         while self._polling_active and self.selected_contact and self._use_daemon and self.rpc:
             try:
                 messages = self.rpc.receive()
-                contact = self.selected_contact
-
                 for msg in messages:
                     envelope = msg.get("envelope", {})
-                    if not self._is_message_for_contact(envelope, contact):
-                        continue
-
-                    ts = self._get_message_timestamp(envelope)
-                    if ts and ts not in self._seen_timestamps:
-                        self._seen_timestamps.add(ts)
-
-                        result = self._extract_message_text(envelope)
-                        if result:
-                            sender, text, is_mine, quote_text = result
-                            if is_mine:
-                                line = f"Tu: {text}"
-                            else:
-                                line = f"{sender}: {text}"
-                            self.call_from_thread(
-                                self._add_message, line, is_mine=is_mine, quote_text=quote_text
-                            )
+                    self._process_envelope(envelope)
             except Exception:
                 pass
 
@@ -655,6 +746,16 @@ class SignalTUI(App):
 
         # Mostra subito il messaggio nella UI (allineato a destra)
         self._add_message(f"Tu: {message}", is_mine=True)
+
+        # Salva in cache
+        _add_message_to_cache(
+            contact_number=self.selected_contact.number,
+            text=message,
+            is_mine=True,
+            sender="Tu",
+            timestamp=int(time.time() * 1000),
+        )
+
         event.input.value = ""
 
         # Invia in un thread worker
