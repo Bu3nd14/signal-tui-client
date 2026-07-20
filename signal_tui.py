@@ -534,11 +534,21 @@ class SignalTUI(App):
         self.contacts = contacts
         self.call_from_thread(self._update_contacts_ui, contacts)
 
+    def _sort_contacts(self):
+        """Ordina i contatti: prima quelli con più non letti, poi alfabetico."""
+        self.contacts.sort(
+            key=lambda c: (
+                -self._unread_counts.get(c.number, 0),
+                c.display_name.lower(),
+            )
+        )
+
     def _update_contacts_ui(self, contacts: list[Contact]):
         """Aggiorna l'interfaccia con la lista contatti."""
+        self._sort_contacts()
         contact_list = self.query_one("#contact-list", ListView)
         contact_list.clear()
-        for c in contacts:
+        for c in self.contacts:
             contact_list.append(ListItem(Label(f"📱 {c.display_name}")))
 
         self._add_message(f"✅ Caricati {len(contacts)} contatti.", is_info=True)
@@ -579,10 +589,16 @@ class SignalTUI(App):
                 self._cache = _load_cache()
             self._unread_counts[number] = 0
 
-            # Forza aggiornamento label per rimuovere badge *N
+            # Riordina e ricostruisce la lista (il contatto torna in posizione alfabetica)
+            self._sort_contacts()
             contact_list = self.query_one("#contact-list", ListView)
-            item = contact_list.children[index]
-            item.children[0].update(f"📱 {self.selected_contact.display_name}")
+            contact_list.clear()
+            for c in self.contacts:
+                label = f"📱 {c.display_name}"
+                unread = self._unread_counts.get(c.number, 0)
+                if unread > 0 and c != self.selected_contact:
+                    label += f" *{unread}"
+                contact_list.append(ListItem(Label(label)))
 
     # ─── Logica messaggi ────────────────────────────────────────────────────
 
@@ -737,30 +753,36 @@ class SignalTUI(App):
             chat_log.scroll_end(animate=False)
 
     def _update_unread_badges(self):
-        """Controlla la cache in memoria e aggiorna i badge *N sui contatti."""
+        """Controlla la cache in memoria e aggiorna i badge *N sui contatti.
+        Se i conteggi cambiano, riordina la lista e la ricostruisce."""
         if not self.contacts:
             return
 
-        contact_list = self.query_one("#contact-list", ListView)
-
-        for i, contact in enumerate(self.contacts):
-            if i >= len(contact_list.children):
-                break
-
+        changed = False
+        for contact in self.contacts:
             messages = self._cache.get(contact.number, [])
             unread = sum(
                 1 for m in messages
                 if not m.get("is_mine") and not m.get("read", True)
             )
             old = self._unread_counts.get(contact.number, 0)
-
             if unread != old:
                 self._unread_counts[contact.number] = unread
-                label = f"📱 {contact.display_name}"
-                if unread > 0 and contact != self.selected_contact:
-                    label += f" *{unread}"
-                item = contact_list.children[i]
-                item.children[0].update(label)
+                changed = True
+
+        if not changed:
+            return
+
+        # Riordina e ricostruisce la lista
+        self._sort_contacts()
+        contact_list = self.query_one("#contact-list", ListView)
+        contact_list.clear()
+        for c in self.contacts:
+            label = f"📱 {c.display_name}"
+            unread = self._unread_counts.get(c.number, 0)
+            if unread > 0 and c != self.selected_contact:
+                label += f" *{unread}"
+            contact_list.append(ListItem(Label(label)))
 
     # ─── Invio messaggi ─────────────────────────────────────────────────────
 
