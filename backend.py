@@ -22,7 +22,7 @@ DAEMON_HTTP_PORT = 8080
 DAEMON_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/rpc"
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 CACHE_FILE = CACHE_DIR / "messages.json"
-CACHE_RETENTION_DAYS = 10
+CACHE_RETENTION_DAYS = 3
 
 
 # ─── Signal CLI ──────────────────────────────────────────────────────────────
@@ -132,6 +132,11 @@ def _add_message_to_cache(
     })
     _save_cache(cache)
     _prune_cache()
+
+    # Limita a 200 messaggi per contatto
+    if len(cache[contact_number]) > 200:
+        cache[contact_number] = cache[contact_number][-200:]
+        _save_cache(cache)
 
 
 def _prune_cache():
