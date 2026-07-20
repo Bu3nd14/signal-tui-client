@@ -133,25 +133,28 @@ def _add_message_to_cache(
     _save_cache(cache)
     _prune_cache()
 
-    # Limita a 200 messaggi per contatto
-    if len(cache[contact_number]) > 200:
-        cache[contact_number] = cache[contact_number][-200:]
-        _save_cache(cache)
-
 
 def _prune_cache():
-    """Rimuove i messaggi più vecchi di CACHE_RETENTION_DAYS giorni."""
+    """Rimuove i messaggi più vecchi di CACHE_RETENTION_DAYS giorni
+    e limita a 200 messaggi per contatto."""
     cache = _load_cache()
     now_ms = int(time.time() * 1000)
     cutoff = now_ms - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
     modified = False
 
     for contact in list(cache.keys()):
+        # Rimuovi messaggi vecchi
         before = len(cache[contact])
         cache[contact] = [m for m in cache[contact] if m.get("timestamp", 0) >= cutoff]
         after = len(cache[contact])
         if before != after:
             modified = True
+
+        # Limita a 200 messaggi per contatto
+        if len(cache[contact]) > 200:
+            cache[contact] = cache[contact][-200:]
+            modified = True
+
         if not cache[contact]:
             del cache[contact]
             modified = True
