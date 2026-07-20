@@ -5,13 +5,8 @@ Se il daemon non è disponibile, ricade su subprocess (più lento ma funziona).
 I messaggi vengono salvati in cache locale per persistenza tra sessioni.
 """
 
-import json
-import os
 import subprocess
 import time
-import urllib.request
-import urllib.error
-from pathlib import Path
 from typing import Optional
 
 from textual.app import App, ComposeResult
@@ -27,261 +22,18 @@ from textual.widgets import (
     Button,
 )
 
-
-# ─── Costanti ────────────────────────────────────────────────────────────────
-
-PROJECT_DIR = Path(__file__).parent
-USER_NUMBER = "+393482581393"
-DAEMON_HTTP_PORT = 8080
-DAEMON_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/rpc"
-CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
-CACHE_FILE = CACHE_DIR / "messages.json"
-CACHE_RETENTION_DAYS = 10
-
-
-def _find_signal_cli() -> Path:
-    """Cerca l'eseguibile signal-cli nella directory ./bin/ del progetto."""
-    bin_dir = PROJECT_DIR / "bin"
-    for d in bin_dir.iterdir():
-        if d.is_dir() and d.name.startswith("signal-cli-"):
-            exe = d / "bin" / "signal-cli"
-            if exe.exists() and exe.stat().st_mode & 0o111:
-                return exe
-    raise FileNotFoundError("signal-cli non trovato in ./bin/")
-
-
-SIGNAL_CLI_PATH = _find_signal_cli()
-
-
-def _is_daemon_running() -> bool:
-    """Verifica se il daemon signal-cli è già in esecuzione."""
-    try:
-        rpc = SignalRPCClient()
-        test = rpc._call("listContacts")
-        return "result" in test
-    except Exception:
-        return False
-
-
-def _run_subprocess(args: list[str]) -> str:
-    """Esegue signal-cli via subprocess e restituisce stdout."""
-    result = subprocess.run(
-        [str(SIGNAL_CLI_PATH), "-u", USER_NUMBER] + args,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"signal-cli error (code {result.returncode}): {result.stderr.strip()}"
-        )
-    return result.stdout
-
-
-# ─── Cache messaggi ──────────────────────────────────────────────────────────
-
-def _ensure_cache_dir():
-    """Crea la directory della cache se non esiste."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _load_cache() -> dict[str, list[dict]]:
-    """Carica tutti i messaggi dalla cache."""
-    _ensure_cache_dir()
-    if not CACHE_FILE.exists():
-        return {}
-    try:
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_cache(data: dict[str, list[dict]]):
-    """Salva tutti i messaggi nella cache."""
-    _ensure_cache_dir()
-    with open(CACHE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def _get_cached_messages(contact_number: str) -> list[dict]:
-    """Restituisce i messaggi in cache per un contatto."""
-    cache = _load_cache()
-    return cache.get(contact_number, [])
-
-
-def _add_message_to_cache(
-    contact_number: str,
-    text: str,
-    is_mine: bool,
-    sender: str,
-    timestamp: int,
-    quote_text: str | None = None,
-    msg_type: str = "text",
-    attachment_info: str | None = None,
-):
-    """Aggiunge un messaggio alla cache.
-    msg_type: "text", "image", "sticker", "attachment"
-    attachment_info: dettagli aggiuntivi (nome file, emoji sticker, ecc.)
-    """
-    cache = _load_cache()
-    if contact_number not in cache:
-        cache[contact_number] = []
-    cache[contact_number].append({
-        "text": text,
-        "is_mine": is_mine,
-        "sender": sender,
-        "timestamp": timestamp,
-        "quote_text": quote_text,
-        "msg_type": msg_type,
-        "attachment_info": attachment_info,
-        "read": is_mine,  # i nostri messaggi sono già letti
-    })
-    _save_cache(cache)
-    _prune_cache()
-
-
-def _prune_cache():
-    """Rimuove i messaggi più vecchi di CACHE_RETENTION_DAYS giorni."""
-    cache = _load_cache()
-    now_ms = int(time.time() * 1000)
-    cutoff = now_ms - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
-    modified = False
-
-    for contact in list(cache.keys()):
-        before = len(cache[contact])
-        cache[contact] = [m for m in cache[contact] if m.get("timestamp", 0) >= cutoff]
-        after = len(cache[contact])
-        if before != after:
-            modified = True
-        if not cache[contact]:
-            del cache[contact]
-            modified = True
-
-    if modified:
-        _save_cache(cache)
-
-
-def _mark_as_read(contact_number: str):
-    """Segna tutti i messaggi di un contatto come letti."""
-    cache = _load_cache()
-    if contact_number in cache:
-        modified = False
-        for msg in cache[contact_number]:
-            if not msg.get("read", True):
-                msg["read"] = True
-                modified = True
-        if modified:
-            _save_cache(cache)
-
-
-def _count_unread() -> dict[str, int]:
-    """Conta i messaggi non letti per ogni contatto.
-    Messaggi senza campo 'read' (vecchia cache) sono considerati letti."""
-    cache = _load_cache()
-    counts = {}
-    for number, messages in cache.items():
-        unread = sum(
-            1 for m in messages
-            if not m.get("is_mine") and not m.get("read", True)
-        )
-        if unread > 0:
-            counts[number] = unread
-    return counts
-
-
-# ─── JSON-RPC Client via HTTP ────────────────────────────────────────────────
-
-class SignalRPCClient:
-    """Client JSON-RPC per comunicare con signal-cli daemon via HTTP."""
-
-    def __init__(self, url: str = DAEMON_URL):
-        self.url = url
-        self._req_id = 0
-
-    def _call(self, method: str, params: dict | None = None) -> dict:
-        """Esegue una chiamata JSON-RPC e restituisce il risultato."""
-        self._req_id += 1
-        payload = {
-            "jsonrpc": "2.0",
-            "id": self._req_id,
-            "method": method,
-            "params": params or {},
-        }
-        data = json.dumps(payload).encode("utf-8")
-
-        req = urllib.request.Request(
-            self.url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                response_data = resp.read().decode("utf-8")
-                return json.loads(response_data)
-        except Exception as e:
-            return {"error": str(e)}
-
-    def list_contacts(self) -> list[dict]:
-        """Recupera la lista contatti."""
-        result = self._call("listContacts")
-        if "error" in result:
-            return []
-        return result.get("result", [])
-
-    def send_message(self, message: str, recipient: str) -> dict:
-        """Invia un messaggio a un destinatario."""
-        params = {
-            "message": message,
-            "recipient": [recipient],
-        }
-        return self._call("send", params)
-
-    def receive(self) -> list[dict]:
-        """Riceve i messaggi."""
-        result = self._call("receive")
-        if "error" in result:
-            return []
-        return result.get("result", [])
-
-
-# ─── Modello dati ────────────────────────────────────────────────────────────
-
-class Contact:
-    """Rappresenta un contatto Signal."""
-
-    def __init__(self, number: str, name: str = "", aci: str = ""):
-        self.number = number
-        self.name = name if name else number
-        self.aci = aci
-
-    @property
-    def display_name(self) -> str:
-        return self.name if self.name else self.number
-
-
-# ─── Widgets ─────────────────────────────────────────────────────────────────
-
-class ContactListWidget(Vertical):
-    """Colonna sinistra: lista contatti."""
-
-    def compose(self):
-        yield Label("📇 Contatti", classes="section-title")
-        yield ListView(id="contact-list")
-
-    def on_mount(self):
-        self.styles.width = 30
-
-
-class ChatAreaWidget(Vertical):
-    """Colonna destra: area messaggi + input."""
-
-    def compose(self):
-        yield Label("💬 Chat", classes="section-title")
-        yield Vertical(id="chat-log")
-        yield Input(placeholder="Scrivi un messaggio...", id="message-input")
+from backend import (
+    Contact,
+    SignalRPCClient,
+    _load_cache,
+    _save_cache,
+    _is_daemon_running,
+    _run_subprocess,
+    SIGNAL_CLI_PATH,
+    USER_NUMBER,
+    DAEMON_HTTP_PORT,
+)
+from ui_components import ContactListWidget, ChatAreaWidget
 
 
 # ─── App principale ──────────────────────────────────────────────────────────
@@ -423,23 +175,16 @@ class SignalTUI(App):
         msg_type: str = "text",
         attachment_info: str | None = None,
     ):
-        """Aggiunge un messaggio alla chat con allineamento corretto.
-        Se quote_text è presente, mostra prima la citazione in stile quote.
-        msg_type: "text", "image", "sticker", "attachment"
-        attachment_info: dettagli aggiuntivi (nome file, emoji sticker, ecc.)
-        """
-        # Sicurezza: text non deve mai essere None
+        """Aggiunge un messaggio alla chat con allineamento corretto."""
         if text is None:
             text = ""
 
         chat_log = self.query_one("#chat-log", Vertical)
 
-        # Se c'è una citazione, mostrala prima
         if quote_text:
             quote_widget = Static(f"▎ {quote_text}", classes="msg-quote")
             chat_log.mount(quote_widget)
 
-        # Genera il testo visuale in base al tipo
         display_text = text
         if msg_type == "image":
             display_text = f"🖼️ {text}" if text and text != "Media" else "🖼️ [Immagine]"
@@ -465,13 +210,7 @@ class SignalTUI(App):
     # ─── Identificazione contatto per envelope ──────────────────────────────
 
     def _identify_contact_for_envelope(self, envelope: dict) -> Optional[Contact]:
-        """Identifica a quale contatto (tra quelli in rubrica) appartiene un envelope.
-        Confronto esatto con ==, nessun substring match.
-        
-        Per i syncMessage (inviati da noi), matcha sul destinatario (destination).
-        Per i messaggi ricevuti, matcha sul mittente (source)."""
-        # SyncMessage (messaggio inviato da noi a un contatto) — PRIORITÀ!
-        # Il source di un syncMessage è il NOSTRO numero, non il contatto.
+        """Identifica a quale contatto appartiene un envelope."""
         sync = envelope.get("syncMessage", {})
         sent = sync.get("sentMessage", {})
         if sent:
@@ -484,7 +223,6 @@ class SignalTUI(App):
                 if dest_uuid and contact.aci and dest_uuid == contact.aci:
                     return contact
 
-        # Messaggio diretto dal contatto
         source = envelope.get("source", "")
         source_number = envelope.get("sourceNumber", "")
         source_uuid = envelope.get("sourceUuid", "")
@@ -494,8 +232,6 @@ class SignalTUI(App):
             if source_uuid and contact.aci and source_uuid == contact.aci:
                 return contact
 
-        # Fallback: se syncMessage ha sentMessage ma non abbiamo matchato,
-        # riprova matchando su destination (alcune versioni usano solo destination)
         if sent:
             dest = sent.get("destination", "")
             for contact in self.contacts:
@@ -505,48 +241,31 @@ class SignalTUI(App):
         return None
 
     def _extract_message_data(self, envelope: dict) -> dict | None:
-        """Estrae i dati di un messaggio da un envelope.
-        Restituisce un dict con:
-          - sender: label del mittente
-          - text: testo del messaggio (può essere vuoto se solo media)
-          - is_mine: True se inviato da noi
-          - quote_text: testo citato (o None)
-          - msg_type: "text", "image", "sticker", "attachment"
-          - attachment_info: dettagli aggiuntivi (nome file, packId/stickerId, ecc.)
-        """
+        """Estrae i dati di un messaggio da un envelope."""
         source_name = envelope.get("sourceName", "")
         source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
 
-        # Helper per classificare attachment (NON contiene sticker, sono separati)
         def _classify_attachments(attachments: list) -> tuple[str, str]:
-            """Analizza gli attachment e restituisce (msg_type, attachment_info).
-            Gli sticker NON sono dentro attachments[] ma in dataMessage.sticker o sentMessage.sticker."""
             if not attachments:
                 return ("text", None)
             for att in attachments:
                 content_type = att.get("contentType", "") or ""
                 fname = att.get("filename", "") or ""
                 caption = att.get("caption", "") or ""
-                # Immagine
                 if content_type.startswith("image/"):
                     info = caption or f"Immagine: {fname}" if fname else "🖼️ Immagine"
                     return ("image", info)
-                # Video
                 if content_type.startswith("video/"):
                     info = caption or f"Video: {fname}" if fname else "🎬 Video"
                     return ("attachment", info)
-                # Audio / Voice
                 if content_type.startswith("audio/"):
                     info = caption or f"Audio: {fname}" if fname else "🎵 Audio"
                     return ("attachment", info)
-                # Altro tipo di file
                 info = caption or fname or content_type or "📎 File"
                 return ("attachment", info)
             return ("attachment", "📎 File")
 
-        # Helper per estrarre sticker
         def _extract_sticker(sticker: dict | None) -> tuple[str, str] | None:
-            """Se sticker è presente, restituisce (msg_type, attachment_info)."""
             if not sticker:
                 return None
             pack_id = sticker.get("packId", "")
@@ -556,7 +275,6 @@ class SignalTUI(App):
                 info = f"Sticker #{sticker_id} (pack:{pack_id[:8]}…)"
             return ("sticker", info)
 
-        # dataMessage — messaggio ricevuto
         data_msg = envelope.get("dataMessage", {})
         if data_msg:
             text = data_msg.get("message", "") or ""
@@ -564,39 +282,27 @@ class SignalTUI(App):
             quote = data_msg.get("quote", {})
             quote_text = quote.get("text", "") if quote else None
 
-            # 1. Controlla sticker (campo DIRETTO in dataMessage, NON dentro attachments)
             sticker_data = _extract_sticker(data_msg.get("sticker"))
             if sticker_data:
                 msg_type, att_info = sticker_data
                 if not text:
                     text = att_info or "🎨 Sticker"
                 return {
-                    "sender": sender,
-                    "text": text,
-                    "is_mine": False,
-                    "quote_text": quote_text,
-                    "msg_type": msg_type,
+                    "sender": sender, "text": text, "is_mine": False,
+                    "quote_text": quote_text, "msg_type": msg_type,
                     "attachment_info": att_info,
                 }
 
-            # 2. Controlla attachments (solo se non c'è sticker)
             attachments = data_msg.get("attachments", [])
             msg_type, att_info = _classify_attachments(attachments)
-
-            # Se c'è solo un attachment senza testo, usa quello come messaggio
             if not text and attachments:
                 text = att_info or "Media"
-
             return {
-                "sender": sender,
-                "text": text,
-                "is_mine": False,
-                "quote_text": quote_text,
-                "msg_type": msg_type,
+                "sender": sender, "text": text, "is_mine": False,
+                "quote_text": quote_text, "msg_type": msg_type,
                 "attachment_info": att_info,
             }
 
-        # syncMessage.sentMessage — messaggio inviato da altro dispositivo
         sync = envelope.get("syncMessage", {})
         sent = sync.get("sentMessage", {})
         if sent:
@@ -604,34 +310,24 @@ class SignalTUI(App):
             quote = sent.get("quote", {})
             quote_text = quote.get("text", "") if quote else None
 
-            # 1. Controlla sticker (campo DIRETTO in sentMessage)
             sticker_data = _extract_sticker(sent.get("sticker"))
             if sticker_data:
                 msg_type, att_info = sticker_data
                 if not text:
                     text = att_info or "🎨 Sticker"
                 return {
-                    "sender": "Tu",
-                    "text": text,
-                    "is_mine": True,
-                    "quote_text": quote_text,
-                    "msg_type": msg_type,
+                    "sender": "Tu", "text": text, "is_mine": True,
+                    "quote_text": quote_text, "msg_type": msg_type,
                     "attachment_info": att_info,
                 }
 
-            # 2. Controlla attachments (solo se non c'è sticker)
             attachments = sent.get("attachments", [])
             msg_type, att_info = _classify_attachments(attachments)
-
             if not text and attachments:
                 text = att_info or "Media"
-
             return {
-                "sender": "Tu",
-                "text": text,
-                "is_mine": True,
-                "quote_text": quote_text,
-                "msg_type": msg_type,
+                "sender": "Tu", "text": text, "is_mine": True,
+                "quote_text": quote_text, "msg_type": msg_type,
                 "attachment_info": att_info,
             }
 
@@ -649,12 +345,11 @@ class SignalTUI(App):
             ts = sent.get("timestamp", 0)
         return ts
 
-    # ─── Processamento envelope (salva in cache + mostra se contatto corrente) ─
+    # ─── Processamento envelope ─────────────────────────────────────────────
 
     def _process_envelope(self, envelope: dict) -> bool:
         """Processa un envelope: identifica il contatto, salva in cache.
-        La visualizzazione nella UI è gestita da _refresh_chat() ogni 1 secondo.
-        Restituisce True se il messaggio è stato salvato in cache."""
+        Se il contatto è quello correntemente selezionato, mostra subito il messaggio."""
         contact = self._identify_contact_for_envelope(envelope)
         if contact is None:
             return False
@@ -664,7 +359,6 @@ class SignalTUI(App):
         if data is None:
             return False
 
-        # Salva in cache (in memoria + su file)
         if contact.number not in self._cache:
             self._cache[contact.number] = []
         self._cache[contact.number].append({
@@ -679,28 +373,41 @@ class SignalTUI(App):
         })
         _save_cache(self._cache)
 
+        # Se è il contatto corrente, mostra subito il messaggio nella UI
+        if self.selected_contact and contact.number == self.selected_contact.number:
+            if ts and ts not in self._seen_timestamps:
+                self._seen_timestamps.add(ts)
+                self.call_from_thread(
+                    self._add_message,
+                    data["text"],
+                    is_mine=data["is_mine"],
+                    quote_text=data["quote_text"],
+                    msg_type=data["msg_type"],
+                    attachment_info=data["attachment_info"],
+                )
+
         return True
 
     # ─── Startup ────────────────────────────────────────────────────────────
 
     def _startup(self):
         """Avvia signal-cli daemon e carica i contatti."""
-        # Carica la cache in memoria all'avvio (una volta sola)
         self._cache = _load_cache()
 
         self.call_from_thread(self._add_message, "⏳ Avvio signal-cli daemon...", is_info=True)
         self.rpc = SignalRPCClient()
 
-        # Verifica se il daemon è già in esecuzione
         if _is_daemon_running():
             self._use_daemon = True
             self.call_from_thread(
                 self._add_message, "✅ Daemon già attivo, collegamento diretto...", is_info=True
             )
             self._load_contacts_rpc()
+
+            self._polling_active = True
+            self.run_worker(self._poll_worker, exclusive=True, thread=True)
             return
 
-        # Altrimenti avvia il daemon
         self.call_from_thread(
             self._add_message, "⏳ Avvio signal-cli daemon...", is_info=True
         )
@@ -718,7 +425,6 @@ class SignalTUI(App):
             stderr=subprocess.DEVNULL,
         )
 
-        # Aspetta che il server HTTP sia pronto
         for _ in range(15):
             try:
                 test = self.rpc._call("listContacts")
@@ -740,7 +446,6 @@ class SignalTUI(App):
 
         self._load_contacts_rpc()
 
-        # Avvia il polling UNA VOLTA (dopo che _startup ha finito)
         self._polling_active = True
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
 
@@ -811,7 +516,6 @@ class SignalTUI(App):
         contacts = []
         for c in contacts_data:
             number = c.get("number", "")
-            # Il nome può essere in name, givenName, o profile.givenName
             name = (
                 c.get("name")
                 or c.get("givenName")
@@ -834,13 +538,12 @@ class SignalTUI(App):
         self._add_message(f"✅ Caricati {len(contacts)} contatti.", is_info=True)
         self._add_message("💡 Seleziona un contatto per vedere la chat", is_info=True)
 
-        # Mostra badge non letti subito all'avvio
         self._update_unread_badges()
 
     # ─── Selezione contatto ─────────────────────────────────────────────────
 
     def on_list_view_selected(self, event: ListView.Selected):
-        """Quando un contatto viene selezionato, mostra la chat e avvia polling."""
+        """Quando un contatto viene selezionato, mostra la chat."""
         index = self.query_one("#contact-list", ListView).index
         if index is not None and 0 <= index < len(self.contacts):
             self.selected_contact = self.contacts[index]
@@ -852,17 +555,15 @@ class SignalTUI(App):
             self._add_message(self.selected_contact.number, is_info=True)
             self._add_message("─" * 40, is_info=True)
 
-            # Ferma refresh timer precedente
             if self._refresh_timer is not None:
                 self._refresh_timer.stop()
                 self._refresh_timer = None
 
-            # Carica messaggi dalla cache (esclusivo: evita race condition)
             self.run_worker(
                 self._load_messages_worker, exclusive=True, thread=True
             )
 
-            # Segna tutti i messaggi di questo contatto come letti (in memoria + su file)
+            # Segna tutti i messaggi di questo contatto come letti
             number = self.selected_contact.number
             if number in self._cache:
                 for msg in self._cache[number]:
@@ -871,22 +572,20 @@ class SignalTUI(App):
                 _save_cache(self._cache)
             self._unread_counts[number] = 0
 
-            # Forza aggiornamento label per rimuovere badge *N immediatamente
+            # Forza aggiornamento label per rimuovere badge *N
             contact_list = self.query_one("#contact-list", ListView)
             item = contact_list.children[index]
             item.children[0].update(f"📱 {self.selected_contact.display_name}")
 
-            # Avvia timer badge non letti (ogni 5 secondi)
             if self._unread_timer is None:
                 self._unread_timer = self.set_interval(5, self._update_unread_badges)
 
-            # Refresh periodico della chat ogni 500ms (recupera messaggi persi)
             self._refresh_timer = self.set_interval(0.5, self._refresh_chat)
 
     # ─── Logica messaggi ────────────────────────────────────────────────────
 
     def _load_messages_worker(self):
-        """Carica i messaggi: ultimi 100 dalla cache, poi receive() per nuovi.
+        """Carica i messaggi: ultimi 100 dalla cache.
         Se ci sono più di 100 messaggi, mostra un widget per caricare il resto."""
         if not self.selected_contact:
             return
@@ -894,15 +593,12 @@ class SignalTUI(App):
         contact = self.selected_contact
         self._loaded_all = False
 
-        # 1. Carica messaggi dalla cache (in memoria, nessuna lettura file)
         cached = self._cache.get(contact.number, [])
         total = len(cached)
 
         if cached:
-            # Mostra solo gli ultimi 100 se ce ne sono più di 100
             if total > 100:
                 messages_to_show = cached[-100:]
-                # Aggiunge widget "carica precedenti" in cima
                 self.call_from_thread(self._add_load_more_widget, total - 100)
             else:
                 messages_to_show = cached
@@ -911,7 +607,6 @@ class SignalTUI(App):
             for msg in messages_to_show:
                 text = msg.get("text", "")
                 is_mine = msg.get("is_mine", False)
-                sender = msg.get("sender", "")
                 quote_text = msg.get("quote_text")
                 ts = msg.get("timestamp", 0)
                 msg_type = msg.get("msg_type", "text")
@@ -965,7 +660,6 @@ class SignalTUI(App):
         contact = self.selected_contact
         cached = self._cache.get(contact.number, [])
 
-        # Pulisce la chat e ricarica tutto
         self._clear_chat()
         self._seen_timestamps.clear()
 
@@ -992,11 +686,9 @@ class SignalTUI(App):
         self._add_message(f"📋 Caricati tutti i {len(cached)} messaggi", is_info=True)
 
     def _poll_worker(self):
-        """Thread worker che fa polling ogni 1 secondo (non blocca la UI).
+        """Thread worker che fa polling ogni 1 secondo.
         Processa TUTTI i messaggi in arrivo e li salva in cache.
-        La visualizzazione è gestita da _refresh_chat().
-        Parte UNA VOLTA in on_mount() e vive per tutta l'app."""
-        # Aspetta che il daemon sia pronto (self._use_daemon e self.rpc)
+        Parte UNA VOLTA in _startup() e vive per tutta l'app."""
         while self._polling_active:
             if self._use_daemon and self.rpc:
                 try:
@@ -1006,16 +698,13 @@ class SignalTUI(App):
                         self._process_envelope(envelope)
                 except Exception:
                     pass
-            # Aspetta 1 secondo prima del prossimo poll
             for _ in range(10):
                 if not self._polling_active:
                     return
                 time.sleep(0.1)
 
     def _refresh_chat(self):
-        """Refresh periodico: controlla se ci sono nuovi messaggi in cache
-        per il contatto corrente e li mostra. Recupera eventuali messaggi
-        persi dal live polling."""
+        """Refresh periodico: mostra nuovi messaggi in cache per il contatto corrente."""
         if not self.selected_contact:
             return
 
@@ -1046,8 +735,7 @@ class SignalTUI(App):
             chat_log.scroll_end(animate=False)
 
     def _update_unread_badges(self):
-        """Controlla la cache in memoria e aggiorna i badge *N sui contatti.
-        Chiamato ogni 5 secondi. Aggiorna solo se il conteggio cambia."""
+        """Controlla la cache in memoria e aggiorna i badge *N sui contatti."""
         if not self.contacts:
             return
 
@@ -1057,7 +745,6 @@ class SignalTUI(App):
             if i >= len(contact_list.children):
                 break
 
-            # Conta non letti dalla cache in memoria (nessuna lettura file)
             messages = self._cache.get(contact.number, [])
             unread = sum(
                 1 for m in messages
@@ -1070,7 +757,6 @@ class SignalTUI(App):
                 label = f"📱 {contact.display_name}"
                 if unread > 0 and contact != self.selected_contact:
                     label += f" *{unread}"
-                # Aggiorna sempre la label (anche per togliere il badge)
                 item = contact_list.children[i]
                 item.children[0].update(label)
 
@@ -1086,7 +772,6 @@ class SignalTUI(App):
         if not message:
             return
 
-        # Salva in cache (in memoria + su file)
         number = self.selected_contact.number
         ts = int(time.time() * 1000)
         if number not in self._cache:
@@ -1105,7 +790,6 @@ class SignalTUI(App):
 
         event.input.value = ""
 
-        # Invia in un thread worker
         self.run_worker(
             lambda msg=message: self._send_message_worker(msg),
             exclusive=False,
@@ -1138,11 +822,6 @@ class SignalTUI(App):
                     f"❌ Errore invio: {e}",
                     is_info=True,
                 )
-
-
-def find_signal_cli() -> Path:
-    """Funzione di utilità per trovare signal-cli."""
-    return _find_signal_cli()
 
 
 if __name__ == "__main__":
