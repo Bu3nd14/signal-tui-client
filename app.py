@@ -402,6 +402,8 @@ class SignalTUI(App):
     def on_mount(self):
         """All'avvio, avvia il daemon e carica i contatti."""
         self.run_worker(self._startup, exclusive=True, thread=True)
+        # Avvia il polling UNA VOLTA per tutta la durata dell'app
+        self.run_worker(self._poll_worker, exclusive=True, thread=True)
 
     def action_quit(self):
         """Ctrl+Q: ferma il polling ed esce pulitamente."""
@@ -848,8 +850,7 @@ class SignalTUI(App):
             self._add_message(self.selected_contact.number, is_info=True)
             self._add_message("─" * 40, is_info=True)
 
-            # Ferma polling precedente se attivo
-            self._polling_active = False
+            # Ferma refresh timer precedente
             if self._refresh_timer is not None:
                 self._refresh_timer.stop()
                 self._refresh_timer = None
@@ -857,12 +858,6 @@ class SignalTUI(App):
             # Carica messaggi dalla cache + nuovi
             self.run_worker(
                 self._load_messages_worker, exclusive=False, thread=True
-            )
-
-            # Avvia polling in un thread worker (non blocca la UI)
-            self._polling_active = True
-            self.run_worker(
-                self._poll_worker, exclusive=False, thread=True
             )
 
             # Segna tutti i messaggi di questo contatto come letti (in memoria + su file)
@@ -1010,17 +1005,19 @@ class SignalTUI(App):
 
     def _poll_worker(self):
         """Thread worker che fa polling ogni 1 secondo (non blocca la UI).
-        Processa TUTTI i messaggi: li salva in cache e mostra solo quelli
-        per il contatto corrente."""
-        while self._polling_active and self.selected_contact and self._use_daemon and self.rpc:
-            try:
-                messages = self.rpc.receive()
-                for msg in messages:
-                    envelope = msg.get("envelope", {})
-                    self._process_envelope(envelope)
-            except Exception:
-                pass
-
+        Processa TUTTI i messaggi in arrivo e li salva in cache.
+        La visualizzazione è gestita da _refresh_chat().
+        Parte UNA VOLTA in on_mount() e vive per tutta l'app."""
+        # Aspetta che il daemon sia pronto (self._use_daemon e self.rpc)
+        while self._polling_active:
+            if self._use_daemon and self.rpc:
+                try:
+                    messages = self.rpc.receive()
+                    for msg in messages:
+                        envelope = msg.get("envelope", {})
+                        self._process_envelope(envelope)
+                except Exception:
+                    pass
             # Aspetta 1 secondo prima del prossimo poll
             for _ in range(10):
                 if not self._polling_active:
