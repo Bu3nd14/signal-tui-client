@@ -185,7 +185,14 @@ def _prune_cache():
             modified = True
 
     if modified:
-        _save_cache(cache)
+        _write_cache(cache)
+
+
+def _write_cache(data: dict[str, list[dict]]):
+    """Scrive la cache su disco (senza chiamare _prune_cache)."""
+    _ensure_cache_dir()
+    with open(CACHE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 def _mark_as_read(contact_number: str):

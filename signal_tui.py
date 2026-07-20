@@ -27,6 +27,7 @@ from backend import (
     SignalRPCClient,
     _load_cache,
     _save_cache,
+    _prune_cache,
     _is_daemon_running,
     _run_subprocess,
     SIGNAL_CLI_PATH,
@@ -370,6 +371,7 @@ class SignalTUI(App):
             "read": data["is_mine"],
         })
         _save_cache(self._cache)
+        _prune_cache()
 
         # Se è il contatto corrente, mostra subito il messaggio nella UI
         if self.selected_contact and contact.number == self.selected_contact.number:
@@ -570,6 +572,7 @@ class SignalTUI(App):
                     if not msg.get("read", True):
                         msg["read"] = True
                 _save_cache(self._cache)
+                _prune_cache()
             self._unread_counts[number] = 0
 
             # Forza aggiornamento label per rimuovere badge *N
@@ -782,6 +785,7 @@ class SignalTUI(App):
             "read": True,
         })
         _save_cache(self._cache)
+        _prune_cache()
 
         # Mostra subito il messaggio nella UI
         self._add_message(message, is_mine=True)
