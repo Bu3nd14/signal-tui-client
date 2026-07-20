@@ -560,6 +560,9 @@ class SignalTUI(App):
                 self._load_messages_worker, exclusive=True, thread=True
             )
 
+            # Refresh finale: recupera messaggi arrivati durante il caricamento
+            self._refresh_chat()
+
             # Segna tutti i messaggi di questo contatto come letti
             number = self.selected_contact.number
             if number in self._cache:
@@ -694,6 +697,37 @@ class SignalTUI(App):
                 if not self._polling_active:
                     return
                 time.sleep(0.1)
+
+    def _refresh_chat(self):
+        """Controlla la cache per nuovi messaggi del contatto corrente non ancora mostrati."""
+        if not self.selected_contact:
+            return
+
+        contact = self.selected_contact
+        cached = self._cache.get(contact.number, [])
+        nuovi = 0
+
+        for msg in cached:
+            ts = msg.get("timestamp", 0)
+            if ts and ts not in self._seen_timestamps:
+                self._seen_timestamps.add(ts)
+                text = msg.get("text", "")
+                is_mine = msg.get("is_mine", False)
+                quote_text = msg.get("quote_text")
+                msg_type = msg.get("msg_type", "text")
+                attachment_info = msg.get("attachment_info")
+                self._add_message(
+                    text,
+                    is_mine=is_mine,
+                    quote_text=quote_text,
+                    msg_type=msg_type,
+                    attachment_info=attachment_info,
+                )
+                nuovi += 1
+
+        if nuovi > 0:
+            chat_log = self.query_one("#chat-log", Vertical)
+            chat_log.scroll_end(animate=False)
 
     def _update_unread_badges(self):
         """Controlla la cache in memoria e aggiorna i badge *N sui contatti."""
