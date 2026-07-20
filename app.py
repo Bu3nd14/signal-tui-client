@@ -24,6 +24,7 @@ from textual.widgets import (
     Label,
     Input,
     Static,
+    Button,
 )
 
 
@@ -134,6 +135,7 @@ def _add_message_to_cache(
         "quote_text": quote_text,
         "msg_type": msg_type,
         "attachment_info": attachment_info,
+        "read": is_mine,  # i nostri messaggi sono già letti
     })
     _save_cache(cache)
     _prune_cache()
@@ -158,6 +160,34 @@ def _prune_cache():
 
     if modified:
         _save_cache(cache)
+
+
+def _mark_as_read(contact_number: str):
+    """Segna tutti i messaggi di un contatto come letti."""
+    cache = _load_cache()
+    if contact_number in cache:
+        modified = False
+        for msg in cache[contact_number]:
+            if not msg.get("read", True):
+                msg["read"] = True
+                modified = True
+        if modified:
+            _save_cache(cache)
+
+
+def _count_unread() -> dict[str, int]:
+    """Conta i messaggi non letti per ogni contatto.
+    Messaggi senza campo 'read' (vecchia cache) sono considerati letti."""
+    cache = _load_cache()
+    counts = {}
+    for number, messages in cache.items():
+        unread = sum(
+            1 for m in messages
+            if not m.get("is_mine") and not m.get("read", True)
+        )
+        if unread > 0:
+            counts[number] = unread
+    return counts
 
 
 # ─── JSON-RPC Client via HTTP ────────────────────────────────────────────────
@@ -322,6 +352,20 @@ class SignalTUI(App):
         text-style: italic;
     }
 
+    .msg-load-more {
+        text-align: center;
+        padding: 1 1;
+        color: $accent;
+        text-style: bold;
+        background: $surface;
+        border: solid $accent;
+        margin: 1 0;
+    }
+
+    .msg-load-more:hover {
+        background: $accent 20%;
+    }
+
     #message-input {
         dock: bottom;
         margin: 1 1;
@@ -342,6 +386,10 @@ class SignalTUI(App):
         self._polling_active = False
         self._seen_timestamps: set[int] = set()
         self._refresh_timer = None
+        self._unread_counts: dict[str, int] = {}
+        self._unread_timer = None
+        self._cache: dict[str, list[dict]] = {}
+        self._loaded_all = False
 
     def compose(self):
         yield Header()
@@ -616,17 +664,20 @@ class SignalTUI(App):
         if data is None:
             return False
 
-        # Salva in cache (sempre, per qualsiasi contatto)
-        _add_message_to_cache(
-            contact_number=contact.number,
-            text=data["text"],
-            is_mine=data["is_mine"],
-            sender=data["sender"],
-            timestamp=ts,
-            quote_text=data["quote_text"],
-            msg_type=data["msg_type"],
-            attachment_info=data["attachment_info"],
-        )
+        # Salva in cache (in memoria + su file)
+        if contact.number not in self._cache:
+            self._cache[contact.number] = []
+        self._cache[contact.number].append({
+            "text": data["text"],
+            "is_mine": data["is_mine"],
+            "sender": data["sender"],
+            "timestamp": ts,
+            "quote_text": data["quote_text"],
+            "msg_type": data["msg_type"],
+            "attachment_info": data["attachment_info"],
+            "read": data["is_mine"],
+        })
+        _save_cache(self._cache)
 
         return True
 
@@ -634,6 +685,9 @@ class SignalTUI(App):
 
     def _startup(self):
         """Avvia signal-cli daemon e carica i contatti."""
+        # Carica la cache in memoria all'avvio (una volta sola)
+        self._cache = _load_cache()
+
         self.call_from_thread(self._add_message, "⏳ Avvio signal-cli daemon...", is_info=True)
         self.rpc = SignalRPCClient()
 
@@ -776,6 +830,9 @@ class SignalTUI(App):
         self._add_message(f"✅ Caricati {len(contacts)} contatti.", is_info=True)
         self._add_message("💡 Seleziona un contatto per vedere la chat", is_info=True)
 
+        # Mostra badge non letti subito all'avvio
+        self._update_unread_badges()
+
     # ─── Selezione contatto ─────────────────────────────────────────────────
 
     def on_list_view_selected(self, event: ListView.Selected):
@@ -808,22 +865,48 @@ class SignalTUI(App):
                 self._poll_worker, exclusive=False, thread=True
             )
 
+            # Segna tutti i messaggi di questo contatto come letti (in memoria + su file)
+            number = self.selected_contact.number
+            if number in self._cache:
+                for msg in self._cache[number]:
+                    if not msg.get("read", True):
+                        msg["read"] = True
+                _save_cache(self._cache)
+            self._unread_counts[number] = 0
+
+            # Avvia timer badge non letti (ogni 5 secondi)
+            if self._unread_timer is None:
+                self._unread_timer = self.set_interval(5, self._update_unread_badges)
+
             # Refresh periodico della chat ogni 500ms (recupera messaggi persi)
             self._refresh_timer = self.set_interval(0.5, self._refresh_chat)
 
     # ─── Logica messaggi ────────────────────────────────────────────────────
 
     def _load_messages_worker(self):
-        """Carica i messaggi: prima dalla cache, poi receive() per nuovi."""
+        """Carica i messaggi: ultimi 100 dalla cache, poi receive() per nuovi.
+        Se ci sono più di 100 messaggi, mostra un widget per caricare il resto."""
         if not self.selected_contact:
             return
 
         contact = self.selected_contact
+        self._loaded_all = False
 
-        # 1. Carica messaggi dalla cache
-        cached = _get_cached_messages(contact.number)
+        # 1. Carica messaggi dalla cache (in memoria, nessuna lettura file)
+        cached = self._cache.get(contact.number, [])
+        total = len(cached)
+
         if cached:
-            for msg in cached:
+            # Mostra solo gli ultimi 100 se ce ne sono più di 100
+            if total > 100:
+                messages_to_show = cached[-100:]
+                # Aggiunge widget "carica precedenti" in cima
+                self.call_from_thread(self._add_load_more_widget, total - 100)
+            else:
+                messages_to_show = cached
+                self._loaded_all = True
+
+            for msg in messages_to_show:
                 text = msg.get("text", "")
                 is_mine = msg.get("is_mine", False)
                 sender = msg.get("sender", "")
@@ -846,10 +929,11 @@ class SignalTUI(App):
 
             self.call_from_thread(
                 self._add_message,
-                f"📋 Caricati {len(cached)} messaggi dalla cronologia",
+                f"📋 Caricati {len(messages_to_show)}/{total} messaggi",
                 is_info=True,
             )
         else:
+            self._loaded_all = True
             self.call_from_thread(
                 self._add_message, "Nessun messaggio in cronologia per questo contatto", is_info=True
             )
@@ -869,6 +953,55 @@ class SignalTUI(App):
                 )
 
         self.call_from_thread(self._add_message, "✅ Pronto", is_info=True)
+
+    def _add_load_more_widget(self, remaining: int):
+        """Aggiunge un widget cliccabile per caricare i messaggi precedenti."""
+        chat_log = self.query_one("#chat-log", Vertical)
+        widget = Button(
+            f"📜 ↑ {remaining} messaggi precedenti — clicca per caricare",
+            classes="msg-load-more",
+            id="load-more-msg",
+        )
+        chat_log.mount(widget, before=0)
+
+    def on_button_pressed(self, event: Button.Pressed):
+        """Quando l'utente clicca sul pulsante 'carica precedenti'."""
+        if event.button.id == "load-more-msg":
+            self._load_all_messages()
+
+    def _load_all_messages(self):
+        """Carica TUTTI i messaggi dalla cache e ricostruisce la chat."""
+        if not self.selected_contact:
+            return
+
+        contact = self.selected_contact
+        cached = self._cache.get(contact.number, [])
+
+        # Pulisce la chat e ricarica tutto
+        self._clear_chat()
+        self._seen_timestamps.clear()
+
+        for msg in cached:
+            text = msg.get("text", "")
+            is_mine = msg.get("is_mine", False)
+            quote_text = msg.get("quote_text")
+            ts = msg.get("timestamp", 0)
+            msg_type = msg.get("msg_type", "text")
+            attachment_info = msg.get("attachment_info")
+
+            if ts:
+                self._seen_timestamps.add(ts)
+
+            self._add_message(
+                text,
+                is_mine=is_mine,
+                quote_text=quote_text,
+                msg_type=msg_type,
+                attachment_info=attachment_info,
+            )
+
+        self._loaded_all = True
+        self._add_message(f"📋 Caricati tutti i {len(cached)} messaggi", is_info=True)
 
     def _poll_worker(self):
         """Thread worker che fa polling ogni 1 secondo (non blocca la UI).
@@ -897,7 +1030,7 @@ class SignalTUI(App):
             return
 
         contact = self.selected_contact
-        cached = _get_cached_messages(contact.number)
+        cached = self._cache.get(contact.number, [])
         nuovi = 0
 
         for msg in cached:
@@ -922,6 +1055,35 @@ class SignalTUI(App):
             chat_log = self.query_one("#chat-log", Vertical)
             chat_log.scroll_end(animate=False)
 
+    def _update_unread_badges(self):
+        """Controlla la cache in memoria e aggiorna i badge *N sui contatti.
+        Chiamato ogni 5 secondi. Aggiorna solo se il conteggio cambia."""
+        if not self.contacts:
+            return
+
+        contact_list = self.query_one("#contact-list", ListView)
+
+        for i, contact in enumerate(self.contacts):
+            if i >= len(contact_list.children):
+                break
+
+            # Conta non letti dalla cache in memoria (nessuna lettura file)
+            messages = self._cache.get(contact.number, [])
+            unread = sum(
+                1 for m in messages
+                if not m.get("is_mine") and not m.get("read", True)
+            )
+            old = self._unread_counts.get(contact.number, 0)
+
+            if unread != old:
+                self._unread_counts[contact.number] = unread
+                label = f"📱 {contact.display_name}"
+                if unread > 0 and contact != self.selected_contact:
+                    label += f" *{unread}"
+                # Aggiorna sempre la label (anche per togliere il badge)
+                item = contact_list.children[i]
+                item.children[0].update(label)
+
     # ─── Invio messaggi ─────────────────────────────────────────────────────
 
     def on_input_submitted(self, event: Input.Submitted):
@@ -934,14 +1096,22 @@ class SignalTUI(App):
         if not message:
             return
 
-        # Salva in cache (la UI verrà aggiornata da _refresh_chat() tra <1 secondo)
-        _add_message_to_cache(
-            contact_number=self.selected_contact.number,
-            text=message,
-            is_mine=True,
-            sender="Tu",
-            timestamp=int(time.time() * 1000),
-        )
+        # Salva in cache (in memoria + su file)
+        number = self.selected_contact.number
+        ts = int(time.time() * 1000)
+        if number not in self._cache:
+            self._cache[number] = []
+        self._cache[number].append({
+            "text": message,
+            "is_mine": True,
+            "sender": "Tu",
+            "timestamp": ts,
+            "quote_text": None,
+            "msg_type": "text",
+            "attachment_info": None,
+            "read": True,
+        })
+        _save_cache(self._cache)
 
         event.input.value = ""
 
