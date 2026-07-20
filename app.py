@@ -592,9 +592,9 @@ class SignalTUI(App):
         total = len(cached)
 
         if cached:
-            if total > 100:
-                messages_to_show = cached[-100:]
-                self.call_from_thread(self._add_load_more_widget, total - 100)
+            if total > 20:
+                messages_to_show = cached[-20:]
+                self.call_from_thread(self._add_load_more_widget, total - 20)
             else:
                 messages_to_show = cached
                 self._loaded_all = True
