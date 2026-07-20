@@ -137,9 +137,7 @@ class SignalTUI(App):
         self._use_daemon = False
         self._polling_active = False
         self._seen_timestamps: set[int] = set()
-        self._refresh_timer = None
         self._unread_counts: dict[str, int] = {}
-        self._unread_timer = None
         self._cache: dict[str, list[dict]] = {}
         self._loaded_all = False
 
@@ -385,6 +383,9 @@ class SignalTUI(App):
                     msg_type=data["msg_type"],
                     attachment_info=data["attachment_info"],
                 )
+        else:
+            # Messaggio per un altro contatto: aggiorna badge unread
+            self.call_from_thread(self._update_unread_badges)
 
         return True
 
@@ -555,10 +556,6 @@ class SignalTUI(App):
             self._add_message(self.selected_contact.number, is_info=True)
             self._add_message("─" * 40, is_info=True)
 
-            if self._refresh_timer is not None:
-                self._refresh_timer.stop()
-                self._refresh_timer = None
-
             self.run_worker(
                 self._load_messages_worker, exclusive=True, thread=True
             )
@@ -576,11 +573,6 @@ class SignalTUI(App):
             contact_list = self.query_one("#contact-list", ListView)
             item = contact_list.children[index]
             item.children[0].update(f"📱 {self.selected_contact.display_name}")
-
-            if self._unread_timer is None:
-                self._unread_timer = self.set_interval(5, self._update_unread_badges)
-
-            self._refresh_timer = self.set_interval(0.5, self._refresh_chat)
 
     # ─── Logica messaggi ────────────────────────────────────────────────────
 
@@ -702,37 +694,6 @@ class SignalTUI(App):
                 if not self._polling_active:
                     return
                 time.sleep(0.1)
-
-    def _refresh_chat(self):
-        """Refresh periodico: mostra nuovi messaggi in cache per il contatto corrente."""
-        if not self.selected_contact:
-            return
-
-        contact = self.selected_contact
-        cached = self._cache.get(contact.number, [])
-        nuovi = 0
-
-        for msg in cached:
-            ts = msg.get("timestamp", 0)
-            if ts and ts not in self._seen_timestamps:
-                self._seen_timestamps.add(ts)
-                text = msg.get("text", "")
-                is_mine = msg.get("is_mine", False)
-                quote_text = msg.get("quote_text")
-                msg_type = msg.get("msg_type", "text")
-                attachment_info = msg.get("attachment_info")
-                self._add_message(
-                    text,
-                    is_mine=is_mine,
-                    quote_text=quote_text,
-                    msg_type=msg_type,
-                    attachment_info=attachment_info,
-                )
-                nuovi += 1
-
-        if nuovi > 0:
-            chat_log = self.query_one("#chat-log", Vertical)
-            chat_log.scroll_end(animate=False)
 
     def _update_unread_badges(self):
         """Controlla la cache in memoria e aggiorna i badge *N sui contatti."""
