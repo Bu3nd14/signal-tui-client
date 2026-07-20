@@ -369,20 +369,12 @@ class SignalTUI(App):
 
     def _identify_contact_for_envelope(self, envelope: dict) -> Optional[Contact]:
         """Identifica a quale contatto (tra quelli in rubrica) appartiene un envelope.
-        Confronto esatto con ==, nessun substring match."""
-        source = envelope.get("source", "")
-        source_number = envelope.get("sourceNumber", "")
-        source_uuid = envelope.get("sourceUuid", "")
-
-        # Cerca tra i contatti
-        for contact in self.contacts:
-            # Messaggio diretto dal contatto
-            if source == contact.number or source_number == contact.number:
-                return contact
-            if source_uuid and contact.aci and source_uuid == contact.aci:
-                return contact
-
-        # SyncMessage (messaggio inviato da noi a un contatto)
+        Confronto esatto con ==, nessun substring match.
+        
+        Per i syncMessage (inviati da noi), matcha sul destinatario (destination).
+        Per i messaggi ricevuti, matcha sul mittente (source)."""
+        # SyncMessage (messaggio inviato da noi a un contatto) — PRIORITÀ!
+        # Il source di un syncMessage è il NOSTRO numero, non il contatto.
         sync = envelope.get("syncMessage", {})
         sent = sync.get("sentMessage", {})
         if sent:
@@ -394,6 +386,16 @@ class SignalTUI(App):
                     return contact
                 if dest_uuid and contact.aci and dest_uuid == contact.aci:
                     return contact
+
+        # Messaggio diretto dal contatto
+        source = envelope.get("source", "")
+        source_number = envelope.get("sourceNumber", "")
+        source_uuid = envelope.get("sourceUuid", "")
+        for contact in self.contacts:
+            if source == contact.number or source_number == contact.number:
+                return contact
+            if source_uuid and contact.aci and source_uuid == contact.aci:
+                return contact
 
         return None
 
