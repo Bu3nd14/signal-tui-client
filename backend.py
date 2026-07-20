@@ -6,6 +6,7 @@ Nessuna dipendenza da Textual.
 """
 
 import json
+import os
 import subprocess
 import time
 import urllib.request
@@ -17,7 +18,31 @@ from typing import Optional
 # ─── Costanti ────────────────────────────────────────────────────────────────
 
 PROJECT_DIR = Path(__file__).parent
-USER_NUMBER = "+393482581393"
+
+
+def _get_user_number() -> str:
+    """Read phone number from environment variable or config.json."""
+    num = os.environ.get("SIGNAL_USER_NUMBER")
+    if num:
+        return num
+    config_file = PROJECT_DIR / "config.json"
+    if config_file.exists():
+        try:
+            with open(config_file) as f:
+                cfg = json.load(f)
+                num = cfg.get("user_number", "")
+                if num:
+                    return num
+        except (json.JSONDecodeError, OSError):
+            pass
+    raise RuntimeError(
+        "Signal phone number not configured.\n"
+        "Set the SIGNAL_USER_NUMBER environment variable or create a config.json file:\n"
+        '  echo \'{"user_number": "+1234567890"}\' > config.json'
+    )
+
+
+USER_NUMBER = _get_user_number()
 DAEMON_HTTP_PORT = 8080
 DAEMON_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/rpc"
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"

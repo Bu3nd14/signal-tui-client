@@ -2,3 +2,6 @@
 bin/signal-cli-*/
 __pycache__/
 *.pyc
+config.json
+signal-tui-client.code-workspace
+*.log
