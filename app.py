@@ -116,8 +116,13 @@ def _add_message_to_cache(
     sender: str,
     timestamp: int,
     quote_text: str | None = None,
+    msg_type: str = "text",
+    attachment_info: str | None = None,
 ):
-    """Aggiunge un messaggio alla cache."""
+    """Aggiunge un messaggio alla cache.
+    msg_type: "text", "image", "sticker", "attachment"
+    attachment_info: dettagli aggiuntivi (nome file, emoji sticker, ecc.)
+    """
     cache = _load_cache()
     if contact_number not in cache:
         cache[contact_number] = []
@@ -127,6 +132,8 @@ def _add_message_to_cache(
         "sender": sender,
         "timestamp": timestamp,
         "quote_text": quote_text,
+        "msg_type": msg_type,
+        "attachment_info": attachment_info,
     })
     _save_cache(cache)
     _prune_cache()
@@ -364,9 +371,18 @@ class SignalTUI(App):
         is_mine: bool = False,
         is_info: bool = False,
         quote_text: str | None = None,
+        msg_type: str = "text",
+        attachment_info: str | None = None,
     ):
         """Aggiunge un messaggio alla chat con allineamento corretto.
-        Se quote_text è presente, mostra prima la citazione in stile quote."""
+        Se quote_text è presente, mostra prima la citazione in stile quote.
+        msg_type: "text", "image", "sticker", "attachment"
+        attachment_info: dettagli aggiuntivi (nome file, emoji sticker, ecc.)
+        """
+        # Sicurezza: text non deve mai essere None
+        if text is None:
+            text = ""
+
         chat_log = self.query_one("#chat-log", Vertical)
 
         # Se c'è una citazione, mostrala prima
@@ -374,12 +390,21 @@ class SignalTUI(App):
             quote_widget = Static(f"▎ {quote_text}", classes="msg-quote")
             chat_log.mount(quote_widget)
 
+        # Genera il testo visuale in base al tipo
+        display_text = text
+        if msg_type == "image":
+            display_text = f"🖼️ {text}" if text and text != "Media" else "🖼️ [Immagine]"
+        elif msg_type == "sticker":
+            display_text = f"🎨 {text}" if text and text != "Media" else "🎨 [Sticker]"
+        elif msg_type == "attachment":
+            display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
+
         if is_info:
-            widget = Static(text, classes="msg-info")
+            widget = Static(display_text, classes="msg-info")
         elif is_mine:
-            widget = Static(text, classes="msg-right")
+            widget = Static(display_text, classes="msg-right")
         else:
-            widget = Static(text, classes="msg-left")
+            widget = Static(display_text, classes="msg-left")
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
 
@@ -422,34 +447,90 @@ class SignalTUI(App):
 
         return None
 
-    def _extract_message_text(self, envelope: dict) -> tuple[str, str, bool, str | None] | None:
-        """Estrae (sender_label, text, is_mine, quote_text) da un envelope.
-        is_mine=True per messaggi inviati da noi (sync), False per messaggi ricevuti.
-        quote_text è il testo del messaggio citato, se presente."""
+    def _extract_message_data(self, envelope: dict) -> dict | None:
+        """Estrae i dati di un messaggio da un envelope.
+        Restituisce un dict con:
+          - sender: label del mittente
+          - text: testo del messaggio (può essere vuoto se solo media)
+          - is_mine: True se inviato da noi
+          - quote_text: testo citato (o None)
+          - msg_type: "text", "image", "sticker", "attachment"
+          - attachment_info: dettagli aggiuntivi (nome file, emoji sticker, ecc.)
+        """
         source_name = envelope.get("sourceName", "")
         source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
+
+        # Helper per estrarre tipo attachment
+        def _classify_attachments(attachments: list) -> tuple[str, str]:
+            """Analizza gli attachment e restituisce (msg_type, attachment_info)."""
+            if not attachments:
+                return ("text", None)
+            for att in attachments:
+                content_type = att.get("contentType", "")
+                # Sticker
+                sticker = att.get("sticker", {})
+                if sticker:
+                    emoji = sticker.get("emoji", "")
+                    info = f"Sticker {emoji}" if emoji else "Sticker"
+                    return ("sticker", info)
+                # Immagine
+                if content_type.startswith("image/"):
+                    fname = att.get("filename", "")
+                    info = f"Immagine: {fname}" if fname else "Immagine"
+                    return ("image", info)
+                # Altro tipo di file
+                fname = att.get("filename", "") or content_type or "File"
+                return ("attachment", f"File: {fname}")
+            return ("attachment", "Attachment")
 
         # dataMessage — messaggio ricevuto
         data_msg = envelope.get("dataMessage", {})
         if data_msg:
-            text = data_msg.get("message", "")
-            if text:
-                sender = source_name or source_number
-                # Estrai citazione (quote)
-                quote = data_msg.get("quote", {})
-                quote_text = quote.get("text", "") if quote else None
-                return (sender, text, False, quote_text)
+            text = data_msg.get("message", "") or ""
+            sender = source_name or source_number
+            quote = data_msg.get("quote", {})
+            quote_text = quote.get("text", "") if quote else None
+
+            # Controlla attachment
+            attachments = data_msg.get("attachments", [])
+            msg_type, att_info = _classify_attachments(attachments)
+
+            # Se c'è solo un attachment senza testo, usa quello come messaggio
+            if not text and attachments:
+                text = att_info or "Media"
+
+            return {
+                "sender": sender,
+                "text": text,
+                "is_mine": False,
+                "quote_text": quote_text,
+                "msg_type": msg_type,
+                "attachment_info": att_info,
+            }
 
         # syncMessage.sentMessage — messaggio inviato da altro dispositivo
         sync = envelope.get("syncMessage", {})
         sent = sync.get("sentMessage", {})
         if sent:
-            text = sent.get("message", "")
-            if text:
-                # Estrai citazione anche dai syncMessage
-                quote = sent.get("quote", {})
-                quote_text = quote.get("text", "") if quote else None
-                return ("Tu", text, True, quote_text)
+            text = sent.get("message", "") or ""
+            quote = sent.get("quote", {})
+            quote_text = quote.get("text", "") if quote else None
+
+            # Controlla attachment nei syncMessage
+            attachments = sent.get("attachments", [])
+            msg_type, att_info = _classify_attachments(attachments)
+
+            if not text and attachments:
+                text = att_info or "Media"
+
+            return {
+                "sender": "Tu",
+                "text": text,
+                "is_mine": True,
+                "quote_text": quote_text,
+                "msg_type": msg_type,
+                "attachment_info": att_info,
+            }
 
         return None
 
@@ -476,20 +557,20 @@ class SignalTUI(App):
             return False
 
         ts = self._get_message_timestamp(envelope)
-        result = self._extract_message_text(envelope)
-        if result is None:
+        data = self._extract_message_data(envelope)
+        if data is None:
             return False
-
-        sender, text, is_mine, quote_text = result
 
         # Salva in cache (sempre, per qualsiasi contatto)
         _add_message_to_cache(
             contact_number=contact.number,
-            text=text,
-            is_mine=is_mine,
-            sender=sender,
+            text=data["text"],
+            is_mine=data["is_mine"],
+            sender=data["sender"],
             timestamp=ts,
-            quote_text=quote_text,
+            quote_text=data["quote_text"],
+            msg_type=data["msg_type"],
+            attachment_info=data["attachment_info"],
         )
 
         # Mostra nella UI solo se è il contatto corrente
@@ -497,7 +578,12 @@ class SignalTUI(App):
             if ts:
                 self._seen_timestamps.add(ts)
             self.call_from_thread(
-                self._add_message, text, is_mine=is_mine, quote_text=quote_text
+                self._add_message,
+                data["text"],
+                is_mine=data["is_mine"],
+                quote_text=data["quote_text"],
+                msg_type=data["msg_type"],
+                attachment_info=data["attachment_info"],
             )
             return True
 
@@ -696,12 +782,19 @@ class SignalTUI(App):
                 sender = msg.get("sender", "")
                 quote_text = msg.get("quote_text")
                 ts = msg.get("timestamp", 0)
+                msg_type = msg.get("msg_type", "text")
+                attachment_info = msg.get("attachment_info")
 
                 if ts:
                     self._seen_timestamps.add(ts)
 
                 self.call_from_thread(
-                    self._add_message, text, is_mine=is_mine, quote_text=quote_text
+                    self._add_message,
+                    text,
+                    is_mine=is_mine,
+                    quote_text=quote_text,
+                    msg_type=msg_type,
+                    attachment_info=attachment_info,
                 )
 
             self.call_from_thread(
