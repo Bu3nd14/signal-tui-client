@@ -1,8 +1,8 @@
 """
-Signal TUI Client — Interfaccia Textual integrata con signal-cli via JSON-RPC.
-Usa signal-cli daemon su HTTP (localhost) per operazioni veloci (millisecondi).
-Se il daemon non è disponibile, ricade su subprocess (più lento ma funziona).
-I messaggi vengono salvati in cache locale per persistenza tra sessioni.
+Signal TUI Client — Textual interface integrated with signal-cli via JSON-RPC.
+Uses signal-cli daemon over HTTP (localhost) for fast operations (milliseconds).
+If the daemon is unavailable, falls back to subprocess (slower but works).
+Messages are saved in a local cache for persistence across sessions.
 """
 
 import subprocess
@@ -37,10 +37,10 @@ from backend import (
 from ui_components import ContactListWidget, ChatAreaWidget
 
 
-# ─── App principale ──────────────────────────────────────────────────────────
+# ─── Main App ────────────────────────────────────────────────────────────────
 
 class SignalTUI(App):
-    """App principale Signal TUI con daemon JSON-RPC via HTTP."""
+    """Main Signal TUI App with JSON-RPC daemon over HTTP."""
 
     CSS = """
     Screen {
@@ -151,19 +151,19 @@ class SignalTUI(App):
         yield Footer()
 
     def on_mount(self):
-        """All'avvio, avvia il daemon e carica i contatti."""
+        """On startup, start the daemon and load contacts."""
         self.run_worker(self._startup, exclusive=True, thread=True)
 
     def action_quit(self):
-        """Ctrl+Q: ferma il polling ed esce pulitamente."""
+        """Ctrl+Q: stop polling and exit cleanly."""
         self._polling_active = False
         self.exit()
 
     def on_exit(self):
-        """Alla chiusura, ferma il polling e NON killiamo il daemon."""
+        """On exit, stop polling and do NOT kill the daemon."""
         self._polling_active = False
 
-    # ─── Metodi helper per la chat ──────────────────────────────────────────
+    # ─── Chat helper methods ────────────────────────────────────────────────
 
     def _add_message(
         self,
@@ -174,7 +174,7 @@ class SignalTUI(App):
         msg_type: str = "text",
         attachment_info: str | None = None,
     ):
-        """Aggiunge un messaggio alla chat con allineamento corretto."""
+        """Add a message to the chat with correct alignment."""
         if text is None:
             text = ""
 
@@ -186,7 +186,7 @@ class SignalTUI(App):
 
         display_text = text
         if msg_type == "image":
-            display_text = f"🖼️ {text}" if text and text != "Media" else "🖼️ [Immagine]"
+            display_text = f"🖼️ {text}" if text and text != "Media" else "🖼️ [Image]"
         elif msg_type == "sticker":
             display_text = f"🎨 {text}" if text and text != "Media" else "🎨 [Sticker]"
         elif msg_type == "attachment":
@@ -202,14 +202,14 @@ class SignalTUI(App):
         chat_log.scroll_end(animate=False)
 
     def _clear_chat(self):
-        """Pulisce la chat."""
+        """Clear the chat."""
         chat_log = self.query_one("#chat-log", Vertical)
         chat_log.remove_children()
 
-    # ─── Identificazione contatto per envelope ──────────────────────────────
+    # ─── Contact identification for envelope ────────────────────────────────
 
     def _identify_contact_for_envelope(self, envelope: dict) -> Optional[Contact]:
-        """Identifica a quale contatto appartiene un envelope."""
+        """Identify which contact an envelope belongs to."""
         sync = envelope.get("syncMessage", {})
         sent = sync.get("sentMessage", {})
         if sent:
@@ -240,7 +240,7 @@ class SignalTUI(App):
         return None
 
     def _extract_message_data(self, envelope: dict) -> dict | None:
-        """Estrae i dati di un messaggio da un envelope."""
+        """Extract message data from an envelope."""
         source_name = envelope.get("sourceName", "")
         source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
 
@@ -252,7 +252,7 @@ class SignalTUI(App):
                 fname = att.get("filename", "") or ""
                 caption = att.get("caption", "") or ""
                 if content_type.startswith("image/"):
-                    info = caption or f"Immagine: {fname}" if fname else "🖼️ Immagine"
+                    info = caption or f"Image: {fname}" if fname else "🖼️ Image"
                     return ("image", info)
                 if content_type.startswith("video/"):
                     info = caption or f"Video: {fname}" if fname else "🎬 Video"
@@ -315,7 +315,7 @@ class SignalTUI(App):
                 if not text:
                     text = att_info or "🎨 Sticker"
                 return {
-                    "sender": "Tu", "text": text, "is_mine": True,
+                    "sender": "You", "text": text, "is_mine": True,
                     "quote_text": quote_text, "msg_type": msg_type,
                     "attachment_info": att_info,
                 }
@@ -325,7 +325,7 @@ class SignalTUI(App):
             if not text and attachments:
                 text = att_info or "Media"
             return {
-                "sender": "Tu", "text": text, "is_mine": True,
+                "sender": "You", "text": text, "is_mine": True,
                 "quote_text": quote_text, "msg_type": msg_type,
                 "attachment_info": att_info,
             }
@@ -333,7 +333,7 @@ class SignalTUI(App):
         return None
 
     def _get_message_timestamp(self, envelope: dict) -> int:
-        """Restituisce il timestamp del messaggio."""
+        """Return the message timestamp."""
         ts = envelope.get("timestamp", 0)
         if not ts:
             data = envelope.get("dataMessage", {})
@@ -344,11 +344,11 @@ class SignalTUI(App):
             ts = sent.get("timestamp", 0)
         return ts
 
-    # ─── Processamento envelope ─────────────────────────────────────────────
+    # ─── Envelope processing ─────────────────────────────────────────────────
 
     def _process_envelope(self, envelope: dict) -> bool:
-        """Processa un envelope: identifica il contatto, salva in cache.
-        Se il contatto è quello correntemente selezionato, mostra subito il messaggio."""
+        """Process an envelope: identify the contact, save to cache.
+        If the contact is currently selected, show the message immediately."""
         contact = self._identify_contact_for_envelope(envelope)
         if contact is None:
             return False
@@ -374,7 +374,7 @@ class SignalTUI(App):
         _prune_cache()
         self._cache = _load_cache()
 
-        # Se è il contatto corrente, mostra subito il messaggio nella UI
+        # If it's the current contact, show the message in the UI immediately
         if self.selected_contact and contact.number == self.selected_contact.number:
             if ts and ts not in self._seen_timestamps:
                 self._seen_timestamps.add(ts)
@@ -387,7 +387,7 @@ class SignalTUI(App):
                     attachment_info=data["attachment_info"],
                 )
         else:
-            # Messaggio per un altro contatto: aggiorna badge unread
+            # Message for another contact: update unread badge
             self.call_from_thread(self._update_unread_badges)
 
         return True
@@ -395,18 +395,18 @@ class SignalTUI(App):
     # ─── Startup ────────────────────────────────────────────────────────────
 
     def _startup(self):
-        """Avvia signal-cli daemon e carica i contatti."""
+        """Start signal-cli daemon and load contacts."""
         self._cache = _load_cache()
         _prune_cache()
-        self._cache = _load_cache()  # ricarica dopo il prune
+        self._cache = _load_cache()  # reload after prune
 
-        self.call_from_thread(self._add_message, "⏳ Avvio signal-cli daemon...", is_info=True)
+        self.call_from_thread(self._add_message, "⏳ Starting signal-cli daemon...", is_info=True)
         self.rpc = SignalRPCClient()
 
         if _is_daemon_running():
             self._use_daemon = True
             self.call_from_thread(
-                self._add_message, "✅ Daemon già attivo, collegamento diretto...", is_info=True
+                self._add_message, "✅ Daemon already active, connecting directly...", is_info=True
             )
             self._load_contacts_rpc()
 
@@ -415,7 +415,7 @@ class SignalTUI(App):
             return
 
         self.call_from_thread(
-            self._add_message, "⏳ Avvio signal-cli daemon...", is_info=True
+            self._add_message, "⏳ Starting signal-cli daemon...", is_info=True
         )
 
         self.daemon_proc = subprocess.Popen(
@@ -443,7 +443,7 @@ class SignalTUI(App):
         else:
             self.call_from_thread(
                 self._add_message,
-                "❌ Daemon non disponibile. Uso modalità subprocess (più lenta).",
+                "❌ Daemon not available. Using subprocess mode (slower).",
                 is_info=True,
             )
             self._use_daemon = False
@@ -456,9 +456,9 @@ class SignalTUI(App):
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
 
     def _load_contacts_rpc(self):
-        """Carica i contatti via JSON-RPC (daemon già attivo)."""
+        """Load contacts via JSON-RPC (daemon already active)."""
         self.call_from_thread(
-            self._add_message, "⏳ Caricamento contatti...", is_info=True
+            self._add_message, "⏳ Loading contacts...", is_info=True
         )
 
         contacts_data = self.rpc.list_contacts()
@@ -467,15 +467,15 @@ class SignalTUI(App):
         else:
             self.call_from_thread(
                 self._add_message,
-                "⚠️ RPC non ha restituito contatti. Provo con subprocess...",
+                "⚠️ RPC returned no contacts. Trying subprocess...",
                 is_info=True,
             )
             self._load_contacts_subprocess()
 
     def _load_contacts_subprocess(self):
-        """Carica i contatti via subprocess (fallback)."""
+        """Load contacts via subprocess (fallback)."""
         self.call_from_thread(
-            self._add_message, "⏳ Caricamento contatti (subprocess)...", is_info=True
+            self._add_message, "⏳ Loading contacts (subprocess)...", is_info=True
         )
 
         try:
@@ -486,12 +486,12 @@ class SignalTUI(App):
         except Exception as e:
             self.call_from_thread(
                 self._add_message,
-                f"❌ Errore caricamento contatti: {e}",
+                f"❌ Error loading contacts: {e}",
                 is_info=True,
             )
 
     def _parse_contacts_from_output(self, output: str) -> list[Contact]:
-        """Parsa l'output di 'signal-cli listContacts'."""
+        """Parse the output of 'signal-cli listContacts'."""
         contacts = []
         for line in output.strip().split("\n"):
             if not line.strip():
@@ -518,7 +518,7 @@ class SignalTUI(App):
         return contacts
 
     def _parse_and_update_contacts(self, contacts_data: list[dict]):
-        """Parsa i dati dei contatti e aggiorna l'interfaccia."""
+        """Parse contact data and update the UI."""
         contacts = []
         for c in contacts_data:
             number = c.get("number", "")
@@ -535,7 +535,7 @@ class SignalTUI(App):
         self.call_from_thread(self._update_contacts_ui, contacts)
 
     def _sort_contacts(self):
-        """Ordina i contatti: prima quelli con più non letti, poi alfabetico."""
+        """Sort contacts: unread first, then alphabetical."""
         self.contacts.sort(
             key=lambda c: (
                 -self._unread_counts.get(c.number, 0),
@@ -544,29 +544,29 @@ class SignalTUI(App):
         )
 
     def _update_contacts_ui(self, contacts: list[Contact]):
-        """Aggiorna l'interfaccia con la lista contatti."""
+        """Update the UI with the contact list."""
         self._sort_contacts()
         contact_list = self.query_one("#contact-list", ListView)
         contact_list.clear()
         for c in self.contacts:
             contact_list.append(ListItem(Label(f"📱 {c.display_name}")))
 
-        self._add_message(f"✅ Caricati {len(contacts)} contatti.", is_info=True)
-        self._add_message("💡 Seleziona un contatto per vedere la chat", is_info=True)
+        self._add_message(f"✅ Loaded {len(contacts)} contacts.", is_info=True)
+        self._add_message("💡 Select a contact to view chat", is_info=True)
 
         self._update_unread_badges()
 
-    # ─── Selezione contatto ─────────────────────────────────────────────────
+    # ─── Contact selection ─────────────────────────────────────────────────
 
     def on_list_view_selected(self, event: ListView.Selected):
-        """Quando un contatto viene selezionato, mostra la chat."""
+        """When a contact is selected, show the chat."""
         index = self.query_one("#contact-list", ListView).index
         if index is not None and 0 <= index < len(self.contacts):
             self.selected_contact = self.contacts[index]
             self._seen_timestamps.clear()
             self._clear_chat()
             self._add_message(
-                f"📱 Chat con: {self.selected_contact.display_name}", is_info=True
+                f"📱 Chat with: {self.selected_contact.display_name}", is_info=True
             )
             self._add_message(self.selected_contact.number, is_info=True)
             self._add_message("─" * 40, is_info=True)
@@ -575,10 +575,10 @@ class SignalTUI(App):
                 self._load_messages_worker, exclusive=True, thread=True
             )
 
-            # Refresh finale: recupera messaggi arrivati durante il caricamento
+            # Final refresh: fetch messages that arrived during loading
             self._refresh_chat()
 
-            # Segna tutti i messaggi di questo contatto come letti
+            # Mark all messages from this contact as read
             number = self.selected_contact.number
             if number in self._cache:
                 for msg in self._cache[number]:
@@ -589,16 +589,16 @@ class SignalTUI(App):
                 self._cache = _load_cache()
             self._unread_counts[number] = 0
 
-            # Forza aggiornamento label per rimuovere badge *N
+            # Force label update to remove *N badge
             contact_list = self.query_one("#contact-list", ListView)
             item = contact_list.children[index]
             item.children[0].update(f"📱 {self.selected_contact.display_name}")
 
-    # ─── Logica messaggi ────────────────────────────────────────────────────
+    # ─── Message logic ────────────────────────────────────────────────────
 
     def _load_messages_worker(self):
-        """Carica i messaggi: ultimi 100 dalla cache.
-        Se ci sono più di 100 messaggi, mostra un widget per caricare il resto."""
+        """Load messages: last 20 from cache.
+        If there are more than 20 messages, show a widget to load the rest."""
         if not self.selected_contact:
             return
 
@@ -638,34 +638,34 @@ class SignalTUI(App):
 
             self.call_from_thread(
                 self._add_message,
-                f"📋 Caricati {len(messages_to_show)}/{total} messaggi",
+                f"📋 Loaded {len(messages_to_show)}/{total} messages",
                 is_info=True,
             )
         else:
             self._loaded_all = True
             self.call_from_thread(
-                self._add_message, "Nessun messaggio in cronologia per questo contatto", is_info=True
+                self._add_message, "No message history for this contact", is_info=True
             )
 
-        self.call_from_thread(self._add_message, "✅ Pronto", is_info=True)
+        self.call_from_thread(self._add_message, "✅ Ready", is_info=True)
 
     def _add_load_more_widget(self, remaining: int):
-        """Aggiunge un widget cliccabile per caricare i messaggi precedenti."""
+        """Add a clickable widget to load older messages."""
         chat_log = self.query_one("#chat-log", Vertical)
         widget = Button(
-            f"📜 ↑ {remaining} messaggi precedenti — clicca per caricare",
+            f"📜 ↑ {remaining} older messages — click to load",
             classes="msg-load-more",
             id="load-more-msg",
         )
         chat_log.mount(widget, before=0)
 
     def on_button_pressed(self, event: Button.Pressed):
-        """Quando l'utente clicca sul pulsante 'carica precedenti'."""
+        """When the user clicks the 'load older' button."""
         if event.button.id == "load-more-msg":
             self._load_all_messages()
 
     def _load_all_messages(self):
-        """Carica TUTTI i messaggi dalla cache e ricostruisce la chat."""
+        """Load ALL messages from cache and rebuild the chat."""
         if not self.selected_contact:
             return
 
@@ -695,12 +695,12 @@ class SignalTUI(App):
             )
 
         self._loaded_all = True
-        self._add_message(f"📋 Caricati tutti i {len(cached)} messaggi", is_info=True)
+        self._add_message(f"📋 Loaded all {len(cached)} messages", is_info=True)
 
     def _poll_worker(self):
-        """Thread worker che fa polling ogni 1 secondo.
-        Processa TUTTI i messaggi in arrivo e li salva in cache.
-        Parte UNA VOLTA in _startup() e vive per tutta l'app."""
+        """Thread worker that polls every 1 second.
+        Processes ALL incoming messages and saves them to cache.
+        Starts ONCE in _startup() and lives for the entire app lifetime."""
         while self._polling_active:
             if self._use_daemon and self.rpc:
                 try:
@@ -716,13 +716,13 @@ class SignalTUI(App):
                 time.sleep(0.1)
 
     def _refresh_chat(self):
-        """Controlla la cache per nuovi messaggi del contatto corrente non ancora mostrati."""
+        """Check cache for new messages of the current contact not yet shown."""
         if not self.selected_contact:
             return
 
         contact = self.selected_contact
         cached = self._cache.get(contact.number, [])
-        nuovi = 0
+        new_count = 0
 
         for msg in cached:
             ts = msg.get("timestamp", 0)
@@ -740,15 +740,15 @@ class SignalTUI(App):
                     msg_type=msg_type,
                     attachment_info=attachment_info,
                 )
-                nuovi += 1
+                new_count += 1
 
-        if nuovi > 0:
+        if new_count > 0:
             chat_log = self.query_one("#chat-log", Vertical)
             chat_log.scroll_end(animate=False)
 
     def _update_unread_badges(self):
-        """Controlla la cache in memoria e aggiorna i badge *N sui contatti.
-        Se i conteggi cambiano, riordina la lista e la ricostruisce."""
+        """Check the in-memory cache and update *N badges on contacts.
+        If counts change, re-sort the list and rebuild it."""
         if not self.contacts:
             return
 
@@ -767,7 +767,7 @@ class SignalTUI(App):
         if not changed:
             return
 
-        # Riordina e ricostruisce la lista
+        # Re-sort and rebuild the list
         self._sort_contacts()
         contact_list = self.query_one("#contact-list", ListView)
         contact_list.clear()
@@ -778,16 +778,16 @@ class SignalTUI(App):
                 label += f" *{unread}"
             contact_list.append(ListItem(Label(label)))
 
-        # Ripristina la selezione sul contatto corrente (se presente)
+        # Restore selection on the current contact (if present)
         if self.selected_contact and self.selected_contact in self.contacts:
             contact_list.index = self.contacts.index(self.selected_contact)
 
-    # ─── Invio messaggi ─────────────────────────────────────────────────────
+    # ─── Sending messages ─────────────────────────────────────────────────────
 
     def on_input_submitted(self, event: Input.Submitted):
-        """Invia un messaggio quando l'utente preme Invio."""
+        """Send a message when the user presses Enter."""
         if not self.selected_contact:
-            self._add_message("❌ Seleziona prima un contatto!", is_info=True)
+            self._add_message("❌ Select a contact first!", is_info=True)
             return
 
         message = event.value.strip()
@@ -801,7 +801,7 @@ class SignalTUI(App):
         self._cache[number].append({
             "text": message,
             "is_mine": True,
-            "sender": "Tu",
+            "sender": "You",
             "timestamp": ts,
             "quote_text": None,
             "msg_type": "text",
@@ -812,7 +812,7 @@ class SignalTUI(App):
         _prune_cache()
         self._cache = _load_cache()
 
-        # Mostra subito il messaggio nella UI
+        # Show the message in the UI immediately
         self._add_message(message, is_mine=True)
 
         event.input.value = ""
@@ -824,7 +824,7 @@ class SignalTUI(App):
         )
 
     def _send_message_worker(self, message: str):
-        """Invia un messaggio (via RPC o subprocess fallback)."""
+        """Send a message (via RPC or subprocess fallback)."""
         if not self.selected_contact:
             return
 
@@ -833,7 +833,7 @@ class SignalTUI(App):
             if "error" in result:
                 self.call_from_thread(
                     self._add_message,
-                    f"❌ Errore invio: {result['error']}",
+                    f"❌ Send error: {result['error']}",
                     is_info=True,
                 )
         else:
@@ -846,7 +846,7 @@ class SignalTUI(App):
             except Exception as e:
                 self.call_from_thread(
                     self._add_message,
-                    f"❌ Errore invio: {e}",
+                    f"❌ Send error: {e}",
                     is_info=True,
                 )
 
@@ -857,7 +857,7 @@ if __name__ == "__main__":
     app = SignalTUI()
 
     def _handle_sigint(sig, frame):
-        """Gestisce Ctrl+C: ferma il polling ed esce pulitamente."""
+        """Handle Ctrl+C: stop polling and exit cleanly."""
         app._polling_active = False
         app.exit()
 

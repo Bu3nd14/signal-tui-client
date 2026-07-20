@@ -1,8 +1,8 @@
 """
-Backend per Signal TUI Client.
-Gestisce la comunicazione con signal-cli (JSON-RPC via HTTP o subprocess),
-la cache dei messaggi su disco, e il modello dati Contact.
-Nessuna dipendenza da Textual.
+Backend for Signal TUI Client.
+Handles communication with signal-cli (JSON-RPC over HTTP or subprocess),
+message cache on disk, and the Contact data model.
+No Textual dependency.
 """
 
 import json
@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 
-# ─── Costanti ────────────────────────────────────────────────────────────────
+# ─── Constants ────────────────────────────────────────────────────────────────
 
 PROJECT_DIR = Path(__file__).parent
 
@@ -53,26 +53,26 @@ CACHE_RETENTION_DAYS = 3
 # ─── Signal CLI ──────────────────────────────────────────────────────────────
 
 def _find_signal_cli() -> Path:
-    """Cerca l'eseguibile signal-cli nella directory ./bin/ del progetto."""
+    """Find the signal-cli executable in the ./bin/ directory of the project."""
     bin_dir = PROJECT_DIR / "bin"
     for d in bin_dir.iterdir():
         if d.is_dir() and d.name.startswith("signal-cli-"):
             exe = d / "bin" / "signal-cli"
             if exe.exists() and exe.stat().st_mode & 0o111:
                 return exe
-    raise FileNotFoundError("signal-cli non trovato in ./bin/")
+    raise FileNotFoundError("signal-cli not found in ./bin/")
 
 
 SIGNAL_CLI_PATH = _find_signal_cli()
 
 
 def find_signal_cli() -> Path:
-    """Funzione di utilità pubblica per trovare signal-cli."""
+    """Public utility function to find signal-cli."""
     return _find_signal_cli()
 
 
 def _is_daemon_running() -> bool:
-    """Verifica se il daemon signal-cli è già in esecuzione."""
+    """Check if the signal-cli daemon is already running."""
     try:
         rpc = SignalRPCClient()
         test = rpc._call("listContacts")
@@ -82,7 +82,7 @@ def _is_daemon_running() -> bool:
 
 
 def _run_subprocess(args: list[str]) -> str:
-    """Esegue signal-cli via subprocess e restituisce stdout."""
+    """Run signal-cli via subprocess and return stdout."""
     result = subprocess.run(
         [str(SIGNAL_CLI_PATH), "-u", USER_NUMBER] + args,
         capture_output=True,
@@ -96,15 +96,15 @@ def _run_subprocess(args: list[str]) -> str:
     return result.stdout
 
 
-# ─── Cache messaggi ──────────────────────────────────────────────────────────
+# ─── Message cache ──────────────────────────────────────────────────────────
 
 def _ensure_cache_dir():
-    """Crea la directory della cache se non esiste."""
+    """Create the cache directory if it doesn't exist."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _load_cache() -> dict[str, list[dict]]:
-    """Carica tutti i messaggi dalla cache."""
+    """Load all messages from cache."""
     _ensure_cache_dir()
     if not CACHE_FILE.exists():
         return {}
@@ -116,14 +116,14 @@ def _load_cache() -> dict[str, list[dict]]:
 
 
 def _save_cache(data: dict[str, list[dict]]):
-    """Salva tutti i messaggi nella cache."""
+    """Save all messages to cache."""
     _ensure_cache_dir()
     with open(CACHE_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 
 def _get_cached_messages(contact_number: str) -> list[dict]:
-    """Restituisce i messaggi in cache per un contatto."""
+    """Return cached messages for a contact."""
     cache = _load_cache()
     return cache.get(contact_number, [])
 
@@ -138,9 +138,9 @@ def _add_message_to_cache(
     msg_type: str = "text",
     attachment_info: str | None = None,
 ):
-    """Aggiunge un messaggio alla cache.
+    """Add a message to the cache.
     msg_type: "text", "image", "sticker", "attachment"
-    attachment_info: dettagli aggiuntivi (nome file, emoji sticker, ecc.)
+    attachment_info: additional details (filename, sticker emoji, etc.)
     """
     cache = _load_cache()
     if contact_number not in cache:
@@ -153,29 +153,29 @@ def _add_message_to_cache(
         "quote_text": quote_text,
         "msg_type": msg_type,
         "attachment_info": attachment_info,
-        "read": is_mine,  # i nostri messaggi sono già letti
+        "read": is_mine,  # our messages are already read
     })
     _save_cache(cache)
     _prune_cache()
 
 
 def _prune_cache():
-    """Rimuove i messaggi più vecchi di CACHE_RETENTION_DAYS giorni
-    e limita a 200 messaggi per contatto."""
+    """Remove messages older than CACHE_RETENTION_DAYS days
+    and limit to 200 messages per contact."""
     cache = _load_cache()
     now_ms = int(time.time() * 1000)
     cutoff = now_ms - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
     modified = False
 
     for contact in list(cache.keys()):
-        # Rimuovi messaggi vecchi
+        # Remove old messages
         before = len(cache[contact])
         cache[contact] = [m for m in cache[contact] if m.get("timestamp", 0) >= cutoff]
         after = len(cache[contact])
         if before != after:
             modified = True
 
-        # Limita a 200 messaggi per contatto
+        # Limit to 200 messages per contact
         if len(cache[contact]) > 200:
             cache[contact] = cache[contact][-200:]
             modified = True
@@ -189,14 +189,14 @@ def _prune_cache():
 
 
 def _write_cache(data: dict[str, list[dict]]):
-    """Scrive la cache su disco (senza chiamare _prune_cache)."""
+    """Write cache to disk (without calling _prune_cache)."""
     _ensure_cache_dir()
     with open(CACHE_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 
 def _mark_as_read(contact_number: str):
-    """Segna tutti i messaggi di un contatto come letti."""
+    """Mark all messages for a contact as read."""
     cache = _load_cache()
     if contact_number in cache:
         modified = False
@@ -209,8 +209,8 @@ def _mark_as_read(contact_number: str):
 
 
 def _count_unread() -> dict[str, int]:
-    """Conta i messaggi non letti per ogni contatto.
-    Messaggi senza campo 'read' (vecchia cache) sono considerati letti."""
+    """Count unread messages per contact.
+    Messages without 'read' field (old cache) are considered read."""
     cache = _load_cache()
     counts = {}
     for number, messages in cache.items():
@@ -226,14 +226,14 @@ def _count_unread() -> dict[str, int]:
 # ─── JSON-RPC Client via HTTP ────────────────────────────────────────────────
 
 class SignalRPCClient:
-    """Client JSON-RPC per comunicare con signal-cli daemon via HTTP."""
+    """JSON-RPC client for communicating with signal-cli daemon over HTTP."""
 
     def __init__(self, url: str = DAEMON_URL):
         self.url = url
         self._req_id = 0
 
     def _call(self, method: str, params: dict | None = None) -> dict:
-        """Esegue una chiamata JSON-RPC e restituisce il risultato."""
+        """Execute a JSON-RPC call and return the result."""
         self._req_id += 1
         payload = {
             "jsonrpc": "2.0",
@@ -258,14 +258,14 @@ class SignalRPCClient:
             return {"error": str(e)}
 
     def list_contacts(self) -> list[dict]:
-        """Recupera la lista contatti."""
+        """Fetch the contact list."""
         result = self._call("listContacts")
         if "error" in result:
             return []
         return result.get("result", [])
 
     def send_message(self, message: str, recipient: str) -> dict:
-        """Invia un messaggio a un destinatario."""
+        """Send a message to a recipient."""
         params = {
             "message": message,
             "recipient": [recipient],
@@ -273,17 +273,17 @@ class SignalRPCClient:
         return self._call("send", params)
 
     def receive(self) -> list[dict]:
-        """Riceve i messaggi."""
+        """Receive messages."""
         result = self._call("receive")
         if "error" in result:
             return []
         return result.get("result", [])
 
 
-# ─── Modello dati ────────────────────────────────────────────────────────────
+# ─── Data model ──────────────────────────────────────────────────────────────
 
 class Contact:
-    """Rappresenta un contatto Signal."""
+    """Represents a Signal contact."""
 
     def __init__(self, number: str, name: str = "", aci: str = ""):
         self.number = number

@@ -1,7 +1,7 @@
 """
-Script per associare un nuovo dispositivo Signal come client secondario.
-Genera un QR code da scansionare con l'app Signal dello smartphone.
-Il processo signal-cli rimane in esecuzione in attesa della scansione.
+Script to link a new Signal device as a secondary client.
+Generates a QR code to scan with the Signal app on your smartphone.
+The signal-cli process stays running waiting for the scan.
 """
 
 import subprocess
@@ -14,22 +14,22 @@ import qrcode
 
 
 def find_signal_cli() -> Path:
-    """Cerca l'eseguibile signal-cli nella directory ./bin/ del progetto."""
+    """Find the signal-cli executable in the ./bin/ directory of the project."""
     bin_dir = Path(__file__).parent / "bin"
-    # Cerca pattern: bin/signal-cli-*/bin/signal-cli
+    # Look for pattern: bin/signal-cli-*/bin/signal-cli
     for d in bin_dir.iterdir():
         if d.is_dir() and d.name.startswith("signal-cli-"):
             exe = d / "bin" / "signal-cli"
             if exe.exists() and exe.stat().st_mode & 0o111:
                 return exe
     raise FileNotFoundError(
-        "signal-cli non trovato in ./bin/. Esegui prima lo scaricamento."
+        "signal-cli not found in ./bin/. Run the download step first."
     )
 
 
 def print_qr_code(link: str) -> None:
     """
-    Genera e stampa il QR code nel terminale usando la libreria qrcode.
+    Generate and print the QR code in the terminal using the qrcode library.
     """
     qr = qrcode.QRCode(
         version=None,
@@ -43,7 +43,7 @@ def print_qr_code(link: str) -> None:
 
 
 def main():
-    # Trova signal-cli
+    # Find signal-cli
     try:
         signal_cli_path = find_signal_cli()
     except FileNotFoundError as e:
@@ -51,15 +51,15 @@ def main():
         sys.exit(1)
 
     print("=" * 60)
-    print("  🔗 Associazione nuovo dispositivo Signal")
-    print("  📱 Scansiona il QR code con l'app Signal del tuo smartphone")
+    print("  🔗 Link new Signal device")
+    print("  📱 Scan the QR code with the Signal app on your phone")
     print("=" * 60)
     print()
-    print(f"✅ signal-cli trovato: {signal_cli_path}")
-    print(f"⏳ Avvio del comando di link...")
+    print(f"✅ signal-cli found: {signal_cli_path}")
+    print(f"⏳ Starting link command...")
     print()
 
-    # Avvia signal-cli link in un processo separato (non bloccante)
+    # Start signal-cli link in a separate process (non-blocking)
     proc = subprocess.Popen(
         [str(signal_cli_path), "link", "-n", "Mac-TUI-Client"],
         stdout=subprocess.PIPE,
@@ -70,37 +70,37 @@ def main():
 
     link_found = False
 
-    # Legge l'output riga per riga in tempo reale
+    # Read output line by line in real time
     for line in iter(proc.stdout.readline, ""):
         line = line.rstrip()
         print(line)
 
         if not link_found:
-            # Cerca il link di associazione (formato sgnl://linkdevice?... o signal://link/...)
+            # Look for the link URL (format: sgnl://linkdevice?... or signal://link/...)
             match = re.search(r"((?:sgnl|signal)://link[^\s]*)", line)
             if match:
                 link = match.group(1)
                 link_found = True
                 print()
                 print("=" * 60)
-                print("  📸 INQUADRA IL QR CODE CON L'APP SIGNAL:")
+                print("  📸 SCAN THE QR CODE WITH THE SIGNAL APP:")
                 print()
                 print_qr_code(link)
                 print()
-                print("  ⏳ In attesa della scansione dal telefono...")
-                print("  (premi Ctrl+C per annullare)")
+                print("  ⏳ Waiting for scan from phone...")
+                print("  (press Ctrl+C to cancel)")
                 print("=" * 60)
                 print()
 
-    # Quando signal-cli termina, attendi il codice di uscita
+    # When signal-cli finishes, wait for the exit code
     proc.wait()
 
     if proc.returncode == 0:
         print()
-        print("✅ Dispositivo associato con successo!")
+        print("✅ Device linked successfully!")
     else:
         print()
-        print(f"❌ signal-cli terminato con errore (codice: {proc.returncode})")
+        print(f"❌ signal-cli exited with error (code: {proc.returncode})")
 
 
 if __name__ == "__main__":
@@ -108,5 +108,5 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print()
-        print("⏹ Operazione annullata dall'utente.")
+        print("⏹ Operation cancelled by user.")
         sys.exit(0)

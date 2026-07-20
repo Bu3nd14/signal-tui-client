@@ -1,6 +1,6 @@
 """
-Widget personalizzati per Signal TUI Client.
-Contiene i componenti UI riutilizzabili basati su Textual.
+Custom widgets for Signal TUI Client.
+Contains reusable UI components based on Textual.
 """
 
 from textual.containers import Vertical
@@ -8,10 +8,10 @@ from textual.widgets import Label, ListView, Input
 
 
 class ContactListWidget(Vertical):
-    """Colonna sinistra: lista contatti."""
+    """Left column: contact list."""
 
     def compose(self):
-        yield Label("📇 Contatti", classes="section-title")
+        yield Label("📇 Contacts", classes="section-title")
         yield ListView(id="contact-list")
 
     def on_mount(self):
@@ -19,9 +19,9 @@ class ContactListWidget(Vertical):
 
 
 class ChatAreaWidget(Vertical):
-    """Colonna destra: area messaggi + input."""
+    """Right column: messages area + input."""
 
     def compose(self):
         yield Label("💬 Chat", classes="section-title")
         yield Vertical(id="chat-log")
-        yield Input(placeholder="Scrivi un messaggio...", id="message-input")
+        yield Input(placeholder="Type a message...", id="message-input")
