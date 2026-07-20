@@ -749,6 +749,9 @@ class SignalTUI(App):
         })
         _save_cache(self._cache)
 
+        # Mostra subito il messaggio nella UI
+        self._add_message(message, is_mine=True)
+
         event.input.value = ""
 
         self.run_worker(
