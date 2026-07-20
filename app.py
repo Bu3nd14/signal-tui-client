@@ -35,6 +35,7 @@ DAEMON_HTTP_PORT = 8080
 DAEMON_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/rpc"
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 CACHE_FILE = CACHE_DIR / "messages.json"
+CACHE_RETENTION_DAYS = 10
 
 
 def _find_signal_cli() -> Path:
@@ -128,6 +129,28 @@ def _add_message_to_cache(
         "quote_text": quote_text,
     })
     _save_cache(cache)
+    _prune_cache()
+
+
+def _prune_cache():
+    """Rimuove i messaggi più vecchi di CACHE_RETENTION_DAYS giorni."""
+    cache = _load_cache()
+    now_ms = int(time.time() * 1000)
+    cutoff = now_ms - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
+    modified = False
+
+    for contact in list(cache.keys()):
+        before = len(cache[contact])
+        cache[contact] = [m for m in cache[contact] if m.get("timestamp", 0) >= cutoff]
+        after = len(cache[contact])
+        if before != after:
+            modified = True
+        if not cache[contact]:
+            del cache[contact]
+            modified = True
+
+    if modified:
+        _save_cache(cache)
 
 
 # ─── JSON-RPC Client via HTTP ────────────────────────────────────────────────
@@ -473,12 +496,8 @@ class SignalTUI(App):
         if self.selected_contact and contact.number == self.selected_contact.number:
             if ts:
                 self._seen_timestamps.add(ts)
-            if is_mine:
-                line = f"Tu: {text}"
-            else:
-                line = f"{sender}: {text}"
             self.call_from_thread(
-                self._add_message, line, is_mine=is_mine, quote_text=quote_text
+                self._add_message, text, is_mine=is_mine, quote_text=quote_text
             )
             return True
 
@@ -681,12 +700,8 @@ class SignalTUI(App):
                 if ts:
                     self._seen_timestamps.add(ts)
 
-                if is_mine:
-                    line = f"Tu: {text}"
-                else:
-                    line = f"{sender}: {text}"
                 self.call_from_thread(
-                    self._add_message, line, is_mine=is_mine, quote_text=quote_text
+                    self._add_message, text, is_mine=is_mine, quote_text=quote_text
                 )
 
             self.call_from_thread(
@@ -747,7 +762,7 @@ class SignalTUI(App):
             return
 
         # Mostra subito il messaggio nella UI (allineato a destra)
-        self._add_message(f"Tu: {message}", is_mine=True)
+        self._add_message(message, is_mine=True)
 
         # Salva in cache
         _add_message_to_cache(
