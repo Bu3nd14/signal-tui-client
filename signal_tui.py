@@ -589,16 +589,10 @@ class SignalTUI(App):
                 self._cache = _load_cache()
             self._unread_counts[number] = 0
 
-            # Riordina e ricostruisce la lista (il contatto torna in posizione alfabetica)
-            self._sort_contacts()
+            # Forza aggiornamento label per rimuovere badge *N
             contact_list = self.query_one("#contact-list", ListView)
-            contact_list.clear()
-            for c in self.contacts:
-                label = f"📱 {c.display_name}"
-                unread = self._unread_counts.get(c.number, 0)
-                if unread > 0 and c != self.selected_contact:
-                    label += f" *{unread}"
-                contact_list.append(ListItem(Label(label)))
+            item = contact_list.children[index]
+            item.children[0].update(f"📱 {self.selected_contact.display_name}")
 
     # ─── Logica messaggi ────────────────────────────────────────────────────
 
@@ -783,6 +777,10 @@ class SignalTUI(App):
             if unread > 0 and c != self.selected_contact:
                 label += f" *{unread}"
             contact_list.append(ListItem(Label(label)))
+
+        # Ripristina la selezione sul contatto corrente (se presente)
+        if self.selected_contact and self.selected_contact in self.contacts:
+            contact_list.index = self.contacts.index(self.selected_contact)
 
     # ─── Invio messaggi ─────────────────────────────────────────────────────
 
