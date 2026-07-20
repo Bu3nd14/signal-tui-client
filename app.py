@@ -857,9 +857,9 @@ class SignalTUI(App):
                 self._refresh_timer.stop()
                 self._refresh_timer = None
 
-            # Carica messaggi dalla cache + nuovi
+            # Carica messaggi dalla cache (esclusivo: evita race condition)
             self.run_worker(
-                self._load_messages_worker, exclusive=False, thread=True
+                self._load_messages_worker, exclusive=True, thread=True
             )
 
             # Segna tutti i messaggi di questo contatto come letti (in memoria + su file)
@@ -939,20 +939,6 @@ class SignalTUI(App):
             self.call_from_thread(
                 self._add_message, "Nessun messaggio in cronologia per questo contatto", is_info=True
             )
-
-        # 2. Receive per eventuali nuovi messaggi
-        if self._use_daemon and self.rpc:
-            messages = self.rpc.receive()
-            nuovi = 0
-            for msg in messages:
-                envelope = msg.get("envelope", {})
-                if self._process_envelope(envelope):
-                    nuovi += 1
-
-            if nuovi > 0:
-                self.call_from_thread(
-                    self._add_message, f"📨 {nuovi} nuovi messaggi", is_info=True
-                )
 
         self.call_from_thread(self._add_message, "✅ Pronto", is_info=True)
 
