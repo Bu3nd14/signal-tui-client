@@ -341,6 +341,7 @@ class SignalTUI(App):
         self._use_daemon = False
         self._polling_active = False
         self._seen_timestamps: set[int] = set()
+        self._refresh_timer = None
 
     def compose(self):
         yield Header()
@@ -445,6 +446,14 @@ class SignalTUI(App):
             if source_uuid and contact.aci and source_uuid == contact.aci:
                 return contact
 
+        # Fallback: se syncMessage ha sentMessage ma non abbiamo matchato,
+        # riprova matchando su destination (alcune versioni usano solo destination)
+        if sent:
+            dest = sent.get("destination", "")
+            for contact in self.contacts:
+                if dest == contact.number:
+                    return contact
+
         return None
 
     def _extract_message_data(self, envelope: dict) -> dict | None:
@@ -455,33 +464,49 @@ class SignalTUI(App):
           - is_mine: True se inviato da noi
           - quote_text: testo citato (o None)
           - msg_type: "text", "image", "sticker", "attachment"
-          - attachment_info: dettagli aggiuntivi (nome file, emoji sticker, ecc.)
+          - attachment_info: dettagli aggiuntivi (nome file, packId/stickerId, ecc.)
         """
         source_name = envelope.get("sourceName", "")
         source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
 
-        # Helper per estrarre tipo attachment
+        # Helper per classificare attachment (NON contiene sticker, sono separati)
         def _classify_attachments(attachments: list) -> tuple[str, str]:
-            """Analizza gli attachment e restituisce (msg_type, attachment_info)."""
+            """Analizza gli attachment e restituisce (msg_type, attachment_info).
+            Gli sticker NON sono dentro attachments[] ma in dataMessage.sticker o sentMessage.sticker."""
             if not attachments:
                 return ("text", None)
             for att in attachments:
-                content_type = att.get("contentType", "")
-                # Sticker
-                sticker = att.get("sticker", {})
-                if sticker:
-                    emoji = sticker.get("emoji", "")
-                    info = f"Sticker {emoji}" if emoji else "Sticker"
-                    return ("sticker", info)
+                content_type = att.get("contentType", "") or ""
+                fname = att.get("filename", "") or ""
+                caption = att.get("caption", "") or ""
                 # Immagine
                 if content_type.startswith("image/"):
-                    fname = att.get("filename", "")
-                    info = f"Immagine: {fname}" if fname else "Immagine"
+                    info = caption or f"Immagine: {fname}" if fname else "🖼️ Immagine"
                     return ("image", info)
+                # Video
+                if content_type.startswith("video/"):
+                    info = caption or f"Video: {fname}" if fname else "🎬 Video"
+                    return ("attachment", info)
+                # Audio / Voice
+                if content_type.startswith("audio/"):
+                    info = caption or f"Audio: {fname}" if fname else "🎵 Audio"
+                    return ("attachment", info)
                 # Altro tipo di file
-                fname = att.get("filename", "") or content_type or "File"
-                return ("attachment", f"File: {fname}")
-            return ("attachment", "Attachment")
+                info = caption or fname or content_type or "📎 File"
+                return ("attachment", info)
+            return ("attachment", "📎 File")
+
+        # Helper per estrarre sticker
+        def _extract_sticker(sticker: dict | None) -> tuple[str, str] | None:
+            """Se sticker è presente, restituisce (msg_type, attachment_info)."""
+            if not sticker:
+                return None
+            pack_id = sticker.get("packId", "")
+            sticker_id = sticker.get("stickerId", "")
+            info = f"Sticker #{sticker_id}"
+            if pack_id:
+                info = f"Sticker #{sticker_id} (pack:{pack_id[:8]}…)"
+            return ("sticker", info)
 
         # dataMessage — messaggio ricevuto
         data_msg = envelope.get("dataMessage", {})
@@ -491,7 +516,22 @@ class SignalTUI(App):
             quote = data_msg.get("quote", {})
             quote_text = quote.get("text", "") if quote else None
 
-            # Controlla attachment
+            # 1. Controlla sticker (campo DIRETTO in dataMessage, NON dentro attachments)
+            sticker_data = _extract_sticker(data_msg.get("sticker"))
+            if sticker_data:
+                msg_type, att_info = sticker_data
+                if not text:
+                    text = att_info or "🎨 Sticker"
+                return {
+                    "sender": sender,
+                    "text": text,
+                    "is_mine": False,
+                    "quote_text": quote_text,
+                    "msg_type": msg_type,
+                    "attachment_info": att_info,
+                }
+
+            # 2. Controlla attachments (solo se non c'è sticker)
             attachments = data_msg.get("attachments", [])
             msg_type, att_info = _classify_attachments(attachments)
 
@@ -516,7 +556,22 @@ class SignalTUI(App):
             quote = sent.get("quote", {})
             quote_text = quote.get("text", "") if quote else None
 
-            # Controlla attachment nei syncMessage
+            # 1. Controlla sticker (campo DIRETTO in sentMessage)
+            sticker_data = _extract_sticker(sent.get("sticker"))
+            if sticker_data:
+                msg_type, att_info = sticker_data
+                if not text:
+                    text = att_info or "🎨 Sticker"
+                return {
+                    "sender": "Tu",
+                    "text": text,
+                    "is_mine": True,
+                    "quote_text": quote_text,
+                    "msg_type": msg_type,
+                    "attachment_info": att_info,
+                }
+
+            # 2. Controlla attachments (solo se non c'è sticker)
             attachments = sent.get("attachments", [])
             msg_type, att_info = _classify_attachments(attachments)
 
@@ -549,9 +604,9 @@ class SignalTUI(App):
     # ─── Processamento envelope (salva in cache + mostra se contatto corrente) ─
 
     def _process_envelope(self, envelope: dict) -> bool:
-        """Processa un envelope: identifica il contatto, salva in cache,
-        e se è il contatto corrente, mostra nella UI.
-        Restituisce True se il messaggio è stato mostrato."""
+        """Processa un envelope: identifica il contatto, salva in cache.
+        La visualizzazione nella UI è gestita da _refresh_chat() ogni 1 secondo.
+        Restituisce True se il messaggio è stato salvato in cache."""
         contact = self._identify_contact_for_envelope(envelope)
         if contact is None:
             return False
@@ -573,21 +628,7 @@ class SignalTUI(App):
             attachment_info=data["attachment_info"],
         )
 
-        # Mostra nella UI solo se è il contatto corrente
-        if self.selected_contact and contact.number == self.selected_contact.number:
-            if ts:
-                self._seen_timestamps.add(ts)
-            self.call_from_thread(
-                self._add_message,
-                data["text"],
-                is_mine=data["is_mine"],
-                quote_text=data["quote_text"],
-                msg_type=data["msg_type"],
-                attachment_info=data["attachment_info"],
-            )
-            return True
-
-        return False
+        return True
 
     # ─── Startup ────────────────────────────────────────────────────────────
 
@@ -752,6 +793,9 @@ class SignalTUI(App):
 
             # Ferma polling precedente se attivo
             self._polling_active = False
+            if self._refresh_timer is not None:
+                self._refresh_timer.stop()
+                self._refresh_timer = None
 
             # Carica messaggi dalla cache + nuovi
             self.run_worker(
@@ -763,6 +807,9 @@ class SignalTUI(App):
             self.run_worker(
                 self._poll_worker, exclusive=False, thread=True
             )
+
+            # Refresh periodico della chat ogni 500ms (recupera messaggi persi)
+            self._refresh_timer = self.set_interval(0.5, self._refresh_chat)
 
     # ─── Logica messaggi ────────────────────────────────────────────────────
 
@@ -842,6 +889,39 @@ class SignalTUI(App):
                     return
                 time.sleep(0.1)
 
+    def _refresh_chat(self):
+        """Refresh periodico: controlla se ci sono nuovi messaggi in cache
+        per il contatto corrente e li mostra. Recupera eventuali messaggi
+        persi dal live polling."""
+        if not self.selected_contact:
+            return
+
+        contact = self.selected_contact
+        cached = _get_cached_messages(contact.number)
+        nuovi = 0
+
+        for msg in cached:
+            ts = msg.get("timestamp", 0)
+            if ts and ts not in self._seen_timestamps:
+                self._seen_timestamps.add(ts)
+                text = msg.get("text", "")
+                is_mine = msg.get("is_mine", False)
+                quote_text = msg.get("quote_text")
+                msg_type = msg.get("msg_type", "text")
+                attachment_info = msg.get("attachment_info")
+                self._add_message(
+                    text,
+                    is_mine=is_mine,
+                    quote_text=quote_text,
+                    msg_type=msg_type,
+                    attachment_info=attachment_info,
+                )
+                nuovi += 1
+
+        if nuovi > 0:
+            chat_log = self.query_one("#chat-log", Vertical)
+            chat_log.scroll_end(animate=False)
+
     # ─── Invio messaggi ─────────────────────────────────────────────────────
 
     def on_input_submitted(self, event: Input.Submitted):
@@ -854,10 +934,7 @@ class SignalTUI(App):
         if not message:
             return
 
-        # Mostra subito il messaggio nella UI (allineato a destra)
-        self._add_message(message, is_mine=True)
-
-        # Salva in cache
+        # Salva in cache (la UI verrà aggiornata da _refresh_chat() tra <1 secondo)
         _add_message_to_cache(
             contact_number=self.selected_contact.number,
             text=message,
