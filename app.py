@@ -874,6 +874,11 @@ class SignalTUI(App):
                 _save_cache(self._cache)
             self._unread_counts[number] = 0
 
+            # Forza aggiornamento label per rimuovere badge *N immediatamente
+            contact_list = self.query_one("#contact-list", ListView)
+            item = contact_list.children[index]
+            item.children[0].update(f"📱 {self.selected_contact.display_name}")
+
             # Avvia timer badge non letti (ogni 5 secondi)
             if self._unread_timer is None:
                 self._unread_timer = self.set_interval(5, self._update_unread_badges)
