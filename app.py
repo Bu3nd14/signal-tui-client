@@ -402,8 +402,6 @@ class SignalTUI(App):
     def on_mount(self):
         """All'avvio, avvia il daemon e carica i contatti."""
         self.run_worker(self._startup, exclusive=True, thread=True)
-        # Avvia il polling UNA VOLTA per tutta la durata dell'app
-        self.run_worker(self._poll_worker, exclusive=True, thread=True)
 
     def action_quit(self):
         """Ctrl+Q: ferma il polling ed esce pulitamente."""
@@ -741,6 +739,10 @@ class SignalTUI(App):
             return
 
         self._load_contacts_rpc()
+
+        # Avvia il polling UNA VOLTA (dopo che _startup ha finito)
+        self._polling_active = True
+        self.run_worker(self._poll_worker, exclusive=True, thread=True)
 
     def _load_contacts_rpc(self):
         """Carica i contatti via JSON-RPC (daemon già attivo)."""
