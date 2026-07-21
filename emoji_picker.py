@@ -90,6 +90,28 @@ def _get_categories() -> list[tuple[str, str, list[str]]]:
 # ─── Emoji Picker Screen ─────────────────────────────────────────────────────
 
 
+class EmojiCell(Static):
+    """A single emoji cell in the grid — clickable and focusable."""
+
+    def __init__(self, emoji_char: str) -> None:
+        super().__init__(emoji_char, classes="emoji-cell")
+        self.emoji_char = emoji_char
+        self.can_focus = True
+
+    def on_click(self) -> None:
+        """Click → dismiss the picker with this emoji."""
+        # Walk up to the screen and dismiss
+        screen = self.app.screen
+        if isinstance(screen, EmojiPickerScreen):
+            screen.dismiss(self.emoji_char)
+
+    def on_focus(self) -> None:
+        self.styles.background = "$accent 50%"
+
+    def on_blur(self) -> None:
+        self.styles.background = "transparent"
+
+
 class EmojiPickerScreen(ModalScreen[str]):
     """Full-screen modal emoji picker with categories, search, and grid view.
 
@@ -173,9 +195,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         width: 100%;
         height: 2;
         text-align: center;
-        padding: 0;
-        border: none;
-        background: transparent;
+        padding: 0 1;
         color: $text;
         min-width: 4;
     }
@@ -240,8 +260,6 @@ class EmojiPickerScreen(ModalScreen[str]):
     def on_mount(self) -> None:
         """Set initial state and render the first category."""
         self._activate_category(0)
-        search_input = self.query_one("#emoji-search", Input)
-        search_input.focus()
 
     # ── Category navigation ──────────────────────────────────────────────
 
@@ -264,13 +282,12 @@ class EmojiPickerScreen(ModalScreen[str]):
         self._render_grid(self._categories[index][2])
 
     def _render_grid(self, emojis: list[str]) -> None:
-        """Fill the grid container with emoji buttons."""
+        """Fill the grid container with emoji cells."""
         grid = self.query_one("#emoji-grid-container", Vertical)
         grid.remove_children()
         for char in emojis:
-            btn = Button(char, classes="emoji-cell")
-            btn.can_focus = True
-            grid.mount(btn)
+            cell = EmojiCell(char)
+            grid.mount(cell)
 
     # ── Search ───────────────────────────────────────────────────────────
 
@@ -306,16 +323,10 @@ class EmojiPickerScreen(ModalScreen[str]):
     # ── Emoji selection ──────────────────────────────────────────────────
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle emoji selection."""
+        """Handle category tab clicks."""
         if event.button.id and event.button.id.startswith("emoji-cat-"):
-            # Category tab clicked
             idx = int(event.button.id.split("-")[-1])
             self._activate_category(idx)
-            return
-
-        # Emoji cell clicked
-        if "emoji-cell" in event.button.classes:
-            self.dismiss(event.button.label.plain if event.button.label else None)
 
     # ── Keyboard navigation ──────────────────────────────────────────────
 
@@ -335,15 +346,15 @@ class EmojiPickerScreen(ModalScreen[str]):
         search_input.focus()
 
     def key_enter(self) -> None:
-        """Enter key: select the focused emoji button."""
+        """Enter key: select the focused emoji cell."""
         focused = self.focused
-        if focused and hasattr(focused, "classes") and "emoji-cell" in focused.classes:
-            self.dismiss(focused.label.plain if focused.label else None)
+        if isinstance(focused, EmojiCell):
+            self.dismiss(focused.emoji_char)
 
     def key_left(self) -> None:
         """Navigate left in the grid."""
         focused = self.focused
-        if focused and hasattr(focused, "classes") and "emoji-cell" in focused.classes:
+        if isinstance(focused, EmojiCell):
             grid = self.query_one("#emoji-grid-container", Vertical)
             children = list(grid.children)
             try:
@@ -356,7 +367,7 @@ class EmojiPickerScreen(ModalScreen[str]):
     def key_right(self) -> None:
         """Navigate right in the grid."""
         focused = self.focused
-        if focused and hasattr(focused, "classes") and "emoji-cell" in focused.classes:
+        if isinstance(focused, EmojiCell):
             grid = self.query_one("#emoji-grid-container", Vertical)
             children = list(grid.children)
             try:
@@ -369,7 +380,7 @@ class EmojiPickerScreen(ModalScreen[str]):
     def key_up(self) -> None:
         """Navigate up in the grid (8 columns)."""
         focused = self.focused
-        if focused and hasattr(focused, "classes") and "emoji-cell" in focused.classes:
+        if isinstance(focused, EmojiCell):
             grid = self.query_one("#emoji-grid-container", Vertical)
             children = list(grid.children)
             try:
@@ -383,7 +394,7 @@ class EmojiPickerScreen(ModalScreen[str]):
     def key_down(self) -> None:
         """Navigate down in the grid (8 columns)."""
         focused = self.focused
-        if focused and hasattr(focused, "classes") and "emoji-cell" in focused.classes:
+        if isinstance(focused, EmojiCell):
             grid = self.query_one("#emoji-grid-container", Vertical)
             children = list(grid.children)
             try:
@@ -398,7 +409,7 @@ class EmojiPickerScreen(ModalScreen[str]):
 # ─── Emoji Completion Widget ─────────────────────────────────────────────────
 
 
-class EmojiCompletionWidget(Static):
+class EmojiCompletionWidget(Vertical):
     """A popup widget that shows emoji suggestions as the user types ``:alias:``.
 
     This widget is placed above the input row and is hidden by default.
@@ -422,6 +433,21 @@ class EmojiCompletionWidget(Static):
     EmojiCompletionWidget.-visible {
         display: block;
     }
+
+    .emoji-suggestion {
+        padding: 0 1;
+        color: $text;
+    }
+
+    .emoji-suggestion:hover {
+        background: $accent 30%;
+    }
+
+    .emoji-suggestion-selected {
+        background: $accent 50%;
+        color: $text;
+        text-style: bold;
+    }
     """
 
     def __init__(self, **kwargs) -> None:
@@ -436,17 +462,17 @@ class EmojiCompletionWidget(Static):
             return self._suggestions[self._selected_index][0]
         return None
 
-    def render(self) -> RichText:
-        """Render the suggestion list."""
-        lines: list[str] = []
+    def _rebuild(self) -> None:
+        """Rebuild the suggestion children."""
+        self.remove_children()
         for i, (char, alias) in enumerate(self._suggestions):
             marker = "▸" if i == self._selected_index else " "
-            lines.append(f"{marker} {char}  :{alias}:")
-        return RichText("\n".join(lines))
-
-    def _render(self) -> None:
-        """Rebuild the suggestion list display and refresh."""
-        self.refresh()
+            classes = "emoji-suggestion"
+            if i == self._selected_index:
+                classes += " emoji-suggestion-selected"
+            w = Static(f"{marker} {char}  :{alias}:", classes=classes)
+            w.can_focus = True
+            self.mount(w)
 
     def show_suggestions(self, prefix: str) -> None:
         """Query emoji suggestions matching *prefix* and show the widget."""
@@ -456,24 +482,24 @@ class EmojiCompletionWidget(Static):
             return
         self._suggestions = suggestions
         self._selected_index = 0
-        self._render()
+        self._rebuild()
         self.add_class("-visible")
 
     def hide_suggestions(self) -> None:
         """Hide the completion widget and clear suggestions."""
         self._suggestions = []
         self._selected_index = 0
+        self.remove_children()
         self.remove_class("-visible")
-        self._render()
 
     def select_next(self) -> None:
         """Move selection down."""
         if self._suggestions:
             self._selected_index = (self._selected_index + 1) % len(self._suggestions)
-            self._render()
+            self._rebuild()
 
     def select_prev(self) -> None:
         """Move selection up."""
         if self._suggestions:
             self._selected_index = (self._selected_index - 1) % len(self._suggestions)
-            self._render()
+            self._rebuild()
