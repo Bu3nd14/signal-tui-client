@@ -12,6 +12,7 @@ from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Label, ListView, Input, Static, RichLog, Button
+from emoji_picker import _normalize_emoji_width
 
 from emoji_picker import EmojiCompletionWidget
 
@@ -56,7 +57,7 @@ class ChatAreaWidget(Vertical):
         yield EmojiCompletionWidget(id="emoji-completion")
 
         yield Horizontal(
-            Button(" 😊 ", id="emoji-btn", classes="emoji-toggle-btn"),
+            Static(_normalize_emoji_width("😊"), id="emoji-btn"),
             Input(placeholder="Type a message...", id="message-input"),
             id="input-row",
         )
