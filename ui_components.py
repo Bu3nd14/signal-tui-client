@@ -112,7 +112,14 @@ class ImageModalScreen(ModalScreen):
         yield Static("Press Escape or q to close", id="modal-hint")
 
     def on_mount(self) -> None:
-        """Start the async rendering worker."""
+        """Start the async rendering worker.
+
+        Dynamically calculates the image width based on the current
+        terminal size so the image fills most of the modal.
+        """
+        # Use ~90% of the available terminal columns, clamped to [40, 300]
+        terminal_width = self.app.size.width
+        self._catimg_width = max(40, min(300, int(terminal_width * 0.9)))
         self.run_worker(self._render_image(), exclusive=False)
 
     async def _render_image(self) -> None:
@@ -133,7 +140,7 @@ class ImageModalScreen(ModalScreen):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "catimg",
-                "-w", "120",
+                "-w", str(self._catimg_width),
                 str(self._attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
