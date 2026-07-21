@@ -205,11 +205,11 @@ class SignalTUI(App):
     }
 
     #emoji-btn {
-        width: 6;
-        min-width: 6;
+        width: 5;
+        min-width: 5;
         content-align: center middle;
-        padding: 0 1;
-        border: solid $border;
+        padding: 0;
+        border: tall $border;
         background: $surface;
         color: $text;
     }

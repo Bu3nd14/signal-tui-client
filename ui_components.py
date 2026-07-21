@@ -56,7 +56,7 @@ class ChatAreaWidget(Vertical):
         yield EmojiCompletionWidget(id="emoji-completion")
 
         yield Horizontal(
-            Button(" 😊 ", id="emoji-btn", classes="emoji-toggle-btn"),
+            Button("😊", id="emoji-btn", classes="emoji-toggle-btn"),
             Input(placeholder="Type a message...", id="message-input"),
             id="input-row",
         )
