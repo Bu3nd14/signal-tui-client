@@ -114,12 +114,18 @@ class ImageModalScreen(ModalScreen):
     def on_mount(self) -> None:
         """Start the async rendering worker.
 
-        Dynamically calculates the image width based on the current
-        terminal size so the image fills most of the modal.
+        Dynamically calculates the image width and height based on the
+        current terminal size so the image fills the modal without
+        overflowing in either direction.
         """
-        # Use ~90% of the available terminal columns, clamped to [40, 300]
-        terminal_width = self.app.size.width
-        self._catimg_width = max(40, min(300, int(terminal_width * 0.9)))
+        # self.app.size is in character cells (columns × rows)
+        term_cols = self.app.size.width
+        term_rows = self.app.size.height
+
+        # Available space: full width minus a 1-char padding on each side,
+        # and ~80% of height (leave room for header/footer/hint).
+        self._catimg_cols = max(40, term_cols - 2)
+        self._catimg_rows = max(10, int(term_rows * 0.75))
         self.run_worker(self._render_image(), exclusive=False)
 
     async def _render_image(self) -> None:
@@ -130,8 +136,8 @@ class ImageModalScreen(ModalScreen):
         """
         img = self.query_one("#modal-image", RichLog)
         img.styles.width = "100%"
-        img.styles.height = "85%"
-        img.styles.margin = (1, 2)
+        img.styles.height = "1fr"
+        img.styles.margin = (1, 0)
         hint = self.query_one("#modal-hint", Static)
         hint.styles.text_align = "center"
         hint.styles.color = "#888888"
@@ -140,7 +146,8 @@ class ImageModalScreen(ModalScreen):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "catimg",
-                "-w", str(self._catimg_width),
+                "-w", str(self._catimg_cols),
+                "-h", str(self._catimg_rows),
                 str(self._attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
