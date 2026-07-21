@@ -33,12 +33,19 @@ from backend import (
     _prune_cache,
     _is_daemon_running,
     _run_subprocess,
+    _send_subprocess,
     get_attachment_path,
     SIGNAL_CLI_PATH,
     USER_NUMBER,
     DAEMON_HTTP_PORT,
 )
-from ui_components import ContactListWidget, ChatAreaWidget, ImageWidget, ImageModalScreen
+from ui_components import (
+    ContactListWidget,
+    ChatAreaWidget,
+    MessageWidget,
+    ImageWidget,
+    ImageModalScreen,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +132,30 @@ class SignalTUI(App):
         background: $accent 20%;
     }
 
+    #reply-bar {
+        dock: bottom;
+        height: auto;
+        padding: 0 1;
+        background: $accent 30%;
+        color: $text;
+        text-style: bold;
+        border: solid $accent;
+        margin: 0 1;
+        display: none;
+    }
+
+    #reply-bar.visible {
+        display: block;
+    }
+
+    #reply-bar #reply-cancel {
+        dock: right;
+        width: 3;
+        text-align: center;
+        color: $error;
+        text-style: bold;
+    }
+
     #message-input {
         dock: bottom;
         margin: 1 1;
@@ -147,6 +178,7 @@ class SignalTUI(App):
         self._unread_counts: dict[str, int] = {}
         self._cache: dict[str, list[dict]] = {}
         self._loaded_all = False
+        self._reply_to: Optional[dict] = None  # message being replied to
 
     def compose(self):
         yield Header()
@@ -154,6 +186,7 @@ class SignalTUI(App):
             ContactListWidget(),
             ChatAreaWidget(),
         )
+        yield Static(id="reply-bar")
         yield Footer()
 
     def on_mount(self):
@@ -180,12 +213,17 @@ class SignalTUI(App):
         msg_type: str = "text",
         attachment_info: str | None = None,
         attachment_id: str | None = None,
+        timestamp: int = 0,
+        sender: str = "",
     ):
         """Add a message to the chat with correct alignment.
 
         For image messages, this method launches an async worker that
         renders the image inline via ``catimg``.  If rendering fails, a
         clickable fallback placeholder is shown instead.
+
+        For text messages (not info), a clickable ``MessageWidget`` is
+        used so the user can click to reply.
         """
         if text is None:
             text = ""
@@ -215,10 +253,15 @@ class SignalTUI(App):
 
         if is_info:
             widget = Static(display_text, classes="msg-info")
-        elif is_mine:
-            widget = Static(display_text, classes="msg-right")
         else:
-            widget = Static(display_text, classes="msg-left")
+            # Use clickable MessageWidget for all non-info messages
+            widget = MessageWidget(
+                text=display_text,
+                timestamp=timestamp,
+                sender=sender,
+                is_mine=is_mine,
+                classes="msg-right" if is_mine else "msg-left",
+            )
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
 
@@ -448,6 +491,8 @@ class SignalTUI(App):
                     msg_type=data["msg_type"],
                     attachment_info=data["attachment_info"],
                     attachment_id=data.get("attachment_id"),
+                    timestamp=ts,
+                    sender=data.get("sender", ""),
                 )
         else:
             # Message for another contact: update unread badge
@@ -687,6 +732,7 @@ class SignalTUI(App):
                 msg_type = msg.get("msg_type", "text")
                 attachment_info = msg.get("attachment_info")
                 attachment_id = msg.get("attachment_id")
+                sender = msg.get("sender", "")
 
                 if ts:
                     self._seen_timestamps.add(ts)
@@ -699,6 +745,8 @@ class SignalTUI(App):
                     msg_type=msg_type,
                     attachment_info=attachment_info,
                     attachment_id=attachment_id,
+                    timestamp=ts,
+                    sender=sender,
                 )
 
             self.call_from_thread(
@@ -748,6 +796,7 @@ class SignalTUI(App):
             msg_type = msg.get("msg_type", "text")
             attachment_info = msg.get("attachment_info")
             attachment_id = msg.get("attachment_id")
+            sender = msg.get("sender", "")
 
             if ts:
                 self._seen_timestamps.add(ts)
@@ -759,6 +808,8 @@ class SignalTUI(App):
                 msg_type=msg_type,
                 attachment_info=attachment_info,
                 attachment_id=attachment_id,
+                timestamp=ts,
+                sender=sender,
             )
 
         self._loaded_all = True
@@ -801,6 +852,7 @@ class SignalTUI(App):
                 msg_type = msg.get("msg_type", "text")
                 attachment_info = msg.get("attachment_info")
                 attachment_id = msg.get("attachment_id")
+                sender = msg.get("sender", "")
                 self._add_message(
                     text,
                     is_mine=is_mine,
@@ -808,6 +860,8 @@ class SignalTUI(App):
                     msg_type=msg_type,
                     attachment_info=attachment_info,
                     attachment_id=attachment_id,
+                    timestamp=ts,
+                    sender=sender,
                 )
                 new_count += 1
 
@@ -851,6 +905,79 @@ class SignalTUI(App):
         if self.selected_contact and self.selected_contact in self.contacts:
             contact_list.index = self.contacts.index(self.selected_contact)
 
+    # ─── Reply-to (quote) handling ───────────────────────────────────────────
+
+    def _update_reply_bar(self):
+        """Show or hide the reply bar based on ``self._reply_to``."""
+        bar = self.query_one("#reply-bar", Static)
+        if self._reply_to:
+            reply_text = self._reply_to.get("text", "")
+            # Truncate long messages for display
+            if len(reply_text) > 60:
+                reply_text = reply_text[:57] + "..."
+            bar.update(f"↩️ Replying to: {reply_text}   [✕]")
+            bar.classes = "visible"
+            bar.styles.display = "block"
+        else:
+            bar.update("")
+            bar.classes = ""
+            bar.styles.display = "none"
+
+    def _cancel_reply(self):
+        """Cancel the current reply selection."""
+        # Deselect the previously selected widget
+        if self._reply_to is not None:
+            prev_widget = self._reply_to.get("_widget")
+            if prev_widget is not None:
+                try:
+                    prev_widget.set_selected(False)
+                except Exception:
+                    pass
+        self._reply_to = None
+        self._update_reply_bar()
+
+    def on_message_widget_message_clicked(
+        self, event: MessageWidget.MessageClicked
+    ):
+        """Handle ``MessageClicked`` from a ``MessageWidget``.
+
+        Toggles reply selection on the clicked message.
+        """
+        # If clicking the same message, cancel the reply
+        if (
+            self._reply_to is not None
+            and self._reply_to.get("timestamp") == event.timestamp
+        ):
+            self._cancel_reply()
+            return
+
+        # Deselect the previously selected widget
+        if self._reply_to is not None:
+            prev_widget = self._reply_to.get("_widget")
+            if prev_widget is not None:
+                try:
+                    prev_widget.set_selected(False)
+                except Exception:
+                    pass
+
+        # Store the new reply target
+        self._reply_to = {
+            "text": event.text,
+            "timestamp": event.timestamp,
+            "sender": event.sender,
+            "is_mine": event.is_mine,
+        }
+
+        # Highlight the clicked widget (find it by timestamp in the chat log)
+        chat_log = self.query_one("#chat-log", Vertical)
+        for child in chat_log.children:
+            if isinstance(child, MessageWidget) and child._msg_timestamp == event.timestamp:
+                child.set_selected(True)
+                self._reply_to["_widget"] = child
+                break
+
+        self._update_reply_bar()
+
     # ─── Image modal ─────────────────────────────────────────────────────────
 
     def on_image_widget_image_clicked(self, event: ImageWidget.ImageClicked):
@@ -875,6 +1002,11 @@ class SignalTUI(App):
 
         number = self.selected_contact.number
         ts = int(time.time() * 1000)
+
+        # Capture reply data before clearing it
+        reply_data = self._reply_to
+        quote_text = reply_data.get("text") if reply_data else None
+
         if number not in self._cache:
             self._cache[number] = []
         self._cache[number].append({
@@ -882,7 +1014,7 @@ class SignalTUI(App):
             "is_mine": True,
             "sender": "You",
             "timestamp": ts,
-            "quote_text": None,
+            "quote_text": quote_text,
             "msg_type": "text",
             "attachment_info": None,
             "attachment_id": None,
@@ -892,24 +1024,48 @@ class SignalTUI(App):
         _prune_cache()
         self._cache = _load_cache()
 
-        # Show the message in the UI immediately
-        self._add_message(message, is_mine=True)
+        # Show the message in the UI immediately (with quote if replying)
+        self._add_message(
+            message,
+            is_mine=True,
+            quote_text=quote_text,
+            timestamp=ts,
+            sender="You",
+        )
 
         event.input.value = ""
 
+        # Cancel the reply highlight
+        self._cancel_reply()
+
         self.run_worker(
-            lambda msg=message: self._send_message_worker(msg),
+            lambda msg=message, rdata=reply_data: self._send_message_worker(msg, rdata),
             exclusive=False,
             thread=True,
         )
 
-    def _send_message_worker(self, message: str):
-        """Send a message (via RPC or subprocess fallback)."""
+    def _send_message_worker(self, message: str, reply_data: dict | None = None):
+        """Send a message (via RPC or subprocess fallback).
+
+        If ``reply_data`` is provided, the message is sent as a quote/reply
+        to the original message.
+        """
         if not self.selected_contact:
             return
 
+        # Extract quote parameters from reply_data
+        quote_timestamp = reply_data.get("timestamp") if reply_data else None
+        quote_author = reply_data.get("sender") if reply_data else None
+        quote_message = reply_data.get("text") if reply_data else None
+
         if self._use_daemon and self.rpc:
-            result = self.rpc.send_message(message, self.selected_contact.number)
+            result = self.rpc.send_message(
+                message,
+                self.selected_contact.number,
+                quote_timestamp=quote_timestamp,
+                quote_author=quote_author,
+                quote_message=quote_message,
+            )
             if "error" in result:
                 self.call_from_thread(
                     self._add_message,
@@ -918,11 +1074,13 @@ class SignalTUI(App):
                 )
         else:
             try:
-                _run_subprocess([
-                    "send",
-                    "-m", message,
+                _send_subprocess(
+                    message,
                     self.selected_contact.number,
-                ])
+                    quote_timestamp=quote_timestamp,
+                    quote_author=quote_author,
+                    quote_message=quote_message,
+                )
             except Exception as e:
                 self.call_from_thread(
                     self._add_message,
