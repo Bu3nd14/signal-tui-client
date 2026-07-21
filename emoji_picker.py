@@ -137,7 +137,7 @@ class EmojiPickerScreen(ModalScreen[str]):
     }
 
     #emoji-picker-container {
-        width: 66;
+        width: 69;
         height: 70%;
         min-height: 20;
         border: thick $accent;
@@ -192,6 +192,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         overflow-y: auto;
         overflow-x: hidden;
         padding: 0 0 1 0;
+        scrollbar-gutter: stable;
     }
 
     #emoji-grid-container {
