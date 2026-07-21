@@ -120,6 +120,16 @@ class EmojiCell(Static):
         self.emoji_char = emoji_char
         self.can_focus = True
 
+    def get_content_width(self, container, viewport) -> int:
+        """Force Textual to report a fixed width of 2 columns.
+
+        This is critical for flag emoji (Regional Indicator Symbols) which
+        are composed of 2 Unicode characters but occupy only 2 visual columns.
+        Without this override, Textual calculates 4 columns for flags,
+        breaking the grid layout and corrupting the right border.
+        """
+        return 2
+
     def on_click(self) -> None:
         """Click → dismiss the picker with this emoji."""
         # Walk up to the screen and dismiss
@@ -210,8 +220,8 @@ class EmojiPickerScreen(ModalScreen[str]):
 
     .emoji-cell {
         height: 1;
-        width: 100%;
-        content-align: center middle;
+        width: 2;
+        max-width: 2;
         overflow: hidden;
         color: $text;
     }
