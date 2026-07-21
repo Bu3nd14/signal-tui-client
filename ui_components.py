@@ -7,6 +7,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+from rich.text import Text as RichText
 from textual.containers import Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -107,7 +108,7 @@ class ImageModalScreen(ModalScreen):
         self._attachment_path = attachment_path
 
     def compose(self):
-        yield RichLog(id="modal-image", highlight=True, markup=True, wrap=True)
+        yield RichLog(id="modal-image", highlight=True, markup=False, wrap=True)
         yield Static("Press Escape or q to close", id="modal-hint")
 
     def on_mount(self) -> None:
@@ -162,9 +163,10 @@ class ImageModalScreen(ModalScreen):
             img.write(f"⚠️ Could not render image: {exc}")
             return
 
-        # Write the ANSI output into the RichLog.
-        # RichLog.write() accepts raw ANSI strings and renders them correctly.
-        img.write(ansi_output)
+        # Convert ANSI → RichText, then write into RichLog.
+        # RichLog with markup=False does not interpret ANSI codes directly,
+        # so we parse them via RichText.from_ansi() first.
+        img.write(RichText.from_ansi(ansi_output))
 
     def key_escape(self) -> None:
         self.dismiss()
