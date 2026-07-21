@@ -196,7 +196,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         height: 1fr;
         overflow-y: auto;
         overflow-x: hidden;
-        padding: 0 0 1 0;
+        padding: 0;
         scrollbar-gutter: stable;
     }
 
