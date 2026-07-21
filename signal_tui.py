@@ -118,6 +118,13 @@ class SignalTUI(App):
         text-style: italic;
     }
 
+    .msg-quote-right {
+        text-align: right;
+        padding: 0 3 0 1;
+        color: $text-muted;
+        text-style: italic;
+    }
+
     .msg-load-more {
         text-align: center;
         padding: 1 1;
@@ -240,7 +247,8 @@ class SignalTUI(App):
         chat_log = self.query_one("#chat-log", Vertical)
 
         if quote_text:
-            quote_widget = Static(f"▎ {quote_text}", classes="msg-quote")
+            quote_class = "msg-quote-right" if is_mine else "msg-quote"
+            quote_widget = Static(f"▎ {quote_text}", classes=quote_class)
             chat_log.mount(quote_widget)
 
         # ── Image messages: render inline via async worker ──────────────
