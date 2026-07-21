@@ -119,7 +119,7 @@ class ImageModalScreen(ModalScreen):
         self._attachment_path = attachment_path
 
     def compose(self):
-        yield RichLog(id="modal-image", highlight=True, markup=False, wrap=True)
+        yield RichLog(id="modal-image", highlight=True, markup=False, wrap=False)
         yield Static("Press Escape or q to close", id="modal-hint")
 
     def on_mount(self) -> None:
