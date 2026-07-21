@@ -144,15 +144,20 @@ class ImageModalScreen(ModalScreen):
     def _start_image_render(self) -> None:
         """Called after layout is complete — widget regions are now valid."""
         img = self.query_one("#modal-image", RichLog)
-        # region.width is in character columns; subtract 2 for side margins
+        # region.width is in character columns; subtract 2 for side margins.
+        # catimg -w expects *pixels*, not columns.  Each half-block
+        # character (▄) covers 2 pixels horizontally, so we multiply
+        # by 2 to fill the available width.
         available_cols = max(40, img.region.width - 2)
+        catimg_pixels = available_cols * 2
 
         _log_debug(
             f"[_start_image_render] RichLog region={img.region} "
-            f"available_cols={available_cols}"
+            f"available_cols={available_cols} "
+            f"catimg_pixels={catimg_pixels}"
         )
 
-        self._catimg_cols = available_cols
+        self._catimg_pixels = catimg_pixels
         self.run_worker(self._render_image(), exclusive=False)
 
     async def _render_image(self) -> None:
@@ -166,7 +171,7 @@ class ImageModalScreen(ModalScreen):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "catimg",
-                "-w", str(self._catimg_cols),
+                "-w", str(self._catimg_pixels),
                 str(self._attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -187,7 +192,7 @@ class ImageModalScreen(ModalScreen):
             lines = ansi_output.splitlines()
             max_line_len = max((len(l) for l in lines), default=0)
             _log_debug(
-                f"[_render_image] catimg -w {self._catimg_cols} → "
+                f"[_render_image] catimg -w {self._catimg_pixels} → "
                 f"{len(lines)} lines, max width {max_line_len} chars"
             )
 
