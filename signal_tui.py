@@ -288,7 +288,7 @@ class SignalTUI(App):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "./bin/viu-x86_64-unknown-linux-musl",
-                "-w", "60",
+                "-b", "-w", "60",
                 str(attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -949,7 +949,7 @@ class SignalTUI(App):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "./bin/viu-x86_64-unknown-linux-musl",
-                "-w", "120",
+                "-b", "-w", "120",
                 str(attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
