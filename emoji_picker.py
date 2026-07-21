@@ -203,19 +203,16 @@ class EmojiPickerScreen(ModalScreen[str]):
     #emoji-grid-container {
         layout: grid;
         grid-size: 8;
-        grid-columns: 8 8 8 8 8 8 8 8;
         grid-gutter: 0;
         width: 100%;
         height: auto;
     }
 
     .emoji-cell {
-        height: 2;
-        width: 8;
-        min-width: 8;
-        max-width: 8;
-        text-align: center;
-        padding: 0 1;
+        height: 1;
+        width: 100%;
+        content-align: center middle;
+        overflow: hidden;
         color: $text;
     }
 
