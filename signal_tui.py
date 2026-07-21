@@ -8,9 +8,25 @@ Messages are saved in a local cache for persistence across sessions.
 import asyncio
 import logging
 import subprocess
+import sys
 import time
+import traceback
 from pathlib import Path
 from typing import ClassVar, Optional
+
+
+# Global exception handler: salva le eccezioni non gestite su file
+# per debug, senza interferire con stderr usato da Textual per la TUI.
+def _global_exception_handler(exc_type, exc_value, exc_traceback):
+    try:
+        with open("/tmp/signal-crash.log", "w") as f:
+            traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
+    except Exception:
+        pass  # non vogliamo causare altri errori
+    # Chiama comunque l'handler predefinito per vedere l'errore anche in console
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+sys.excepthook = _global_exception_handler
 
 
 from textual.app import App, ComposeResult
@@ -214,6 +230,8 @@ class SignalTUI(App):
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("ctrl+e", "open_emoji_picker", "Emoji"),
+        Binding("ctrl+n", "next_suggestion", "Next", show=False),
+        Binding("ctrl+p", "prev_suggestion", "Prev", show=False),
     ]
 
     def __init__(self):
@@ -856,6 +874,14 @@ class SignalTUI(App):
 
     # ─── Emoji alias auto-completion ──────────────────────────────────────────
 
+    def _is_completion_visible(self) -> bool:
+        """Check if the emoji completion widget is currently visible."""
+        try:
+            completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
+            return completion.has_class("-visible")
+        except Exception:
+            return False
+
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle input changes for emoji alias auto-completion."""
         if event.input.id != "message-input":
@@ -906,6 +932,24 @@ class SignalTUI(App):
         msg_input.cursor_position = len(new_value)
         completion.hide_suggestions()
         msg_input.focus()
+
+    def action_next_suggestion(self) -> None:
+        """Ctrl+N: go to next emoji suggestion."""
+        if self._is_completion_visible():
+            try:
+                completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
+                completion.select_next()
+            except Exception:
+                pass
+
+    def action_prev_suggestion(self) -> None:
+        """Ctrl+P: go to previous emoji suggestion."""
+        if self._is_completion_visible():
+            try:
+                completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
+                completion.select_prev()
+            except Exception:
+                pass
 
     def _load_all_messages(self):
         """Load ALL messages from cache and rebuild the chat."""
@@ -1124,7 +1168,13 @@ class SignalTUI(App):
 
     def on_input_submitted(self, event: Input.Submitted):
         """Send a message when the user presses Enter.
-        Also converts any :emoji: aliases in the message."""
+        Also converts any :emoji: aliases in the message.
+        If emoji completion is visible, insert the selected emoji instead."""
+        # If emoji completion is visible, insert the selected emoji
+        if self._is_completion_visible():
+            self._insert_emoji_from_completion()
+            return
+
         if not self.selected_contact:
             self._add_message("❌ Select a contact first!", is_info=True)
             return

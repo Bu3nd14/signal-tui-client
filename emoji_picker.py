@@ -105,12 +105,6 @@ class EmojiCell(Static):
         if isinstance(screen, EmojiPickerScreen):
             screen.dismiss(self.emoji_char)
 
-    def on_focus(self) -> None:
-        self.styles.background = "$accent 50%"
-
-    def on_blur(self) -> None:
-        self.styles.background = "transparent"
-
 
 class EmojiPickerScreen(ModalScreen[str]):
     """Full-screen modal emoji picker with categories, search, and grid view.
@@ -406,6 +400,21 @@ class EmojiPickerScreen(ModalScreen[str]):
                 pass
 
 
+# ─── Suggestion item (clickable) ─────────────────────────────────────────────
+
+
+class _SuggestionWidget(Static):
+    """A single emoji suggestion in the completion popup — clickable."""
+
+    emoji_char: str = ""
+    completion_widget: EmojiCompletionWidget | None = None
+
+    def on_click(self) -> None:
+        """Click → insert this emoji into the message input."""
+        if self.completion_widget:
+            self.completion_widget._select_and_insert(self.emoji_char)
+
+
 # ─── Emoji Completion Widget ─────────────────────────────────────────────────
 
 
@@ -470,8 +479,9 @@ class EmojiCompletionWidget(Vertical):
             classes = "emoji-suggestion"
             if i == self._selected_index:
                 classes += " emoji-suggestion-selected"
-            w = Static(f"{marker} {char}  :{alias}:", classes=classes)
-            w.can_focus = True
+            w = _SuggestionWidget(f"{marker} {char}  :{alias}:", classes=classes)
+            w.emoji_char = char
+            w.completion_widget = self
             self.mount(w)
 
     def show_suggestions(self, prefix: str) -> None:
@@ -503,3 +513,29 @@ class EmojiCompletionWidget(Vertical):
         if self._suggestions:
             self._selected_index = (self._selected_index - 1) % len(self._suggestions)
             self._rebuild()
+
+    def _select_and_insert(self, emoji_char: str) -> None:
+        """Insert an emoji into the message input and hide suggestions.
+        
+        Called when the user clicks a suggestion or presses Enter.
+        """
+        # Walk up to the app and insert the emoji into the message input
+        from textual.app import App
+        app = self.app
+        try:
+            msg_input = app.query_one("#message-input", Input)
+            value = msg_input.value
+            last_colon = value.rfind(":")
+            if last_colon >= 0:
+                new_value = value[:last_colon] + emoji_char + " "
+                msg_input.value = new_value
+                msg_input.cursor_position = len(new_value)
+        except Exception:
+            pass
+        self.hide_suggestions()
+        # Refocus the input
+        try:
+            msg_input = app.query_one("#message-input", Input)
+            msg_input.focus()
+        except Exception:
+            pass
