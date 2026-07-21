@@ -123,8 +123,10 @@ class ImageModalScreen(ModalScreen):
         yield Static("Press Escape or q to close", id="modal-hint")
 
     def on_mount(self) -> None:
-        """Set up widget styles on mount. Rendering is deferred to
-        ``on_ready()`` so that the RichLog has final layout dimensions.
+        """Set up widget styles on mount.
+
+        Rendering is deferred via ``call_after_refresh`` so that the
+        RichLog has final layout dimensions before we read its height.
         """
         img = self.query_one("#modal-image", RichLog)
         img.styles.width = "100%"
@@ -135,17 +137,18 @@ class ImageModalScreen(ModalScreen):
         hint.styles.color = "#888888"
         hint.styles.margin = (0, 2)
 
-    def on_ready(self) -> None:
-        """Called once the screen layout is complete and all widgets have
-        their final dimensions.  Now we can safely read the RichLog height
-        and start the async image renderer.
-        """
+        # Defer rendering until after the next layout pass, when
+        # widget regions are guaranteed to have non-zero dimensions.
+        self.call_after_refresh(self._start_image_render)
+
+    def _start_image_render(self) -> None:
+        """Called after layout is complete — widget regions are now valid."""
         img = self.query_one("#modal-image", RichLog)
         # region.height is in character rows; subtract 1 for top margin
         available_rows = max(10, img.region.height - 1)
 
         _log_debug(
-            f"[on_ready] RichLog region={img.region} "
+            f"[_start_image_render] RichLog region={img.region} "
             f"available_rows={available_rows}"
         )
 
