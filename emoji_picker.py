@@ -196,20 +196,18 @@ class EmojiPickerScreen(ModalScreen[str]):
 
     #emoji-grid-container {
         layout: grid;
-        grid-columns: 8;
+        grid-size: 8;
+        grid-columns: 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr;
         grid-gutter: 0;
         width: 100%;
         height: auto;
     }
 
     .emoji-cell {
-        width: 100%;
         height: 2;
         text-align: center;
         padding: 0 1;
         color: $text;
-        min-width: 4;
-        max-width: 4;
     }
 
     .emoji-cell:hover {
@@ -263,7 +261,7 @@ class EmojiPickerScreen(ModalScreen[str]):
                         yield btn
             # Emoji grid
             with Vertical(id="emoji-grid"):
-                yield Grid(id="emoji-grid-container")
+                yield Vertical(id="emoji-grid-container")
             yield Static(
                 "↑↓←→ navigate · Enter select · Esc close · Ctrl+F search",
                 id="emoji-picker-footer",
@@ -295,7 +293,7 @@ class EmojiPickerScreen(ModalScreen[str]):
 
     def _render_grid(self, emojis: list[str]) -> None:
         """Fill the grid container with emoji cells."""
-        grid = self.query_one("#emoji-grid-container", Grid)
+        grid = self.query_one("#emoji-grid-container", Vertical)
         grid.remove_children()
         for char in emojis:
             cell = EmojiCell(char)
@@ -367,7 +365,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         """Navigate left in the grid."""
         focused = self.focused
         if isinstance(focused, EmojiCell):
-            grid = self.query_one("#emoji-grid-container", Grid)
+            grid = self.query_one("#emoji-grid-container", Vertical)
             children = list(grid.children)
             try:
                 idx = children.index(focused)
@@ -380,7 +378,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         """Navigate right in the grid."""
         focused = self.focused
         if isinstance(focused, EmojiCell):
-            grid = self.query_one("#emoji-grid-container", Grid)
+            grid = self.query_one("#emoji-grid-container", Vertical)
             children = list(grid.children)
             try:
                 idx = children.index(focused)
@@ -393,7 +391,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         """Navigate up in the grid (8 columns)."""
         focused = self.focused
         if isinstance(focused, EmojiCell):
-            grid = self.query_one("#emoji-grid-container", Grid)
+            grid = self.query_one("#emoji-grid-container", Vertical)
             children = list(grid.children)
             try:
                 idx = children.index(focused)
@@ -407,7 +405,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         """Navigate down in the grid (8 columns)."""
         focused = self.focused
         if isinstance(focused, EmojiCell):
-            grid = self.query_one("#emoji-grid-container", Grid)
+            grid = self.query_one("#emoji-grid-container", Vertical)
             children = list(grid.children)
             try:
                 idx = children.index(focused)
