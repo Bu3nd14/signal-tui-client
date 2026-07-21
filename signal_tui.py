@@ -325,16 +325,14 @@ class SignalTUI(App):
         )
         widget.classes = "msg-right" if is_mine else "msg-left"
 
-        # Replace the loading indicator in the UI thread
-        def _replace():
-            try:
-                loading_widget.remove()
-            except Exception:
-                pass
-            chat_log.mount(widget)
-            chat_log.scroll_end(animate=False)
-
-        self.call_from_thread(_replace)
+        # Replace the loading indicator directly (we are in the main thread
+        # since this is an async worker, not a thread worker).
+        try:
+            loading_widget.remove()
+        except Exception:
+            pass
+        chat_log.mount(widget)
+        chat_log.scroll_end(animate=False)
 
     def _clear_chat(self):
         """Clear the chat."""
@@ -969,17 +967,13 @@ class SignalTUI(App):
 
         except Exception as exc:
             logger.warning("modal image rendering failed: %s", exc)
-            self.call_from_thread(
-                self._add_message,
+            self._add_message(
                 "⚠️ Could not render image in modal view.",
                 is_info=True,
             )
             return
 
-        def _push_modal():
-            self.push_screen(ImageModalScreen(ansi_output))
-
-        self.call_from_thread(_push_modal)
+        self.push_screen(ImageModalScreen(ansi_output))
 
     # ─── Sending messages ─────────────────────────────────────────────────────
 
