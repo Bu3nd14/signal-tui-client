@@ -137,12 +137,12 @@ class EmojiPickerScreen(ModalScreen[str]):
     }
 
     #emoji-picker-container {
-        width: 60;
+        width: 66;
         height: 70%;
         min-height: 20;
         border: thick $accent;
         background: $surface;
-        padding: 1;
+        padding: 0 1;
     }
 
     #emoji-picker-title {
@@ -197,7 +197,7 @@ class EmojiPickerScreen(ModalScreen[str]):
     #emoji-grid-container {
         layout: grid;
         grid-size: 8;
-        grid-columns: 1fr 1fr 1fr 1fr 1fr 1fr 1fr 1fr;
+        grid-columns: 8 8 8 8 8 8 8 8;
         grid-gutter: 0;
         width: 100%;
         height: auto;
