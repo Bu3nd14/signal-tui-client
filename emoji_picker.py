@@ -20,7 +20,7 @@ from rich.cells import cell_len
 from rich.text import Text as RichText
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, Grid
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static, Button, Label
 
@@ -196,7 +196,7 @@ class EmojiPickerScreen(ModalScreen[str]):
 
     #emoji-grid-container {
         layout: grid;
-        grid-size: 8;
+        grid-columns: 8;
         grid-gutter: 0;
         width: 100%;
         height: auto;
@@ -209,6 +209,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         padding: 0 1;
         color: $text;
         min-width: 4;
+        max-width: 4;
     }
 
     .emoji-cell:hover {
@@ -262,7 +263,7 @@ class EmojiPickerScreen(ModalScreen[str]):
                         yield btn
             # Emoji grid
             with Vertical(id="emoji-grid"):
-                yield Vertical(id="emoji-grid-container")
+                yield Grid(id="emoji-grid-container")
             yield Static(
                 "↑↓←→ navigate · Enter select · Esc close · Ctrl+F search",
                 id="emoji-picker-footer",
@@ -294,7 +295,7 @@ class EmojiPickerScreen(ModalScreen[str]):
 
     def _render_grid(self, emojis: list[str]) -> None:
         """Fill the grid container with emoji cells."""
-        grid = self.query_one("#emoji-grid-container", Vertical)
+        grid = self.query_one("#emoji-grid-container", Grid)
         grid.remove_children()
         for char in emojis:
             cell = EmojiCell(char)
@@ -366,7 +367,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         """Navigate left in the grid."""
         focused = self.focused
         if isinstance(focused, EmojiCell):
-            grid = self.query_one("#emoji-grid-container", Vertical)
+            grid = self.query_one("#emoji-grid-container", Grid)
             children = list(grid.children)
             try:
                 idx = children.index(focused)
@@ -379,7 +380,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         """Navigate right in the grid."""
         focused = self.focused
         if isinstance(focused, EmojiCell):
-            grid = self.query_one("#emoji-grid-container", Vertical)
+            grid = self.query_one("#emoji-grid-container", Grid)
             children = list(grid.children)
             try:
                 idx = children.index(focused)
@@ -392,7 +393,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         """Navigate up in the grid (8 columns)."""
         focused = self.focused
         if isinstance(focused, EmojiCell):
-            grid = self.query_one("#emoji-grid-container", Vertical)
+            grid = self.query_one("#emoji-grid-container", Grid)
             children = list(grid.children)
             try:
                 idx = children.index(focused)
@@ -406,7 +407,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         """Navigate down in the grid (8 columns)."""
         focused = self.focused
         if isinstance(focused, EmojiCell):
-            grid = self.query_one("#emoji-grid-container", Vertical)
+            grid = self.query_one("#emoji-grid-container", Grid)
             children = list(grid.children)
             try:
                 idx = children.index(focused)
