@@ -215,7 +215,6 @@ class SignalTUI(App):
         attachment_id: str | None = None,
         timestamp: int = 0,
         sender: str = "",
-        sender_number: str = "",
     ):
         """Add a message to the chat with correct alignment.
 
@@ -260,7 +259,6 @@ class SignalTUI(App):
                 text=display_text,
                 timestamp=timestamp,
                 sender=sender,
-                sender_number=sender_number,
                 is_mine=is_mine,
                 classes="msg-right" if is_mine else "msg-left",
             )
@@ -464,19 +462,12 @@ class SignalTUI(App):
         if data is None:
             return False
 
-        # Determine sender_number for the message
-        if data["is_mine"]:
-            sender_number = USER_NUMBER
-        else:
-            sender_number = contact.number
-
         if contact.number not in self._cache:
             self._cache[contact.number] = []
         self._cache[contact.number].append({
             "text": data["text"],
             "is_mine": data["is_mine"],
             "sender": data["sender"],
-            "sender_number": sender_number,
             "timestamp": ts,
             "quote_text": data["quote_text"],
             "msg_type": data["msg_type"],
@@ -502,7 +493,6 @@ class SignalTUI(App):
                     attachment_id=data.get("attachment_id"),
                     timestamp=ts,
                     sender=data.get("sender", ""),
-                    sender_number=sender_number,
                 )
         else:
             # Message for another contact: update unread badge
@@ -743,7 +733,6 @@ class SignalTUI(App):
                 attachment_info = msg.get("attachment_info")
                 attachment_id = msg.get("attachment_id")
                 sender = msg.get("sender", "")
-                sender_number = msg.get("sender_number", "")
 
                 if ts:
                     self._seen_timestamps.add(ts)
@@ -758,7 +747,6 @@ class SignalTUI(App):
                     attachment_id=attachment_id,
                     timestamp=ts,
                     sender=sender,
-                    sender_number=sender_number,
                 )
 
             self.call_from_thread(
@@ -809,7 +797,6 @@ class SignalTUI(App):
             attachment_info = msg.get("attachment_info")
             attachment_id = msg.get("attachment_id")
             sender = msg.get("sender", "")
-            sender_number = msg.get("sender_number", "")
 
             if ts:
                 self._seen_timestamps.add(ts)
@@ -823,7 +810,6 @@ class SignalTUI(App):
                 attachment_id=attachment_id,
                 timestamp=ts,
                 sender=sender,
-                sender_number=sender_number,
             )
 
         self._loaded_all = True
@@ -867,7 +853,6 @@ class SignalTUI(App):
                 attachment_info = msg.get("attachment_info")
                 attachment_id = msg.get("attachment_id")
                 sender = msg.get("sender", "")
-                sender_number = msg.get("sender_number", "")
                 self._add_message(
                     text,
                     is_mine=is_mine,
@@ -877,7 +862,6 @@ class SignalTUI(App):
                     attachment_id=attachment_id,
                     timestamp=ts,
                     sender=sender,
-                    sender_number=sender_number,
                 )
                 new_count += 1
 
@@ -981,7 +965,6 @@ class SignalTUI(App):
             "text": event.text,
             "timestamp": event.timestamp,
             "sender": event.sender,
-            "sender_number": event.sender_number,
             "is_mine": event.is_mine,
         }
 
@@ -1030,7 +1013,6 @@ class SignalTUI(App):
             "text": message,
             "is_mine": True,
             "sender": "You",
-            "sender_number": USER_NUMBER,
             "timestamp": ts,
             "quote_text": quote_text,
             "msg_type": "text",
@@ -1049,7 +1031,6 @@ class SignalTUI(App):
             quote_text=quote_text,
             timestamp=ts,
             sender="You",
-            sender_number=USER_NUMBER,
         )
 
         event.input.value = ""
@@ -1073,9 +1054,8 @@ class SignalTUI(App):
             return
 
         # Extract quote parameters from reply_data
-        # quote_author MUST be a phone number, not a display name
         quote_timestamp = reply_data.get("timestamp") if reply_data else None
-        quote_author = reply_data.get("sender_number") if reply_data else None
+        quote_author = reply_data.get("sender") if reply_data else None
         quote_message = reply_data.get("text") if reply_data else None
 
         if self._use_daemon and self.rpc:

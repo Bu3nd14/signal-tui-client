@@ -66,14 +66,12 @@ class MessageWidget(Static):
             text: str,
             timestamp: int,
             sender: str,
-            sender_number: str,
             is_mine: bool,
         ) -> None:
             super().__init__()
             self.text = text
             self.timestamp = timestamp
             self.sender = sender
-            self.sender_number = sender_number
             self.is_mine = is_mine
 
     def __init__(
@@ -81,7 +79,6 @@ class MessageWidget(Static):
         text: str,
         timestamp: int = 0,
         sender: str = "",
-        sender_number: str = "",
         is_mine: bool = False,
         classes: str = "",
     ) -> None:
@@ -95,8 +92,6 @@ class MessageWidget(Static):
             Unix timestamp (ms) of the message.
         sender:
             Display name / number of the sender.
-        sender_number:
-            Phone number of the sender (used for quote_author).
         is_mine:
             Whether this message was sent by the current user.
         classes:
@@ -105,7 +100,6 @@ class MessageWidget(Static):
         self._msg_text = text
         self._msg_timestamp = timestamp
         self._msg_sender = sender
-        self._msg_sender_number = sender_number
         self._msg_is_mine = is_mine
         self._selected = False
 
@@ -127,7 +121,6 @@ class MessageWidget(Static):
                 text=self._msg_text,
                 timestamp=self._msg_timestamp,
                 sender=self._msg_sender,
-                sender_number=self._msg_sender_number,
                 is_mine=self._msg_is_mine,
             )
         )
@@ -149,7 +142,6 @@ class MessageWidget(Static):
                 text=self._msg_text,
                 timestamp=self._msg_timestamp,
                 sender=self._msg_sender,
-                sender_number=self._msg_sender_number,
                 is_mine=self._msg_is_mine,
             )
         )
