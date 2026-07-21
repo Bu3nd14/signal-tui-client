@@ -13,6 +13,9 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Label, ListView, Input, Static, RichLog, Button
 
+from emoji_picker import EmojiCompletionWidget
+
+
 logger = logging.getLogger(__name__)
 
 # Debug log per dimensioni immagine nella modale
@@ -50,7 +53,15 @@ class ChatAreaWidget(Vertical):
             id="reply-bar",
             classes="reply-bar-hidden",
         )
-        yield Input(placeholder="Type a message...", id="message-input")
+        yield EmojiCompletionWidget(id="emoji-completion")
+
+        yield Horizontal(
+            Button("😊", id="emoji-btn", classes="emoji-toggle-btn"),
+            Input(placeholder="Type a message...", id="message-input"),
+            id="input-row",
+        )
+
+
 
 
 class MessageWidget(Static):

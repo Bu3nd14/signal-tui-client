@@ -10,9 +10,11 @@ import logging
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional
+
 
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import (
     Header,
@@ -24,6 +26,7 @@ from textual.widgets import (
     Static,
     Button,
 )
+
 
 from backend import (
     Contact,
@@ -46,6 +49,12 @@ from ui_components import (
     ImageWidget,
     ImageModalScreen,
 )
+from emoji_picker import (
+    EmojiPickerScreen,
+    EmojiCompletionWidget,
+    replace_emoji_aliases,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -173,19 +182,44 @@ class SignalTUI(App):
         background: $error 30%;
     }
 
-    #message-input {
+    #input-row {
         dock: bottom;
+        height: auto;
         margin: 1 1;
+    }
+
+    #emoji-btn {
+        width: 5;
+        min-width: 5;
+        text-align: center;
+        padding: 0;
+        border: solid $border;
+        background: $surface;
+        color: $text;
+    }
+
+    #emoji-btn:hover {
+        background: $accent 30%;
+    }
+
+    #message-input {
+        width: 1fr;
     }
 
     Horizontal {
         height: 1fr;
     }
+
     """
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("ctrl+e", "open_emoji_picker", "Emoji"),
+    ]
 
     def __init__(self):
         super().__init__()
         self.contacts: list[Contact] = []
+
         self.selected_contact: Optional[Contact] = None
         self.daemon_proc: Optional[subprocess.Popen] = None
         self.rpc: Optional[SignalRPCClient] = None
@@ -795,9 +829,87 @@ class SignalTUI(App):
             self._load_all_messages()
         elif event.button.id == "reply-cancel":
             self._cancel_reply()
+        elif event.button.id == "emoji-btn":
+            self._open_emoji_picker()
+
+    # ─── Emoji picker ─────────────────────────────────────────────────────────
+
+    def _open_emoji_picker(self) -> None:
+        """Open the emoji picker modal."""
+        def _on_emoji_selected(emoji_char: str | None) -> None:
+            if emoji_char:
+                # Insert the selected emoji into the message input
+                msg_input = self.query_one("#message-input", Input)
+                current = msg_input.value
+                cursor = msg_input.cursor_position
+                # Insert at cursor position
+                new_value = current[:cursor] + emoji_char + current[cursor:]
+                msg_input.value = new_value
+                msg_input.cursor_position = cursor + len(emoji_char)
+                msg_input.focus()
+
+        self.push_screen(EmojiPickerScreen(), _on_emoji_selected)
+
+    def action_open_emoji_picker(self) -> None:
+        """Action to open emoji picker (bound to Ctrl+E)."""
+        self._open_emoji_picker()
+
+    # ─── Emoji alias auto-completion ──────────────────────────────────────────
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Handle input changes for emoji alias auto-completion."""
+        if event.input.id != "message-input":
+            return
+
+        value = event.value
+        # Check if the user is typing an emoji alias (starts with ':')
+        if ":" in value:
+            # Find the last ':' that starts an alias
+            last_colon = value.rfind(":")
+            if last_colon >= 0:
+                # Check if there's a closing ':' after it
+                rest = value[last_colon + 1:]
+                # If no space after the colon, it might be an incomplete alias
+                if " " not in rest and "/" not in rest:
+                    prefix = rest
+                    # Try to show suggestions
+                    completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
+                    completion.show_suggestions(prefix)
+                    return
+
+        # Hide completion if no alias is being typed
+        try:
+            completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
+            completion.hide_suggestions()
+        except Exception:
+            pass
+
+    def _insert_emoji_from_completion(self) -> None:
+        """Replace the current :alias: with the selected emoji from completion."""
+        try:
+            completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
+        except Exception:
+            return
+
+        if not completion.selected_emoji:
+            return
+
+        msg_input = self.query_one("#message-input", Input)
+        value = msg_input.value
+        last_colon = value.rfind(":")
+        if last_colon < 0:
+            return
+
+        # Replace from the last ':' to the end with the emoji
+        new_value = value[:last_colon] + completion.selected_emoji + " "
+        msg_input.value = new_value
+        msg_input.cursor_position = len(new_value)
+        completion.hide_suggestions()
+        msg_input.focus()
 
     def _load_all_messages(self):
         """Load ALL messages from cache and rebuild the chat."""
+
         if not self.selected_contact:
             return
 
@@ -1011,12 +1123,22 @@ class SignalTUI(App):
     # ─── Sending messages ─────────────────────────────────────────────────────
 
     def on_input_submitted(self, event: Input.Submitted):
-        """Send a message when the user presses Enter."""
+        """Send a message when the user presses Enter.
+        Also converts any :emoji: aliases in the message."""
         if not self.selected_contact:
             self._add_message("❌ Select a contact first!", is_info=True)
             return
 
-        message = event.value.strip()
+        # Hide completion if visible
+        try:
+            completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
+            completion.hide_suggestions()
+        except Exception:
+            pass
+
+        # Convert emoji aliases (e.g. :smile: → 😊)
+        message = replace_emoji_aliases(event.value.strip())
+
         if not message:
             return
 
