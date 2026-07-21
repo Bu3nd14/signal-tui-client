@@ -226,9 +226,11 @@ class EmojiPickerScreen(ModalScreen[str]):
     #emoji-picker-footer {
         dock: bottom;
         height: 1;
+        width: 100%;
         text-align: center;
         color: $text-muted;
-        padding: 0 0 0 0;
+        padding: 0 1;
+        margin: 0;
     }
     """
 
