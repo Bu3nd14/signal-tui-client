@@ -288,7 +288,8 @@ class SignalTUI(App):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "catimg",
-                "-w", "40",
+                "-w", "100",
+                "-r", "2",
                 str(attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -949,7 +950,8 @@ class SignalTUI(App):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "catimg",
-                "-w", "80",
+                "-w", "500",
+                "-r", "2",
                 str(attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

@@ -113,6 +113,7 @@ class ImageModalScreen(ModalScreen):
 
     def compose(self):
         yield Static(RichText.from_ansi(self._ansi_data), id="modal-image")
+        yield Static("Press Escape or q to close", id="modal-hint")
 
     def on_mount(self) -> None:
         """Centre the image on screen."""
@@ -120,6 +121,10 @@ class ImageModalScreen(ModalScreen):
         img.styles.width = "80%"
         img.styles.height = "80%"
         img.styles.margin = (1, 2)
+        hint = self.query_one("#modal-hint", Static)
+        hint.styles.text_align = "center"
+        hint.styles.color = "$text-muted"
+        hint.styles.margin = (0, 2)
 
     def key_escape(self) -> None:
         self.dismiss()
