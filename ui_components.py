@@ -65,7 +65,7 @@ class ImageWidget(Static):
         attachment_id:
             The raw signal-cli attachment UUID (for reference / logging).
         rendered:
-            ANSI-encoded image string from ``viu``.  If provided it will
+            ANSI-encoded image string from ``catimg``.  If provided it will
             be parsed via ``Rich.Text.from_ansi()`` for display.
         fallback_text:
             Plain-text fallback shown when *rendered* is empty or None.
@@ -102,7 +102,7 @@ class ImageWidget(Static):
 
 class ImageModalScreen(ModalScreen):
     """Fullscreen modal that displays a larger version of an image rendered
-    via ``viu``.
+    via ``catimg``.
 
     Dismiss with ``Escape`` or ``q``.
     """

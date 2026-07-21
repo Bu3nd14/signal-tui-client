@@ -184,7 +184,7 @@ class SignalTUI(App):
         """Add a message to the chat with correct alignment.
 
         For image messages, this method launches an async worker that
-        renders the image inline via ``viu``.  If rendering fails, a
+        renders the image inline via ``catimg``.  If rendering fails, a
         clickable fallback placeholder is shown instead.
         """
         if text is None:
@@ -230,9 +230,9 @@ class SignalTUI(App):
         chat_log: Vertical,
     ):
         """Resolve the attachment path and launch an async worker to render
-        the image inline via ``viu``.
+        the image inline via ``catimg``.
 
-        If the file cannot be resolved or ``viu`` fails, a clickable
+        If the file cannot be resolved or ``catimg`` fails, a clickable
         fallback ``ImageWidget`` is mounted immediately.
         """
         # Resolve the file path
@@ -279,7 +279,7 @@ class SignalTUI(App):
         loading_widget: Static,
         chat_log: Vertical,
     ):
-        """Async worker that spawns ``viu``, captures its ANSI output,
+        """Async worker that spawns ``catimg``, captures its ANSI output,
         and replaces the loading indicator with an ``ImageWidget``.
 
         Uses ``asyncio.create_subprocess_exec`` so the Textual event loop
@@ -287,7 +287,7 @@ class SignalTUI(App):
         """
         try:
             proc = await asyncio.create_subprocess_exec(
-                "viu",
+                "catimg",
                 "-w", "300",
                 str(attachment_path),
                 stdout=asyncio.subprocess.PIPE,
@@ -299,20 +299,20 @@ class SignalTUI(App):
 
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"viu exited with code {proc.returncode}: {stderr.decode().strip()}"
+                    f"catimg exited with code {proc.returncode}: {stderr.decode().strip()}"
                 )
 
             ansi_output = stdout.decode("utf-8", errors="replace")
 
         except (FileNotFoundError, ProcessLookupError):
-            # viu not installed on the system
-            logger.warning("viu not found — falling back to text placeholder")
+            # catimg not installed on the system
+            logger.warning("catimg not found — falling back to text placeholder")
             ansi_output = ""
         except asyncio.TimeoutError:
-            logger.warning("viu timed out — falling back to text placeholder")
+            logger.warning("catimg timed out — falling back to text placeholder")
             ansi_output = ""
         except Exception as exc:
-            logger.warning("viu rendering failed: %s", exc)
+            logger.warning("catimg rendering failed: %s", exc)
             ansi_output = ""
 
         # Build the final widget (rendered or fallback)
@@ -935,7 +935,7 @@ class SignalTUI(App):
         """Handle ``ImageClicked`` from an ``ImageWidget``.
 
         Opens a fullscreen ``ImageModalScreen`` with a larger rendering
-        of the image via ``viu``.
+        of the image via ``catimg``.
         """
         self.run_worker(
             self._show_image_modal(event.attachment_path),
@@ -946,11 +946,11 @@ class SignalTUI(App):
         """Async worker that renders the image at a larger size and
         pushes an ``ImageModalScreen``.
 
-        Falls back gracefully if ``viu`` fails.
+        Falls back gracefully if ``catimg`` fails.
         """
         try:
             proc = await asyncio.create_subprocess_exec(
-                "viu",
+                "catimg",
                 "-w", "800",
                 str(attachment_path),
                 stdout=asyncio.subprocess.PIPE,
@@ -962,7 +962,7 @@ class SignalTUI(App):
 
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"viu exited with code {proc.returncode}: {stderr.decode().strip()}"
+                    f"catimg exited with code {proc.returncode}: {stderr.decode().strip()}"
                 )
 
             ansi_output = stdout.decode("utf-8", errors="replace")
