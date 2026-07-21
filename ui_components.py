@@ -47,6 +47,106 @@ class ChatAreaWidget(Vertical):
         yield Input(placeholder="Type a message...", id="message-input")
 
 
+class MessageWidget(Static):
+    """A clickable, focusable widget that displays a text message.
+
+    When the user clicks on this widget, it emits a ``MessageClicked``
+    message carrying the message data so the parent can set it as the
+    message to reply to.
+
+    The widget can be visually toggled as "selected" (the message being
+    replied to) via ``set_selected()``.
+    """
+
+    class MessageClicked(Message):
+        """Posted when the user clicks this message widget."""
+
+        def __init__(
+            self,
+            text: str,
+            timestamp: int,
+            sender: str,
+            is_mine: bool,
+        ) -> None:
+            super().__init__()
+            self.text = text
+            self.timestamp = timestamp
+            self.sender = sender
+            self.is_mine = is_mine
+
+    def __init__(
+        self,
+        text: str,
+        timestamp: int = 0,
+        sender: str = "",
+        is_mine: bool = False,
+        classes: str = "",
+    ) -> None:
+        """Initialise the message widget.
+
+        Parameters
+        ----------
+        text:
+            The message text to display.
+        timestamp:
+            Unix timestamp (ms) of the message.
+        sender:
+            Display name / number of the sender.
+        is_mine:
+            Whether this message was sent by the current user.
+        classes:
+            CSS classes to apply (e.g. "msg-left" or "msg-right").
+        """
+        self._msg_text = text
+        self._msg_timestamp = timestamp
+        self._msg_sender = sender
+        self._msg_is_mine = is_mine
+        self._selected = False
+
+        super().__init__(text, markup=False, classes=classes)
+        self.can_focus = True
+
+    def set_selected(self, selected: bool) -> None:
+        """Toggle the visual "selected" state (reply highlight)."""
+        self._selected = selected
+        if selected:
+            self.styles.border = ("solid", "#4ebf71")
+        else:
+            self.styles.border = None
+
+    def on_click(self) -> None:
+        """Mouse click → emit ``MessageClicked``."""
+        self.post_message(
+            self.MessageClicked(
+                text=self._msg_text,
+                timestamp=self._msg_timestamp,
+                sender=self._msg_sender,
+                is_mine=self._msg_is_mine,
+            )
+        )
+
+    def on_focus(self) -> None:
+        """Visual feedback when focused."""
+        if not self._selected:
+            self.styles.border = ("solid", "#4ebf71")
+
+    def on_blur(self) -> None:
+        """Remove focus border if not in selected state."""
+        if not self._selected:
+            self.styles.border = None
+
+    def key_enter(self) -> None:
+        """Enter key → emit ``MessageClicked``."""
+        self.post_message(
+            self.MessageClicked(
+                text=self._msg_text,
+                timestamp=self._msg_timestamp,
+                sender=self._msg_sender,
+                is_mine=self._msg_is_mine,
+            )
+        )
+
+
 class ImageWidget(Static):
     """A clickable, focusable widget that displays a text placeholder for an
     image attachment.
