@@ -83,9 +83,40 @@ def get_emoji_suggestions(prefix: str, max_results: int = 10) -> list[tuple[str,
     return results
 
 
+def _sanitize_emojis(
+    categories: list[tuple[str, str, list[str]]],
+) -> list[tuple[str, str, list[str]]]:
+    """Remove emoji that break Textual's grid layout.
+
+    Textual calculates widget width based on ``len()`` (Python string length)
+    rather than visual terminal width (``cell_len``).  This causes layout
+    corruption for three types of multi-codepoint emoji:
+
+    * **ZWJ sequences** (``\\u200d``) — compound emoji such as ``🐕‍🦺``
+      (dog + ZWJ + safety vest) which have ``len=3`` but ``cell_len=2``.
+    * **Keycap sequences** (``\\u20e3``) — keycap number signs such as
+      ``1️⃣`` which have ``len=3`` but ``cell_len=2``.
+    * **Regional Indicator Symbols** (U+1F1E6 … U+1F1FF) — country flags
+      such as ``🇮🇹`` which are two RIS letters that Textual counts as 4
+      columns instead of the 2 visual columns the terminal renders.
+    """
+    cleaned: list[tuple[str, str, list[str]]] = []
+    for name, icon, emojis in categories:
+        safe: list[str] = []
+        for char in emojis:
+            has_zwj = "\u200d" in char
+            has_keycap = "\u20e3" in char
+            is_flag = any(0x1F1E6 <= ord(c) <= 0x1F1FF for c in char)
+            if has_zwj or has_keycap or is_flag:
+                continue
+            safe.append(char)
+        cleaned.append((name, icon, safe))
+    return cleaned
+
+
 def _get_categories() -> list[tuple[str, str, list[str]]]:
-    """Return predefined emoji categories (fast, no iteration)."""
-    return PREDEFINED_CATEGORIES
+    """Return predefined emoji categories, sanitised for Textual."""
+    return _sanitize_emojis(PREDEFINED_CATEGORIES)
 
 
 # ─── Emoji width normalisation ────────────────────────────────────────────────
