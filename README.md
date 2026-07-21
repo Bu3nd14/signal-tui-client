@@ -10,7 +10,7 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 
 - 📱 Full contact list with unread badges
 - 💬 Real-time message receiving and sending
-- 🖼️ Image, sticker, and attachment support
+- 🖼️ Native terminal image rendering (via `catimg`) with fullscreen modal viewer
 - 📜 Message history with local cache (last 200 messages per contact, 3-day retention)
 - 🔗 Device linking via QR code
 - ⚡ Daemon mode for fast JSON-RPC communication
@@ -20,6 +20,7 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 
 - **Python 3.10+**
 - **signal-cli** — download and place in `./bin/` directory (see Installation)
+- **catimg** — for rendering images in the terminal (optional; falls back to text placeholder if missing)
 - A linked Signal account (see Device Linking)
 
 ## Installation
@@ -53,7 +54,13 @@ cd ..
 
 The app will automatically find `signal-cli` in the `./bin/signal-cli-*/` directory.
 
-### 4. Configure your phone number
+### 4. Install catimg (optional, for image rendering)
+
+```bash
+sudo apt install catimg
+```
+
+### 5. Configure your phone number
 
 Set your Signal phone number via environment variable:
 
@@ -93,6 +100,8 @@ python3 signal_tui.py
 |-----|--------|
 | `↑` / `↓` | Navigate contact list |
 | `Enter` | Select contact / open chat |
+| `Enter` (on image) | Open image in fullscreen modal |
+| `Escape` / `q` (in modal) | Close image modal |
 | Type message + `Enter` | Send message |
 | `Ctrl+Q` | Quit |
 | `Ctrl+C` | Quit |
