@@ -1054,8 +1054,11 @@ class SignalTUI(App):
             return
 
         # Extract quote parameters from reply_data
+        # quote_author MUST be a phone number, not a display name.
+        # We always use the selected contact's number because we are
+        # replying to the person we are chatting with.
         quote_timestamp = reply_data.get("timestamp") if reply_data else None
-        quote_author = reply_data.get("sender") if reply_data else None
+        quote_author = self.selected_contact.number if reply_data else None
         quote_message = reply_data.get("text") if reply_data else None
 
         if self._use_daemon and self.rpc:
