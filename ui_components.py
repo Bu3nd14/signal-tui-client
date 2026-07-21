@@ -114,17 +114,17 @@ class ImageModalScreen(ModalScreen):
     def on_mount(self) -> None:
         """Start the async rendering worker.
 
-        Dynamically calculates the image width and height based on the
-        current terminal size so the image fills the modal without
-        overflowing in either direction.
+        Dynamically calculates the image height based on the current
+        terminal size so the image fits without vertical overflow.
+        Uses ``-H`` (height in rows) so ``catimg`` scales the image
+        to fit the available vertical space while preserving aspect
+        ratio.
         """
         # self.app.size is in character cells (columns × rows)
-        term_cols = self.app.size.width
         term_rows = self.app.size.height
 
-        # Available space: full width minus a 1-char padding on each side,
-        # and ~80% of height (leave room for header/footer/hint).
-        self._catimg_cols = max(40, term_cols - 2)
+        # Available height: ~75% of terminal rows (leave room for
+        # header, footer, and the hint bar).
         self._catimg_rows = max(10, int(term_rows * 0.75))
         self.run_worker(self._render_image(), exclusive=False)
 
@@ -146,8 +146,7 @@ class ImageModalScreen(ModalScreen):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "catimg",
-                "-w", str(self._catimg_cols),
-                "-h", str(self._catimg_rows),
+                "-H", str(self._catimg_rows),
                 str(self._attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
