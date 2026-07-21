@@ -49,6 +49,9 @@ CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 CACHE_FILE = CACHE_DIR / "messages.json"
 CACHE_RETENTION_DAYS = 3
 
+# Directory where signal-cli stores downloaded attachments
+SIGNAL_CLI_ATTACHMENTS_DIR = Path.home() / ".local" / "share" / "signal-cli" / "attachments"
+
 
 # ─── Signal CLI ──────────────────────────────────────────────────────────────
 
@@ -96,6 +99,22 @@ def _run_subprocess(args: list[str]) -> str:
     return result.stdout
 
 
+# ─── Attachment helpers ─────────────────────────────────────────────────────
+
+def get_attachment_path(attachment_id: str) -> Optional[Path]:
+    """Resolve a signal-cli attachment ID to a local file path.
+
+    Returns the Path if the file exists and is readable, or None if the
+    file is missing / inaccessible (safe fallback).
+    """
+    if not attachment_id:
+        return None
+    att_path = SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id
+    if att_path.exists() and att_path.is_file():
+        return att_path
+    return None
+
+
 # ─── Message cache ──────────────────────────────────────────────────────────
 
 def _ensure_cache_dir():
@@ -137,10 +156,12 @@ def _add_message_to_cache(
     quote_text: str | None = None,
     msg_type: str = "text",
     attachment_info: str | None = None,
+    attachment_id: str | None = None,
 ):
     """Add a message to the cache.
     msg_type: "text", "image", "sticker", "attachment"
     attachment_info: additional details (filename, sticker emoji, etc.)
+    attachment_id: signal-cli attachment UUID for resolving the file on disk.
     """
     cache = _load_cache()
     if contact_number not in cache:
@@ -153,6 +174,7 @@ def _add_message_to_cache(
         "quote_text": quote_text,
         "msg_type": msg_type,
         "attachment_info": attachment_info,
+        "attachment_id": attachment_id,
         "read": is_mine,  # our messages are already read
     })
     _save_cache(cache)

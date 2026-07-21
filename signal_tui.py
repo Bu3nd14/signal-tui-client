@@ -5,8 +5,11 @@ If the daemon is unavailable, falls back to subprocess (slower but works).
 Messages are saved in a local cache for persistence across sessions.
 """
 
+import asyncio
+import logging
 import subprocess
 import time
+from pathlib import Path
 from typing import Optional
 
 from textual.app import App, ComposeResult
@@ -30,11 +33,14 @@ from backend import (
     _prune_cache,
     _is_daemon_running,
     _run_subprocess,
+    get_attachment_path,
     SIGNAL_CLI_PATH,
     USER_NUMBER,
     DAEMON_HTTP_PORT,
 )
-from ui_components import ContactListWidget, ChatAreaWidget
+from ui_components import ContactListWidget, ChatAreaWidget, ImageWidget, ImageModalScreen
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Main App ────────────────────────────────────────────────────────────────
@@ -173,8 +179,14 @@ class SignalTUI(App):
         quote_text: str | None = None,
         msg_type: str = "text",
         attachment_info: str | None = None,
+        attachment_id: str | None = None,
     ):
-        """Add a message to the chat with correct alignment."""
+        """Add a message to the chat with correct alignment.
+
+        For image messages, this method launches an async worker that
+        renders the image inline via ``viu``.  If rendering fails, a
+        clickable fallback placeholder is shown instead.
+        """
         if text is None:
             text = ""
 
@@ -184,10 +196,19 @@ class SignalTUI(App):
             quote_widget = Static(f"▎ {quote_text}", classes="msg-quote")
             chat_log.mount(quote_widget)
 
-        display_text = text
+        # ── Image messages: render inline via async worker ──────────────
         if msg_type == "image":
-            display_text = f"🖼️ {text}" if text and text != "Media" else "🖼️ [Image]"
-        elif msg_type == "sticker":
+            self._render_image_in_chat(
+                attachment_id=attachment_id,
+                attachment_info=attachment_info or text,
+                is_mine=is_mine,
+                chat_log=chat_log,
+            )
+            return
+
+        # ── Non-image messages ──────────────────────────────────────────
+        display_text = text
+        if msg_type == "sticker":
             display_text = f"🎨 {text}" if text and text != "Media" else "🎨 [Sticker]"
         elif msg_type == "attachment":
             display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
@@ -200,6 +221,120 @@ class SignalTUI(App):
             widget = Static(display_text, classes="msg-left")
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
+
+    def _render_image_in_chat(
+        self,
+        attachment_id: str | None,
+        attachment_info: str,
+        is_mine: bool,
+        chat_log: Vertical,
+    ):
+        """Resolve the attachment path and launch an async worker to render
+        the image inline via ``viu``.
+
+        If the file cannot be resolved or ``viu`` fails, a clickable
+        fallback ``ImageWidget`` is mounted immediately.
+        """
+        # Resolve the file path
+        att_path: Path | None = None
+        if attachment_id:
+            att_path = get_attachment_path(attachment_id)
+
+        if att_path is None:
+            # File not found — show fallback placeholder immediately
+            fallback = f"[🖼️ Image Attachment: {attachment_info}]"
+            widget = ImageWidget(
+                attachment_path=None,
+                attachment_id=attachment_id or "",
+                rendered=None,
+                fallback_text=fallback,
+            )
+            widget.classes = "msg-right" if is_mine else "msg-left"
+            chat_log.mount(widget)
+            chat_log.scroll_end(animate=False)
+            return
+
+        # Show a temporary "loading" indicator
+        loading = Static("⏳ Rendering image…", classes="msg-right" if is_mine else "msg-left")
+        chat_log.mount(loading)
+        chat_log.scroll_end(animate=False)
+
+        # Launch the async rendering worker
+        self.run_worker(
+            self._render_image_inline_worker(
+                attachment_path=att_path,
+                attachment_id=attachment_id or "",
+                is_mine=is_mine,
+                loading_widget=loading,
+                chat_log=chat_log,
+            ),
+            exclusive=False,
+        )
+
+    async def _render_image_inline_worker(
+        self,
+        attachment_path: Path,
+        attachment_id: str,
+        is_mine: bool,
+        loading_widget: Static,
+        chat_log: Vertical,
+    ):
+        """Async worker that spawns ``viu``, captures its ANSI output,
+        and replaces the loading indicator with an ``ImageWidget``.
+
+        Uses ``asyncio.create_subprocess_exec`` so the Textual event loop
+        is never blocked.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "viu",
+                "-w", "300",
+                str(attachment_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=30.0
+            )
+
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"viu exited with code {proc.returncode}: {stderr.decode().strip()}"
+                )
+
+            ansi_output = stdout.decode("utf-8", errors="replace")
+
+        except (FileNotFoundError, ProcessLookupError):
+            # viu not installed on the system
+            logger.warning("viu not found — falling back to text placeholder")
+            ansi_output = ""
+        except asyncio.TimeoutError:
+            logger.warning("viu timed out — falling back to text placeholder")
+            ansi_output = ""
+        except Exception as exc:
+            logger.warning("viu rendering failed: %s", exc)
+            ansi_output = ""
+
+        # Build the final widget (rendered or fallback)
+        fallback_text = f"[🖼️ Image Attachment: {attachment_path.name}]"
+        widget = ImageWidget(
+            attachment_path=attachment_path if ansi_output else None,
+            attachment_id=attachment_id,
+            rendered=ansi_output or None,
+            fallback_text=fallback_text,
+        )
+        widget.classes = "msg-right" if is_mine else "msg-left"
+
+        # Replace the loading indicator in the UI thread
+        def _replace():
+            try:
+                loading_widget.remove()
+            except Exception:
+                pass
+            chat_log.mount(widget)
+            chat_log.scroll_end(animate=False)
+
+        self.call_from_thread(_replace)
 
     def _clear_chat(self):
         """Clear the chat."""
@@ -244,25 +379,27 @@ class SignalTUI(App):
         source_name = envelope.get("sourceName", "")
         source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
 
-        def _classify_attachments(attachments: list) -> tuple[str, str]:
+        def _classify_attachments(attachments: list) -> tuple[str, str, str | None]:
+            """Classify attachments and return (msg_type, info, first_attachment_id)."""
             if not attachments:
-                return ("text", None)
+                return ("text", None, None)
             for att in attachments:
                 content_type = att.get("contentType", "") or ""
                 fname = att.get("filename", "") or ""
                 caption = att.get("caption", "") or ""
+                att_id = att.get("id") or att.get("attachmentId") or None
                 if content_type.startswith("image/"):
                     info = caption or f"Image: {fname}" if fname else "🖼️ Image"
-                    return ("image", info)
+                    return ("image", info, att_id)
                 if content_type.startswith("video/"):
                     info = caption or f"Video: {fname}" if fname else "🎬 Video"
-                    return ("attachment", info)
+                    return ("attachment", info, att_id)
                 if content_type.startswith("audio/"):
                     info = caption or f"Audio: {fname}" if fname else "🎵 Audio"
-                    return ("attachment", info)
+                    return ("attachment", info, att_id)
                 info = caption or fname or content_type or "📎 File"
-                return ("attachment", info)
-            return ("attachment", "📎 File")
+                return ("attachment", info, att_id)
+            return ("attachment", "📎 File", None)
 
         def _extract_sticker(sticker: dict | None) -> tuple[str, str] | None:
             if not sticker:
@@ -293,13 +430,14 @@ class SignalTUI(App):
                 }
 
             attachments = data_msg.get("attachments", [])
-            msg_type, att_info = _classify_attachments(attachments)
+            msg_type, att_info, att_id = _classify_attachments(attachments)
             if not text and attachments:
                 text = att_info or "Media"
             return {
                 "sender": sender, "text": text, "is_mine": False,
                 "quote_text": quote_text, "msg_type": msg_type,
                 "attachment_info": att_info,
+                "attachment_id": att_id,
             }
 
         sync = envelope.get("syncMessage", {})
@@ -321,13 +459,14 @@ class SignalTUI(App):
                 }
 
             attachments = sent.get("attachments", [])
-            msg_type, att_info = _classify_attachments(attachments)
+            msg_type, att_info, att_id = _classify_attachments(attachments)
             if not text and attachments:
                 text = att_info or "Media"
             return {
                 "sender": "You", "text": text, "is_mine": True,
                 "quote_text": quote_text, "msg_type": msg_type,
                 "attachment_info": att_info,
+                "attachment_id": att_id,
             }
 
         return None
@@ -368,6 +507,7 @@ class SignalTUI(App):
             "quote_text": data["quote_text"],
             "msg_type": data["msg_type"],
             "attachment_info": data["attachment_info"],
+            "attachment_id": data.get("attachment_id"),
             "read": data["is_mine"],
         })
         _save_cache(self._cache)
@@ -385,6 +525,7 @@ class SignalTUI(App):
                     quote_text=data["quote_text"],
                     msg_type=data["msg_type"],
                     attachment_info=data["attachment_info"],
+                    attachment_id=data.get("attachment_id"),
                 )
         else:
             # Message for another contact: update unread badge
@@ -623,6 +764,7 @@ class SignalTUI(App):
                 ts = msg.get("timestamp", 0)
                 msg_type = msg.get("msg_type", "text")
                 attachment_info = msg.get("attachment_info")
+                attachment_id = msg.get("attachment_id")
 
                 if ts:
                     self._seen_timestamps.add(ts)
@@ -634,6 +776,7 @@ class SignalTUI(App):
                     quote_text=quote_text,
                     msg_type=msg_type,
                     attachment_info=attachment_info,
+                    attachment_id=attachment_id,
                 )
 
             self.call_from_thread(
@@ -682,6 +825,7 @@ class SignalTUI(App):
             ts = msg.get("timestamp", 0)
             msg_type = msg.get("msg_type", "text")
             attachment_info = msg.get("attachment_info")
+            attachment_id = msg.get("attachment_id")
 
             if ts:
                 self._seen_timestamps.add(ts)
@@ -692,6 +836,7 @@ class SignalTUI(App):
                 quote_text=quote_text,
                 msg_type=msg_type,
                 attachment_info=attachment_info,
+                attachment_id=attachment_id,
             )
 
         self._loaded_all = True
@@ -733,12 +878,14 @@ class SignalTUI(App):
                 quote_text = msg.get("quote_text")
                 msg_type = msg.get("msg_type", "text")
                 attachment_info = msg.get("attachment_info")
+                attachment_id = msg.get("attachment_id")
                 self._add_message(
                     text,
                     is_mine=is_mine,
                     quote_text=quote_text,
                     msg_type=msg_type,
                     attachment_info=attachment_info,
+                    attachment_id=attachment_id,
                 )
                 new_count += 1
 
@@ -782,6 +929,58 @@ class SignalTUI(App):
         if self.selected_contact and self.selected_contact in self.contacts:
             contact_list.index = self.contacts.index(self.selected_contact)
 
+    # ─── Image modal ─────────────────────────────────────────────────────────
+
+    def on_image_widget_image_clicked(self, event: ImageWidget.ImageClicked):
+        """Handle ``ImageClicked`` from an ``ImageWidget``.
+
+        Opens a fullscreen ``ImageModalScreen`` with a larger rendering
+        of the image via ``viu``.
+        """
+        self.run_worker(
+            self._show_image_modal(event.attachment_path),
+            exclusive=False,
+        )
+
+    async def _show_image_modal(self, attachment_path: Path):
+        """Async worker that renders the image at a larger size and
+        pushes an ``ImageModalScreen``.
+
+        Falls back gracefully if ``viu`` fails.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "viu",
+                "-w", "800",
+                str(attachment_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=30.0
+            )
+
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"viu exited with code {proc.returncode}: {stderr.decode().strip()}"
+                )
+
+            ansi_output = stdout.decode("utf-8", errors="replace")
+
+        except Exception as exc:
+            logger.warning("modal image rendering failed: %s", exc)
+            self.call_from_thread(
+                self._add_message,
+                "⚠️ Could not render image in modal view.",
+                is_info=True,
+            )
+            return
+
+        def _push_modal():
+            self.push_screen(ImageModalScreen(ansi_output))
+
+        self.call_from_thread(_push_modal)
+
     # ─── Sending messages ─────────────────────────────────────────────────────
 
     def on_input_submitted(self, event: Input.Submitted):
@@ -806,6 +1005,7 @@ class SignalTUI(App):
             "quote_text": None,
             "msg_type": "text",
             "attachment_info": None,
+            "attachment_id": None,
             "read": True,
         })
         _save_cache(self._cache)
