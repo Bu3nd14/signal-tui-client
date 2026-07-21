@@ -123,33 +123,8 @@ class ImageModalScreen(ModalScreen):
         yield Static("Press Escape or q to close", id="modal-hint")
 
     def on_mount(self) -> None:
-        """Start the async rendering worker.
-
-        Dynamically calculates the image height based on the current
-        terminal size so the image fits without vertical overflow.
-        Uses ``-H`` (height in rows) so ``catimg`` scales the image
-        to fit the available vertical space while preserving aspect
-        ratio.
-        """
-        # self.app.size is in character cells (columns × rows)
-        term_cols = self.app.size.width
-        term_rows = self.app.size.height
-
-        # Available height: ~75% of terminal rows (leave room for
-        # header, footer, and the hint bar).
-        self._catimg_rows = max(10, int(term_rows * 0.75))
-
-        _log_debug(
-            f"[on_mount] app.size=({term_cols}×{term_rows}) "
-            f"catimg -H {self._catimg_rows}"
-        )
-        self.run_worker(self._render_image(), exclusive=False)
-
-    async def _render_image(self) -> None:
-        """Async worker that spawns ``catimg``, captures its ANSI output,
-        and writes it into the ``RichLog`` widget line by line.
-
-        Falls back gracefully if ``catimg`` fails or is not installed.
+        """Set up widget styles on mount. Rendering is deferred to
+        ``on_ready()`` so that the RichLog has final layout dimensions.
         """
         img = self.query_one("#modal-image", RichLog)
         img.styles.width = "100%"
@@ -160,16 +135,30 @@ class ImageModalScreen(ModalScreen):
         hint.styles.color = "#888888"
         hint.styles.margin = (0, 2)
 
-        # Log widget dimensions after layout
-        try:
-            region = img.region
-            _log_debug(
-                f"[_render_image] RichLog region=({region.x},{region.y}) "
-                f"{region.width}×{region.height} "
-                f"container_size={img.container_size}"
-            )
-        except Exception as e:
-            _log_debug(f"[_render_image] could not get region: {e}")
+    def on_ready(self) -> None:
+        """Called once the screen layout is complete and all widgets have
+        their final dimensions.  Now we can safely read the RichLog height
+        and start the async image renderer.
+        """
+        img = self.query_one("#modal-image", RichLog)
+        # region.height is in character rows; subtract 1 for top margin
+        available_rows = max(10, img.region.height - 1)
+
+        _log_debug(
+            f"[on_ready] RichLog region={img.region} "
+            f"available_rows={available_rows}"
+        )
+
+        self._catimg_rows = available_rows
+        self.run_worker(self._render_image(), exclusive=False)
+
+    async def _render_image(self) -> None:
+        """Async worker that spawns ``catimg``, captures its ANSI output,
+        and writes it into the ``RichLog`` widget line by line.
+
+        Falls back gracefully if ``catimg`` fails or is not installed.
+        """
+        img = self.query_one("#modal-image", RichLog)
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -195,8 +184,8 @@ class ImageModalScreen(ModalScreen):
             lines = ansi_output.splitlines()
             max_line_len = max((len(l) for l in lines), default=0)
             _log_debug(
-                f"[_render_image] catimg output: {len(lines)} lines, "
-                f"max width {max_line_len} chars"
+                f"[_render_image] catimg -H {self._catimg_rows} → "
+                f"{len(lines)} lines, max width {max_line_len} chars"
             )
 
         except (FileNotFoundError, ProcessLookupError):
