@@ -95,10 +95,15 @@ def _normalize_emoji_width(char: str) -> str:
 
     Some emoji are single-width (1 column) while others are double-width
     (2 columns).  When rendered in a grid, this causes misalignment.
-    This function pads single-width emoji with a trailing space so that
-    every emoji takes up exactly 2 columns.
+    This function:
+    1. Removes Variation Selector-16 (\\ufe0f) which can confuse width calc
+    2. Pads single-width emoji with a trailing space so that
+       every emoji takes up exactly 2 columns.
     """
-    if cell_len(char) < 2:
+    # Remove Variation Selector-16 which can cause width calculation issues
+    char = char.replace("\ufe0f", "")
+    width = cell_len(char)
+    if width < 2:
         return char + " "
     return char
 
@@ -137,7 +142,7 @@ class EmojiPickerScreen(ModalScreen[str]):
     }
 
     #emoji-picker-container {
-        width: 69;
+        width: 66;
         height: 70%;
         min-height: 20;
         border: thick $accent;
@@ -206,6 +211,9 @@ class EmojiPickerScreen(ModalScreen[str]):
 
     .emoji-cell {
         height: 2;
+        width: 8;
+        min-width: 8;
+        max-width: 8;
         text-align: center;
         padding: 0 1;
         color: $text;
