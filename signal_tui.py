@@ -133,7 +133,6 @@ class SignalTUI(App):
     }
 
     #reply-bar {
-        dock: bottom;
         height: auto;
         padding: 0 1;
         background: $accent 30%;
@@ -141,19 +140,30 @@ class SignalTUI(App):
         text-style: bold;
         border: solid $accent;
         margin: 0 1;
+    }
+
+    #reply-bar.reply-bar-hidden {
         display: none;
     }
 
-    #reply-bar.visible {
-        display: block;
+    #reply-text {
+        width: 1fr;
+        padding: 0 1;
     }
 
-    #reply-bar #reply-cancel {
-        dock: right;
+    .reply-cancel-btn {
         width: 3;
         text-align: center;
         color: $error;
         text-style: bold;
+        background: transparent;
+        border: none;
+        padding: 0;
+        min-width: 3;
+    }
+
+    .reply-cancel-btn:hover {
+        background: $error 30%;
     }
 
     #message-input {
@@ -186,7 +196,6 @@ class SignalTUI(App):
             ContactListWidget(),
             ChatAreaWidget(),
         )
-        yield Static(id="reply-bar")
         yield Footer()
 
     def on_mount(self):
@@ -773,9 +782,11 @@ class SignalTUI(App):
         chat_log.mount(widget, before=0)
 
     def on_button_pressed(self, event: Button.Pressed):
-        """When the user clicks the 'load older' button."""
+        """When the user clicks a button."""
         if event.button.id == "load-more-msg":
             self._load_all_messages()
+        elif event.button.id == "reply-cancel":
+            self._cancel_reply()
 
     def _load_all_messages(self):
         """Load ALL messages from cache and rebuild the chat."""
@@ -909,18 +920,19 @@ class SignalTUI(App):
 
     def _update_reply_bar(self):
         """Show or hide the reply bar based on ``self._reply_to``."""
-        bar = self.query_one("#reply-bar", Static)
+        bar = self.query_one("#reply-bar", Horizontal)
+        text_widget = self.query_one("#reply-text", Static)
         if self._reply_to:
             reply_text = self._reply_to.get("text", "")
             # Truncate long messages for display
             if len(reply_text) > 60:
                 reply_text = reply_text[:57] + "..."
-            bar.update(f"↩️ Replying to: {reply_text}   [✕]")
-            bar.classes = "visible"
+            text_widget.update(f"↩️ Replying to: {reply_text}")
+            bar.remove_class("reply-bar-hidden")
             bar.styles.display = "block"
         else:
-            bar.update("")
-            bar.classes = ""
+            text_widget.update("")
+            bar.add_class("reply-bar-hidden")
             bar.styles.display = "none"
 
     def _cancel_reply(self):

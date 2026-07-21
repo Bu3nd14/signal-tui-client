@@ -8,10 +8,10 @@ import logging
 from pathlib import Path
 
 from rich.text import Text as RichText
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Label, ListView, Input, Static, RichLog
+from textual.widgets import Label, ListView, Input, Static, RichLog, Button
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +39,17 @@ class ContactListWidget(Vertical):
 
 
 class ChatAreaWidget(Vertical):
-    """Right column: messages area + input."""
+    """Right column: messages area + reply bar + input."""
 
     def compose(self):
         yield Label("💬 Chat", classes="section-title")
         yield Vertical(id="chat-log")
+        yield Horizontal(
+            Static("", id="reply-text"),
+            Button("✕", id="reply-cancel", classes="reply-cancel-btn"),
+            id="reply-bar",
+            classes="reply-bar-hidden",
+        )
         yield Input(placeholder="Type a message...", id="message-input")
 
 
