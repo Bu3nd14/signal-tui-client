@@ -201,14 +201,13 @@ class SignalTUI(App):
     #input-row {
         dock: bottom;
         height: auto;
-        margin: 1 1;
+        margin: 1 0;
     }
 
     #emoji-btn {
         width: 6;
         min-width: 6;
-        height: 3;
-        text-align: center;
+        content-align: center middle;
         padding: 0 1;
         border: solid $border;
         background: $surface;
