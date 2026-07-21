@@ -96,7 +96,7 @@ class ImageWidget(Static):
 
 
 class ImageModalScreen(ModalScreen):
-    """Fullscreen modal that renders an image via ``viu`` and displays it
+    """Fullscreen modal that renders an image via ``catimg`` and displays it
     inside a scrollable ``RichLog`` widget.
 
     The image is rendered asynchronously so the UI stays responsive.
@@ -116,10 +116,10 @@ class ImageModalScreen(ModalScreen):
         self.run_worker(self._render_image(), exclusive=False)
 
     async def _render_image(self) -> None:
-        """Async worker that spawns ``viu``, captures its ANSI output,
+        """Async worker that spawns ``catimg``, captures its ANSI output,
         and writes it into the ``RichLog`` widget line by line.
 
-        Falls back gracefully if ``viu`` fails or is not installed.
+        Falls back gracefully if ``catimg`` fails or is not installed.
         """
         img = self.query_one("#modal-image", RichLog)
         img.styles.width = "100%"
@@ -132,8 +132,8 @@ class ImageModalScreen(ModalScreen):
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "./bin/viu-x86_64-unknown-linux-musl",
-                "-b", "-w", "120",
+                "catimg",
+                "-w", "120",
                 str(self._attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -144,18 +144,18 @@ class ImageModalScreen(ModalScreen):
 
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"viu exited with code {proc.returncode}: "
+                    f"catimg exited with code {proc.returncode}: "
                     f"{stderr.decode().strip()}"
                 )
 
             ansi_output = stdout.decode("utf-8", errors="replace")
 
         except (FileNotFoundError, ProcessLookupError):
-            logger.warning("viu not found — cannot render image in modal")
-            img.write("⚠️ viu is not installed on this system.")
+            logger.warning("catimg not found — cannot render image in modal")
+            img.write("⚠️ catimg is not installed on this system.")
             return
         except asyncio.TimeoutError:
-            logger.warning("viu timed out")
+            logger.warning("catimg timed out")
             img.write("⚠️ Image rendering timed out.")
             return
         except Exception as exc:
