@@ -212,10 +212,20 @@ def _build_categories() -> list[EmojiCategory]:
     return categories
 
 
-EMOJI_CATEGORIES = _build_categories()
+# Lazy-loaded categories — built only when first accessed
+_EMOJI_CATEGORIES: list[EmojiCategory] | None = None
+
+
+def _get_categories() -> list[EmojiCategory]:
+    """Return the emoji categories, building them lazily if needed."""
+    global _EMOJI_CATEGORIES
+    if _EMOJI_CATEGORIES is None:
+        _EMOJI_CATEGORIES = _build_categories()
+    return _EMOJI_CATEGORIES
 
 
 # ─── Emoji Picker Screen ─────────────────────────────────────────────────────
+
 
 class EmojiPickerScreen(ModalScreen[str]):
     """Full-screen modal emoji picker with categories, search, and grid view.
@@ -332,10 +342,11 @@ class EmojiPickerScreen(ModalScreen[str]):
 
     def __init__(self) -> None:
         super().__init__()
-        self._categories = EMOJI_CATEGORIES
+        self._categories = _get_categories()
         self._current_cat_index = 0
         self._search_query = ""
         self._filtered_emojis: list[str] = []
+
 
     def compose(self) -> ComposeResult:
         with Vertical(id="emoji-picker-container"):
@@ -564,11 +575,15 @@ class EmojiCompletionWidget(Static):
             return self._suggestions[self._selected_index][1]
         return None
 
-    def _render(self) -> None:
-        """Rebuild the suggestion list display."""
-        # We use a simple approach: update the text content
+    def render(self) -> RichText:
+        """Render the suggestion list."""
         lines: list[str] = []
         for i, (char, alias) in enumerate(self._suggestions):
             marker = "▸" if i == self._selected_index else " "
             lines.append(f"{marker} {char}  :{alias}:")
-        self.update("\n".join(lines))
+        return RichText("\n".join(lines))
+
+    def _render(self) -> None:
+        """Rebuild the suggestion list display and refresh."""
+        self.refresh()
+
