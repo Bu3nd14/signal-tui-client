@@ -207,8 +207,8 @@ class SignalTUI(App):
     #emoji-btn {
         width: 5;
         min-width: 5;
-        content-align: center middle;
-        padding: 0 1;
+        text-align: center;
+        padding: 0;
         border: solid $border;
         background: $surface;
         color: $text;
@@ -216,10 +216,6 @@ class SignalTUI(App):
 
     #emoji-btn:hover {
         background: $accent 30%;
-    }
-
-    #emoji-btn:focus {
-        border: solid $accent;
     }
 
     #message-input {
@@ -851,13 +847,10 @@ class SignalTUI(App):
             self._load_all_messages()
         elif event.button.id == "reply-cancel":
             self._cancel_reply()
+        elif event.button.id == "emoji-btn":
+            self._open_emoji_picker()
 
     # ─── Emoji picker ─────────────────────────────────────────────────────────
-
-    def on_static_clicked(self, event: Static.Clicked) -> None:
-        """Handle clicks on Static widgets."""
-        if event.static.id == "emoji-btn":
-            self._open_emoji_picker()
 
     def _open_emoji_picker(self) -> None:
         """Open the emoji picker modal."""
