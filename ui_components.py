@@ -3,13 +3,16 @@ Custom widgets for Signal TUI Client.
 Contains reusable UI components based on Textual.
 """
 
+import asyncio
+import logging
 from pathlib import Path
 
-from rich.text import Text as RichText
 from textual.containers import Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Label, ListView, Input, Static, RichLog
+
+logger = logging.getLogger(__name__)
 
 
 class ContactListWidget(Vertical):
@@ -33,8 +36,8 @@ class ChatAreaWidget(Vertical):
 
 
 class ImageWidget(Static):
-    """A clickable, focusable widget that displays an ANSI-rendered image
-    or a fallback text placeholder.
+    """A clickable, focusable widget that displays a text placeholder for an
+    image attachment.
 
     When the user presses Enter or clicks on this widget, it emits an
     ``ImageClicked`` message carrying the attachment path so the parent
@@ -52,8 +55,7 @@ class ImageWidget(Static):
         self,
         attachment_path: Path | None,
         attachment_id: str = "",
-        rendered: str | None = None,
-        fallback_text: str = "[🖼️ Image Attachment: Click Enter to View]",
+        fallback_text: str = "[🖼️ Image: Click Enter to View]",
     ) -> None:
         """Initialise the image widget.
 
@@ -64,25 +66,13 @@ class ImageWidget(Static):
             file could not be located.
         attachment_id:
             The raw signal-cli attachment UUID (for reference / logging).
-        rendered:
-            ANSI-encoded image string from ``catimg``.  If provided it will
-            be parsed via ``Rich.Text.from_ansi()`` for display.
         fallback_text:
-            Plain-text fallback shown when *rendered* is empty or None.
+            Plain-text placeholder shown in the chat.
         """
         self.attachment_path = attachment_path
         self.attachment_id = attachment_id
 
-        if rendered:
-            # Pass the raw ANSI string directly with markup=False.
-            # Textual's Static widget renders ANSI escape sequences natively
-            # when markup=False, which correctly handles the per-character
-            # colour codes produced by ``viu -b``.
-            display = rendered
-        else:
-            display = fallback_text
-
-        super().__init__(display, markup=False)
+        super().__init__(fallback_text, markup=False)
         self.can_focus = True
 
     def on_click(self) -> None:
@@ -105,30 +95,76 @@ class ImageWidget(Static):
 
 
 class ImageModalScreen(ModalScreen):
-    """Fullscreen modal that displays a larger version of an image rendered
-    via ``catimg``.
+    """Fullscreen modal that renders an image via ``viu`` and displays it
+    inside a scrollable ``RichLog`` widget.
 
+    The image is rendered asynchronously so the UI stays responsive.
     Dismiss with ``Escape`` or ``q``.
     """
 
-    def __init__(self, ansi_data: str) -> None:
+    def __init__(self, attachment_path: Path) -> None:
         super().__init__()
-        self._ansi_data = ansi_data
+        self._attachment_path = attachment_path
 
     def compose(self):
-        yield Static(self._ansi_data, id="modal-image", markup=False)
+        yield RichLog(id="modal-image", highlight=True, markup=True, wrap=True)
         yield Static("Press Escape or q to close", id="modal-hint")
 
     def on_mount(self) -> None:
-        """Centre the image on screen."""
-        img = self.query_one("#modal-image", Static)
-        img.styles.width = "80%"
-        img.styles.height = "80%"
+        """Start the async rendering worker."""
+        self.run_worker(self._render_image(), exclusive=False)
+
+    async def _render_image(self) -> None:
+        """Async worker that spawns ``viu``, captures its ANSI output,
+        and writes it into the ``RichLog`` widget line by line.
+
+        Falls back gracefully if ``viu`` fails or is not installed.
+        """
+        img = self.query_one("#modal-image", RichLog)
+        img.styles.width = "100%"
+        img.styles.height = "85%"
         img.styles.margin = (1, 2)
         hint = self.query_one("#modal-hint", Static)
         hint.styles.text_align = "center"
         hint.styles.color = "#888888"
         hint.styles.margin = (0, 2)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "./bin/viu-x86_64-unknown-linux-musl",
+                "-b", "-w", "120",
+                str(self._attachment_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=30.0
+            )
+
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"viu exited with code {proc.returncode}: "
+                    f"{stderr.decode().strip()}"
+                )
+
+            ansi_output = stdout.decode("utf-8", errors="replace")
+
+        except (FileNotFoundError, ProcessLookupError):
+            logger.warning("viu not found — cannot render image in modal")
+            img.write("⚠️ viu is not installed on this system.")
+            return
+        except asyncio.TimeoutError:
+            logger.warning("viu timed out")
+            img.write("⚠️ Image rendering timed out.")
+            return
+        except Exception as exc:
+            logger.warning("modal image rendering failed: %s", exc)
+            img.write(f"⚠️ Could not render image: {exc}")
+            return
+
+        # Write the ANSI output into the RichLog.
+        # RichLog.write() accepts raw ANSI strings and renders them correctly.
+        img.write(ansi_output)
 
     def key_escape(self) -> None:
         self.dismiss()
