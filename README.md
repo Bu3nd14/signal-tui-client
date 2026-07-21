@@ -7,11 +7,11 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 ![Main interface](screenshot.png)
 *Main chat interface*
 
-![Image placeholder](screenshot2.png)
-*Image attachment placeholder in chat*
-
-![Image modal viewer](screenshot3.png)
+![Image modal viewer](screenshot2.png)
 *Fullscreen image viewer modal*
+
+![Image modal viewer (alternate)](screenshot3.png)
+*Fullscreen image viewer modal (alternate view)*
 
 ## Features
 
