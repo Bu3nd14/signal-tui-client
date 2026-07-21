@@ -88,7 +88,7 @@ class ImageWidget(Static):
 
     def on_focus(self) -> None:
         """Visual feedback when focused."""
-        self.styles.border = ("solid", "$accent")
+        self.styles.border = ("solid", "#4ebf71")
 
     def on_blur(self) -> None:
         """Remove focus border."""
