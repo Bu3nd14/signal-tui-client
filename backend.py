@@ -99,6 +99,24 @@ def _run_subprocess(args: list[str]) -> str:
     return result.stdout
 
 
+def _send_subprocess(
+    message: str,
+    recipient: str,
+    quote_timestamp: int | None = None,
+    quote_author: str | None = None,
+    quote_message: str | None = None,
+) -> str:
+    """Send a message via subprocess, optionally with a quote/reply."""
+    args = ["send", "-m", message, recipient]
+    if quote_timestamp is not None:
+        args.extend(["--quote-timestamp", str(quote_timestamp)])
+    if quote_author is not None:
+        args.extend(["--quote-author", quote_author])
+    if quote_message is not None:
+        args.extend(["--quote-message", quote_message])
+    return _run_subprocess(args)
+
+
 # ─── Attachment helpers ─────────────────────────────────────────────────────
 
 def get_attachment_path(attachment_id: str) -> Optional[Path]:
@@ -286,12 +304,39 @@ class SignalRPCClient:
             return []
         return result.get("result", [])
 
-    def send_message(self, message: str, recipient: str) -> dict:
-        """Send a message to a recipient."""
-        params = {
+    def send_message(
+        self,
+        message: str,
+        recipient: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+    ) -> dict:
+        """Send a message to a recipient, optionally with a quote/reply.
+
+        Parameters
+        ----------
+        message:
+            The message text to send.
+        recipient:
+            The recipient's phone number.
+        quote_timestamp:
+            Timestamp (ms) of the message being replied to.
+        quote_author:
+            Phone number of the original message's author.
+        quote_message:
+            Text of the original message being quoted.
+        """
+        params: dict = {
             "message": message,
             "recipient": [recipient],
         }
+        if quote_timestamp is not None:
+            params["quoteTimestamp"] = quote_timestamp
+        if quote_author is not None:
+            params["quoteAuthor"] = quote_author
+        if quote_message is not None:
+            params["quoteMessage"] = quote_message
         return self._call("send", params)
 
     def receive(self) -> list[dict]:
