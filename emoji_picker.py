@@ -16,6 +16,7 @@ import re
 from typing import ClassVar
 
 import emoji
+from rich.cells import cell_len
 from rich.text import Text as RichText
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -87,6 +88,21 @@ def _get_categories() -> list[tuple[str, str, list[str]]]:
     return PREDEFINED_CATEGORIES
 
 
+# ─── Emoji width normalisation ────────────────────────────────────────────────
+
+def _normalize_emoji_width(char: str) -> str:
+    """Ensure an emoji character occupies exactly 2 terminal columns.
+
+    Some emoji are single-width (1 column) while others are double-width
+    (2 columns).  When rendered in a grid, this causes misalignment.
+    This function pads single-width emoji with a trailing space so that
+    every emoji takes up exactly 2 columns.
+    """
+    if cell_len(char) < 2:
+        return char + " "
+    return char
+
+
 # ─── Emoji Picker Screen ─────────────────────────────────────────────────────
 
 
@@ -94,7 +110,8 @@ class EmojiCell(Static):
     """A single emoji cell in the grid — clickable and focusable."""
 
     def __init__(self, emoji_char: str) -> None:
-        super().__init__(emoji_char, classes="emoji-cell")
+        display = _normalize_emoji_width(emoji_char)
+        super().__init__(display, classes="emoji-cell")
         self.emoji_char = emoji_char
         self.can_focus = True
 
@@ -237,7 +254,7 @@ class EmojiPickerScreen(ModalScreen[str]):
                 with Horizontal():
                     for i, (label, icon, _) in enumerate(self._categories):
                         btn = Button(
-                            f"{icon}",
+                            _normalize_emoji_width(icon),
                             id=f"emoji-cat-{i}",
                             classes="emoji-cat-btn",
                             tooltip=label,
@@ -475,11 +492,12 @@ class EmojiCompletionWidget(Vertical):
         """Rebuild the suggestion children."""
         self.remove_children()
         for i, (char, alias) in enumerate(self._suggestions):
-            marker = "▸" if i == self._selected_index else " "
+            marker = _normalize_emoji_width("▸") if i == self._selected_index else " "
+            emoji_display = _normalize_emoji_width(char)
             classes = "emoji-suggestion"
             if i == self._selected_index:
                 classes += " emoji-suggestion-selected"
-            w = _SuggestionWidget(f"{marker} {char}  :{alias}:", classes=classes)
+            w = _SuggestionWidget(f"{marker} {emoji_display}  :{alias}:", classes=classes)
             w.emoji_char = char
             w.completion_widget = self
             self.mount(w)
