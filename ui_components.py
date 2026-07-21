@@ -9,7 +9,7 @@ from rich.text import Text as RichText
 from textual.containers import Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Label, ListView, Input, Static
+from textual.widgets import Label, ListView, Input, Static, RichLog
 
 
 class ContactListWidget(Vertical):
@@ -74,11 +74,15 @@ class ImageWidget(Static):
         self.attachment_id = attachment_id
 
         if rendered:
-            display = RichText.from_ansi(rendered)
+            # Pass the raw ANSI string directly with markup=False.
+            # Textual's Static widget renders ANSI escape sequences natively
+            # when markup=False, which correctly handles the per-character
+            # colour codes produced by ``viu -b``.
+            display = rendered
         else:
             display = fallback_text
 
-        super().__init__(display)
+        super().__init__(display, markup=False)
         self.can_focus = True
 
     def on_click(self) -> None:
@@ -112,7 +116,7 @@ class ImageModalScreen(ModalScreen):
         self._ansi_data = ansi_data
 
     def compose(self):
-        yield Static(RichText.from_ansi(self._ansi_data), id="modal-image")
+        yield Static(self._ansi_data, id="modal-image", markup=False)
         yield Static("Press Escape or q to close", id="modal-hint")
 
     def on_mount(self) -> None:
