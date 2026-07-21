@@ -4,7 +4,14 @@ A terminal-based (TUI) Signal client built with [Textual](https://textual.textua
 
 Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automatic fallback to subprocess if the daemon is unavailable.
 
-![Screenshot](screenshot.png)
+![Main interface](screenshot.png)
+*Main chat interface*
+
+![Image placeholder](screenshot2.png)
+*Image attachment placeholder in chat*
+
+![Image modal viewer](screenshot3.png)
+*Fullscreen image viewer modal*
 
 ## Features
 
