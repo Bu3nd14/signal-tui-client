@@ -287,9 +287,9 @@ class SignalTUI(App):
         """
         try:
             proc = await asyncio.create_subprocess_exec(
-                "catimg",
+                "./bin/viu-x86_64-unknown-linux-musl",
                 "-w", "100",
-                "-r", "2",
+                "-b",
                 str(attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -300,20 +300,20 @@ class SignalTUI(App):
 
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"catimg exited with code {proc.returncode}: {stderr.decode().strip()}"
+                    f"viu exited with code {proc.returncode}: {stderr.decode().strip()}"
                 )
 
             ansi_output = stdout.decode("utf-8", errors="replace")
 
         except (FileNotFoundError, ProcessLookupError):
             # catimg not installed on the system
-            logger.warning("catimg not found — falling back to text placeholder")
+            logger.warning("viu not found — falling back to text placeholder")
             ansi_output = ""
         except asyncio.TimeoutError:
-            logger.warning("catimg timed out — falling back to text placeholder")
+            logger.warning("viu timed out — falling back to text placeholder")
             ansi_output = ""
         except Exception as exc:
-            logger.warning("catimg rendering failed: %s", exc)
+            logger.warning("viu rendering failed: %s", exc)
             ansi_output = ""
 
         # Build the final widget (rendered or fallback)
@@ -949,9 +949,9 @@ class SignalTUI(App):
         """
         try:
             proc = await asyncio.create_subprocess_exec(
-                "catimg",
+                "./bin/viu-x86_64-unknown-linux-musl",
                 "-w", "500",
-                "-r", "2",
+                "-b",
                 str(attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -962,7 +962,7 @@ class SignalTUI(App):
 
             if proc.returncode != 0:
                 raise RuntimeError(
-                    f"catimg exited with code {proc.returncode}: {stderr.decode().strip()}"
+                    f"viu exited with code {proc.returncode}: {stderr.decode().strip()}"
                 )
 
             ansi_output = stdout.decode("utf-8", errors="replace")
