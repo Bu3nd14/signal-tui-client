@@ -22,6 +22,7 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 - 🔗 Device linking via QR code
 - ⚡ Daemon mode for fast JSON-RPC communication
 - 🔄 Automatic fallback to subprocess if daemon is not running
+- ↩️ Reply to messages — click any message to quote it in your reply
 
 ## Prerequisites
 
@@ -109,7 +110,9 @@ python3 signal_tui.py
 | `Enter` | Select contact / open chat |
 | `Enter` (on image) | Open image in fullscreen modal |
 | `Escape` / `q` (in modal) | Close image modal |
-| Type message + `Enter` | Send message |
+| `Click` / `Enter` (on message) | Select message to reply to |
+| `✕` button | Cancel reply selection |
+| Type message + `Enter` | Send message (with quote if replying) |
 | `Ctrl+Q` | Quit |
 | `Ctrl+C` | Quit |
 
