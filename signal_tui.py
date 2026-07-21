@@ -208,7 +208,6 @@ class SignalTUI(App):
         width: 6;
         min-width: 6;
         height: 3;
-        line-pad: 0;
         text-align: center;
         padding: 0 1;
         border: solid $border;
