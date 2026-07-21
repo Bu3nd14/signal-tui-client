@@ -123,7 +123,7 @@ class ImageModalScreen(ModalScreen):
         img.styles.margin = (1, 2)
         hint = self.query_one("#modal-hint", Static)
         hint.styles.text_align = "center"
-        hint.styles.color = "$text-muted"
+        hint.styles.color = "#888888"
         hint.styles.margin = (0, 2)
 
     def key_escape(self) -> None:
