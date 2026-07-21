@@ -506,11 +506,12 @@ class EmojiCompletionWidget(Static):
     }
     """
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
         self._suggestions: list[tuple[str, str]] = []
         self._selected_index = 0
         self._prefix = ""
+
 
     def show_suggestions(self, prefix: str) -> bool:
         """Show suggestions for the given prefix.
