@@ -15,6 +15,17 @@ from textual.widgets import Label, ListView, Input, Static, RichLog
 
 logger = logging.getLogger(__name__)
 
+# Debug log per dimensioni immagine nella modale
+_DEBUG_LOG = Path("./debug_image.log")
+
+def _log_debug(msg: str) -> None:
+    """Append a line to the debug log file."""
+    try:
+        with _DEBUG_LOG.open("a") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
 
 class ContactListWidget(Vertical):
     """Left column: contact list."""
@@ -121,11 +132,17 @@ class ImageModalScreen(ModalScreen):
         ratio.
         """
         # self.app.size is in character cells (columns × rows)
+        term_cols = self.app.size.width
         term_rows = self.app.size.height
 
         # Available height: ~75% of terminal rows (leave room for
         # header, footer, and the hint bar).
         self._catimg_rows = max(10, int(term_rows * 0.75))
+
+        _log_debug(
+            f"[on_mount] app.size=({term_cols}×{term_rows}) "
+            f"catimg -H {self._catimg_rows}"
+        )
         self.run_worker(self._render_image(), exclusive=False)
 
     async def _render_image(self) -> None:
@@ -142,6 +159,17 @@ class ImageModalScreen(ModalScreen):
         hint.styles.text_align = "center"
         hint.styles.color = "#888888"
         hint.styles.margin = (0, 2)
+
+        # Log widget dimensions after layout
+        try:
+            region = img.region
+            _log_debug(
+                f"[_render_image] RichLog region=({region.x},{region.y}) "
+                f"{region.width}×{region.height} "
+                f"container_size={img.container_size}"
+            )
+        except Exception as e:
+            _log_debug(f"[_render_image] could not get region: {e}")
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -162,6 +190,14 @@ class ImageModalScreen(ModalScreen):
                 )
 
             ansi_output = stdout.decode("utf-8", errors="replace")
+
+            # Log catimg output stats
+            lines = ansi_output.splitlines()
+            max_line_len = max((len(l) for l in lines), default=0)
+            _log_debug(
+                f"[_render_image] catimg output: {len(lines)} lines, "
+                f"max width {max_line_len} chars"
+            )
 
         except (FileNotFoundError, ProcessLookupError):
             logger.warning("catimg not found — cannot render image in modal")
