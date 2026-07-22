@@ -315,6 +315,28 @@ def _process_receipt(envelope: dict, cache: dict) -> list[dict]:
                     msg["status"] = new_status
                     updated_messages.append(msg)
 
+        # Fallback: if no messages matched by timestamp, try matching by
+        # text content. This handles the case where the message was sent
+        # from this TUI client and the local timestamp differs from the
+        # server timestamp used in the receipt.
+        if not updated_messages:
+            for msg in cache[source]:
+                if msg.get("is_mine", False) and msg.get("status") == "sent":
+                    # Check if any receipt timestamp is close to this message
+                    # (within a few seconds) — this is a heuristic fallback
+                    msg_ts = msg.get("timestamp", 0)
+                    for receipt_ts in timestamps:
+                        if abs(msg_ts - receipt_ts) < 5000:  # within 5 seconds
+                            old_status = msg.get("status", "sent")
+                            if (old_status == "sent" and new_status in ("delivered", "read")) or \
+                               (old_status == "delivered" and new_status == "read"):
+                                msg["status"] = new_status
+                                # Also update the timestamp to the receipt's timestamp
+                                # so future lookups match correctly
+                                msg["timestamp"] = receipt_ts
+                                updated_messages.append(msg)
+                            break
+
     return updated_messages
 
 

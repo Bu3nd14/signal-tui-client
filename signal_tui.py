@@ -598,31 +598,56 @@ class SignalTUI(App):
 
         contact = self._identify_contact_for_envelope(envelope)
         if contact is None:
-            try:
-                with open("/tmp/signal-envelopes.log", "a") as f:
-                    f.write(f"{time.time()}: ENVELOPE NO CONTACT: {str(envelope)[:500]}\n")
-            except Exception:
-                pass
             return False
 
         ts = self._get_message_timestamp(envelope)
         data = self._extract_message_data(envelope)
         if data is None:
-            try:
-                with open("/tmp/signal-envelopes.log", "a") as f:
-                    f.write(f"{time.time()}: ENVELOPE NO DATA: contact={contact.number} ts={ts} keys={list(envelope.keys())} envelope={str(envelope)[:500]}\n")
-            except Exception:
-                pass
             return False
 
-        try:
-            with open("/tmp/signal-envelopes.log", "a") as f:
-                f.write(f"{time.time()}: ENVELOPE OK: contact={contact.number} ts={ts} text={data['text'][:50]} is_mine={data['is_mine']}\n")
-        except Exception:
-            pass
+        # ── Handle syncMessage (sent message confirmation) ──────────────
+        # When we send a message, it's first saved with a local timestamp.
+        # The syncMessage arrives later with the server timestamp.
+        # Instead of creating a duplicate, update the existing message's
+        # timestamp so that receiptMessage timestamps match correctly.
+        sync = envelope.get("syncMessage", {})
+        sent = sync.get("sentMessage", {})
+        is_sync = bool(sent)
 
         if contact.number not in self._cache:
             self._cache[contact.number] = []
+
+        if is_sync and data["is_mine"]:
+            # This is a sync confirmation for a message we sent.
+            # Try to find the original message (by text and contact)
+            # and update its timestamp to the server timestamp.
+            found = False
+            old_ts = 0
+            for existing in self._cache[contact.number]:
+                if (existing.get("is_mine")
+                        and existing.get("text") == data["text"]
+                        and existing.get("timestamp") != ts):
+                    # Update the timestamp to the server timestamp
+                    old_ts = existing["timestamp"]
+                    existing["timestamp"] = ts
+                    # Also update in seen_timestamps if present
+                    if old_ts in self._seen_timestamps:
+                        self._seen_timestamps.discard(old_ts)
+                        self._seen_timestamps.add(ts)
+                    found = True
+                    break
+            if found:
+                _save_cache(self._cache)
+                _prune_cache()
+                self._cache = _load_cache()
+                # Update the widget's timestamp in the UI so that
+                # receiptMessage lookups match correctly.
+                if self.selected_contact and contact.number == self.selected_contact.number:
+                    self.call_from_thread(self._update_widget_timestamp, data["text"], old_ts, ts)
+                # Don't show a duplicate message in the UI
+                return True
+
+        # Normal message: save to cache
         self._cache[contact.number].append({
             "text": data["text"],
             "is_mine": data["is_mine"],
@@ -687,6 +712,21 @@ class SignalTUI(App):
             self.call_from_thread(self._update_message_widgets_status, updated)
 
         return True
+
+    def _update_widget_timestamp(self, text: str, old_ts: int, new_ts: int) -> None:
+        """Update a MessageWidget's timestamp in the chat log.
+
+        Called when a syncMessage arrives with the server timestamp,
+        so that receiptMessage lookups match correctly.
+        """
+        chat_log = self.query_one("#chat-log", Vertical)
+        for child in chat_log.children:
+            if (isinstance(child, MessageWidget)
+                    and child._msg_timestamp == old_ts
+                    and child._msg_text == text
+                    and child._msg_is_mine):
+                child._msg_timestamp = new_ts
+                break
 
     def _update_message_widgets_status(self, updated_messages: list[dict]) -> None:
         """Update the visual status of MessageWidget instances in the chat log.
