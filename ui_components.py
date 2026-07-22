@@ -4,8 +4,10 @@ Contains reusable UI components based on Textual.
 """
 
 import asyncio
+import base64
 import logging
 import subprocess
+import sys
 from pathlib import Path
 
 from rich.text import Text as RichText
@@ -344,8 +346,14 @@ class DownloadLinkWidget(Static):
     """A clickable, focusable widget that displays a download URL.
 
     When the user presses Enter or clicks on this widget, it copies the
-    URL to the clipboard (via ``xclip`` or ``wl-copy``) and emits a
-    ``URLCopied`` message.
+    URL to the *local* clipboard via the **OSC 52** ANSI escape sequence
+    and emits a ``URLCopied`` message.
+
+    OSC 52 works through SSH: the escape sequence is forwarded to the
+    user's terminal emulator (iTerm2, Windows Terminal, Kitty, WezTerm,
+    Alacritty, tmux, …) which places the decoded content into the local
+    system clipboard.  No ``xclip`` / ``wl-copy`` required on the remote
+    machine.
     """
 
     class URLCopied(Message):
@@ -386,25 +394,17 @@ class DownloadLinkWidget(Static):
         self.styles.border = None
 
     def _copy_url(self) -> None:
-        """Copy the URL to the system clipboard."""
-        copied = False
-        # Try wl-copy (Wayland) first, then xclip (X11)
-        for cmd in [
-            ["wl-copy", self._url],
-            ["xclip", "-selection", "clipboard", self._url],
-            ["xclip", "-selection", "primary", self._url],
-        ]:
-            try:
-                subprocess.run(cmd, check=True, timeout=5,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                copied = True
-                break
-            except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
-                continue
+        """Copy the URL to the local clipboard via OSC 52 escape sequence.
 
-        if copied:
-            self.post_message(self.URLCopied(self._url))
-        else:
-            # Fallback: just print the URL to stderr
-            logger.warning("No clipboard tool found (install xclip or wl-copy)")
-            self.post_message(self.URLCopied(self._url))
+        This writes ``\\033]52;c;<base64-url>\\a`` to stdout, which is
+        forwarded through SSH to the user's terminal emulator.  Modern
+        terminals (iTerm2, Windows Terminal, Kitty, WezTerm, Alacritty,
+        tmux, etc.) recognise OSC 52 and place the decoded content into
+        the *local* system clipboard — no ``xclip`` / ``wl-copy`` needed
+        on the remote machine.
+        """
+        encoded = base64.b64encode(self._url.encode()).decode()
+        # OSC 52: ESC ] 52 ; c ; <base64> ST
+        sys.stdout.write(f"\033]52;c;{encoded}\a")
+        sys.stdout.flush()
+        self.post_message(self.URLCopied(self._url))
