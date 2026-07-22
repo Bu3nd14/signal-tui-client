@@ -73,6 +73,13 @@ class MessageWidget(Static):
 
     The widget can be visually toggled as "selected" (the message being
     replied to) via ``set_selected()``.
+
+    For messages sent by the current user (``is_mine=True``), the widget
+    supports three visual statuses via ``set_status()``:
+
+    - ``"sent"`` → *italic* (message sent but not yet delivered)
+    - ``"delivered"`` → **bold** (message delivered to recipient's device)
+    - ``"read"`` → normal (message read by the recipient)
     """
 
     class MessageClicked(Message):
@@ -98,6 +105,7 @@ class MessageWidget(Static):
         sender: str = "",
         is_mine: bool = False,
         classes: str = "",
+        status: str = "sent",
     ) -> None:
         """Initialise the message widget.
 
@@ -113,15 +121,47 @@ class MessageWidget(Static):
             Whether this message was sent by the current user.
         classes:
             CSS classes to apply (e.g. "msg-left" or "msg-right").
+        status:
+            Delivery status for sent messages: "sent", "delivered", or "read".
+            Defaults to "sent".
         """
         self._msg_text = text
         self._msg_timestamp = timestamp
         self._msg_sender = sender
         self._msg_is_mine = is_mine
         self._selected = False
+        self._status = status
 
         super().__init__(text, markup=False, classes=classes)
         self.can_focus = True
+        self._apply_status_style()
+
+    def _apply_status_style(self) -> None:
+        """Apply the CSS text style based on the current status.
+
+        Only applies to messages sent by the current user (is_mine=True).
+        """
+        if not self._msg_is_mine:
+            return
+
+        if self._status == "sent":
+            self.styles.text_style = "italic"
+        elif self._status == "delivered":
+            self.styles.text_style = "bold"
+        elif self._status == "read":
+            self.styles.text_style = "none"
+
+    def set_status(self, status: str) -> None:
+        """Update the delivery status and refresh the visual style.
+
+        Parameters
+        ----------
+        status:
+            New status: "sent", "delivered", or "read".
+        """
+        self._status = status
+        self._apply_status_style()
+        self.refresh()
 
     def set_selected(self, selected: bool) -> None:
         """Toggle the visual "selected" state (reply highlight)."""

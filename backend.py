@@ -198,6 +198,7 @@ def _add_message_to_cache(
         "attachment_info": attachment_info,
         "attachment_id": attachment_id,
         "read": is_mine,  # our messages are already read
+        "status": "sent" if is_mine else "read",
     })
     _save_cache(cache)
     _prune_cache()
@@ -250,6 +251,67 @@ def _mark_as_read(contact_number: str):
                 modified = True
         if modified:
             _save_cache(cache)
+
+
+def _process_receipt(envelope: dict, cache: dict) -> list[dict]:
+    """Process a receiptMessage envelope and update message statuses in cache.
+
+    Receipt messages contain delivery and read receipts for messages we sent.
+    The envelope has the form:
+    {
+        "source": "+39...",
+        "sourceNumber": "+39...",
+        "sourceUuid": "...",
+        "timestamp": 1234567890000,
+        "receiptMessage": {
+            "type": "delivery" | "read",
+            "timestamps": [1234567890000, ...]
+        }
+    }
+
+    Parameters
+    ----------
+    envelope:
+        The full envelope dict from signal-cli.
+    cache:
+        The current message cache (mutated in-place).
+
+    Returns
+    -------
+    list[dict]
+        A list of updated message dicts (for UI refresh).
+    """
+    receipt = envelope.get("receiptMessage", {})
+    receipt_type = receipt.get("type", "")
+    timestamps = receipt.get("timestamps", [])
+    source = envelope.get("sourceNumber", "") or envelope.get("source", "")
+
+    if not receipt_type or not timestamps or not source:
+        return []
+
+    updated_messages = []
+
+    # Determine the new status based on receipt type
+    if receipt_type == "delivery":
+        new_status = "delivered"
+    elif receipt_type == "read":
+        new_status = "read"
+    else:
+        return []
+
+    # Update messages in cache for this contact
+    if source in cache:
+        for msg in cache[source]:
+            ts = msg.get("timestamp", 0)
+            if ts in timestamps and msg.get("is_mine", False):
+                old_status = msg.get("status", "sent")
+                # Only upgrade status: sent → delivered → read
+                if (old_status == "sent" and new_status in ("delivered", "read")) or \
+                   (old_status == "delivered" and new_status == "read"):
+                    msg["status"] = new_status
+                    updated_messages.append(msg)
+
+    return updated_messages
 
 
 def _count_unread() -> dict[str, int]:

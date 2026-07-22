@@ -95,6 +95,7 @@ from backend import (
     _is_daemon_running,
     _run_subprocess,
     _send_subprocess,
+    _process_receipt,
     get_attachment_path,
     serve_attachment_for_download,
     serve_text_as_file,
@@ -340,6 +341,7 @@ class SignalTUI(App):
         attachment_id: str | None = None,
         timestamp: int = 0,
         sender: str = "",
+        status: str = "sent",
     ):
         """Add a message to the chat with correct alignment.
 
@@ -349,6 +351,12 @@ class SignalTUI(App):
 
         For text messages (not info), a clickable ``MessageWidget`` is
         used so the user can click to reply.
+
+        Parameters
+        ----------
+        status:
+            Delivery status for sent messages: "sent", "delivered", or "read".
+            Only meaningful when ``is_mine=True``.
         """
         if text is None:
             text = ""
@@ -387,6 +395,7 @@ class SignalTUI(App):
                 sender=sender,
                 is_mine=is_mine,
                 classes="msg-right" if is_mine else "msg-left",
+                status=status,
             )
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
@@ -578,7 +587,15 @@ class SignalTUI(App):
 
     def _process_envelope(self, envelope: dict) -> bool:
         """Process an envelope: identify the contact, save to cache.
-        If the contact is currently selected, show the message immediately."""
+        If the contact is currently selected, show the message immediately.
+
+        Also handles receiptMessage envelopes (delivery and read receipts)
+        for messages we sent, updating their status in the cache and UI.
+        """
+        # ── Check if this is a receipt message ──────────────────────────────
+        if "receiptMessage" in envelope:
+            return self._process_receipt_envelope(envelope)
+
         contact = self._identify_contact_for_envelope(envelope)
         if contact is None:
             try:
@@ -616,6 +633,7 @@ class SignalTUI(App):
             "attachment_info": data["attachment_info"],
             "attachment_id": data.get("attachment_id"),
             "read": data["is_mine"],
+            "status": "sent" if data["is_mine"] else "read",
         })
         _save_cache(self._cache)
         _prune_cache()
@@ -635,12 +653,58 @@ class SignalTUI(App):
                     attachment_id=data.get("attachment_id"),
                     timestamp=ts,
                     sender=data.get("sender", ""),
+                    status="sent" if data["is_mine"] else "read",
                 )
         else:
             # Message for another contact: update unread badge
             self.call_from_thread(self._update_unread_badges)
 
         return True
+
+    def _process_receipt_envelope(self, envelope: dict) -> bool:
+        """Process a receiptMessage envelope (delivery or read receipt).
+
+        Updates the status of sent messages in the cache and refreshes
+        the corresponding widgets in the UI if the contact is currently
+        selected.
+        """
+        # Process the receipt using the backend function
+        updated = _process_receipt(envelope, self._cache)
+        if not updated:
+            return False
+
+        # Save the updated cache
+        _save_cache(self._cache)
+
+        # Get the source contact number from the envelope
+        source = envelope.get("sourceNumber", "") or envelope.get("source", "")
+        if not source:
+            return False
+
+        # If the contact whose messages got receipts is currently selected,
+        # update the corresponding widgets in the UI
+        if self.selected_contact and source == self.selected_contact.number:
+            self.call_from_thread(self._update_message_widgets_status, updated)
+
+        return True
+
+    def _update_message_widgets_status(self, updated_messages: list[dict]) -> None:
+        """Update the visual status of MessageWidget instances in the chat log.
+
+        Parameters
+        ----------
+        updated_messages:
+            List of message dicts that had their status changed.
+        """
+        chat_log = self.query_one("#chat-log", Vertical)
+        for msg in updated_messages:
+            ts = msg.get("timestamp", 0)
+            new_status = msg.get("status", "sent")
+            # Find the corresponding widget by timestamp
+            for child in chat_log.children:
+                if isinstance(child, MessageWidget) and child._msg_timestamp == ts:
+                    child.set_status(new_status)
+                    break
 
     # ─── Startup ────────────────────────────────────────────────────────────
 
@@ -876,6 +940,7 @@ class SignalTUI(App):
                     attachment_info = msg.get("attachment_info")
                     attachment_id = msg.get("attachment_id")
                     sender = msg.get("sender", "")
+                    status = msg.get("status", "sent" if is_mine else "read")
 
                     if ts:
                         self._seen_timestamps.add(ts)
@@ -890,6 +955,7 @@ class SignalTUI(App):
                         attachment_id=attachment_id,
                         timestamp=ts,
                         sender=sender,
+                        status=status,
                     )
                 except Exception as exc:
                     try:
@@ -1060,6 +1126,7 @@ class SignalTUI(App):
             attachment_info = msg.get("attachment_info")
             attachment_id = msg.get("attachment_id")
             sender = msg.get("sender", "")
+            status = msg.get("status", "sent" if is_mine else "read")
 
             if ts:
                 self._seen_timestamps.add(ts)
@@ -1073,6 +1140,7 @@ class SignalTUI(App):
                 attachment_id=attachment_id,
                 timestamp=ts,
                 sender=sender,
+                status=status,
             )
 
         self._loaded_all = True
@@ -1121,6 +1189,7 @@ class SignalTUI(App):
                 attachment_info = msg.get("attachment_info")
                 attachment_id = msg.get("attachment_id")
                 sender = msg.get("sender", "")
+                status = msg.get("status", "sent" if is_mine else "read")
                 self._add_message(
                     text,
                     is_mine=is_mine,
@@ -1130,6 +1199,7 @@ class SignalTUI(App):
                     attachment_id=attachment_id,
                     timestamp=ts,
                     sender=sender,
+                    status=status,
                 )
                 new_count += 1
 
@@ -1400,6 +1470,7 @@ class SignalTUI(App):
             "attachment_info": None,
             "attachment_id": None,
             "read": True,
+            "status": "sent",
         })
         _save_cache(self._cache)
         _prune_cache()
@@ -1412,6 +1483,7 @@ class SignalTUI(App):
             quote_text=quote_text,
             timestamp=ts,
             sender="You",
+            status="sent",
         )
         self._seen_timestamps.add(ts)
 
