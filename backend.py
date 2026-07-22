@@ -304,10 +304,13 @@ def _process_receipt(envelope: dict, cache: dict) -> list[dict]:
         return []
 
     # Update messages in cache for this contact
+    # Usa fuzzy match con tolleranza di 1 secondo perché signal-cli a volte
+    # modifica leggermente il timestamp che passiamo in send().
+    TOLERANCE_MS = 1000
     if source in cache:
         for msg in cache[source]:
             ts = msg.get("timestamp", 0)
-            if ts in timestamps and msg.get("is_mine", False):
+            if msg.get("is_mine", False) and any(abs(ts - t) <= TOLERANCE_MS for t in timestamps):
                 old_status = msg.get("status", "sent")
                 # Only upgrade status: sent → delivered → read
                 if (old_status == "sent" and new_status in ("delivered", "read")) or \

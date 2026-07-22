@@ -654,13 +654,19 @@ class SignalTUI(App):
         the corresponding widgets in the UI if the contact is currently
         selected.
         """
+        # Salva il riferimento corrente a self._cache prima di modificarlo.
+        # Questo evita un race condition con l'UI thread che potrebbe
+        # sostituire self._cache (via self._cache = _load_cache()) tra
+        # la modifica in-place e il salvataggio su disco.
+        cache_ref = self._cache
+
         # Process the receipt using the backend function
-        updated = _process_receipt(envelope, self._cache)
+        updated = _process_receipt(envelope, cache_ref)
         if not updated:
             return False
 
-        # Save the updated cache
-        _save_cache(self._cache)
+        # Save the updated cache (usa il riferimento originale)
+        _save_cache(cache_ref)
 
         # Get the source contact number from the envelope
         source = envelope.get("sourceNumber", "") or envelope.get("source", "")
