@@ -447,11 +447,28 @@ def _ensure_download_server() -> str:
     return _DOWNLOAD_URL_BASE
 
 
+def _clean_download_dir(keep: str | None = None) -> None:
+    """Remove all files in the temp download directory except *keep*."""
+    dl_dir = _get_temp_download_dir()
+    for child in dl_dir.iterdir():
+        if keep is not None and child.name == keep:
+            continue
+        try:
+            if child.is_symlink() or child.is_file():
+                child.unlink()
+            elif child.is_dir():
+                import shutil
+                shutil.rmtree(child)
+        except OSError:
+            pass
+
+
 def serve_attachment_for_download(attachment_id: str) -> str:
     """Serve an attachment file via the persistent HTTP server.
 
     The file is symlinked (or copied) into the temp download directory
-    as ``download``, so the URL is always ``http://ip:10042/download``.
+    under its original name, so the URL preserves the filename and
+    extension (e.g. ``http://ip:10042/photo.jpg``).
 
     Parameters
     ----------
@@ -469,34 +486,33 @@ def serve_attachment_for_download(attachment_id: str) -> str:
 
     url_base = _ensure_download_server()
 
-    # Place the file in the temp dir as "download" (no extension needed)
+    # Remove previous files, then place the new one with its original name
     dl_dir = _get_temp_download_dir()
-    link_path = dl_dir / "download"
+    _clean_download_dir()
+
+    link_path = dl_dir / att_path.name
     try:
-        if link_path.exists() or link_path.is_symlink():
-            link_path.unlink()
         link_path.symlink_to(att_path)
     except OSError:
         # Symlink may fail; copy instead
         import shutil
         shutil.copy2(att_path, link_path)
 
-    return f"{url_base}/download"
+    return f"{url_base}/{att_path.name}"
 
 
 def serve_text_as_file(text: str, filename: str = "message.txt") -> str:
     """Write text to a temporary file and serve it via the persistent HTTP server.
 
-    The file is written as ``download`` in the temp directory, so the URL
-    is always ``http://ip:10042/download``.
+    The file is written under the given ``filename``, so the URL preserves
+    the name (e.g. ``http://ip:10042/signal-message-12345.txt``).
 
     Parameters
     ----------
     text:
         The message text to save.
     filename:
-        Ignored (kept for backward compatibility); the file is always
-        served as ``download``.
+        The filename to use (default ``message.txt``).
 
     Returns
     -------
@@ -505,11 +521,14 @@ def serve_text_as_file(text: str, filename: str = "message.txt") -> str:
     """
     url_base = _ensure_download_server()
 
+    # Remove previous files, then write the new one
     dl_dir = _get_temp_download_dir()
-    file_path = dl_dir / "download"
+    _clean_download_dir()
+
+    file_path = dl_dir / filename
     try:
         file_path.write_text(text, encoding="utf-8")
     except OSError as e:
         return f"ERROR: Cannot write temp file: {e}"
 
-    return f"{url_base}/download"
+    return f"{url_base}/{filename}"
