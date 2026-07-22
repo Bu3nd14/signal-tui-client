@@ -264,7 +264,8 @@ def _process_receipt(envelope: dict, cache: dict) -> list[dict]:
         "sourceUuid": "...",
         "timestamp": 1234567890000,
         "receiptMessage": {
-            "type": "delivery" | "read",
+            "isDelivery": true,
+            "isRead": false,
             "timestamps": [1234567890000, ...]
         }
     }
@@ -282,20 +283,23 @@ def _process_receipt(envelope: dict, cache: dict) -> list[dict]:
         A list of updated message dicts (for UI refresh).
     """
     receipt = envelope.get("receiptMessage", {})
-    receipt_type = receipt.get("type", "")
     timestamps = receipt.get("timestamps", [])
     source = envelope.get("sourceNumber", "") or envelope.get("source", "")
 
-    if not receipt_type or not timestamps or not source:
+    if not timestamps or not source:
         return []
 
     updated_messages = []
 
-    # Determine the new status based on receipt type
-    if receipt_type == "delivery":
-        new_status = "delivered"
-    elif receipt_type == "read":
+    # Determine the new status based on receipt type.
+    # signal-cli uses boolean fields: isDelivery, isRead, isViewed
+    is_delivery = receipt.get("isDelivery", False)
+    is_read = receipt.get("isRead", False)
+
+    if is_read:
         new_status = "read"
+    elif is_delivery:
+        new_status = "delivered"
     else:
         return []
 
