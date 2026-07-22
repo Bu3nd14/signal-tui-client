@@ -381,11 +381,7 @@ class DownloadLinkWidget(Static):
         self.border_title = self._label
 
     def on_focus(self) -> None:
-        """When the container gets focus, pass it to the Input."""
+        """When the container gets focus, pass it to the Input and select all."""
         inp = self.query_one("#download-url-input", Input)
         inp.focus()
-
-    def on_input_focused(self, event: Input.Focused) -> None:
-        """Auto-select all text when the Input gains focus."""
-        if event.input.id == "download-url-input":
-            event.input.select_all()
+        inp.select_all()
