@@ -1335,12 +1335,16 @@ class SignalTUI(App):
         """
         if self._download_mode:
             # In download mode: serve the file via HTTP
+            text = event.attachment_path.name if event.attachment_path else "attachment"
             self._start_download(
-                text=event.attachment_path.name,
+                text=text,
                 attachment_id=event.attachment_id,
             )
             return
-        self.push_screen(ImageModalScreen(event.attachment_path))
+        if event.attachment_path:
+            self.push_screen(ImageModalScreen(event.attachment_path))
+        else:
+            self._add_message("❌ Image file not found on server", is_info=True)
 
     # ─── Sending messages ─────────────────────────────────────────────────────
 

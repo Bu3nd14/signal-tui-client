@@ -176,9 +176,10 @@ class ImageWidget(Static):
     class ImageClicked(Message):
         """Posted when the user activates this image widget."""
 
-        def __init__(self, attachment_path: Path) -> None:
+        def __init__(self, attachment_path: Path, attachment_id: str = "") -> None:
             super().__init__()
             self.attachment_path = attachment_path
+            self.attachment_id = attachment_id
 
     def __init__(
         self,
@@ -207,7 +208,7 @@ class ImageWidget(Static):
     def on_click(self) -> None:
         """Mouse click → emit ``ImageClicked``."""
         if self.attachment_path:
-            self.post_message(self.ImageClicked(self.attachment_path))
+            self.post_message(self.ImageClicked(self.attachment_path, self.attachment_id))
 
     def on_focus(self) -> None:
         """Visual feedback when focused."""
@@ -220,7 +221,7 @@ class ImageWidget(Static):
     def key_enter(self) -> None:
         """Enter key → emit ``ImageClicked``."""
         if self.attachment_path:
-            self.post_message(self.ImageClicked(self.attachment_path))
+            self.post_message(self.ImageClicked(self.attachment_path, self.attachment_id))
 
 
 class ImageModalScreen(ModalScreen):
