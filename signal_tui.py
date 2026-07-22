@@ -7,12 +7,54 @@ Messages are saved in a local cache for persistence across sessions.
 
 import asyncio
 import logging
+import os
 import subprocess
 import sys
 import time
 import traceback
 from pathlib import Path
 from typing import ClassVar, Optional
+
+
+LOCK_FILE = "/tmp/signal-tui.lock"
+
+
+def _acquire_lock() -> bool:
+    """Try to acquire a lock file to prevent multiple instances.
+
+    Returns True if the lock was acquired (or no other instance is running),
+    False if another instance is already running.
+    """
+    try:
+        if os.path.exists(LOCK_FILE):
+            with open(LOCK_FILE) as f:
+                old_pid = int(f.read().strip())
+            # Check if the process is still alive
+            try:
+                os.kill(old_pid, 0)
+                # Process is alive → another instance is running
+                return False
+            except OSError:
+                # Process is dead → we can take the lock
+                pass
+        with open(LOCK_FILE, "w") as f:
+            f.write(str(os.getpid()))
+        return True
+    except Exception:
+        # If anything goes wrong, allow the app to start anyway
+        return True
+
+
+def _release_lock():
+    """Remove the lock file if it belongs to us."""
+    try:
+        if os.path.exists(LOCK_FILE):
+            with open(LOCK_FILE) as f:
+                old_pid = int(f.read().strip())
+            if old_pid == os.getpid():
+                os.remove(LOCK_FILE)
+    except Exception:
+        pass
 
 
 # Global exception handler: salva le eccezioni non gestite su file
@@ -1334,6 +1376,11 @@ class SignalTUI(App):
 if __name__ == "__main__":
     import signal as signal_module
 
+    if not _acquire_lock():
+        print("❌ Signal TUI is already running (lock file /tmp/signal-tui.lock).", file=sys.stderr)
+        print("   If you're sure it's not running, delete the lock file and try again.", file=sys.stderr)
+        sys.exit(1)
+
     app = SignalTUI()
 
     def _handle_sigint(sig, frame):
@@ -1343,3 +1390,4 @@ if __name__ == "__main__":
 
     signal_module.signal(signal_module.SIGINT, _handle_sigint)
     app.run()
+    _release_lock()
