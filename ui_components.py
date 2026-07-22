@@ -371,7 +371,7 @@ class DownloadLinkWidget(Static):
         self.can_focus = True
 
     def compose(self):
-        yield Input(value=self._url, readonly=True, id="download-url-input")
+        yield Input(value=self._url, id="download-url-input")
 
     def on_mount(self) -> None:
         """Set a border and label on the container."""
