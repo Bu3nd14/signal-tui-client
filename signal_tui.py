@@ -534,12 +534,28 @@ class SignalTUI(App):
         If the contact is currently selected, show the message immediately."""
         contact = self._identify_contact_for_envelope(envelope)
         if contact is None:
+            try:
+                with open("/tmp/signal-envelopes.log", "a") as f:
+                    f.write(f"{time.time()}: ENVELOPE NO CONTACT: {str(envelope)[:500]}\n")
+            except Exception:
+                pass
             return False
 
         ts = self._get_message_timestamp(envelope)
         data = self._extract_message_data(envelope)
         if data is None:
+            try:
+                with open("/tmp/signal-envelopes.log", "a") as f:
+                    f.write(f"{time.time()}: ENVELOPE NO DATA: contact={contact.number} ts={ts} keys={list(envelope.keys())} envelope={str(envelope)[:500]}\n")
+            except Exception:
+                pass
             return False
+
+        try:
+            with open("/tmp/signal-envelopes.log", "a") as f:
+                f.write(f"{time.time()}: ENVELOPE OK: contact={contact.number} ts={ts} text={data['text'][:50]} is_mine={data['is_mine']}\n")
+        except Exception:
+            pass
 
         if contact.number not in self._cache:
             self._cache[contact.number] = []
@@ -804,29 +820,36 @@ class SignalTUI(App):
                 self._loaded_all = True
 
             for msg in messages_to_show:
-                text = msg.get("text", "")
-                is_mine = msg.get("is_mine", False)
-                quote_text = msg.get("quote_text")
-                ts = msg.get("timestamp", 0)
-                msg_type = msg.get("msg_type", "text")
-                attachment_info = msg.get("attachment_info")
-                attachment_id = msg.get("attachment_id")
-                sender = msg.get("sender", "")
+                try:
+                    text = msg.get("text", "")
+                    is_mine = msg.get("is_mine", False)
+                    quote_text = msg.get("quote_text")
+                    ts = msg.get("timestamp", 0)
+                    msg_type = msg.get("msg_type", "text")
+                    attachment_info = msg.get("attachment_info")
+                    attachment_id = msg.get("attachment_id")
+                    sender = msg.get("sender", "")
 
-                if ts:
-                    self._seen_timestamps.add(ts)
+                    if ts:
+                        self._seen_timestamps.add(ts)
 
-                self.call_from_thread(
-                    self._add_message,
-                    text,
-                    is_mine=is_mine,
-                    quote_text=quote_text,
-                    msg_type=msg_type,
-                    attachment_info=attachment_info,
-                    attachment_id=attachment_id,
-                    timestamp=ts,
-                    sender=sender,
-                )
+                    self.call_from_thread(
+                        self._add_message,
+                        text,
+                        is_mine=is_mine,
+                        quote_text=quote_text,
+                        msg_type=msg_type,
+                        attachment_info=attachment_info,
+                        attachment_id=attachment_id,
+                        timestamp=ts,
+                        sender=sender,
+                    )
+                except Exception as exc:
+                    try:
+                        with open("/tmp/signal-load-error.log", "a") as f:
+                            f.write(f"{time.time()}: call_from_thread failed: {exc}\n")
+                    except Exception:
+                        pass
 
             self.call_from_thread(
                 self._add_message,
@@ -875,6 +898,8 @@ class SignalTUI(App):
                 msg_input.value = new_value
                 msg_input.cursor_position = cursor + len(emoji_char)
                 msg_input.focus()
+            # Refresh chat to show any messages that arrived while the picker was open
+            self._refresh_chat()
 
         self.push_screen(EmojiPickerScreen(), _on_emoji_selected)
 
@@ -1011,12 +1036,17 @@ class SignalTUI(App):
         Processes ALL incoming messages and saves them to cache.
         Starts ONCE in _startup() and lives for the entire app lifetime."""
         while self._polling_active:
-            if self._use_daemon and self.rpc:
-                try:
+            try:
+                if self._use_daemon and self.rpc:
                     messages = self.rpc.receive()
                     for msg in messages:
                         envelope = msg.get("envelope", {})
                         self._process_envelope(envelope)
+            except Exception as exc:
+                # Log any polling error to file for debugging
+                try:
+                    with open("/tmp/signal-poll-error.log", "a") as f:
+                        f.write(f"{time.time()}: {exc}\n")
                 except Exception:
                     pass
             for _ in range(10):
@@ -1240,6 +1270,7 @@ class SignalTUI(App):
             timestamp=ts,
             sender="You",
         )
+        self._seen_timestamps.add(ts)
 
         event.input.value = ""
 

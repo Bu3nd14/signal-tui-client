@@ -273,6 +273,7 @@ class EmojiPickerScreen(ModalScreen[str]):
         Binding("ctrl+f", "focus_search", "Search", priority=True),
         Binding("tab", "focus_next_section", "Next", priority=True, show=False),
         Binding("shift+tab", "focus_prev_section", "Prev", priority=True, show=False),
+        Binding("enter", "select_emoji", "Select", priority=True),
     ]
 
     def __init__(self) -> None:
@@ -452,15 +453,11 @@ class EmojiPickerScreen(ModalScreen[str]):
         """Shift+Tab: move to the previous section."""
         self._focus_section(-1)
 
-    def key_enter(self) -> bool | None:
-        """Enter key: select the focused emoji cell.
-        Returns True to stop event propagation and prevent the Enter
-        from being handled by the underlying App (which would send the message)."""
+    def action_select_emoji(self) -> None:
+        """Enter: select the focused emoji cell and dismiss the picker."""
         focused = self.focused
         if isinstance(focused, EmojiCell):
             self.dismiss(focused.emoji_char)
-            return True
-        return None
 
     def key_left(self) -> None:
         """Navigate left in the grid."""
