@@ -25,6 +25,7 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 - ↩️ Reply to messages — click any message to quote it in your reply
 - 😊 Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
 - 📥 Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
+- ✅ Message delivery and read receipts — sent messages show status: sent (italic), delivered (bold), read (normal)
 
 ## Prerequisites
 
@@ -152,6 +153,7 @@ A persistent HTTP server starts on port **10042** (first download only) and stay
 - Messages are cached locally in `~/.local/share/signal-tui-client/messages.json`
 - Only the last 20 messages are shown when opening a chat; click "Load more" to see all cached messages
 - Unread messages are shown with a `*N` badge next to the contact name
+- Sent messages show their delivery status: sent (italic), delivered (bold), read (normal)
 
 ## Project Structure
 
