@@ -189,8 +189,9 @@ class EmojiPickerScreen(ModalScreen[str]):
     }
 
     #emoji-search {
-        dock: top;
-        margin: 0 0 1 0;
+        width: 66;
+        height: 3;
+        margin: 1 0 0 0;
     }
 
     #emoji-category-tabs {
@@ -266,10 +267,12 @@ class EmojiPickerScreen(ModalScreen[str]):
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("escape", "dismiss(None)", "Close"),
-        Binding("ctrl+n", "next_category", "Next Cat"),
-        Binding("ctrl+p", "prev_category", "Prev Cat"),
-        Binding("ctrl+f", "focus_search", "Search"),
+        Binding("escape", "dismiss(None)", "Close", priority=True),
+        Binding("ctrl+n", "next_category", "Next Cat", priority=True),
+        Binding("ctrl+p", "prev_category", "Prev Cat", priority=True),
+        Binding("ctrl+f", "focus_search", "Search", priority=True),
+        Binding("tab", "focus_next_section", "Next", priority=True, show=False),
+        Binding("shift+tab", "focus_prev_section", "Prev", priority=True, show=False),
     ]
 
     def __init__(self) -> None:
@@ -282,10 +285,6 @@ class EmojiPickerScreen(ModalScreen[str]):
     def compose(self) -> ComposeResult:
         with Vertical(id="emoji-picker-container"):
             yield Static("😊 Emoji Picker", id="emoji-picker-title")
-            yield Input(
-                placeholder="Search emoji... (type to filter)",
-                id="emoji-search",
-            )
             # Category tabs
             with Vertical(id="emoji-category-tabs"):
                 with Horizontal():
@@ -301,9 +300,14 @@ class EmojiPickerScreen(ModalScreen[str]):
             with Vertical(id="emoji-grid"):
                 yield Vertical(id="emoji-grid-container")
             yield Static(
-                "↑↓←→ navigate · Enter select · Esc close · Ctrl+F search",
+                "Tab/Shift+Tab navigate · Enter select · Esc close · Ctrl+F search",
                 id="emoji-picker-footer",
             )
+        # Search bar below the picker container
+        yield Input(
+            placeholder="Search emoji... (type to filter)",
+            id="emoji-search",
+        )
 
     def on_mount(self) -> None:
         """Set initial state and render the first category."""
@@ -379,19 +383,74 @@ class EmojiPickerScreen(ModalScreen[str]):
     # ── Keyboard navigation ──────────────────────────────────────────────
 
     def action_next_category(self) -> None:
-        """Switch to the next category."""
+        """Switch to the next category and focus the first emoji."""
         idx = (self._current_cat_index + 1) % len(self._categories)
         self._activate_category(idx)
+        self._focus_first_cell()
 
     def action_prev_category(self) -> None:
-        """Switch to the previous category."""
+        """Switch to the previous category and focus the first emoji."""
         idx = (self._current_cat_index - 1) % len(self._categories)
         self._activate_category(idx)
+        self._focus_first_cell()
 
     def action_focus_search(self) -> None:
         """Focus the search input."""
         search_input = self.query_one("#emoji-search", Input)
         search_input.focus()
+
+    def _focus_first_cell(self) -> None:
+        """Focus the first emoji cell in the grid, if any."""
+        grid = self.query_one("#emoji-grid-container", Vertical)
+        children = list(grid.children)
+        if children:
+            children[0].focus()
+
+    def _focus_section(self, direction: int) -> None:
+        """Move focus between sections: search → categories → grid → ...
+        direction=1 for forward (Tab), -1 for backward (Shift+Tab)."""
+        focused = self.focused
+        sections = ["emoji-search", "emoji-category-tabs", "emoji-grid-container"]
+
+        # Determine which section the focused widget belongs to
+        current_section = -1
+        if focused is not None:
+            focused_id = focused.id or ""
+            for s, section_id in enumerate(sections):
+                if focused_id == section_id:
+                    current_section = s
+                    break
+                # Check if the focused widget is inside a section container
+                parent = focused.parent
+                while parent is not None and parent is not self:
+                    if getattr(parent, "id", None) == section_id:
+                        current_section = s
+                        break
+                    parent = parent.parent
+
+        if current_section < 0:
+            current_section = 0
+
+        next_section = (current_section + direction) % len(sections)
+
+        if next_section == 0:
+            # Focus search input
+            self.query_one("#emoji-search", Input).focus()
+        elif next_section == 1:
+            # Focus the active category button
+            btn = self.query_one(f"#emoji-cat-{self._current_cat_index}", Button)
+            btn.focus()
+        elif next_section == 2:
+            # Focus the first emoji cell
+            self._focus_first_cell()
+
+    def action_focus_next_section(self) -> None:
+        """Tab: move to the next section."""
+        self._focus_section(1)
+
+    def action_focus_prev_section(self) -> None:
+        """Shift+Tab: move to the previous section."""
+        self._focus_section(-1)
 
     def key_enter(self) -> None:
         """Enter key: select the focused emoji cell."""

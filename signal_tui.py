@@ -236,6 +236,14 @@ class SignalTUI(App):
         Binding("ctrl+p", "prev_suggestion", "Prev", show=False),
     ]
 
+    # Disable Textual's built-in command palette (Ctrl+P) to avoid conflict
+    # with the emoji picker's Ctrl+P for previous category.
+    ENABLE_COMMAND_PALETTE = False
+
+    def _is_emoji_picker_open(self) -> bool:
+        """Check if the emoji picker modal screen is currently active."""
+        return isinstance(self.screen, EmojiPickerScreen)
+
     def __init__(self):
         super().__init__()
         self.contacts: list[Contact] = []
@@ -936,7 +944,10 @@ class SignalTUI(App):
         msg_input.focus()
 
     def action_next_suggestion(self) -> None:
-        """Ctrl+N: go to next emoji suggestion."""
+        """Ctrl+N: go to next emoji suggestion.
+        Does nothing if the emoji picker is open (so Ctrl+N reaches the picker)."""
+        if self._is_emoji_picker_open():
+            return
         if self._is_completion_visible():
             try:
                 completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
@@ -945,7 +956,10 @@ class SignalTUI(App):
                 pass
 
     def action_prev_suggestion(self) -> None:
-        """Ctrl+P: go to previous emoji suggestion."""
+        """Ctrl+P: go to previous emoji suggestion.
+        Does nothing if the emoji picker is open (so Ctrl+P reaches the picker)."""
+        if self._is_emoji_picker_open():
+            return
         if self._is_completion_visible():
             try:
                 completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
