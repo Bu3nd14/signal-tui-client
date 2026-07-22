@@ -605,49 +605,10 @@ class SignalTUI(App):
         if data is None:
             return False
 
-        # ── Handle syncMessage (sent message confirmation) ──────────────
-        # When we send a message, it's first saved with a local timestamp.
-        # The syncMessage arrives later with the server timestamp.
-        # Instead of creating a duplicate, update the existing message's
-        # timestamp so that receiptMessage timestamps match correctly.
-        sync = envelope.get("syncMessage", {})
-        sent = sync.get("sentMessage", {})
-        is_sync = bool(sent)
-
         if contact.number not in self._cache:
             self._cache[contact.number] = []
 
-        if is_sync and data["is_mine"]:
-            # This is a sync confirmation for a message we sent.
-            # Try to find the original message (by text and contact)
-            # and update its timestamp to the server timestamp.
-            found = False
-            old_ts = 0
-            for existing in self._cache[contact.number]:
-                if (existing.get("is_mine")
-                        and existing.get("text") == data["text"]
-                        and existing.get("timestamp") != ts):
-                    # Update the timestamp to the server timestamp
-                    old_ts = existing["timestamp"]
-                    existing["timestamp"] = ts
-                    # Also update in seen_timestamps if present
-                    if old_ts in self._seen_timestamps:
-                        self._seen_timestamps.discard(old_ts)
-                        self._seen_timestamps.add(ts)
-                    found = True
-                    break
-            if found:
-                _save_cache(self._cache)
-                _prune_cache()
-                self._cache = _load_cache()
-                # Update the widget's timestamp in the UI so that
-                # receiptMessage lookups match correctly.
-                if self.selected_contact and contact.number == self.selected_contact.number:
-                    self.call_from_thread(self._update_widget_timestamp, data["text"], old_ts, ts)
-                # Don't show a duplicate message in the UI
-                return True
-
-        # Normal message: save to cache
+        # Save to cache
         self._cache[contact.number].append({
             "text": data["text"],
             "is_mine": data["is_mine"],
@@ -712,21 +673,6 @@ class SignalTUI(App):
             self.call_from_thread(self._update_message_widgets_status, updated)
 
         return True
-
-    def _update_widget_timestamp(self, text: str, old_ts: int, new_ts: int) -> None:
-        """Update a MessageWidget's timestamp in the chat log.
-
-        Called when a syncMessage arrives with the server timestamp,
-        so that receiptMessage lookups match correctly.
-        """
-        chat_log = self.query_one("#chat-log", Vertical)
-        for child in chat_log.children:
-            if (isinstance(child, MessageWidget)
-                    and child._msg_timestamp == old_ts
-                    and child._msg_text == text
-                    and child._msg_is_mine):
-                child._msg_timestamp = new_ts
-                break
 
     def _update_message_widgets_status(self, updated_messages: list[dict]) -> None:
         """Update the visual status of MessageWidget instances in the chat log.
@@ -1533,16 +1479,23 @@ class SignalTUI(App):
         self._cancel_reply()
 
         self.run_worker(
-            lambda msg=message, rdata=reply_data: self._send_message_worker(msg, rdata),
+            lambda msg=message, ts=ts, rdata=reply_data: self._send_message_worker(msg, ts, rdata),
             exclusive=False,
             thread=True,
         )
 
-    def _send_message_worker(self, message: str, reply_data: dict | None = None):
+    def _send_message_worker(self, message: str, timestamp: int, reply_data: dict | None = None):
         """Send a message (via RPC or subprocess fallback).
 
-        If ``reply_data`` is provided, the message is sent as a quote/reply
-        to the original message.
+        Parameters
+        ----------
+        message:
+            The message text to send.
+        timestamp:
+            The client-generated timestamp (ms) used as the message ID.
+            Passed to signal-cli so that receiptMessage timestamps match.
+        reply_data:
+            If provided, the message is sent as a quote/reply.
         """
         if not self.selected_contact:
             return
@@ -1559,6 +1512,7 @@ class SignalTUI(App):
             result = self.rpc.send_message(
                 message,
                 self.selected_contact.number,
+                timestamp=timestamp,
                 quote_timestamp=quote_timestamp,
                 quote_author=quote_author,
                 quote_message=quote_message,
