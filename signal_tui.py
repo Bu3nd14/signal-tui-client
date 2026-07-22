@@ -108,6 +108,7 @@ from ui_components import (
     MessageWidget,
     ImageWidget,
     ImageModalScreen,
+    DownloadLinkWidget,
 )
 from emoji_picker import (
     EmojiPickerScreen,
@@ -1304,7 +1305,7 @@ class SignalTUI(App):
         served.  Otherwise the message text is written to a .txt file and
         served.
 
-        The download URL is shown in the chat log.
+        A clickable ``DownloadLinkWidget`` is mounted in the chat log.
         """
         if attachment_id:
             # Serve the original attachment file
@@ -1318,11 +1319,24 @@ class SignalTUI(App):
         if url.startswith("ERROR:"):
             self._add_message(f"❌ {url}", is_info=True)
         else:
-            self._add_message(f"📥 Download: {url}", is_info=True)
+            # Mount a clickable download link widget
+            chat_log = self.query_one("#chat-log", Vertical)
+            widget = DownloadLinkWidget(url)
+            chat_log.mount(widget)
+            chat_log.scroll_end(animate=False)
 
         # Exit download mode after serving
         self._download_mode = False
         self._update_download_bar()
+
+    def on_download_link_widget_url_copied(
+        self, event: DownloadLinkWidget.URLCopied
+    ) -> None:
+        """Handle ``URLCopied`` from a ``DownloadLinkWidget``.
+
+        Shows a confirmation message in the chat log.
+        """
+        self._add_message(f"📋 URL copied to clipboard: {event.url}", is_info=True)
 
     # ─── Image modal ─────────────────────────────────────────────────────────
 

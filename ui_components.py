@@ -5,6 +5,7 @@ Contains reusable UI components based on Textual.
 
 import asyncio
 import logging
+import subprocess
 from pathlib import Path
 
 from rich.text import Text as RichText
@@ -337,3 +338,73 @@ class ImageModalScreen(ModalScreen):
 
     def key_q(self) -> None:
         self.dismiss()
+
+
+class DownloadLinkWidget(Static):
+    """A clickable, focusable widget that displays a download URL.
+
+    When the user presses Enter or clicks on this widget, it copies the
+    URL to the clipboard (via ``xclip`` or ``wl-copy``) and emits a
+    ``URLCopied`` message.
+    """
+
+    class URLCopied(Message):
+        """Posted when the URL has been copied to the clipboard."""
+
+        def __init__(self, url: str) -> None:
+            super().__init__()
+            self.url = url
+
+    def __init__(self, url: str, label: str = "📥 Download") -> None:
+        """Initialise the download link widget.
+
+        Parameters
+        ----------
+        url:
+            The full download URL to display and copy.
+        label:
+            Optional label prefix (default ``📥 Download``).
+        """
+        self._url = url
+        super().__init__(f"{label}: {url}", markup=False)
+        self.can_focus = True
+
+    def on_click(self) -> None:
+        """Mouse click → copy URL to clipboard."""
+        self._copy_url()
+
+    def key_enter(self) -> None:
+        """Enter key → copy URL to clipboard."""
+        self._copy_url()
+
+    def on_focus(self) -> None:
+        """Visual feedback when focused."""
+        self.styles.border = ("solid", "#4ebf71")
+
+    def on_blur(self) -> None:
+        """Remove focus border."""
+        self.styles.border = None
+
+    def _copy_url(self) -> None:
+        """Copy the URL to the system clipboard."""
+        copied = False
+        # Try wl-copy (Wayland) first, then xclip (X11)
+        for cmd in [
+            ["wl-copy", self._url],
+            ["xclip", "-selection", "clipboard", self._url],
+            ["xclip", "-selection", "primary", self._url],
+        ]:
+            try:
+                subprocess.run(cmd, check=True, timeout=5,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                copied = True
+                break
+            except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError):
+                continue
+
+        if copied:
+            self.post_message(self.URLCopied(self._url))
+        else:
+            # Fallback: just print the URL to stderr
+            logger.warning("No clipboard tool found (install xclip or wl-copy)")
+            self.post_message(self.URLCopied(self._url))
