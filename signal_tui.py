@@ -231,7 +231,7 @@ class SignalTUI(App):
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
-        Binding("ctrl+e", "open_emoji_picker", "Emoji"),
+        Binding("ctrl+e", "open_emoji_picker", "Emoji", priority=True),
         Binding("ctrl+n", "next_suggestion", "Next", show=False),
         Binding("ctrl+p", "prev_suggestion", "Prev", show=False),
     ]
