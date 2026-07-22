@@ -1336,7 +1336,10 @@ class SignalTUI(App):
 
         Shows a confirmation message in the chat log.
         """
-        self._add_message(f"📋 URL copied to clipboard: {event.url}", is_info=True)
+        self._add_message(
+            "📋 URL ready — select it above and press Cmd+C / Ctrl+C to copy",
+            is_info=True,
+        )
 
     # ─── Image modal ─────────────────────────────────────────────────────────
 

@@ -4,10 +4,7 @@ Contains reusable UI components based on Textual.
 """
 
 import asyncio
-import base64
 import logging
-import subprocess
-import sys
 from pathlib import Path
 
 from rich.text import Text as RichText
@@ -343,17 +340,12 @@ class ImageModalScreen(ModalScreen):
 
 
 class DownloadLinkWidget(Static):
-    """A clickable, focusable widget that displays a download URL.
+    """A widget that displays a download URL in a readonly ``Input`` field.
 
-    When the user presses Enter or clicks on this widget, it copies the
-    URL to the *local* clipboard via the **OSC 52** ANSI escape sequence
-    and emits a ``URLCopied`` message.
-
-    OSC 52 works through SSH: the escape sequence is forwarded to the
-    user's terminal emulator (iTerm2, Windows Terminal, Kitty, WezTerm,
-    Alacritty, tmux, …) which places the decoded content into the local
-    system clipboard.  No ``xclip`` / ``wl-copy`` required on the remote
-    machine.
+    The URL is displayed in a selectable ``Input`` widget so the user can
+    copy it with **Cmd+C / Ctrl+C** (or right-click → Copy) on any
+    terminal — Mac, Windows, Linux, SSH, etc.  No special terminal
+    features required.
     """
 
     class URLCopied(Message):
@@ -374,37 +366,26 @@ class DownloadLinkWidget(Static):
             Optional label prefix (default ``📥 Download``).
         """
         self._url = url
-        super().__init__(f"{label}: {url}", markup=False)
+        self._label = label
+        super().__init__()
         self.can_focus = True
 
-    def on_click(self) -> None:
-        """Mouse click → copy URL to clipboard."""
-        self._copy_url()
+    def compose(self):
+        yield Input(value=self._url, readonly=True, id="download-url-input")
 
-    def key_enter(self) -> None:
-        """Enter key → copy URL to clipboard."""
-        self._copy_url()
+    def on_mount(self) -> None:
+        """Set a border and label on the container."""
+        self.styles.border = ("solid", "#4ebf71")
+        self.styles.padding = (0, 1)
+        self.styles.margin = (0, 0, 0, 0)
+        self.border_title = self._label
 
     def on_focus(self) -> None:
-        """Visual feedback when focused."""
-        self.styles.border = ("solid", "#4ebf71")
+        """When the container gets focus, pass it to the Input."""
+        inp = self.query_one("#download-url-input", Input)
+        inp.focus()
 
-    def on_blur(self) -> None:
-        """Remove focus border."""
-        self.styles.border = None
-
-    def _copy_url(self) -> None:
-        """Copy the URL to the local clipboard via OSC 52 escape sequence.
-
-        This writes ``\\033]52;c;<base64-url>\\a`` to stdout, which is
-        forwarded through SSH to the user's terminal emulator.  Modern
-        terminals (iTerm2, Windows Terminal, Kitty, WezTerm, Alacritty,
-        tmux, etc.) recognise OSC 52 and place the decoded content into
-        the *local* system clipboard — no ``xclip`` / ``wl-copy`` needed
-        on the remote machine.
-        """
-        encoded = base64.b64encode(self._url.encode()).decode()
-        # OSC 52: ESC ] 52 ; c ; <base64> ST
-        sys.stdout.write(f"\033]52;c;{encoded}\a")
-        sys.stdout.flush()
-        self.post_message(self.URLCopied(self._url))
+    def on_input_focused(self, event: Input.Focused) -> None:
+        """Auto-select all text when the Input gains focus."""
+        if event.input.id == "download-url-input":
+            event.input.select_all()
