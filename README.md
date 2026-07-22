@@ -123,7 +123,7 @@ python3 signal_tui.py
 
 ### Emoji
 
-Press **`Ctrl+E`** to open the emoji picker. Browse categories with `←`/`→` or `Ctrl+N`/`Ctrl+P`, search by name, and press `Enter` to insert the selected emoji at the cursor position.
+Press **`Ctrl+E`** to open the emoji picker. Browse categories with `←`/`→` or `Tab`/`Shift+Tab`, search by name, and press `Enter` to insert the selected emoji at the cursor position.
 
 You can also type `:alias:` shortcuts directly in the message input (e.g. `:smile:` → 😊, `:heart:` → ❤️). A completion popup will appear as you type; use `Ctrl+N`/`Ctrl+P` to navigate and `Enter` to confirm.
 
@@ -153,10 +153,13 @@ A persistent HTTP server starts on port **10042** (first download only) and stay
 signal-tui-client/
 ├── signal_tui.py          # Main TUI application (Textual App)
 ├── backend.py             # Backend: signal-cli communication, cache, data models
-├── ui_components.py       # Custom Textual widgets
+├── ui_components.py       # Custom Textual widgets (MessageWidget, ImageWidget, DownloadLinkWidget, …)
+├── emoji_picker.py        # Emoji picker modal screen and auto-completion widget
+├── emoji_data.py          # Emoji database (categories, aliases, search index)
 ├── link_account.py        # Device linking script (QR code)
 ├── requirements.txt       # Python dependencies
 ├── config.json            # Local configuration (not committed)
+├── BUGS.md                # Known bugs and limitations
 ├── bin/                   # signal-cli binaries (not committed)
 └── LICENSE                # GPLv3
 ```
