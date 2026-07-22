@@ -123,7 +123,13 @@ python3 signal_tui.py
 
 ### Emoji
 
-Press **`Ctrl+E`** to open the emoji picker. Browse categories with `←`/`→` or `Tab`/`Shift+Tab`, search by name, and press `Enter` to insert the selected emoji at the cursor position.
+Press **`Ctrl+E`** to open the emoji picker. Inside the picker:
+
+- **`Tab`** / **`Shift+Tab`** — move focus between: category tabs → emoji grid → search bar
+- **`Ctrl+N`** / **`Ctrl+P`** — switch between emoji categories
+- **`←`** / **`→`** / **`↑`** / **`↓`** — navigate the emoji grid
+- **`Enter`** — insert the selected emoji at the cursor position
+- **`Escape`** — close the picker without inserting
 
 You can also type `:alias:` shortcuts directly in the message input (e.g. `:smile:` → 😊, `:heart:` → ❤️). A completion popup will appear as you type; use `Ctrl+N`/`Ctrl+P` to navigate and `Enter` to confirm.
 
