@@ -369,12 +369,13 @@ class Contact:
 # ─── Download server (temporary HTTP) ───────────────────────────────────────
 
 DOWNLOAD_PORT = 10042
-DOWNLOAD_TIMEOUT = 60  # seconds
+_DOWNLOAD_SERVER: Optional[socketserver.TCPServer] = None
+_DOWNLOAD_URL_BASE: Optional[str] = None
 _TEMP_DOWNLOAD_DIR: Optional[Path] = None
 
 
 def _get_temp_download_dir() -> Path:
-    """Get or create a temporary directory for serving text-as-file downloads."""
+    """Get or create a temporary directory for serving download files."""
     global _TEMP_DOWNLOAD_DIR
     if _TEMP_DOWNLOAD_DIR is None:
         _TEMP_DOWNLOAD_DIR = CACHE_DIR / "downloads"
@@ -404,72 +405,58 @@ def get_local_ip() -> str:
         return "127.0.0.1"
 
 
-class _OneShotHTTPHandler(http.server.SimpleHTTPRequestHandler):
-    """HTTP handler that serves a single file from a fixed directory,
-    then shuts down the server after the first successful GET."""
+class _DownloadHTTPHandler(http.server.SimpleHTTPRequestHandler):
+    """HTTP handler that serves files from the temp download directory.
 
-    def __init__(self, *args, directory=None, **kwargs):
-        if directory is None:
-            directory = str(Path.cwd())
-        super().__init__(*args, directory=directory, **kwargs)
+    The server stays alive permanently; the file content is updated
+    by overwriting ``download`` (or symlink) in the temp directory.
+    """
 
-    def do_GET(self) -> None:
-        """Serve the file and schedule server shutdown."""
-        try:
-            super().do_GET()
-        except Exception:
-            pass
-        # Shutdown after first request (in a thread to avoid deadlock)
-        threading.Thread(target=self.server.shutdown, daemon=True).start()
+    def __init__(self, *args, **kwargs):
+        dl_dir = _get_temp_download_dir()
+        super().__init__(*args, directory=str(dl_dir), **kwargs)
 
     def log_message(self, format: str, *args) -> None:
         """Suppress default HTTP log output."""
         pass
 
 
-def _start_oneshot_server(
-    directory: Path,
-    port: int = DOWNLOAD_PORT,
-    timeout: int = DOWNLOAD_TIMEOUT,
-) -> tuple[socketserver.TCPServer, str]:
-    """Start a one-shot HTTP server on ``port`` serving files from ``directory``.
+def _ensure_download_server() -> str:
+    """Start the persistent download server if not already running.
 
-    Returns (server, url_base) where url_base is e.g. ``http://1.2.3.4:10042``.
-    The server is already started in a daemon thread.
+    Returns the URL base (e.g. ``http://1.2.3.4:10042``).
     """
+    global _DOWNLOAD_SERVER, _DOWNLOAD_URL_BASE
+
+    if _DOWNLOAD_SERVER is not None:
+        # Server already running — return the existing URL base
+        assert _DOWNLOAD_URL_BASE is not None
+        return _DOWNLOAD_URL_BASE
+
     ip = get_local_ip()
+    socketserver.TCPServer.allow_reuse_address = True
 
-    class _Handler(_OneShotHTTPHandler):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, directory=str(directory), **kwargs)
+    _DOWNLOAD_SERVER = socketserver.TCPServer(
+        ("0.0.0.0", DOWNLOAD_PORT), _DownloadHTTPHandler
+    )
+    _DOWNLOAD_URL_BASE = f"http://{ip}:{DOWNLOAD_PORT}"
 
-    # Bind to 0.0.0.0 so it's reachable from the LAN
-    server = socketserver.TCPServer(("0.0.0.0", port), _Handler)
-    server.timeout = timeout
-
-    # Start serving in a background thread
-    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t = threading.Thread(target=_DOWNLOAD_SERVER.serve_forever, daemon=True)
     t.start()
 
-    url_base = f"http://{ip}:{port}"
-    return server, url_base
+    return _DOWNLOAD_URL_BASE
 
 
-def serve_attachment_for_download(
-    attachment_id: str,
-    port: int = DOWNLOAD_PORT,
-    timeout: int = DOWNLOAD_TIMEOUT,
-) -> str:
-    """Serve an attachment file via a temporary HTTP server.
+def serve_attachment_for_download(attachment_id: str) -> str:
+    """Serve an attachment file via the persistent HTTP server.
+
+    The file is symlinked (or copied) into the temp download directory
+    as ``download``, so the URL is always ``http://ip:10042/download``.
 
     Parameters
     ----------
     attachment_id:
         The signal-cli attachment UUID.
-    port:
-        TCP port for the HTTP server.
-    timeout:
-        Seconds to keep the server alive before auto-shutdown.
 
     Returns
     -------
@@ -480,11 +467,13 @@ def serve_attachment_for_download(
     if att_path is None:
         return f"ERROR: Attachment file not found on server (id={attachment_id})"
 
-    # Create a temp dir with just this file (symlink to avoid copying)
+    url_base = _ensure_download_server()
+
+    # Place the file in the temp dir as "download" (no extension needed)
     dl_dir = _get_temp_download_dir()
-    link_path = dl_dir / att_path.name
+    link_path = dl_dir / "download"
     try:
-        if link_path.exists():
+        if link_path.exists() or link_path.is_symlink():
             link_path.unlink()
         link_path.symlink_to(att_path)
     except OSError:
@@ -492,40 +481,35 @@ def serve_attachment_for_download(
         import shutil
         shutil.copy2(att_path, link_path)
 
-    server, url_base = _start_oneshot_server(dl_dir, port=port, timeout=timeout)
-    return f"{url_base}/{att_path.name}"
+    return f"{url_base}/download"
 
 
-def serve_text_as_file(
-    text: str,
-    filename: str = "message.txt",
-    port: int = DOWNLOAD_PORT,
-    timeout: int = DOWNLOAD_TIMEOUT,
-) -> str:
-    """Write text to a temporary .txt file and serve it via HTTP.
+def serve_text_as_file(text: str, filename: str = "message.txt") -> str:
+    """Write text to a temporary file and serve it via the persistent HTTP server.
+
+    The file is written as ``download`` in the temp directory, so the URL
+    is always ``http://ip:10042/download``.
 
     Parameters
     ----------
     text:
         The message text to save.
     filename:
-        The filename to serve (default ``message.txt``).
-    port:
-        TCP port for the HTTP server.
-    timeout:
-        Seconds to keep the server alive before auto-shutdown.
+        Ignored (kept for backward compatibility); the file is always
+        served as ``download``.
 
     Returns
     -------
     str
         The full download URL, or an error message prefixed with ``ERROR:``.
     """
+    url_base = _ensure_download_server()
+
     dl_dir = _get_temp_download_dir()
-    file_path = dl_dir / filename
+    file_path = dl_dir / "download"
     try:
         file_path.write_text(text, encoding="utf-8")
     except OSError as e:
         return f"ERROR: Cannot write temp file: {e}"
 
-    server, url_base = _start_oneshot_server(dl_dir, port=port, timeout=timeout)
-    return f"{url_base}/{filename}"
+    return f"{url_base}/download"
