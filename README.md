@@ -23,6 +23,8 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 - ⚡ Daemon mode for fast JSON-RPC communication
 - 🔄 Automatic fallback to subprocess if daemon is not running
 - ↩️ Reply to messages — click any message to quote it in your reply
+- 😊 Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
+- 📥 Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
 
 ## Prerequisites
 
@@ -113,8 +115,30 @@ python3 signal_tui.py
 | `Click` / `Enter` (on message) | Select message to reply to |
 | `✕` button | Cancel reply selection |
 | Type message + `Enter` | Send message (with quote if replying) |
+| `Ctrl+E` | Open emoji picker |
+| `Ctrl+D` | Toggle download mode |
+| `Ctrl+N` / `Ctrl+P` | Navigate emoji suggestions / emoji picker categories |
 | `Ctrl+Q` | Quit |
 | `Ctrl+C` | Quit |
+
+### Emoji
+
+Press **`Ctrl+E`** to open the emoji picker. Browse categories with `←`/`→` or `Ctrl+N`/`Ctrl+P`, search by name, and press `Enter` to insert the selected emoji at the cursor position.
+
+You can also type `:alias:` shortcuts directly in the message input (e.g. `:smile:` → 😊, `:heart:` → ❤️). A completion popup will appear as you type; use `Ctrl+N`/`Ctrl+P` to navigate and `Enter` to confirm.
+
+### Download Mode
+
+Press **`Ctrl+D`** to enter download mode, then click any message to serve it for download:
+
+- **Text messages** are served as `.txt` files
+- **Images and attachments** are served with their original filename and extension
+
+A persistent HTTP server starts on port **10042** (first download only) and stays alive for the duration of the app. The download URL is shown in a selectable `Input` widget — use **Tab** to focus it, then **Cmd+C / Ctrl+C** to copy the URL and paste it into your browser.
+
+> **Note:** You need to open port **10042** on your server's firewall for downloads to work.
+
+> **macOS users:** The download URL is shown in a selectable `Input` widget, but **Terminal.app** does not allow copying text from Textual widgets with `Cmd+C`. For the best experience, use **[iTerm2](https://iterm2.com/)** (free) which supports clipboard access from terminal applications.
 
 ### Tips
 
