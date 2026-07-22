@@ -452,11 +452,15 @@ class EmojiPickerScreen(ModalScreen[str]):
         """Shift+Tab: move to the previous section."""
         self._focus_section(-1)
 
-    def key_enter(self) -> None:
-        """Enter key: select the focused emoji cell."""
+    def key_enter(self) -> bool | None:
+        """Enter key: select the focused emoji cell.
+        Returns True to stop event propagation and prevent the Enter
+        from being handled by the underlying App (which would send the message)."""
         focused = self.focused
         if isinstance(focused, EmojiCell):
             self.dismiss(focused.emoji_char)
+            return True
+        return None
 
     def key_left(self) -> None:
         """Navigate left in the grid."""
