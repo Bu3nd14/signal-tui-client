@@ -7,25 +7,9 @@
 
 ## 🔴 Critici (impatto diretto sull'esperienza utente)
 
-### #2 — `_process_envelope` salva/ricarica cache ridondantemente (`signal_tui.py`, righe 620-622)
-
-Dopo aver aggiunto un messaggio al dizionario `_cache`, chiama:
-```python
-_save_cache(self._cache)    # riga 620
-_prune_cache()              # riga 621 — internamente fa _load_cache() + _write_cache()
-self._cache = _load_cache() # riga 622 — ricarica tutto
-```
-
-`_prune_cache()` internamente (in `backend.py`) carica il file, lo pota e lo riscrive.
-Ma qui si salva **prima** con `_save_cache`, poi si chiama `_prune_cache` che rilegge da file
-(sovrascrivendo potenziali modifiche non ancora scritte), e poi si ricarica tutto.
-
-**Impatto:** Se arrivano due messaggi in rapida successione, il primo `_save_cache` + `_prune_cache`
-potrebbe sovrascrivere i dati del secondo. **Possibile perdita di messaggi.**
-
----
-
 ### #1 — `_classify_attachments` processa solo il primo attachment (`signal_tui.py`, righe 473-493)
+
+
 
 Il `for att in attachments` itera ma fa `return` al primo elemento che matcha.
 Se ci sono più attachment (es. un'immagine + un video), solo il primo viene processato.
@@ -87,7 +71,26 @@ viene indicizzato. La ricerca potrebbe perdere match.
 
 ## 🟢 Minori (comportamenti subottimali ma non bloccanti)
 
+### #2 — `_process_envelope` salva/ricarica cache ridondantemente (`signal_tui.py`, righe 620-622)
+
+Dopo aver aggiunto un messaggio al dizionario `_cache`, chiama:
+```python
+_save_cache(self._cache)    # riga 620
+_prune_cache()              # riga 621 — internamente fa _load_cache() + _write_cache()
+self._cache = _load_cache() # riga 622 — ricarica tutto
+```
+
+`_prune_cache()` internamente (in `backend.py`) carica il file, lo pota e lo riscrive.
+La sequenza è ridondante: si scrive su disco due volte invece di una.
+Tuttavia, poiché `_poll_worker` è un singolo thread, non c'è rischio di race condition
+o perdita dati. È solo un'inefficienza (due scritture invece di una).
+
+**Impatto:** Minimo — due scritture su disco invece di una. Nessun impatto sull'utente.
+
+---
+
 ### #10 — `on_input_changed` nella ricerca emoji non usa `search_emoji()` (`emoji_picker.py`, righe 347-374)
+
 
 Invece di chiamare `search_emoji(query)` che è già definita, reimplementa la
 ricerca in modo diverso, creando prima una lista di tutti gli emoji e poi
