@@ -96,6 +96,8 @@ from backend import (
     _run_subprocess,
     _send_subprocess,
     get_attachment_path,
+    serve_attachment_for_download,
+    serve_text_as_file,
     SIGNAL_CLI_PATH,
     USER_NUMBER,
     DAEMON_HTTP_PORT,
@@ -274,6 +276,7 @@ class SignalTUI(App):
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("ctrl+e", "open_emoji_picker", "Emoji", priority=True),
+        Binding("ctrl+d", "download_mode", "Download", priority=True),
         Binding("ctrl+n", "next_suggestion", "Next", show=False),
         Binding("ctrl+p", "prev_suggestion", "Prev", show=False),
     ]
@@ -300,6 +303,7 @@ class SignalTUI(App):
         self._cache: dict[str, list[dict]] = {}
         self._loaded_all = False
         self._reply_to: Optional[dict] = None  # message being replied to
+        self._download_mode = False  # Ctrl+D download mode active
 
     def compose(self):
         yield Header()
@@ -1205,8 +1209,19 @@ class SignalTUI(App):
     ):
         """Handle ``MessageClicked`` from a ``MessageWidget``.
 
-        Toggles reply selection on the clicked message.
+        If download mode is active, serve the message text as a .txt file
+        for download.  Otherwise toggles reply selection on the clicked
+        message.
         """
+        if self._download_mode:
+            # In download mode: serve the message text as a downloadable file
+            self._start_download(
+                text=event.text,
+                attachment_id=None,
+                timestamp=event.timestamp,
+            )
+            return
+
         # If clicking the same message, cancel the reply
         if (
             self._reply_to is not None
@@ -1242,14 +1257,89 @@ class SignalTUI(App):
 
         self._update_reply_bar()
 
+    # ─── Download mode (Ctrl+D) ──────────────────────────────────────────────
+
+    def action_download_mode(self) -> None:
+        """Toggle download mode on/off (Ctrl+D).
+
+        When active, clicking a message will serve it for download via a
+        temporary HTTP server instead of replying (for text) or opening
+        the image modal (for images).
+        """
+        self._download_mode = not self._download_mode
+        if self._download_mode:
+            self._add_message(
+                "📥 Download mode ON — Click any message to get a download link",
+                is_info=True,
+            )
+        else:
+            self._add_message(
+                "📥 Download mode OFF",
+                is_info=True,
+            )
+        self._update_download_bar()
+
+    def _update_download_bar(self) -> None:
+        """Show or hide the download mode hint in the reply bar."""
+        bar = self.query_one("#reply-bar", Horizontal)
+        text_widget = self.query_one("#reply-text", Static)
+        if self._download_mode:
+            text_widget.update("📥 Download mode — Click a message to download")
+            bar.remove_class("reply-bar-hidden")
+            bar.styles.display = "block"
+        elif not self._reply_to:
+            text_widget.update("")
+            bar.add_class("reply-bar-hidden")
+            bar.styles.display = "none"
+
+    def _start_download(
+        self,
+        text: str,
+        attachment_id: str | None = None,
+        timestamp: int = 0,
+    ) -> None:
+        """Start a temporary HTTP server to serve the message content.
+
+        If ``attachment_id`` is provided, the original attachment file is
+        served.  Otherwise the message text is written to a .txt file and
+        served.
+
+        The download URL is shown in the chat log.
+        """
+        if attachment_id:
+            # Serve the original attachment file
+            url = serve_attachment_for_download(attachment_id)
+        else:
+            # Serve the message text as a .txt file
+            # Use timestamp to create a unique filename
+            fname = f"signal-message-{timestamp}.txt" if timestamp else "message.txt"
+            url = serve_text_as_file(text, filename=fname)
+
+        if url.startswith("ERROR:"):
+            self._add_message(f"❌ {url}", is_info=True)
+        else:
+            self._add_message(f"📥 Download: {url}", is_info=True)
+
+        # Exit download mode after serving
+        self._download_mode = False
+        self._update_download_bar()
+
     # ─── Image modal ─────────────────────────────────────────────────────────
 
     def on_image_widget_image_clicked(self, event: ImageWidget.ImageClicked):
         """Handle ``ImageClicked`` from an ``ImageWidget``.
 
-        Opens a fullscreen ``ImageModalScreen`` that renders the image
-        via ``viu`` asynchronously.
+        If download mode is active, serve the image for download instead
+        of opening the modal.  Otherwise opens a fullscreen
+        ``ImageModalScreen`` that renders the image via ``viu``.
         """
+        if self._download_mode:
+            # In download mode: serve the file via HTTP
+            self._start_download(
+                text=event.attachment_path.name,
+                attachment_id=event.attachment_id,
+            )
+            return
         self.push_screen(ImageModalScreen(event.attachment_path))
 
     # ─── Sending messages ─────────────────────────────────────────────────────

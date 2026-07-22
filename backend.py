@@ -5,9 +5,13 @@ message cache on disk, and the Contact data model.
 No Textual dependency.
 """
 
+import http.server
 import json
 import os
+import socket
+import socketserver
 import subprocess
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -360,3 +364,168 @@ class Contact:
     @property
     def display_name(self) -> str:
         return self.name if self.name else self.number
+
+
+# ─── Download server (temporary HTTP) ───────────────────────────────────────
+
+DOWNLOAD_PORT = 10042
+DOWNLOAD_TIMEOUT = 60  # seconds
+_TEMP_DOWNLOAD_DIR: Optional[Path] = None
+
+
+def _get_temp_download_dir() -> Path:
+    """Get or create a temporary directory for serving text-as-file downloads."""
+    global _TEMP_DOWNLOAD_DIR
+    if _TEMP_DOWNLOAD_DIR is None:
+        _TEMP_DOWNLOAD_DIR = CACHE_DIR / "downloads"
+        _TEMP_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    return _TEMP_DOWNLOAD_DIR
+
+
+def get_local_ip() -> str:
+    """Try to determine the local IP address reachable from the SSH client.
+
+    Priority:
+    1. Parse SSH_CONNECTION env var (set by SSH) for the server's IP.
+    2. Connect to a dummy socket to learn which interface is used.
+    """
+    ssh_conn = os.environ.get("SSH_CONNECTION", "")
+    if ssh_conn:
+        parts = ssh_conn.strip().split()
+        if len(parts) >= 3:
+            # SSH_CONNECTION = "client_ip client_port server_ip server_port"
+            return parts[2]  # server IP
+    # Fallback: create a UDP socket to a non-routable address to learn our IP
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+
+
+class _OneShotHTTPHandler(http.server.SimpleHTTPRequestHandler):
+    """HTTP handler that serves a single file from a fixed directory,
+    then shuts down the server after the first successful GET."""
+
+    def __init__(self, *args, directory=None, **kwargs):
+        if directory is None:
+            directory = str(Path.cwd())
+        super().__init__(*args, directory=directory, **kwargs)
+
+    def do_GET(self) -> None:
+        """Serve the file and schedule server shutdown."""
+        try:
+            super().do_GET()
+        except Exception:
+            pass
+        # Shutdown after first request (in a thread to avoid deadlock)
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+    def log_message(self, format: str, *args) -> None:
+        """Suppress default HTTP log output."""
+        pass
+
+
+def _start_oneshot_server(
+    directory: Path,
+    port: int = DOWNLOAD_PORT,
+    timeout: int = DOWNLOAD_TIMEOUT,
+) -> tuple[socketserver.TCPServer, str]:
+    """Start a one-shot HTTP server on ``port`` serving files from ``directory``.
+
+    Returns (server, url_base) where url_base is e.g. ``http://1.2.3.4:10042``.
+    The server is already started in a daemon thread.
+    """
+    ip = get_local_ip()
+
+    class _Handler(_OneShotHTTPHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(directory), **kwargs)
+
+    # Bind to 0.0.0.0 so it's reachable from the LAN
+    server = socketserver.TCPServer(("0.0.0.0", port), _Handler)
+    server.timeout = timeout
+
+    # Start serving in a background thread
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+    url_base = f"http://{ip}:{port}"
+    return server, url_base
+
+
+def serve_attachment_for_download(
+    attachment_id: str,
+    port: int = DOWNLOAD_PORT,
+    timeout: int = DOWNLOAD_TIMEOUT,
+) -> str:
+    """Serve an attachment file via a temporary HTTP server.
+
+    Parameters
+    ----------
+    attachment_id:
+        The signal-cli attachment UUID.
+    port:
+        TCP port for the HTTP server.
+    timeout:
+        Seconds to keep the server alive before auto-shutdown.
+
+    Returns
+    -------
+    str
+        The full download URL, or an error message prefixed with ``ERROR:``.
+    """
+    att_path = get_attachment_path(attachment_id)
+    if att_path is None:
+        return f"ERROR: Attachment file not found on server (id={attachment_id})"
+
+    # Create a temp dir with just this file (symlink to avoid copying)
+    dl_dir = _get_temp_download_dir()
+    link_path = dl_dir / att_path.name
+    try:
+        if link_path.exists():
+            link_path.unlink()
+        link_path.symlink_to(att_path)
+    except OSError:
+        # Symlink may fail; copy instead
+        import shutil
+        shutil.copy2(att_path, link_path)
+
+    server, url_base = _start_oneshot_server(dl_dir, port=port, timeout=timeout)
+    return f"{url_base}/{att_path.name}"
+
+
+def serve_text_as_file(
+    text: str,
+    filename: str = "message.txt",
+    port: int = DOWNLOAD_PORT,
+    timeout: int = DOWNLOAD_TIMEOUT,
+) -> str:
+    """Write text to a temporary .txt file and serve it via HTTP.
+
+    Parameters
+    ----------
+    text:
+        The message text to save.
+    filename:
+        The filename to serve (default ``message.txt``).
+    port:
+        TCP port for the HTTP server.
+    timeout:
+        Seconds to keep the server alive before auto-shutdown.
+
+    Returns
+    -------
+    str
+        The full download URL, or an error message prefixed with ``ERROR:``.
+    """
+    dl_dir = _get_temp_download_dir()
+    file_path = dl_dir / filename
+    try:
+        file_path.write_text(text, encoding="utf-8")
+    except OSError as e:
+        return f"ERROR: Cannot write temp file: {e}"
+
+    server, url_base = _start_oneshot_server(dl_dir, port=port, timeout=timeout)
+    return f"{url_base}/{filename}"
