@@ -1268,16 +1268,6 @@ class SignalTUI(App):
         the image modal (for images).
         """
         self._download_mode = not self._download_mode
-        if self._download_mode:
-            self._add_message(
-                "📥 Download mode ON — Click any message to get a download link",
-                is_info=True,
-            )
-        else:
-            self._add_message(
-                "📥 Download mode OFF",
-                is_info=True,
-            )
         self._update_download_bar()
 
     def _update_download_bar(self) -> None:
