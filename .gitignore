@@ -1,4 +1,5 @@
 .venv/
+.venv-test/
 bin/signal-cli-*/
 __pycache__/
 *.pyc
