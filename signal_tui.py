@@ -881,9 +881,6 @@ class SignalTUI(App):
                 self._load_messages_worker, exclusive=True, thread=True
             )
 
-            # Final refresh: fetch messages that arrived during loading
-            self._refresh_chat()
-
             # Mark all messages from this contact as read
             number = self.selected_contact.number
             if number in self._cache:
