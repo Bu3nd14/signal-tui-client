@@ -953,18 +953,11 @@ class SignalTUI(App):
                     except Exception:
                         pass
 
-            self.call_from_thread(
-                self._add_message,
-                f"📋 Loaded {len(messages_to_show)}/{total} messages",
-                is_info=True,
-            )
         else:
             self._loaded_all = True
             self.call_from_thread(
                 self._add_message, "No message history for this contact", is_info=True
             )
-
-        self.call_from_thread(self._add_message, "✅ Ready", is_info=True)
 
     def _add_load_more_widget(self, remaining: int):
         """Add a clickable widget to load older messages."""
