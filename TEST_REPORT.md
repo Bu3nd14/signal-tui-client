@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
-**Data:** 2026-07-26  
-**Git commit:** `124215e90c0c202da7e6a8c2710942caa870aeaf`  
+**Data:** 2026-08-02  
+**Git commit:** `1904c9f`  
 **Python:** 3.12.3  
-**Stato:** ✅ 72/72 test superati
+**Stato:** ✅ 88/88 test superati
 
 ---
 
@@ -19,7 +19,8 @@
 | Invio messaggi | `test_backend_send.py` | 6 | ✅ |
 | UI Components | `test_ui_components.py` | 11 | ✅ |
 | Lock file | `test_signal_tui_lock.py` | 6 | ✅ |
-| **Totale** | | **72** | **✅ 72/72** |
+| Script installazione | `test_install_script.py` | 16 | ✅ |
+| **Totale** | | **88** | **✅ 88/88** |
 
 ---
 
@@ -136,6 +137,29 @@
 | `test_release_lock` | Lock rilasciato |
 | `test_release_lock_not_ours` | Lock non nostro → non rimosso |
 | `test_acquire_lock_exception_safe` | Eccezione → fail-safe True |
+
+### 🛠️ Script installazione (`test_install_script.py`) — 16 test
+
+Test dello script `install.sh` (eseguito come subprocess in ambienti temporanei isolati, con `curl`/`wget`/`python3`/`java`/`pip` mockati tramite stub in un PATH finto — nessun download o installazione reale).
+
+| Test | Descrizione |
+|------|-------------|
+| `test_help_flag` | `--help` mostra l'uso ed esce con 0 |
+| `test_unknown_flag` | Flag sconosciuto → errore, exit ≠ 0 |
+| `test_missing_version_arg` | `--version` senza argomento → errore |
+| `test_installed_version_detected` | Rileva la versione da `bin/signal-cli-*/` |
+| `test_no_installed_version` | Nessuna versione in `bin/` → stringa vuota |
+| `test_update_already_latest` | `--update` con versione già aggiornata → nessun download |
+| `test_update_downloads_new` | `--update` con versione vecchia → scarica la nuova e rimuove la vecchia |
+| `test_skip_no_version` | `--skip-signal-cli` senza versioni → warning |
+| `test_skip_with_version` | `--skip-signal-cli` con versione presente → OK |
+| `test_download_specific_version` | `--version X.Y.Z` → scarica quella versione specifica |
+| `test_download_creates_correct_structure` | Struttura `bin/signal-cli-*/bin/signal-cli` corretta dopo il download |
+| `test_remove_old_versions` | Le versioni vecchie vengono rimosse dopo il download |
+| `test_python_version_check` | Python troppo vecchio → errore |
+| `test_java_old_warns` | Java troppo vecchio → warning ma non blocca |
+| `test_venv_created` | Crea `.venv` quando `DO_VENV=1` |
+| `test_no_venv_flag` | `--no-venv` non crea `.venv` |
 
 ---
 

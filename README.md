@@ -30,48 +30,82 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 ## Prerequisites
 
 - **Python 3.10+**
+- **Java 25 (JRE)** — required by `signal-cli` (the JVM build). Without it, `signal-cli` will not start.
 - **signal-cli** — download and place in `./bin/` directory (see Installation)
 - **catimg** — for rendering images in the terminal (optional; falls back to text placeholder if missing)
 - A linked Signal account (see Device Linking)
 
+> **Note:** A Python virtual environment (venv) is **recommended** but not strictly required. See [Virtual environment](#virtual-environment-optional-but-recommended).
+
 ## Installation
 
-### 1. Clone the repository
+### Option A — Automatic installation (recommended)
+
+The easiest way is to use the provided `install.sh` script, which checks prerequisites, downloads the correct `signal-cli` build, creates a virtual environment and installs the Python dependencies:
+
+```bash
+git clone https://github.com/Bu3nd14/signal-tui-client.git
+cd signal-tui-client
+./install.sh
+```
+
+The script supports several options:
+
+```bash
+./install.sh --no-venv            # install without creating a virtual environment
+./install.sh --version 0.14.7     # download a specific signal-cli version
+./install.sh --skip-signal-cli    # skip downloading signal-cli (if already present)
+./install.sh --update             # update signal-cli to the latest version
+./install.sh --help               # show usage
+```
+
+### Option B — Manual installation
+
+#### 1. Clone the repository
 
 ```bash
 git clone https://github.com/Bu3nd14/signal-tui-client.git
 cd signal-tui-client
 ```
 
-### 2. Install Python dependencies
+#### 2. Install Python dependencies
+
+It is recommended to use a virtual environment (see [Virtual environment](#virtual-environment-optional-but-recommended)):
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Download signal-cli
+#### 3. Download signal-cli
 
-Download the latest `signal-cli` release for your platform:
+Download the **JVM build** of `signal-cli` (the full `signal-cli-X.Y.Z.tar.gz` archive, **not** the `-Linux-client` or `-Linux-native` variants):
 
 ```bash
-# Example for Linux x86_64
+# Example for Linux x86_64 — replace X.Y.Z with the actual version (e.g. 0.14.7)
 mkdir -p bin
 cd bin
-wget https://github.com/AsamK/signal-cli/releases/latest/download/signal-cli-X.Y.Z-Linux.tar.gz
-tar xzf signal-cli-X.Y.Z-Linux.tar.gz
-rm signal-cli-X.Y.Z-Linux.tar.gz
+wget https://github.com/AsamK/signal-cli/releases/download/vX.Y.Z/signal-cli-X.Y.Z.tar.gz
+tar xzf signal-cli-X.Y.Z.tar.gz
+rm signal-cli-X.Y.Z.tar.gz
 cd ..
 ```
 
+> **⚠️ Important — which build to download:**
+> - ✅ **`signal-cli-X.Y.Z.tar.gz`** — the **JVM build** (full archive with `bin/signal-cli` + `lib/*.jar`). This is the **correct** one: it includes the `daemon` command (JSON-RPC over HTTP) that this client uses, and it produces the `./bin/signal-cli-*/bin/signal-cli` structure the app expects.
+> - ❌ **`signal-cli-X.Y.Z-Linux-client.tar.gz`** — this is only a **JSON-RPC client** (a single native executable). It does **not** include the `daemon` command, so it cannot start the JSON-RPC server this client needs. **Do not use it.**
+> - ❌ **`signal-cli-X.Y.Z-Linux-native.tar.gz`** — the GraalVM native build. It does not produce the `./bin/signal-cli-*/bin/signal-cli` structure the app expects. **Do not use it.**
+>
+> The `releases/latest/download/` URL does **not** work with a versioned filename (the filename changes with each release). You must use the explicit `releases/download/vX.Y.Z/` URL and replace `X.Y.Z` with the actual version (e.g. `0.14.7`). The `install.sh` script resolves the latest version automatically.
+
 The app will automatically find `signal-cli` in the `./bin/signal-cli-*/` directory.
 
-### 4. Install catimg (optional, for image rendering)
+#### 4. Install catimg (optional, for image rendering)
 
 ```bash
 sudo apt install catimg
 ```
 
-### 5. Configure your phone number
+#### 5. Configure your phone number
 
 Set your Signal phone number via environment variable:
 
@@ -88,6 +122,35 @@ Or create a `config.json` file in the project root:
 ```
 
 > **Note:** `config.json` is in `.gitignore` and will not be committed.
+
+## Virtual environment (optional but recommended)
+
+A Python virtual environment is **recommended** to avoid polluting your system Python and to prevent dependency conflicts. It is **not strictly required** — the app is a standalone script launched with `python3 signal_tui.py`.
+
+> **Note:** On many Linux distributions, `pip install` at the system level is blocked (PEP 668 / "externally-managed-environment"). In that case a virtual environment is **required**.
+
+```bash
+# Create the virtual environment
+python3 -m venv .venv
+
+# Activate it
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+To deactivate the environment later, run `deactivate`. The `install.sh` script creates and uses the virtual environment automatically (unless you pass `--no-venv`).
+
+## Updating signal-cli
+
+Signal's servers change over time, and `signal-cli` releases older than ~3 months may stop working. To update `signal-cli` to the latest version, run:
+
+```bash
+./install.sh --update
+```
+
+This downloads the latest JVM build, extracts it into `./bin/`, and removes the previous version(s).
 
 ## Device Linking
 
@@ -165,6 +228,7 @@ signal-tui-client/
 ├── emoji_picker.py        # Emoji picker modal screen and auto-completion widget
 ├── emoji_data.py          # Emoji database (categories, aliases, search index)
 ├── link_account.py        # Device linking script (QR code)
+├── install.sh             # Automatic installation script (downloads signal-cli, sets up venv)
 ├── requirements.txt       # Python dependencies
 ├── config.json            # Local configuration (not committed)
 ├── BUGS.md                # Known bugs and limitations
