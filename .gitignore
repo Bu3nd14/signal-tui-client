@@ -6,3 +6,4 @@ __pycache__/
 config.json
 signal-tui-client.code-workspace
 *.log
+profiling/output/

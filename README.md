@@ -218,6 +218,27 @@ A persistent HTTP server starts on port **10042** (first download only) and stay
 - Unread messages are shown with a `*N` badge next to the contact name
 - Sent messages show their delivery status: sent (italic), delivered (bold), read (normal)
 
+## Performance Profiling
+
+Per profilare l'applicazione in termini di **CPU**, **RAM** e **I/O**, usa gli strumenti nella cartella `profiling/`:
+
+```bash
+# Monitoraggio risorse (CPU, RAM, I/O nel tempo)
+python profiling/monitor_resources.py --duration 120
+python profiling/analyze_resources.py
+
+# Flamegraph CPU (py-spy — campiona tutti i thread)
+./profiling/run_pyspy.sh 120
+
+# Profiling RAM (tracemalloc)
+python profiling/profile_memory.py --duration 120
+
+# Profiling I/O (strace)
+./profiling/run_strace.sh 120
+```
+
+Vedi [profiling/README.md](profiling/README.md) per istruzioni dettagliate, interpretazione dei risultati e i punti critici noti.
+
 ## Project Structure
 
 ```
@@ -232,9 +253,11 @@ signal-tui-client/
 ├── requirements.txt       # Python dependencies
 ├── config.json            # Local configuration (not committed)
 ├── BUGS.md                # Known bugs and limitations
+├── profiling/             # Performance profiling tools (CPU, RAM, I/O)
 ├── bin/                   # signal-cli binaries (not committed)
 └── LICENSE                # GPLv3
 ```
+
 
 ## License
 

@@ -1,0 +1,5 @@
+# Profiling dependencies for signal-tui-client
+# Install with: pip install -r profiling/requirements.txt
+
+py-spy>=0.3.14        # Sampling profiler for flamegraphs (works on running processes, all threads)
+psutil>=5.9.0         # System resource monitoring (CPU, RAM, IO)
