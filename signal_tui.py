@@ -1152,7 +1152,14 @@ class SignalTUI(App):
                 time.sleep(0.1)
 
     def _refresh_chat(self):
-        """Check cache for new messages of the current contact not yet shown."""
+        """Check cache for new messages of the current contact not yet shown.
+
+        Only messages *newer* than the last message already displayed are
+        added.  This avoids re-adding older messages that were intentionally
+        not shown because the chat was loaded with a limited window (e.g. the
+        last 20 messages) — otherwise closing the emoji picker would append
+        all the older cached messages and jump the view to them.
+        """
         if not self.selected_contact:
             return
 
@@ -1160,9 +1167,12 @@ class SignalTUI(App):
         cached = self._cache.get(contact.number, [])
         new_count = 0
 
+        # Only consider messages newer than the newest one already shown.
+        max_seen = max(self._seen_timestamps) if self._seen_timestamps else 0
+
         for msg in cached:
             ts = msg.get("timestamp", 0)
-            if ts and ts not in self._seen_timestamps:
+            if ts and ts > max_seen and ts not in self._seen_timestamps:
                 self._seen_timestamps.add(ts)
                 text = msg.get("text", "")
                 is_mine = msg.get("is_mine", False)
@@ -1188,6 +1198,7 @@ class SignalTUI(App):
         if new_count > 0:
             chat_log = self.query_one("#chat-log", Vertical)
             chat_log.scroll_end(animate=False)
+
 
     def _update_unread_badges(self):
         """Check the in-memory cache and update *N badges on contacts.
