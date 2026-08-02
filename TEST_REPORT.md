@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
 **Data:** 2026-08-02  
-**Git commit:** `1904c9f`  
+**Git commit:** `0e5488d`  
 **Python:** 3.12.3  
-**Stato:** ✅ 88/88 test superati
+**Stato:** ✅ 104/104 test superati
 
 ---
 
@@ -11,7 +11,7 @@
 
 | Modulo | File | Test | Esito |
 |--------|------|------|-------|
-| Emoji Picker | `test_emoji_picker.py` | 14 | ✅ |
+| Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
 | Cache | `test_backend_cache.py` | 16 | ✅ |
 | Contatti | `test_backend_contacts.py` | 4 | ✅ |
 | Attachment | `test_backend_attachments.py` | 5 | ✅ |
@@ -20,13 +20,15 @@
 | UI Components | `test_ui_components.py` | 11 | ✅ |
 | Lock file | `test_signal_tui_lock.py` | 6 | ✅ |
 | Script installazione | `test_install_script.py` | 16 | ✅ |
-| **Totale** | | **88** | **✅ 88/88** |
+| Cache debounce | `test_cache_debounce.py` | 12 | ✅ |
+| Refresh chat | `test_refresh_chat.py` | 4 | ✅ |
+| **Totale** | | **104** | **✅ 104/104** |
 
 ---
 
 ## Dettaglio test
 
-### 🔍 Emoji Picker (`test_emoji_picker.py`) — 14 test
+### 🔍 Emoji Picker (`test_emoji_picker.py`) — 16 test
 
 | Test | Descrizione |
 |------|-------------|
@@ -160,6 +162,32 @@ Test dello script `install.sh` (eseguito come subprocess in ambienti temporanei 
 | `test_java_old_warns` | Java troppo vecchio → warning ma non blocca |
 | `test_venv_created` | Crea `.venv` quando `DO_VENV=1` |
 | `test_no_venv_flag` | `--no-venv` non crea `.venv` |
+
+### 🔄 Cache debounce (`test_cache_debounce.py`) — 12 test
+
+| Test | Descrizione |
+|------|-------------|
+| `test_maybe_flush_does_not_write_before_threshold` | Prima di 5 messaggi, `_maybe_flush_cache` non scrive su disco |
+| `test_maybe_flush_writes_at_threshold` | Al 5° messaggio, `_maybe_flush_cache` scrive su disco |
+| `test_flush_cache_resets_counter` | `_flush_cache()` forza la scrittura e resetta il contatore |
+| `test_maybe_flush_after_flush_restarts_counting` | Dopo un flush, il contatore riparte da zero |
+| `test_on_exit_flushes_pending_saves` | `on_exit()` chiama `_flush_cache()` quando ci sono modifiche pendenti |
+| `test_on_exit_no_flush_when_no_pending` | `on_exit()` NON chiama `_flush_cache()` se non ci sono modifiche pendenti |
+| `test_flush_cache_updates_last_flush_time` | `_flush_cache()` aggiorna `_last_flush_time` |
+| `test_poll_worker_flushes_after_interval` | `_poll_worker()` chiama `_flush_cache()` quando `_pending_saves > 0` e sono passati più di 30s |
+| `test_poll_worker_no_flush_within_interval` | `_poll_worker()` NON chiama `_flush_cache()` se l'ultimo flush è recente |
+| `test_incremental_only_updates_given_contact` | Con `contact_number`, calcola solo per quel contatto |
+| `test_incremental_no_change_returns_early` | Se il conteggio non cambia, non ricostruisce la lista |
+| `test_full_update_all_contacts` | Senza `contact_number`, calcola per tutti i contatti |
+
+### 🔄 Refresh chat (`test_refresh_chat.py`) — 4 test
+
+| Test | Descrizione |
+|------|-------------|
+| `test_refresh_chat_does_not_readd_old_messages` | `_refresh_chat()` non ri-aggiunge messaggi già mostrati |
+| `test_refresh_chat_adds_only_newer_messages` | `_refresh_chat()` aggiunge solo messaggi più recenti |
+| `test_refresh_chat_no_selected_contact` | Nessun contatto selezionato → nessuna operazione |
+| `test_refresh_chat_empty_seen_timestamps` | `_seen_timestamps` vuoto → aggiunge tutti i messaggi |
 
 ---
 
