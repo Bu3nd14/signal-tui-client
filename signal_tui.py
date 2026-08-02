@@ -10,6 +10,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -310,6 +311,7 @@ class SignalTUI(App):
         self._CACHE_FLUSH_THRESHOLD = 5  # flush cache to disk every N messages
         self._CACHE_FLUSH_INTERVAL = 30  # max seconds between cache flushes
         self._last_flush_time = time.time()  # timestamp of last cache flush
+        self._cache_lock = threading.RLock()  # reentrant lock: protects _cache from concurrent access
 
 
     def compose(self):
@@ -613,23 +615,24 @@ class SignalTUI(App):
         if data is None:
             return False
 
-        if contact.number not in self._cache:
-            self._cache[contact.number] = []
+        with self._cache_lock:
+            if contact.number not in self._cache:
+                self._cache[contact.number] = []
 
-        # Save to cache
-        self._cache[contact.number].append({
-            "text": data["text"],
-            "is_mine": data["is_mine"],
-            "sender": data["sender"],
-            "timestamp": ts,
-            "quote_text": data["quote_text"],
-            "msg_type": data["msg_type"],
-            "attachment_info": data["attachment_info"],
-            "attachment_id": data.get("attachment_id"),
-            "read": data["is_mine"],
-            "status": "sent" if data["is_mine"] else "read",
-        })
-        self._maybe_flush_cache()
+            # Save to cache
+            self._cache[contact.number].append({
+                "text": data["text"],
+                "is_mine": data["is_mine"],
+                "sender": data["sender"],
+                "timestamp": ts,
+                "quote_text": data["quote_text"],
+                "msg_type": data["msg_type"],
+                "attachment_info": data["attachment_info"],
+                "attachment_id": data.get("attachment_id"),
+                "read": data["is_mine"],
+                "status": "sent" if data["is_mine"] else "read",
+            })
+            self._maybe_flush_cache()
 
         # If it's the current contact, show the message in the UI immediately
 
@@ -661,11 +664,12 @@ class SignalTUI(App):
         disk (so RAM doesn't grow unboundedly), but only runs when the
         debounce threshold is reached or the safety timer expires.
         """
-        _save_cache(self._cache)
-        _prune_cache()
-        self._cache = _load_cache()
-        self._pending_saves = 0
-        self._last_flush_time = time.time()
+        with self._cache_lock:
+            _save_cache(self._cache)
+            _prune_cache()
+            self._cache = _load_cache()
+            self._pending_saves = 0
+            self._last_flush_time = time.time()
 
     def _maybe_flush_cache(self):
         """Increment the pending-save counter and flush when the threshold
@@ -675,32 +679,31 @@ class SignalTUI(App):
         for every single message, we accumulate in memory and write at most
         once every 5 messages.
         """
-        self._pending_saves += 1
-        if self._pending_saves >= self._CACHE_FLUSH_THRESHOLD:
-            self._flush_cache()
+        with self._cache_lock:
+            self._pending_saves += 1
+            if self._pending_saves >= self._CACHE_FLUSH_THRESHOLD:
+                self._flush_cache()
 
     def _process_receipt_envelope(self, envelope: dict) -> bool:
-
         """Process a receiptMessage envelope (delivery or read receipt).
 
         Updates the status of sent messages in the cache and refreshes
         the corresponding widgets in the UI if the contact is currently
         selected.
+
+        The cache lock ensures that _process_receipt modifies the *current*
+        self._cache dict. Without it, a concurrent _flush_cache() could
+        replace self._cache (via self._cache = _load_cache()) between the
+        in-place modification and the save, losing the receipt updates.
         """
-        # Salva il riferimento corrente a self._cache prima di modificarlo.
-        # Questo evita un race condition con l'UI thread che potrebbe
-        # sostituire self._cache (via self._cache = _load_cache()) tra
-        # la modifica in-place e il salvataggio su disco.
-        cache_ref = self._cache
+        with self._cache_lock:
+            # Process the receipt using the backend function on the current cache
+            updated = _process_receipt(envelope, self._cache)
+            if not updated:
+                return False
 
-        # Process the receipt using the backend function
-        updated = _process_receipt(envelope, cache_ref)
-        if not updated:
-            return False
-
-        # Save the updated cache (usa il riferimento originale)
-        self._maybe_flush_cache()
-
+            # Increment the debounce counter (may trigger a flush)
+            self._maybe_flush_cache()
 
         # Get the source contact number from the envelope
         source = envelope.get("sourceNumber", "") or envelope.get("source", "")
@@ -917,11 +920,12 @@ class SignalTUI(App):
 
             # Mark all messages from this contact as read
             number = self.selected_contact.number
-            if number in self._cache:
-                for msg in self._cache[number]:
-                    if not msg.get("read", True):
-                        msg["read"] = True
-                self._flush_cache()
+            with self._cache_lock:
+                if number in self._cache:
+                    for msg in self._cache[number]:
+                        if not msg.get("read", True):
+                            msg["read"] = True
+                    self._flush_cache()
             self._unread_counts[number] = 0
 
 
@@ -1515,21 +1519,22 @@ class SignalTUI(App):
         reply_data = self._reply_to
         quote_text = reply_data.get("text") if reply_data else None
 
-        if number not in self._cache:
-            self._cache[number] = []
-        self._cache[number].append({
-            "text": message,
-            "is_mine": True,
-            "sender": "You",
-            "timestamp": ts,
-            "quote_text": quote_text,
-            "msg_type": "text",
-            "attachment_info": None,
-            "attachment_id": None,
-            "read": True,
-            "status": "sent",
-        })
-        self._maybe_flush_cache()
+        with self._cache_lock:
+            if number not in self._cache:
+                self._cache[number] = []
+            self._cache[number].append({
+                "text": message,
+                "is_mine": True,
+                "sender": "You",
+                "timestamp": ts,
+                "quote_text": quote_text,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+                "read": True,
+                "status": "sent",
+            })
+            self._maybe_flush_cache()
 
         # Show the message in the UI immediately (with quote if replying)
 

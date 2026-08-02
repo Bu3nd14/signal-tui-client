@@ -173,6 +173,121 @@ class TestSafetyTimer:
             mock_flush.assert_not_called()
 
 
+class TestReceiptRaceCondition:
+    """🔒 Verifica che _process_receipt_envelope non perda modifiche
+    quando _flush_cache() viene chiamato concorrentemente."""
+
+    def _make_app(self) -> SignalTUI:
+        app = SignalTUI()
+        app._cache = {
+            "+391234567890": [
+                {
+                    "text": "Ciao!",
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": 1000,
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                    "read": True,
+                    "status": "sent",
+                }
+            ]
+        }
+        return app
+
+    def test_receipt_updates_current_cache(self):
+        """_process_receipt_envelope aggiorna self._cache direttamente
+        (non un riferimento salvato che potrebbe diventare stale)."""
+        app = self._make_app()
+        app.selected_contact = Contact(number="+391234567890", name="Test")
+
+        envelope = {
+            "receiptMessage": {
+                "isRead": True,
+                "timestamps": [1000],
+            },
+            "sourceNumber": "+391234567890",
+        }
+
+        with patch("signal_tui._save_cache"), \
+             patch("signal_tui._prune_cache"), \
+             patch("signal_tui._load_cache", return_value={}), \
+             patch.object(app, "call_from_thread") as mock_cft:
+            result = app._process_receipt_envelope(envelope)
+
+        assert result is True
+        # The message in self._cache must have status "read"
+        assert app._cache["+391234567890"][0]["status"] == "read"
+        # call_from_thread should be called to update the UI
+        mock_cft.assert_called_once()
+
+    def test_receipt_survives_flush_cache(self):
+        """Le modifiche del receipt non vengono perse quando _flush_cache()
+        viene chiamato dopo _process_receipt_envelope."""
+        app = self._make_app()
+
+        envelope = {
+            "receiptMessage": {
+                "isRead": True,
+                "timestamps": [1000],
+            },
+            "sourceNumber": "+391234567890",
+        }
+
+        # Simulate: receipt processed, then flush_cache called
+        with patch("signal_tui._save_cache") as mock_save, \
+             patch("signal_tui._prune_cache") as mock_prune, \
+             patch("signal_tui._load_cache", return_value={
+                 "+391234567890": [
+                     {
+                         "text": "Ciao!",
+                         "is_mine": True,
+                         "sender": "You",
+                         "timestamp": 1000,
+                         "quote_text": None,
+                         "msg_type": "text",
+                         "attachment_info": None,
+                         "attachment_id": None,
+                         "read": True,
+                         "status": "read",  # already updated by receipt
+                     }
+                 ]
+             }), \
+             patch.object(app, "call_from_thread"):
+            app._process_receipt_envelope(envelope)
+            app._flush_cache()
+
+            # The saved cache must have status "read"
+            saved_cache = mock_save.call_args[0][0]
+            assert saved_cache["+391234567890"][0]["status"] == "read"
+
+    def test_receipt_no_match_returns_false(self):
+        """Se il timestamp del receipt non matcha, non aggiorna nulla."""
+        app = self._make_app()
+
+        envelope = {
+            "receiptMessage": {
+                "isRead": True,
+                "timestamps": [9999],  # no match
+            },
+            "sourceNumber": "+391234567890",
+        }
+
+        with patch("signal_tui._save_cache"), \
+             patch("signal_tui._prune_cache"), \
+             patch("signal_tui._load_cache", return_value={}), \
+             patch.object(app, "call_from_thread") as mock_cft:
+            result = app._process_receipt_envelope(envelope)
+
+        assert result is False
+        # Status unchanged
+        assert app._cache["+391234567890"][0]["status"] == "sent"
+        # call_from_thread should NOT be called
+        mock_cft.assert_not_called()
+
+
 class TestIncrementalUnreadBadges:
     """🔄 Verifica l'aggiornamento incrementale dei badge unread."""
 

@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
-**Data:** 2026-08-02  
+**Data:** 2026-08-03  
 **Git commit:** `0e5488d`  
 **Python:** 3.12.3  
-**Stato:** ✅ 104/104 test superati
+**Stato:** ✅ 107/107 test superati
 
 ---
 
@@ -20,9 +20,9 @@
 | UI Components | `test_ui_components.py` | 11 | ✅ |
 | Lock file | `test_signal_tui_lock.py` | 6 | ✅ |
 | Script installazione | `test_install_script.py` | 16 | ✅ |
-| Cache debounce | `test_cache_debounce.py` | 12 | ✅ |
+| Cache debounce | `test_cache_debounce.py` | 15 | ✅ |
 | Refresh chat | `test_refresh_chat.py` | 4 | ✅ |
-| **Totale** | | **104** | **✅ 104/104** |
+| **Totale** | | **107** | **✅ 107/107** |
 
 ---
 
@@ -163,7 +163,7 @@ Test dello script `install.sh` (eseguito come subprocess in ambienti temporanei 
 | `test_venv_created` | Crea `.venv` quando `DO_VENV=1` |
 | `test_no_venv_flag` | `--no-venv` non crea `.venv` |
 
-### 🔄 Cache debounce (`test_cache_debounce.py`) — 12 test
+### 🔄 Cache debounce (`test_cache_debounce.py`) — 15 test
 
 | Test | Descrizione |
 |------|-------------|
@@ -176,6 +176,9 @@ Test dello script `install.sh` (eseguito come subprocess in ambienti temporanei 
 | `test_flush_cache_updates_last_flush_time` | `_flush_cache()` aggiorna `_last_flush_time` |
 | `test_poll_worker_flushes_after_interval` | `_poll_worker()` chiama `_flush_cache()` quando `_pending_saves > 0` e sono passati più di 30s |
 | `test_poll_worker_no_flush_within_interval` | `_poll_worker()` NON chiama `_flush_cache()` se l'ultimo flush è recente |
+| `test_receipt_updates_current_cache` | `_process_receipt_envelope` aggiorna `self._cache` direttamente (non un riferimento stale) |
+| `test_receipt_survives_flush_cache` | Le modifiche del receipt non vengono perse quando `_flush_cache()` viene chiamato dopo |
+| `test_receipt_no_match_returns_false` | Se il timestamp del receipt non matcha, non aggiorna nulla |
 | `test_incremental_only_updates_given_contact` | Con `contact_number`, calcola solo per quel contatto |
 | `test_incremental_no_change_returns_early` | Se il conteggio non cambia, non ricostruisce la lista |
 | `test_full_update_all_contacts` | Senza `contact_number`, calcola per tutti i contatti |
