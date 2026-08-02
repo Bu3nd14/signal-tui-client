@@ -308,6 +308,8 @@ class SignalTUI(App):
         self._download_mode = False  # Ctrl+D download mode active
         self._pending_saves = 0  # debounce counter for cache writes
         self._CACHE_FLUSH_THRESHOLD = 5  # flush cache to disk every N messages
+        self._CACHE_FLUSH_INTERVAL = 30  # max seconds between cache flushes
+        self._last_flush_time = time.time()  # timestamp of last cache flush
 
 
     def compose(self):
@@ -330,6 +332,9 @@ class SignalTUI(App):
     def on_exit(self):
         """On exit, stop polling and do NOT kill the daemon."""
         self._polling_active = False
+        # Flush any pending cache changes (e.g. read receipts) to disk
+        if self._pending_saves > 0:
+            self._flush_cache()
 
     # ─── Chat helper methods ────────────────────────────────────────────────
 
@@ -654,12 +659,13 @@ class SignalTUI(App):
 
         This keeps the in-memory cache in sync with the pruned version on
         disk (so RAM doesn't grow unboundedly), but only runs when the
-        debounce threshold is reached.
+        debounce threshold is reached or the safety timer expires.
         """
         _save_cache(self._cache)
         _prune_cache()
         self._cache = _load_cache()
         self._pending_saves = 0
+        self._last_flush_time = time.time()
 
     def _maybe_flush_cache(self):
         """Increment the pending-save counter and flush when the threshold
@@ -1173,6 +1179,14 @@ class SignalTUI(App):
                         f.write(f"{time.time()}: {exc}\n")
                 except Exception:
                     pass
+
+            # Safety timer: flush pending cache changes even if the debounce
+            # threshold (5 messages) hasn't been reached. This guarantees
+            # that read receipts and other status changes are persisted to
+            # disk within _CACHE_FLUSH_INTERVAL seconds.
+            if self._pending_saves > 0 and time.time() - self._last_flush_time > self._CACHE_FLUSH_INTERVAL:
+                self._flush_cache()
+
             for _ in range(10):
                 if not self._polling_active:
                     return

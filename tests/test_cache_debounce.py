@@ -10,6 +10,7 @@ Verifies that:
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -93,6 +94,83 @@ class TestCacheDebounce:
             for _ in range(3):
                 app._maybe_flush_cache()
             assert app._pending_saves == 3
+
+
+class TestFlushOnExit:
+    """🚪 Verifica che on_exit() salvi le modifiche pendenti."""
+
+    def _make_app(self) -> SignalTUI:
+        app = SignalTUI()
+        app._cache = {"+391234567890": []}
+        return app
+
+    def test_on_exit_flushes_pending_saves(self):
+        """on_exit() chiama _flush_cache() quando ci sono modifiche pendenti."""
+        app = self._make_app()
+        app._pending_saves = 3
+
+        with patch.object(app, "_flush_cache") as mock_flush:
+            app.on_exit()
+            mock_flush.assert_called_once()
+
+    def test_on_exit_no_flush_when_no_pending(self):
+        """on_exit() NON chiama _flush_cache() se non ci sono modifiche pendenti."""
+        app = self._make_app()
+        app._pending_saves = 0
+
+        with patch.object(app, "_flush_cache") as mock_flush:
+            app.on_exit()
+            mock_flush.assert_not_called()
+
+
+class TestSafetyTimer:
+    """⏱️ Verifica il timer di sicurezza per il flush periodico."""
+
+    def _make_app(self) -> SignalTUI:
+        app = SignalTUI()
+        app._cache = {"+391234567890": []}
+        return app
+
+    def test_flush_cache_updates_last_flush_time(self):
+        """_flush_cache() aggiorna _last_flush_time."""
+        app = self._make_app()
+        app._last_flush_time = 0
+
+        with patch("signal_tui._save_cache"), \
+             patch("signal_tui._prune_cache"), \
+             patch("signal_tui._load_cache", return_value={}):
+            app._flush_cache()
+
+            assert app._last_flush_time > 0
+
+    def test_poll_worker_flushes_after_interval(self):
+        """_poll_worker() chiama _flush_cache() quando _pending_saves > 0
+        e sono passati più di _CACHE_FLUSH_INTERVAL secondi dall'ultimo flush."""
+        app = self._make_app()
+        app._pending_saves = 2
+        app._last_flush_time = 0  # simulate a very old flush
+        app._polling_active = True
+        app._use_daemon = False  # avoid calling rpc.receive()
+
+        with patch.object(app, "_flush_cache") as mock_flush, \
+             patch("signal_tui.time.sleep", side_effect=lambda s: setattr(app, "_polling_active", False)):
+            app._poll_worker()
+
+            mock_flush.assert_called_once()
+
+    def test_poll_worker_no_flush_within_interval(self):
+        """_poll_worker() NON chiama _flush_cache() se l'ultimo flush è recente."""
+        app = self._make_app()
+        app._pending_saves = 2
+        app._last_flush_time = time.time()  # recent flush
+        app._polling_active = True
+        app._use_daemon = False  # avoid calling rpc.receive()
+
+        with patch.object(app, "_flush_cache") as mock_flush, \
+             patch("signal_tui.time.sleep", side_effect=lambda s: setattr(app, "_polling_active", False)):
+            app._poll_worker()
+
+            mock_flush.assert_not_called()
 
 
 class TestIncrementalUnreadBadges:
