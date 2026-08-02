@@ -306,6 +306,9 @@ class SignalTUI(App):
         self._loaded_all = False
         self._reply_to: Optional[dict] = None  # message being replied to
         self._download_mode = False  # Ctrl+D download mode active
+        self._pending_saves = 0  # debounce counter for cache writes
+        self._CACHE_FLUSH_THRESHOLD = 5  # flush cache to disk every N messages
+
 
     def compose(self):
         yield Header()
@@ -621,11 +624,10 @@ class SignalTUI(App):
             "read": data["is_mine"],
             "status": "sent" if data["is_mine"] else "read",
         })
-        _save_cache(self._cache)
-        _prune_cache()
-        self._cache = _load_cache()
+        self._maybe_flush_cache()
 
         # If it's the current contact, show the message in the UI immediately
+
         if self.selected_contact and contact.number == self.selected_contact.number:
             if ts and ts not in self._seen_timestamps:
                 self._seen_timestamps.add(ts)
@@ -643,11 +645,36 @@ class SignalTUI(App):
                 )
         else:
             # Message for another contact: update unread badge
-            self.call_from_thread(self._update_unread_badges)
+            self.call_from_thread(self._update_unread_badges, contact.number)
 
         return True
 
+    def _flush_cache(self):
+        """Force a full cache flush to disk: save, prune, and reload.
+
+        This keeps the in-memory cache in sync with the pruned version on
+        disk (so RAM doesn't grow unboundedly), but only runs when the
+        debounce threshold is reached.
+        """
+        _save_cache(self._cache)
+        _prune_cache()
+        self._cache = _load_cache()
+        self._pending_saves = 0
+
+    def _maybe_flush_cache(self):
+        """Increment the pending-save counter and flush when the threshold
+        (5 messages) is reached.
+
+        This debounces disk I/O: instead of writing the full JSON cache file
+        for every single message, we accumulate in memory and write at most
+        once every 5 messages.
+        """
+        self._pending_saves += 1
+        if self._pending_saves >= self._CACHE_FLUSH_THRESHOLD:
+            self._flush_cache()
+
     def _process_receipt_envelope(self, envelope: dict) -> bool:
+
         """Process a receiptMessage envelope (delivery or read receipt).
 
         Updates the status of sent messages in the cache and refreshes
@@ -666,7 +693,8 @@ class SignalTUI(App):
             return False
 
         # Save the updated cache (usa il riferimento originale)
-        _save_cache(cache_ref)
+        self._maybe_flush_cache()
+
 
         # Get the source contact number from the envelope
         source = envelope.get("sourceNumber", "") or envelope.get("source", "")
@@ -887,10 +915,9 @@ class SignalTUI(App):
                 for msg in self._cache[number]:
                     if not msg.get("read", True):
                         msg["read"] = True
-                _save_cache(self._cache)
-                _prune_cache()
-                self._cache = _load_cache()
+                self._flush_cache()
             self._unread_counts[number] = 0
+
 
             # Force label update to remove *N badge
             contact_list = self.query_one("#contact-list", ListView)
@@ -1200,23 +1227,45 @@ class SignalTUI(App):
             chat_log.scroll_end(animate=False)
 
 
-    def _update_unread_badges(self):
+    def _update_unread_badges(self, contact_number: str | None = None):
         """Check the in-memory cache and update *N badges on contacts.
-        If counts change, re-sort the list and rebuild it."""
+        If counts change, re-sort the list and rebuild it.
+
+        Parameters
+        ----------
+        contact_number:
+            If provided, only recompute the unread count for this single
+            contact (O(M) instead of O(N×M)).  If None, recompute for all
+            contacts (used at startup / contact list load).
+        """
         if not self.contacts:
             return
 
         changed = False
-        for contact in self.contacts:
-            messages = self._cache.get(contact.number, [])
+
+        if contact_number is not None:
+            # Incremental update: only recompute the given contact.
+            messages = self._cache.get(contact_number, [])
             unread = sum(
                 1 for m in messages
                 if not m.get("is_mine") and not m.get("read", True)
             )
-            old = self._unread_counts.get(contact.number, 0)
+            old = self._unread_counts.get(contact_number, 0)
             if unread != old:
-                self._unread_counts[contact.number] = unread
+                self._unread_counts[contact_number] = unread
                 changed = True
+        else:
+            # Full update: recompute all contacts (startup / list load).
+            for contact in self.contacts:
+                messages = self._cache.get(contact.number, [])
+                unread = sum(
+                    1 for m in messages
+                    if not m.get("is_mine") and not m.get("read", True)
+                )
+                old = self._unread_counts.get(contact.number, 0)
+                if unread != old:
+                    self._unread_counts[contact.number] = unread
+                    changed = True
 
         if not changed:
             return
@@ -1235,6 +1284,7 @@ class SignalTUI(App):
         # Restore selection on the current contact (if present)
         if self.selected_contact and self.selected_contact in self.contacts:
             contact_list.index = self.contacts.index(self.selected_contact)
+
 
     # ─── Reply-to (quote) handling ───────────────────────────────────────────
 
@@ -1465,11 +1515,10 @@ class SignalTUI(App):
             "read": True,
             "status": "sent",
         })
-        _save_cache(self._cache)
-        _prune_cache()
-        self._cache = _load_cache()
+        self._maybe_flush_cache()
 
         # Show the message in the UI immediately (with quote if replying)
+
         self._add_message(
             message,
             is_mine=True,
