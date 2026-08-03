@@ -907,6 +907,8 @@ class SignalTUI(App):
         if index is not None and 0 <= index < len(self.contacts):
             self.selected_contact = self.contacts[index]
             self._seen_timestamps.clear()
+            # Cancel any pending reply so we don't reply to the wrong contact
+            self._cancel_reply()
             self._clear_chat()
             self._add_message(
                 f"📱 Chat with: {self.selected_contact.display_name}", is_info=True
@@ -1388,6 +1390,13 @@ class SignalTUI(App):
                 break
 
         self._update_reply_bar()
+
+        # Return focus to the message input so the user can start typing
+        # the reply immediately.
+        try:
+            self.query_one("#message-input", Input).focus()
+        except Exception:
+            pass
 
     # ─── Download mode (Ctrl+D) ──────────────────────────────────────────────
 
