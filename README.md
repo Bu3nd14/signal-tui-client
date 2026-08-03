@@ -26,7 +26,8 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 - Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
 - Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
 - Message delivery and read receipts — sent messages show status: sent (italic), delivered (bold), read (normal)
-- Typing indicators — see when a contact is typing (✍️ icon next to their name)
+- Typing indicators — see when a contact is typing (✍️ icon next to their name); a 💭 icon shows briefly after they stop typing or send a message
+
 
 
 ## Prerequisites
@@ -219,7 +220,9 @@ A persistent HTTP server starts on port **10042** (first download only) and stay
 - Only the last 20 messages are shown when opening a chat; click "Load more" to see all cached messages
 - Unread messages are shown with a `*N` badge next to the contact name
 - Sent messages show their delivery status: sent (italic), delivered (bold), read (normal)
-- A `✍️` icon next to a contact name means they are typing; it disappears when they send the message or stop typing
+- A `✍️` icon next to a contact name means they are typing; a `💭` icon shows briefly after they send the message or stop typing
+- The contact list is always kept in alphabetical order — typing, mumbling and unread states are shown as icons/badges but never reorder the list
+
 
 
 ## Performance Profiling
