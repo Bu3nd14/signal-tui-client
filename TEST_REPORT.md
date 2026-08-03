@@ -1,9 +1,10 @@
 # Test Report — Signal TUI Client
 
 **Data:** 2026-08-03  
-**Git commit:** `b163ba7`  
+**Git commit:** `40eff20`  
 **Python:** 3.12.3  
 **Stato:** ✅ 141/141 test superati
+
 
 
 
