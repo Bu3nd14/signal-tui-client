@@ -15,17 +15,19 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 
 ## Features
 
-- 📱 Full contact list with unread badges
-- 💬 Real-time message receiving and sending
-- 🖼️ Native terminal image rendering (via `catimg`) with fullscreen modal viewer
-- 📜 Message history with local cache (last 200 messages per contact, 3-day retention)
-- 🔗 Device linking via QR code
-- ⚡ Daemon mode for fast JSON-RPC communication
-- 🔄 Automatic fallback to subprocess if daemon is not running
-- ↩️ Reply to messages — click any message to quote it in your reply
-- 😊 Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
-- 📥 Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
-- ✅ Message delivery and read receipts — sent messages show status: sent (italic), delivered (bold), read (normal)
+- Full contact list with unread badges
+- Real-time message receiving and sending
+- Native terminal image rendering (via `catimg`) with fullscreen modal viewer
+- Message history with local cache (last 200 messages per contact, 3-day retention)
+- Device linking via QR code
+- Daemon mode for fast JSON-RPC communication
+- Automatic fallback to subprocess if daemon is not running
+- Reply to messages — click any message to quote it in your reply
+- Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
+- Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
+- Message delivery and read receipts — sent messages show status: sent (italic), delivered (bold), read (normal)
+- Typing indicators — see when a contact is typing (✍️ icon next to their name)
+
 
 ## Prerequisites
 
@@ -217,6 +219,8 @@ A persistent HTTP server starts on port **10042** (first download only) and stay
 - Only the last 20 messages are shown when opening a chat; click "Load more" to see all cached messages
 - Unread messages are shown with a `*N` badge next to the contact name
 - Sent messages show their delivery status: sent (italic), delivered (bold), read (normal)
+- A `✍️` icon next to a contact name means they are typing; it disappears when they send the message or stop typing
+
 
 ## Performance Profiling
 
