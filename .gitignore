@@ -7,3 +7,5 @@ config.json
 signal-tui-client.code-workspace
 *.log
 profiling/output/
+MIGRATION_SQLITE_PLAN.md
+
