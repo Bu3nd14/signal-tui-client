@@ -1078,7 +1078,15 @@ class SignalTUI(App):
         """When a contact is selected, show the chat."""
         index = self.query_one("#contact-list", ListView).index
         if index is not None and 0 <= index < len(self.contacts):
-            self._select_contact(self.contacts[index])
+            contact = self.contacts[index]
+            # Guard: when _select_contact sets contact_list.index programmatically
+            # (e.g. from the contact picker), Textual fires ListView.Selected again.
+            # If the contact is already selected, skip to avoid reloading the chat
+            # twice (which duplicates the messages).
+            if contact == self.selected_contact:
+                return
+            self._select_contact(contact)
+
 
 
     # ─── Message logic ────────────────────────────────────────────────────
