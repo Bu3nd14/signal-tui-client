@@ -24,9 +24,11 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 - Automatic fallback to subprocess if daemon is not running
 - Reply to messages — click any message to quote it in your reply
 - Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
+- Contact search (`Ctrl+S`) — search contacts by name or number with a live-updating picker
 - Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
 - Message delivery and read receipts — sent messages show status: sent (italic), delivered (bold), read (normal)
 - Typing indicators — see when a contact is typing (✍️ icon next to their name); a 💭 icon shows briefly after they stop typing or send a message
+
 
 
 
@@ -183,10 +185,12 @@ python3 signal_tui.py
 | `✕` button | Cancel reply selection |
 | Type message + `Enter` | Send message (with quote if replying) |
 | `Ctrl+E` | Open emoji picker |
+| `Ctrl+S` | Open contact search picker |
 | `Ctrl+D` | Toggle download mode |
 | `Ctrl+N` / `Ctrl+P` | Navigate emoji suggestions / emoji picker categories |
 | `Ctrl+Q` | Quit |
 | `Ctrl+C` | Quit |
+
 
 ### Emoji
 
@@ -200,7 +204,19 @@ Press **`Ctrl+E`** to open the emoji picker. Inside the picker:
 
 You can also type `:alias:` shortcuts directly in the message input (e.g. `:smile:` → 😊, `:heart:` → ❤️). A completion popup will appear as you type; use `Ctrl+N`/`Ctrl+P` to navigate and `Enter` to confirm.
 
+### Contact Search
+
+Press **`Ctrl+S`** to open the contact search picker. Inside the picker:
+
+- **Type** — the result list updates live as you type, filtering contacts by name or number (case-insensitive)
+- **`↑`** / **`↓`** — navigate the list of matching contacts
+- **`Enter`** — select the highlighted contact, open its chat, and close the picker
+- **`Escape`** — close the picker without selecting
+
+Selecting a contact from the picker opens its chat **and** highlights it in the contact list on the left, exactly as if you had selected it manually.
+
 ### Download Mode
+
 
 Press **`Ctrl+D`** to enter download mode, then click any message to serve it for download:
 
@@ -255,6 +271,7 @@ signal-tui-client/
 ├── ui_components.py       # Custom Textual widgets (MessageWidget, ImageWidget, DownloadLinkWidget, …)
 ├── emoji_picker.py        # Emoji picker modal screen and auto-completion widget
 ├── emoji_data.py          # Emoji database (categories, aliases, search index)
+├── contact_picker.py      # Contact search picker modal screen (Ctrl+S)
 ├── link_account.py        # Device linking script (QR code)
 ├── install.sh             # Automatic installation script (downloads signal-cli, sets up venv)
 ├── requirements.txt       # Python dependencies
@@ -263,6 +280,7 @@ signal-tui-client/
 ├── profiling/             # Performance profiling tools (CPU, RAM, I/O)
 ├── bin/                   # signal-cli binaries (not committed)
 └── LICENSE                # GPLv3
+
 ```
 
 

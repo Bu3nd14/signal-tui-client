@@ -3,7 +3,8 @@
 **Data:** 2026-08-03  
 **Git commit:** `b163ba7`  
 **Python:** 3.12.3  
-**Stato:** ✅ 132/132 test superati
+**Stato:** ✅ 141/141 test superati
+
 
 
 
@@ -17,6 +18,7 @@
 | Modulo | File | Test | Esito |
 |--------|------|------|-------|
 | Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
+| Contact Picker | `test_contact_picker.py` | 9 | ✅ |
 | Cache | `test_backend_cache.py` | 16 | ✅ |
 | Contatti | `test_backend_contacts.py` | 4 | ✅ |
 | Attachment | `test_backend_attachments.py` | 5 | ✅ |
@@ -28,7 +30,8 @@
 | Cache debounce | `test_cache_debounce.py` | 15 | ✅ |
 | Refresh chat | `test_refresh_chat.py` | 4 | ✅ |
 | Indicatori di typing | `test_typing_indicator.py` | 25 | ✅ |
-| **Totale** | | **132** | **✅ 132/132** |
+| **Totale** | | **141** | **✅ 141/141** |
+
 
 
 
@@ -60,7 +63,24 @@
 | `test_alias_to_emoji_populated` | Mappa _ALIAS_TO_EMOJI contiene "smile" |
 | `test_emoji_to_alias_populated` | Mappa _EMOJI_TO_ALIAS popolata |
 
+### 🔍 Contact Picker (`test_contact_picker.py`) — 9 test
+
+Test della funzionalità di ricerca contatti (attivata con `Ctrl+S`): l'helper `search_contacts()` filtra la lista dei contatti per nome o numero, case-insensitive, e restituisce i risultati in ordine.
+
+| Test | Descrizione |
+|------|-------------|
+| `test_search_by_name` | Cerca "alice" → trova Alice Rossi |
+| `test_search_case_insensitive` | Cerca "ALICE" (maiuscolo) → stesso risultato di "alice" |
+| `test_search_by_number` | Cerca parte del numero → trova il contatto |
+| `test_search_partial_name` | Cerca "ross" → trova Alice Rossi (substring) |
+| `test_search_no_results` | Stringa inesistente → lista vuota |
+| `test_search_empty_query` | Query vuota → restituisce tutti i contatti |
+| `test_search_whitespace_query` | Query di soli spazi → trattata come vuota |
+| `test_search_max_results` | Verifica il limite massimo di risultati |
+| `test_search_contact_without_name` | Contatto senza nome → match sul numero |
+
 ### 💾 Cache (`test_backend_cache.py`) — 16 test
+
 
 | Test | Descrizione |
 |------|-------------|

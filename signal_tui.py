@@ -119,6 +119,8 @@ from emoji_picker import (
     EmojiCompletionWidget,
     replace_emoji_aliases,
 )
+from contact_picker import ContactPickerScreen
+
 
 
 logger = logging.getLogger(__name__)
@@ -281,10 +283,12 @@ class SignalTUI(App):
 
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("ctrl+e", "open_emoji_picker", "Emoji", priority=True),
+        Binding("ctrl+s", "open_contact_picker", "Search", priority=True),
         Binding("ctrl+d", "download_mode", "Download", priority=True),
         Binding("ctrl+n", "next_suggestion", "Next", show=False),
         Binding("ctrl+p", "prev_suggestion", "Prev", show=False),
     ]
+
 
     # Disable Textual's built-in command palette (Ctrl+P) to avoid conflict
     # with the emoji picker's Ctrl+P for previous category.
@@ -1019,48 +1023,63 @@ class SignalTUI(App):
 
     # ─── Contact selection ─────────────────────────────────────────────────
 
+    def _select_contact(self, contact: Contact) -> None:
+        """Select a contact and show its chat.
+
+        Shared by both the contact list (``on_list_view_selected``) and the
+        contact picker (``_open_contact_picker``).  Sets ``selected_contact``,
+        highlights the contact in the left list, loads the chat, marks all
+        messages as read, updates unread badges, and returns focus to the
+        message input.
+        """
+        if contact not in self.contacts:
+            return
+
+        self.selected_contact = contact
+        self._seen_timestamps.clear()
+        # Cancel any pending reply so we don't reply to the wrong contact
+        self._cancel_reply()
+        self._clear_chat()
+        self._add_message(
+            f"📱 Chat with: {self.selected_contact.display_name}", is_info=True
+        )
+        self._add_message(self.selected_contact.number, is_info=True)
+        self._add_message("─" * 40, is_info=True)
+
+        self.run_worker(
+            self._load_messages_worker, exclusive=True, thread=True
+        )
+
+        # Mark all messages from this contact as read
+        number = self.selected_contact.number
+        with self._cache_lock:
+            if number in self._cache:
+                for msg in self._cache[number]:
+                    if not msg.get("read", True):
+                        msg["read"] = True
+                self._flush_cache()
+        self._unread_counts[number] = 0
+
+        # Highlight the contact in the left list and remove the *N badge
+        contact_list = self.query_one("#contact-list", ListView)
+        index = self.contacts.index(contact)
+        contact_list.index = index
+        item = contact_list.children[index]
+        item.children[0].update(self._contact_label(self.selected_contact))
+
+        # Return focus to the message input so the user can start typing
+        # immediately after selecting a contact.
+        try:
+            self.query_one("#message-input", Input).focus()
+        except Exception:
+            pass
+
     def on_list_view_selected(self, event: ListView.Selected):
         """When a contact is selected, show the chat."""
         index = self.query_one("#contact-list", ListView).index
         if index is not None and 0 <= index < len(self.contacts):
-            self.selected_contact = self.contacts[index]
-            self._seen_timestamps.clear()
-            # Cancel any pending reply so we don't reply to the wrong contact
-            self._cancel_reply()
-            self._clear_chat()
-            self._add_message(
-                f"📱 Chat with: {self.selected_contact.display_name}", is_info=True
-            )
-            self._add_message(self.selected_contact.number, is_info=True)
-            self._add_message("─" * 40, is_info=True)
+            self._select_contact(self.contacts[index])
 
-            self.run_worker(
-                self._load_messages_worker, exclusive=True, thread=True
-            )
-
-            # Mark all messages from this contact as read
-            number = self.selected_contact.number
-            with self._cache_lock:
-                if number in self._cache:
-                    for msg in self._cache[number]:
-                        if not msg.get("read", True):
-                            msg["read"] = True
-                    self._flush_cache()
-            self._unread_counts[number] = 0
-
-
-            # Force label update to remove *N badge (keeps typing icon)
-            contact_list = self.query_one("#contact-list", ListView)
-            item = contact_list.children[index]
-            item.children[0].update(self._contact_label(self.selected_contact))
-
-
-            # Return focus to the message input so the user can start typing
-            # immediately after selecting a contact.
-            try:
-                self.query_one("#message-input", Input).focus()
-            except Exception:
-                pass
 
     # ─── Message logic ────────────────────────────────────────────────────
 
@@ -1167,7 +1186,25 @@ class SignalTUI(App):
         """Action to open emoji picker (bound to Ctrl+E)."""
         self._open_emoji_picker()
 
+    # ─── Contact picker ───────────────────────────────────────────────────────
+
+    def _open_contact_picker(self) -> None:
+        """Open the contact search picker modal."""
+        def _on_contact_selected(contact: Contact | None) -> None:
+            if contact:
+                # Select the contact's chat (also highlights it in the left list)
+                self._select_contact(contact)
+            # Refresh chat to show any messages that arrived while the picker was open
+            self._refresh_chat()
+
+        self.push_screen(ContactPickerScreen(self.contacts), _on_contact_selected)
+
+    def action_open_contact_picker(self) -> None:
+        """Action to open the contact picker (bound to Ctrl+S)."""
+        self._open_contact_picker()
+
     # ─── Emoji alias auto-completion ──────────────────────────────────────────
+
 
     def _is_completion_visible(self) -> bool:
         """Check if the emoji completion widget is currently visible."""
