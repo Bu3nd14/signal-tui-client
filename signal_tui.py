@@ -620,10 +620,19 @@ class SignalTUI(App):
         if contact is None:
             return False
 
+        # When a real message arrives, the sender has stopped typing, so
+        # remove their typing indicator immediately (instead of waiting for
+        # a STOPPED envelope or the 10s timeout).  A later STARTED envelope
+        # will re-add the indicator if they start typing again.
+        if contact.number in self._typing_contacts:
+            self._typing_contacts.pop(contact.number, None)
+            self.call_from_thread(self._refresh_typing_indicator, contact.number)
+
         ts = self._get_message_timestamp(envelope)
         data = self._extract_message_data(envelope)
         if data is None:
             return False
+
 
         with self._cache_lock:
             if contact.number not in self._cache:

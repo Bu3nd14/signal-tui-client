@@ -107,6 +107,53 @@ class TestSignalTUITyping:
         # The cache must remain empty — typing is ephemeral.
         assert app._cache == {}
 
+    def test_real_message_removes_typing_indicator(self):
+        """Quando arriva un messaggio reale, l'indicatore di typing sparisce."""
+        app = self._make_app()
+        app._cache = {}
+        app._typing_contacts["+391234567890"] = 100.0  # sta scrivendo
+
+        # A real message envelope (dataMessage, no typingMessage)
+        message_envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "timestamp": 1234567890000,
+            "dataMessage": {"message": "ciao", "timestamp": 1234567890000},
+        }
+
+        with patch.object(app, "call_from_thread"):
+            app._process_envelope(message_envelope)
+
+        # The typing indicator must be removed immediately.
+        assert "+391234567890" not in app._typing_contacts
+
+    def test_new_started_after_message_readds_indicator(self):
+        """Dopo un messaggio, un nuovo STARTED riattiva l'indicatore."""
+        app = self._make_app()
+        app._cache = {}
+
+        # Contact starts typing → indicator appears
+        with patch.object(app, "call_from_thread"):
+            app._process_envelope(_typing_envelope("+391234567890", "STARTED"))
+        assert "+391234567890" in app._typing_contacts
+
+        # Contact sends a message → indicator disappears
+        message_envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "timestamp": 1234567890000,
+            "dataMessage": {"message": "ciao", "timestamp": 1234567890000},
+        }
+        with patch.object(app, "call_from_thread"):
+            app._process_envelope(message_envelope)
+        assert "+391234567890" not in app._typing_contacts
+
+        # Contact starts typing again → indicator reappears
+        with patch.object(app, "call_from_thread"):
+            app._process_envelope(_typing_envelope("+391234567890", "STARTED"))
+        assert "+391234567890" in app._typing_contacts
+
+
     def test_contact_label_includes_typing_icon(self):
         app = self._make_app()
         contact = app.contacts[0]
