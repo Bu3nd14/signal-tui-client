@@ -1192,10 +1192,18 @@ class SignalTUI(App):
         """Open the contact search picker modal."""
         def _on_contact_selected(contact: Contact | None) -> None:
             if contact:
-                # Select the contact's chat (also highlights it in the left list)
+                # Select the contact's chat (also highlights it in the left list).
+                # _select_contact already reloads the full chat from cache, so
+                # calling _refresh_chat() afterwards would re-add the same
+                # messages (the load worker runs in a separate thread and may
+                # not have populated _seen_timestamps yet, making _refresh_chat
+                # add everything again → duplicated messages).
                 self._select_contact(contact)
-            # Refresh chat to show any messages that arrived while the picker was open
-            self._refresh_chat()
+            else:
+                # Picker dismissed without selecting: refresh to show any
+                # messages that arrived while the picker was open.
+                self._refresh_chat()
+
 
         self.push_screen(ContactPickerScreen(self.contacts), _on_contact_selected)
 
