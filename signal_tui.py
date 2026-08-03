@@ -97,7 +97,9 @@ from backend import (
     _run_subprocess,
     _send_subprocess,
     _process_receipt,
+    _process_typing,
     get_attachment_path,
+
     serve_attachment_for_download,
     serve_text_as_file,
     SIGNAL_CLI_PATH,
@@ -312,6 +314,9 @@ class SignalTUI(App):
         self._CACHE_FLUSH_INTERVAL = 30  # max seconds between cache flushes
         self._last_flush_time = time.time()  # timestamp of last cache flush
         self._cache_lock = threading.RLock()  # reentrant lock: protects _cache from concurrent access
+        self._typing_contacts: dict[str, float] = {}  # contact number → time of last typing STARTED
+        self._TYPING_TIMEOUT = 10.0  # seconds before a typing indicator auto-expires
+
 
 
     def compose(self):
@@ -602,11 +607,16 @@ class SignalTUI(App):
         Also handles receiptMessage envelopes (delivery and read receipts)
         for messages we sent, updating their status in the cache and UI.
         """
+        # ── Check if this is a typing indicator ─────────────────────────────
+        if _process_typing(envelope) is not None:
+            return self._process_typing_envelope(envelope)
+
         # ── Check if this is a receipt message ──────────────────────────────
         if "receiptMessage" in envelope:
             return self._process_receipt_envelope(envelope)
 
         contact = self._identify_contact_for_envelope(envelope)
+
         if contact is None:
             return False
 
@@ -735,7 +745,71 @@ class SignalTUI(App):
                     child.set_status(new_status)
                     break
 
+    # ─── Typing indicators ──────────────────────────────────────────────────
+
+    def _process_typing_envelope(self, envelope: dict) -> bool:
+        """Process a typing-indicator envelope.
+
+        Updates ``self._typing_contacts`` (contact number → time of last
+        STARTED) and refreshes the contact list label so the ``✍️`` icon
+        appears/disappears next to the contact.
+
+        Typing indicators are ephemeral: they are never saved to cache and
+        never shown as messages in the chat log.
+        """
+        result = _process_typing(envelope)
+        if result is None:
+            return False
+
+        source, action = result
+        now = time.time()
+
+        if action == "STARTED":
+            self._typing_contacts[source] = now
+        else:  # STOPPED
+            self._typing_contacts.pop(source, None)
+
+        # Refresh the contact list label (non-invasive: only the label text
+        # of the affected contact changes, selection is preserved).
+        self.call_from_thread(self._refresh_typing_indicator, source)
+        return True
+
+    def _refresh_typing_indicator(self, contact_number: str) -> None:
+        """Rebuild the contact list labels to reflect typing state.
+
+        Only the label of the affected contact changes; the list is rebuilt
+        preserving the current selection (same approach as
+        ``_update_unread_badges``).
+        """
+        if not self.contacts:
+            return
+
+        contact_list = self.query_one("#contact-list", ListView)
+        contact_list.clear()
+        for c in self.contacts:
+            contact_list.append(ListItem(Label(self._contact_label(c))))
+
+        # Restore selection on the current contact (if present)
+        if self.selected_contact and self.selected_contact in self.contacts:
+            contact_list.index = self.contacts.index(self.selected_contact)
+
+    def _contact_label(self, contact: Contact) -> str:
+        """Build the contact list label.
+
+        Format: ``📱 {name}`` + (if unread) `` *{N}`` + (if typing) `` ✍️``.
+        The typing icon appears to the right of the unread badge when present,
+        otherwise to the right of the name.
+        """
+        label = f"📱 {contact.display_name}"
+        unread = self._unread_counts.get(contact.number, 0)
+        if unread > 0 and contact != self.selected_contact:
+            label += f" *{unread}"
+        if contact.number in self._typing_contacts:
+            label += " ✍️"
+        return label
+
     # ─── Startup ────────────────────────────────────────────────────────────
+
 
     def _startup(self):
         """Start signal-cli daemon and load contacts."""
@@ -892,9 +966,10 @@ class SignalTUI(App):
         contact_list = self.query_one("#contact-list", ListView)
         contact_list.clear()
         for c in self.contacts:
-            contact_list.append(ListItem(Label(f"📱 {c.display_name}")))
+            contact_list.append(ListItem(Label(self._contact_label(c))))
 
         self._add_message(f"✅ Loaded {len(contacts)} contacts.", is_info=True)
+
         self._add_message("💡 Select a contact to view chat", is_info=True)
 
         self._update_unread_badges()
@@ -931,10 +1006,11 @@ class SignalTUI(App):
             self._unread_counts[number] = 0
 
 
-            # Force label update to remove *N badge
+            # Force label update to remove *N badge (keeps typing icon)
             contact_list = self.query_one("#contact-list", ListView)
             item = contact_list.children[index]
-            item.children[0].update(f"📱 {self.selected_contact.display_name}")
+            item.children[0].update(self._contact_label(self.selected_contact))
+
 
             # Return focus to the message input so the user can start typing
             # immediately after selecting a contact.
@@ -1200,10 +1276,25 @@ class SignalTUI(App):
             if self._pending_saves > 0 and time.time() - self._last_flush_time > self._CACHE_FLUSH_INTERVAL:
                 self._flush_cache()
 
+            # Typing-indicator timeout: if a contact sent STARTED but no
+            # STOPPED arrived within _TYPING_TIMEOUT seconds, expire the
+            # indicator so the ✍️ icon doesn't stay stuck forever.
+            if self._typing_contacts:
+                now = time.time()
+                expired = [
+                    num for num, started_at in self._typing_contacts.items()
+                    if now - started_at > self._TYPING_TIMEOUT
+                ]
+                if expired:
+                    for num in expired:
+                        self._typing_contacts.pop(num, None)
+                    self.call_from_thread(self._refresh_typing_indicator, expired[0])
+
             for _ in range(10):
                 if not self._polling_active:
                     return
                 time.sleep(0.1)
+
 
     def _refresh_chat(self):
         """Check cache for new messages of the current contact not yet shown.
@@ -1302,15 +1393,12 @@ class SignalTUI(App):
         contact_list = self.query_one("#contact-list", ListView)
         contact_list.clear()
         for c in self.contacts:
-            label = f"📱 {c.display_name}"
-            unread = self._unread_counts.get(c.number, 0)
-            if unread > 0 and c != self.selected_contact:
-                label += f" *{unread}"
-            contact_list.append(ListItem(Label(label)))
+            contact_list.append(ListItem(Label(self._contact_label(c))))
 
         # Restore selection on the current contact (if present)
         if self.selected_contact and self.selected_contact in self.contacts:
             contact_list.index = self.contacts.index(self.selected_contact)
+
 
 
     # ─── Reply-to (quote) handling ───────────────────────────────────────────

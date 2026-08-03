@@ -1,9 +1,10 @@
 # Test Report — Signal TUI Client
 
 **Data:** 2026-08-03  
-**Git commit:** `0e5488d`  
+**Git commit:** `b163ba7`  
 **Python:** 3.12.3  
-**Stato:** ✅ 107/107 test superati
+**Stato:** ✅ 118/118 test superati
+
 
 ---
 
@@ -22,7 +23,9 @@
 | Script installazione | `test_install_script.py` | 16 | ✅ |
 | Cache debounce | `test_cache_debounce.py` | 15 | ✅ |
 | Refresh chat | `test_refresh_chat.py` | 4 | ✅ |
-| **Totale** | | **107** | **✅ 107/107** |
+| Indicatori di typing | `test_typing_indicator.py` | 11 | ✅ |
+| **Totale** | | **118** | **✅ 118/118** |
+
 
 ---
 
@@ -192,9 +195,28 @@ Test dello script `install.sh` (eseguito come subprocess in ambienti temporanei 
 | `test_refresh_chat_no_selected_contact` | Nessun contatto selezionato → nessuna operazione |
 | `test_refresh_chat_empty_seen_timestamps` | `_seen_timestamps` vuoto → aggiunge tutti i messaggi |
 
+### ✍️ Indicatori di typing (`test_typing_indicator.py`) — 11 test
+
+Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano da signal-cli come envelope con `typingMessage` (action `STARTED`/`STOPPED`). Sono effimeri: non finiscono mai in cache né nel log chat, ma attivano l'icona `✍️` accanto al contatto nella lista.
+
+| Test | Descrizione |
+|------|-------------|
+| `test_started` | `_process_typing` estrae `(numero, "STARTED")` |
+| `test_stopped` | `_process_typing` estrae `(numero, "STOPPED")` |
+| `test_not_typing_envelope` | Envelope normale (senza `typingMessage`) → `None` |
+| `test_unknown_action` | Action sconosciuta → `None` |
+| `test_missing_source` | Envelope senza source → `None` |
+| `test_started_adds_to_typing_contacts` | `STARTED` aggiunge il contatto a `_typing_contacts` |
+| `test_stopped_removes_from_typing_contacts` | `STOPPED` rimuove il contatto da `_typing_contacts` |
+| `test_typing_envelope_not_saved_to_cache` | Un envelope di typing non finisce nella cache messaggi |
+| `test_contact_label_includes_typing_icon` | La label del contatto include `✍️` quando sta scrivendo |
+| `test_contact_label_icon_after_unread_badge` | L'icona `✍️` va a destra del badge `*N` quando presente |
+| `test_typing_timeout_expires_indicator` | Dopo il timeout, l'indicatore sparisce |
+
 ---
 
 ## Come eseguire
+
 
 ```bash
 ./tests/run_regression_tests.sh

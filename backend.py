@@ -253,7 +253,52 @@ def _mark_as_read(contact_number: str):
             _save_cache(cache)
 
 
+def _process_typing(envelope: dict) -> tuple[str, str] | None:
+    """Extract typing-indicator data from an envelope.
+
+    Typing indicators arrive as envelopes with a ``typingMessage`` field
+    (from signal-cli's JSON-RPC daemon).  The envelope has the form::
+
+        {
+            "source": "+39...",
+            "sourceNumber": "+39...",
+            "sourceUuid": "...",
+            "timestamp": 1234567890000,
+            "typingMessage": {
+                "action": "STARTED",   # or "STOPPED"
+                "timestamp": 1234567890000
+            }
+        }
+
+    Parameters
+    ----------
+    envelope:
+        The full envelope dict from signal-cli.
+
+    Returns
+    -------
+    tuple[str, str] | None
+        A ``(contact_number, action)`` tuple where ``action`` is either
+        ``"STARTED"`` or ``"STOPPED"``, or ``None`` if the envelope is not
+        a typing indicator.
+    """
+    typing = envelope.get("typingMessage")
+    if not typing:
+        return None
+
+    action = typing.get("action", "")
+    if action not in ("STARTED", "STOPPED"):
+        return None
+
+    source = envelope.get("sourceNumber", "") or envelope.get("source", "")
+    if not source:
+        return None
+
+    return (source, action)
+
+
 def _process_receipt(envelope: dict, cache: dict) -> list[dict]:
+
     """Process a receiptMessage envelope and update message statuses in cache.
 
     Receipt messages contain delivery and read receipts for messages we sent.
