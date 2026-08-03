@@ -209,11 +209,14 @@ You can also type `:alias:` shortcuts directly in the message input (e.g. `:smil
 Press **`Ctrl+S`** to open the contact search picker. Inside the picker:
 
 - **Type** — the result list updates live as you type, filtering contacts by name or number (case-insensitive)
+- **`Tab`** — move focus from the search input to the results list (`Shift+Tab` to go back)
 - **`↑`** / **`↓`** — navigate the list of matching contacts
 - **`Enter`** — select the highlighted contact, open its chat, and close the picker
+- **Click** — select a contact directly with the mouse
 - **`Escape`** — close the picker without selecting
 
 Selecting a contact from the picker opens its chat **and** highlights it in the contact list on the left, exactly as if you had selected it manually.
+
 
 ### Download Mode
 

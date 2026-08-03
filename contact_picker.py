@@ -157,9 +157,10 @@ class ContactPickerScreen(ModalScreen[Contact]):
             )
             yield ListView(id="contact-results")
             yield Static(
-                "↑/↓ navigate · Enter select · Esc close",
+                "Tab switch · ↑/↓ navigate · Enter/click select · Esc close",
                 id="contact-picker-footer",
             )
+
 
     def on_mount(self) -> None:
         """Render the initial (unfiltered) list and focus the search input."""
@@ -198,3 +199,17 @@ class ContactPickerScreen(ModalScreen[Contact]):
         index = results_list.index
         if index is not None and 0 <= index < len(self._results):
             self.dismiss(self._results[index])
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Click: select the clicked contact and dismiss the picker.
+
+        Clicking a ``ListItem`` in the results list emits ``ListView.Selected``.
+        The ``enter`` binding (priority) consumes the Enter key, so keyboard
+        selection goes through ``action_select_contact`` while mouse clicks
+        arrive here — the two paths never conflict.
+        """
+        results_list = self.query_one("#contact-results", ListView)
+        index = results_list.index
+        if index is not None and 0 <= index < len(self._results):
+            self.dismiss(self._results[index])
+
