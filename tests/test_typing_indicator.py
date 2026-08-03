@@ -6,6 +6,10 @@ Typing indicators arrive from signal-cli as envelopes with a
 They are ephemeral: they must never be saved to the message cache nor shown
 as messages in the chat log.  Instead they toggle a ``✍️`` icon next to the
 contact in the contact list.
+
+A contact that stops typing without sending a message moves to a "mumbling"
+state (💭) and stays at the top of the list for a while, so the list doesn't
+jump around on every STOPPED.
 """
 
 from __future__ import annotations
@@ -77,6 +81,8 @@ class TestSignalTUITyping:
         app.contacts = [contact]
         app._unread_counts = {}
         app._typing_contacts = {}
+        app._typing_mumbling = {}
+        app._typing_pending_removal = {}
         return app
 
     def test_started_adds_to_typing_contacts(self):
@@ -88,7 +94,8 @@ class TestSignalTUITyping:
         assert result is True
         assert "+391234567890" in app._typing_contacts
 
-    def test_stopped_removes_from_typing_contacts(self):
+    def test_stopped_moves_to_mumbling(self):
+        """STOPPED rimuove da _typing_contacts e passa allo stato mumbling."""
         app = self._make_app()
         app._typing_contacts["+391234567890"] = 100.0
         with patch.object(app, "call_from_thread"):
@@ -97,6 +104,8 @@ class TestSignalTUITyping:
             )
         assert result is True
         assert "+391234567890" not in app._typing_contacts
+        # The contact stays at the top in the mumbling state (💭)
+        assert "+391234567890" in app._typing_mumbling
 
     def test_typing_envelope_not_saved_to_cache(self):
         """Un envelope di typing non deve finire nella cache messaggi."""
@@ -194,8 +203,6 @@ class TestSignalTUITyping:
         assert "+391234567890" in app._typing_contacts
         assert "+391234567890" not in app._typing_pending_removal
 
-
-
     def test_contact_label_includes_typing_icon(self):
         app = self._make_app()
         contact = app.contacts[0]
@@ -215,8 +222,18 @@ class TestSignalTUITyping:
         # Badge first, then typing icon
         assert label.index("*3") < label.index("✍️")
 
-    def test_typing_timeout_expires_indicator(self):
-        """Dopo il timeout, l'indicatore sparisce."""
+    def test_contact_label_includes_mumbling_icon(self):
+        """Un contatto in stato mumbling mostra 💭 (non ✍️)."""
+        app = self._make_app()
+        contact = app.contacts[0]
+        app._typing_mumbling[contact.number] = 100.0
+        label = app._contact_label(contact)
+        assert "💭" in label
+        assert "✍️" not in label
+
+    def test_typing_timeout_moves_to_mumbling(self):
+        """Dopo il timeout, l'indicatore ✍️ sparisce ma il contatto passa
+        allo stato mumbling (💭) invece di sparire del tutto."""
         app = self._make_app()
         app._typing_contacts["+391234567890"] = 0.0  # started long ago
         with patch.object(app, "call_from_thread"):
@@ -228,4 +245,89 @@ class TestSignalTUITyping:
             ]
             for num in expired:
                 app._typing_contacts.pop(num, None)
+                app._typing_mumbling[num] = now + app._TYPING_MUMBLING_DURATION
         assert app._typing_contacts == {}
+        assert "+391234567890" in app._typing_mumbling
+
+    def test_mumbling_expiry_removes_indicator(self):
+        """Dopo la scadenza del mumbling, il contatto viene rimosso."""
+        app = self._make_app()
+        app._typing_mumbling["+391234567890"] = 100.0  # already expired
+        with patch.object(app, "call_from_thread"):
+            # Simulate the poll loop's mumbling-expiry check
+            now = 200.0
+            expired = [
+                num for num, expires_at in app._typing_mumbling.items()
+                if now >= expires_at
+            ]
+            for num in expired:
+                app._typing_mumbling.pop(num, None)
+        assert app._typing_mumbling == {}
+
+    def test_message_clears_mumbling(self):
+        """Un messaggio reale rimuove lo stato mumbling (ha inviato, ha finito)."""
+        app = self._make_app()
+        app._cache = {}
+        app._typing_mumbling["+391234567890"] = 100.0
+
+        message_envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "timestamp": 1234567890000,
+            "dataMessage": {"message": "ciao", "timestamp": 1234567890000},
+        }
+        with patch.object(app, "call_from_thread"):
+            app._process_envelope(message_envelope)
+
+        assert "+391234567890" not in app._typing_mumbling
+
+    def test_started_clears_mumbling(self):
+        """Un nuovo STARTED rimuove lo stato mumbling (sta scrivendo di nuovo)."""
+        app = self._make_app()
+        app._typing_mumbling["+391234567890"] = 100.0
+        with patch.object(app, "call_from_thread"):
+            app._process_envelope(_typing_envelope("+391234567890", "STARTED"))
+        assert "+391234567890" not in app._typing_mumbling
+        assert "+391234567890" in app._typing_contacts
+
+    def test_sort_typing_above_normal(self):
+        """Un contatto che sta scrivendo viene ordinato sopra i contatti normali."""
+        app = self._make_app()
+        normal = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
+        typing = Contact(number="+391234567890", name="Mario", aci="uuid-123")
+        app.contacts = [normal, typing]
+        app._unread_counts = {}
+        app._typing_contacts[typing.number] = 100.0
+
+        app._sort_contacts()
+
+        assert app.contacts[0].number == typing.number
+        assert app.contacts[1].number == normal.number
+
+    def test_sort_unread_above_typing(self):
+        """Un contatto con messaggi non letti resta sopra chi sta scrivendo."""
+        app = self._make_app()
+        unread = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
+        typing = Contact(number="+391234567890", name="Mario", aci="uuid-123")
+        app.contacts = [typing, unread]
+        app._unread_counts = {unread.number: 2}
+        app._typing_contacts[typing.number] = 100.0
+
+        app._sort_contacts()
+
+        assert app.contacts[0].number == unread.number
+        assert app.contacts[1].number == typing.number
+
+    def test_sort_mumbling_above_normal(self):
+        """Un contatto in stato mumbling viene ordinato sopra i contatti normali."""
+        app = self._make_app()
+        normal = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
+        mumbling = Contact(number="+391234567890", name="Mario", aci="uuid-123")
+        app.contacts = [normal, mumbling]
+        app._unread_counts = {}
+        app._typing_mumbling[mumbling.number] = 100.0
+
+        app._sort_contacts()
+
+        assert app.contacts[0].number == mumbling.number
+        assert app.contacts[1].number == normal.number
