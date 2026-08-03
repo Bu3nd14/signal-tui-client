@@ -315,7 +315,10 @@ class SignalTUI(App):
         self._last_flush_time = time.time()  # timestamp of last cache flush
         self._cache_lock = threading.RLock()  # reentrant lock: protects _cache from concurrent access
         self._typing_contacts: dict[str, float] = {}  # contact number → time of last typing STARTED
+        self._typing_pending_removal: dict[str, float] = {}  # contact number → time when the indicator should be removed
         self._TYPING_TIMEOUT = 10.0  # seconds before a typing indicator auto-expires
+        self._TYPING_GRACE_PERIOD = 1.5  # seconds the ✍️ icon stays visible after a message arrives
+
 
 
 
@@ -621,12 +624,14 @@ class SignalTUI(App):
             return False
 
         # When a real message arrives, the sender has stopped typing, so
-        # remove their typing indicator immediately (instead of waiting for
-        # a STOPPED envelope or the 10s timeout).  A later STARTED envelope
-        # will re-add the indicator if they start typing again.
+        # schedule the removal of their typing indicator after a short grace
+        # period.  This keeps the ✍️ icon visible briefly even when the
+        # STARTED envelope and the message arrive in the same poll batch
+        # (otherwise the icon would flash and disappear before being seen).
+        # A later STARTED envelope cancels the pending removal.
         if contact.number in self._typing_contacts:
-            self._typing_contacts.pop(contact.number, None)
-            self.call_from_thread(self._refresh_typing_indicator, contact.number)
+            self._typing_pending_removal[contact.number] = time.time() + self._TYPING_GRACE_PERIOD
+
 
         ts = self._get_message_timestamp(envelope)
         data = self._extract_message_data(envelope)
@@ -775,8 +780,13 @@ class SignalTUI(App):
 
         if action == "STARTED":
             self._typing_contacts[source] = now
+            # A new STARTED cancels any pending removal scheduled by a
+            # message that arrived during the grace period.
+            self._typing_pending_removal.pop(source, None)
         else:  # STOPPED
             self._typing_contacts.pop(source, None)
+            self._typing_pending_removal.pop(source, None)
+
 
         # Refresh the contact list label (non-invasive: only the label text
         # of the affected contact changes, selection is preserved).
@@ -1298,6 +1308,24 @@ class SignalTUI(App):
                     for num in expired:
                         self._typing_contacts.pop(num, None)
                     self.call_from_thread(self._refresh_typing_indicator, expired[0])
+
+            # Typing-indicator grace period: when a message arrived, the
+            # indicator is kept visible for a short grace period so the user
+            # can see it even if the STARTED and the message arrived in the
+            # same poll batch.  Once the grace period expires, remove the
+            # indicator.
+            if self._typing_pending_removal:
+                now = time.time()
+                due = [
+                    num for num, remove_at in self._typing_pending_removal.items()
+                    if now >= remove_at
+                ]
+                if due:
+                    for num in due:
+                        self._typing_pending_removal.pop(num, None)
+                        self._typing_contacts.pop(num, None)
+                    self.call_from_thread(self._refresh_typing_indicator, due[0])
+
 
             for _ in range(10):
                 if not self._polling_active:

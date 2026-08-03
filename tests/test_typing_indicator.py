@@ -107,8 +107,9 @@ class TestSignalTUITyping:
         # The cache must remain empty — typing is ephemeral.
         assert app._cache == {}
 
-    def test_real_message_removes_typing_indicator(self):
-        """Quando arriva un messaggio reale, l'indicatore di typing sparisce."""
+    def test_real_message_schedules_pending_removal(self):
+        """Quando arriva un messaggio reale, l'indicatore resta visibile per
+        il grace period e viene programmata la rimozione (non immediata)."""
         app = self._make_app()
         app._cache = {}
         app._typing_contacts["+391234567890"] = 100.0  # sta scrivendo
@@ -124,8 +125,45 @@ class TestSignalTUITyping:
         with patch.object(app, "call_from_thread"):
             app._process_envelope(message_envelope)
 
-        # The typing indicator must be removed immediately.
+        # The indicator is NOT removed immediately: it stays visible during
+        # the grace period, but a pending removal is scheduled.
+        assert "+391234567890" in app._typing_contacts
+        assert "+391234567890" in app._typing_pending_removal
+
+    def test_grace_period_expiry_removes_indicator(self):
+        """Dopo il grace period, l'indicatore viene rimosso."""
+        app = self._make_app()
+        app._cache = {}
+        app._typing_contacts["+391234567890"] = 100.0
+        app._typing_pending_removal["+391234567890"] = 100.0  # already due
+
+        with patch.object(app, "call_from_thread"):
+            # Simulate the poll loop's grace-period check
+            now = 100.0
+            due = [
+                num for num, remove_at in app._typing_pending_removal.items()
+                if now >= remove_at
+            ]
+            for num in due:
+                app._typing_pending_removal.pop(num, None)
+                app._typing_contacts.pop(num, None)
+
         assert "+391234567890" not in app._typing_contacts
+        assert "+391234567890" not in app._typing_pending_removal
+
+    def test_new_started_cancels_pending_removal(self):
+        """Un nuovo STARTED durante il grace period annulla la rimozione."""
+        app = self._make_app()
+        app._cache = {}
+        app._typing_contacts["+391234567890"] = 100.0
+        app._typing_pending_removal["+391234567890"] = 200.0  # pending removal
+
+        # Contact starts typing again → cancels the pending removal
+        with patch.object(app, "call_from_thread"):
+            app._process_envelope(_typing_envelope("+391234567890", "STARTED"))
+
+        assert "+391234567890" in app._typing_contacts
+        assert "+391234567890" not in app._typing_pending_removal
 
     def test_new_started_after_message_readds_indicator(self):
         """Dopo un messaggio, un nuovo STARTED riattiva l'indicatore."""
@@ -137,7 +175,8 @@ class TestSignalTUITyping:
             app._process_envelope(_typing_envelope("+391234567890", "STARTED"))
         assert "+391234567890" in app._typing_contacts
 
-        # Contact sends a message → indicator disappears
+        # Contact sends a message → indicator stays visible (grace period),
+        # pending removal scheduled
         message_envelope = {
             "source": "+391234567890",
             "sourceNumber": "+391234567890",
@@ -146,12 +185,15 @@ class TestSignalTUITyping:
         }
         with patch.object(app, "call_from_thread"):
             app._process_envelope(message_envelope)
-        assert "+391234567890" not in app._typing_contacts
+        assert "+391234567890" in app._typing_contacts
+        assert "+391234567890" in app._typing_pending_removal
 
-        # Contact starts typing again → indicator reappears
+        # Contact starts typing again → indicator stays, pending removal cancelled
         with patch.object(app, "call_from_thread"):
             app._process_envelope(_typing_envelope("+391234567890", "STARTED"))
         assert "+391234567890" in app._typing_contacts
+        assert "+391234567890" not in app._typing_pending_removal
+
 
 
     def test_contact_label_includes_typing_icon(self):

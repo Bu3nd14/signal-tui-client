@@ -3,7 +3,8 @@
 **Data:** 2026-08-03  
 **Git commit:** `b163ba7`  
 **Python:** 3.12.3  
-**Stato:** ✅ 120/120 test superati
+**Stato:** ✅ 122/122 test superati
+
 
 
 
@@ -24,8 +25,9 @@
 | Script installazione | `test_install_script.py` | 16 | ✅ |
 | Cache debounce | `test_cache_debounce.py` | 15 | ✅ |
 | Refresh chat | `test_refresh_chat.py` | 4 | ✅ |
-| Indicatori di typing | `test_typing_indicator.py` | 13 | ✅ |
-| **Totale** | | **120** | **✅ 120/120** |
+| Indicatori di typing | `test_typing_indicator.py` | 15 | ✅ |
+| **Totale** | | **122** | **✅ 122/122** |
+
 
 
 
@@ -197,9 +199,9 @@ Test dello script `install.sh` (eseguito come subprocess in ambienti temporanei 
 | `test_refresh_chat_no_selected_contact` | Nessun contatto selezionato → nessuna operazione |
 | `test_refresh_chat_empty_seen_timestamps` | `_seen_timestamps` vuoto → aggiunge tutti i messaggi |
 
-### ✍️ Indicatori di typing (`test_typing_indicator.py`) — 13 test
+### ✍️ Indicatori di typing (`test_typing_indicator.py`) — 15 test
 
-Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano da signal-cli come envelope con `typingMessage` (action `STARTED`/`STOPPED`). Sono effimeri: non finiscono mai in cache né nel log chat, ma attivano l'icona `✍️` accanto al contatto nella lista. L'indicatore sparisce quando arriva un `STOPPED`, quando arriva un messaggio reale dal contatto, o dopo il timeout di sicurezza.
+Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano da signal-cli come envelope con `typingMessage` (action `STARTED`/`STOPPED`). Sono effimeri: non finiscono mai in cache né nel log chat, ma attivano l'icona `✍️` accanto al contatto nella lista. L'indicatore sparisce quando arriva un `STOPPED`, quando scade il **grace period** dopo un messaggio reale (così l'icona resta visibile anche se `STARTED` e messaggio arrivano nello stesso batch), o dopo il timeout di sicurezza.
 
 | Test | Descrizione |
 |------|-------------|
@@ -211,11 +213,14 @@ Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano
 | `test_started_adds_to_typing_contacts` | `STARTED` aggiunge il contatto a `_typing_contacts` |
 | `test_stopped_removes_from_typing_contacts` | `STOPPED` rimuove il contatto da `_typing_contacts` |
 | `test_typing_envelope_not_saved_to_cache` | Un envelope di typing non finisce nella cache messaggi |
-| `test_real_message_removes_typing_indicator` | Un messaggio reale rimuove subito l'indicatore di typing |
+| `test_real_message_schedules_pending_removal` | Un messaggio reale programma la rimozione (grace period), non rimuove subito |
+| `test_grace_period_expiry_removes_indicator` | Dopo il grace period, l'indicatore viene rimosso |
+| `test_new_started_cancels_pending_removal` | Un nuovo `STARTED` durante il grace period annulla la rimozione |
 | `test_new_started_after_message_readds_indicator` | Dopo un messaggio, un nuovo `STARTED` riattiva l'indicatore |
 | `test_contact_label_includes_typing_icon` | La label del contatto include `✍️` quando sta scrivendo |
 | `test_contact_label_icon_after_unread_badge` | L'icona `✍️` va a destra del badge `*N` quando presente |
 | `test_typing_timeout_expires_indicator` | Dopo il timeout, l'indicatore sparisce |
+
 
 
 ---
