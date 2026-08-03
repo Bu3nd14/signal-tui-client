@@ -7,9 +7,11 @@ They are ephemeral: they must never be saved to the message cache nor shown
 as messages in the chat log.  Instead they toggle a ``✍️`` icon next to the
 contact in the contact list.
 
-A contact that stops typing without sending a message moves to a "mumbling"
-state (💭) and stays at the top of the list for a while, so the list doesn't
-jump around on every STOPPED.
+A contact that stops typing without sending a message, or that sends a
+message while typing, moves to a "mumbling" state (💭) and stays at the top
+of the list for a while, so the list doesn't jump around.  The currently
+selected contact is never reordered to the top (we are already chatting with
+them), though the ✍️/💭 icon still shows in their label.
 """
 
 from __future__ import annotations
@@ -39,6 +41,16 @@ def _typing_envelope(source: str, action: str) -> dict:
             "action": action,
             "timestamp": 1234567890000,
         },
+    }
+
+
+def _message_envelope(source: str, text: str = "ciao") -> dict:
+    """Build a real message envelope (no typingMessage)."""
+    return {
+        "source": source,
+        "sourceNumber": source,
+        "timestamp": 1234567890000,
+        "dataMessage": {"message": text, "timestamp": 1234567890000},
     }
 
 
@@ -82,7 +94,6 @@ class TestSignalTUITyping:
         app._unread_counts = {}
         app._typing_contacts = {}
         app._typing_mumbling = {}
-        app._typing_pending_removal = {}
         return app
 
     def test_started_adds_to_typing_contacts(self):
@@ -116,66 +127,44 @@ class TestSignalTUITyping:
         # The cache must remain empty — typing is ephemeral.
         assert app._cache == {}
 
-    def test_real_message_schedules_pending_removal(self):
-        """Quando arriva un messaggio reale, l'indicatore resta visibile per
-        il grace period e viene programmata la rimozione (non immediata)."""
+    def test_message_moves_typing_contact_to_mumbling(self):
+        """Quando arriva un messaggio da chi stava scrivendo, il contatto
+        passa allo stato mumbling (💭) e resta in alto."""
         app = self._make_app()
         app._cache = {}
         app._typing_contacts["+391234567890"] = 100.0  # sta scrivendo
 
-        # A real message envelope (dataMessage, no typingMessage)
-        message_envelope = {
-            "source": "+391234567890",
-            "sourceNumber": "+391234567890",
-            "timestamp": 1234567890000,
-            "dataMessage": {"message": "ciao", "timestamp": 1234567890000},
-        }
-
         with patch.object(app, "call_from_thread"):
-            app._process_envelope(message_envelope)
+            app._process_envelope(_message_envelope("+391234567890"))
 
-        # The indicator is NOT removed immediately: it stays visible during
-        # the grace period, but a pending removal is scheduled.
-        assert "+391234567890" in app._typing_contacts
-        assert "+391234567890" in app._typing_pending_removal
-
-    def test_grace_period_expiry_removes_indicator(self):
-        """Dopo il grace period, l'indicatore viene rimosso."""
-        app = self._make_app()
-        app._cache = {}
-        app._typing_contacts["+391234567890"] = 100.0
-        app._typing_pending_removal["+391234567890"] = 100.0  # already due
-
-        with patch.object(app, "call_from_thread"):
-            # Simulate the poll loop's grace-period check
-            now = 100.0
-            due = [
-                num for num, remove_at in app._typing_pending_removal.items()
-                if now >= remove_at
-            ]
-            for num in due:
-                app._typing_pending_removal.pop(num, None)
-                app._typing_contacts.pop(num, None)
-
+        # The ✍️ indicator is gone, but the contact stays at the top in the
+        # mumbling state (💭) instead of dropping back to alphabetical order.
         assert "+391234567890" not in app._typing_contacts
-        assert "+391234567890" not in app._typing_pending_removal
+        assert "+391234567890" in app._typing_mumbling
 
-    def test_new_started_cancels_pending_removal(self):
-        """Un nuovo STARTED durante il grace period annulla la rimozione."""
+    def test_message_from_non_typing_contact_no_mumbling(self):
+        """Un messaggio da un contatto che NON stava scrivendo non crea
+        alcuno stato mumbling."""
         app = self._make_app()
         app._cache = {}
-        app._typing_contacts["+391234567890"] = 100.0
-        app._typing_pending_removal["+391234567890"] = 200.0  # pending removal
-
-        # Contact starts typing again → cancels the pending removal
         with patch.object(app, "call_from_thread"):
-            app._process_envelope(_typing_envelope("+391234567890", "STARTED"))
+            app._process_envelope(_message_envelope("+391234567890"))
+        assert "+391234567890" not in app._typing_mumbling
+        assert "+391234567890" not in app._typing_contacts
 
-        assert "+391234567890" in app._typing_contacts
-        assert "+391234567890" not in app._typing_pending_removal
+    def test_message_refreshes_existing_mumbling(self):
+        """Un messaggio da un contatto già in mumbling aggiorna il timer."""
+        app = self._make_app()
+        app._cache = {}
+        app._typing_mumbling["+391234567890"] = 100.0  # already mumbling
+        with patch.object(app, "call_from_thread"):
+            app._process_envelope(_message_envelope("+391234567890"))
+        # Still mumbling, with a fresh (future) expiry.
+        assert "+391234567890" in app._typing_mumbling
+        assert app._typing_mumbling["+391234567890"] > 100.0
 
     def test_new_started_after_message_readds_indicator(self):
-        """Dopo un messaggio, un nuovo STARTED riattiva l'indicatore."""
+        """Dopo un messaggio, un nuovo STARTED riattiva l'indicatore ✍️."""
         app = self._make_app()
         app._cache = {}
 
@@ -184,24 +173,17 @@ class TestSignalTUITyping:
             app._process_envelope(_typing_envelope("+391234567890", "STARTED"))
         assert "+391234567890" in app._typing_contacts
 
-        # Contact sends a message → indicator stays visible (grace period),
-        # pending removal scheduled
-        message_envelope = {
-            "source": "+391234567890",
-            "sourceNumber": "+391234567890",
-            "timestamp": 1234567890000,
-            "dataMessage": {"message": "ciao", "timestamp": 1234567890000},
-        }
+        # Contact sends a message → moves to mumbling (💭)
         with patch.object(app, "call_from_thread"):
-            app._process_envelope(message_envelope)
-        assert "+391234567890" in app._typing_contacts
-        assert "+391234567890" in app._typing_pending_removal
+            app._process_envelope(_message_envelope("+391234567890"))
+        assert "+391234567890" not in app._typing_contacts
+        assert "+391234567890" in app._typing_mumbling
 
-        # Contact starts typing again → indicator stays, pending removal cancelled
+        # Contact starts typing again → back to ✍️, mumbling cleared
         with patch.object(app, "call_from_thread"):
             app._process_envelope(_typing_envelope("+391234567890", "STARTED"))
         assert "+391234567890" in app._typing_contacts
-        assert "+391234567890" not in app._typing_pending_removal
+        assert "+391234567890" not in app._typing_mumbling
 
     def test_contact_label_includes_typing_icon(self):
         app = self._make_app()
@@ -264,23 +246,6 @@ class TestSignalTUITyping:
                 app._typing_mumbling.pop(num, None)
         assert app._typing_mumbling == {}
 
-    def test_message_clears_mumbling(self):
-        """Un messaggio reale rimuove lo stato mumbling (ha inviato, ha finito)."""
-        app = self._make_app()
-        app._cache = {}
-        app._typing_mumbling["+391234567890"] = 100.0
-
-        message_envelope = {
-            "source": "+391234567890",
-            "sourceNumber": "+391234567890",
-            "timestamp": 1234567890000,
-            "dataMessage": {"message": "ciao", "timestamp": 1234567890000},
-        }
-        with patch.object(app, "call_from_thread"):
-            app._process_envelope(message_envelope)
-
-        assert "+391234567890" not in app._typing_mumbling
-
     def test_started_clears_mumbling(self):
         """Un nuovo STARTED rimuove lo stato mumbling (sta scrivendo di nuovo)."""
         app = self._make_app()
@@ -331,3 +296,52 @@ class TestSignalTUITyping:
 
         assert app.contacts[0].number == mumbling.number
         assert app.contacts[1].number == normal.number
+
+    def test_sort_selected_typing_not_reordered(self):
+        """Il contatto selezionato che sta scrivendo NON viene spostato in
+        cima: resta nel suo posto alfabetico."""
+        app = self._make_app()
+        selected = Contact(number="+391234567890", name="Mario", aci="uuid-123")
+        other = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
+        app.contacts = [selected, other]
+        app._unread_counts = {}
+        app.selected_contact = selected
+        app._typing_contacts[selected.number] = 100.0
+
+        app._sort_contacts()
+
+        # Mario (selected, typing) stays in alphabetical order, not at the top.
+        assert app.contacts[0].number == other.number  # Anna
+        assert app.contacts[1].number == selected.number  # Mario
+
+    def test_sort_selected_mumbling_not_reordered(self):
+        """Il contatto selezionato in stato mumbling NON viene spostato in cima."""
+        app = self._make_app()
+        selected = Contact(number="+391234567890", name="Mario", aci="uuid-123")
+        other = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
+        app.contacts = [selected, other]
+        app._unread_counts = {}
+        app.selected_contact = selected
+        app._typing_mumbling[selected.number] = 100.0
+
+        app._sort_contacts()
+
+        assert app.contacts[0].number == other.number  # Anna
+        assert app.contacts[1].number == selected.number  # Mario
+
+    def test_selected_typing_still_shows_icon(self):
+        """Il contatto selezionato che sta scrivendo mostra comunque l'icona
+        ✍️ nella label (solo il riordino è disabilitato)."""
+        app = self._make_app()
+        contact = app.contacts[0]
+        app.selected_contact = contact
+        app._typing_contacts[contact.number] = 100.0
+        assert "✍️" in app._contact_label(contact)
+
+    def test_selected_mumbling_still_shows_icon(self):
+        """Il contatto selezionato in stato mumbling mostra comunque 💭."""
+        app = self._make_app()
+        contact = app.contacts[0]
+        app.selected_contact = contact
+        app._typing_mumbling[contact.number] = 100.0
+        assert "💭" in app._contact_label(contact)

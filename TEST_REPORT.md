@@ -3,7 +3,8 @@
 **Data:** 2026-08-03  
 **Git commit:** `b163ba7`  
 **Python:** 3.12.3  
-**Stato:** ✅ 129/129 test superati
+**Stato:** ✅ 132/132 test superati
+
 
 
 
@@ -26,8 +27,9 @@
 | Script installazione | `test_install_script.py` | 16 | ✅ |
 | Cache debounce | `test_cache_debounce.py` | 15 | ✅ |
 | Refresh chat | `test_refresh_chat.py` | 4 | ✅ |
-| Indicatori di typing | `test_typing_indicator.py` | 22 | ✅ |
-| **Totale** | | **129** | **✅ 129/129** |
+| Indicatori di typing | `test_typing_indicator.py` | 25 | ✅ |
+| **Totale** | | **132** | **✅ 132/132** |
+
 
 
 
@@ -201,9 +203,9 @@ Test dello script `install.sh` (eseguito come subprocess in ambienti temporanei 
 | `test_refresh_chat_no_selected_contact` | Nessun contatto selezionato → nessuna operazione |
 | `test_refresh_chat_empty_seen_timestamps` | `_seen_timestamps` vuoto → aggiunge tutti i messaggi |
 
-### ✍️ Indicatori di typing (`test_typing_indicator.py`) — 22 test
+### ✍️ Indicatori di typing (`test_typing_indicator.py`) — 25 test
 
-Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano da signal-cli come envelope con `typingMessage` (action `STARTED`/`STOPPED`). Sono effimeri: non finiscono mai in cache né nel log chat, ma attivano l'icona `✍️` accanto al contatto nella lista. Chi sta scrivendo (o ha smesso da poco) viene **spostato in alto** nella lista, subito sotto chi ha messaggi non letti. Quando un contatto smette di scrivere senza inviare, passa allo stato **mumbling** (`💭`) e resta in alto per ~1 minuto, così la lista non "salta" a ogni STOPPED.
+Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano da signal-cli come envelope con `typingMessage` (action `STARTED`/`STOPPED`). Sono effimeri: non finiscono mai in cache né nel log chat, ma attivano l'icona `✍️` accanto al contatto nella lista. Chi sta scrivendo (o ha smesso da poco) viene **spostato in alto** nella lista, subito sotto chi ha messaggi non letti. Quando un contatto smette di scrivere senza inviare **oppure invia un messaggio**, passa allo stato **mumbling** (`💭`) e resta in alto per ~1 minuto, così la lista non "salta". Il contatto **selezionato** non viene mai riordinato in cima (siamo già in chat con lui/lei), ma l'icona `✍️`/`💭` resta visibile nella sua label.
 
 | Test | Descrizione |
 |------|-------------|
@@ -215,20 +217,24 @@ Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano
 | `test_started_adds_to_typing_contacts` | `STARTED` aggiunge il contatto a `_typing_contacts` |
 | `test_stopped_moves_to_mumbling` | `STOPPED` rimuove da `_typing_contacts` e passa allo stato mumbling |
 | `test_typing_envelope_not_saved_to_cache` | Un envelope di typing non finisce nella cache messaggi |
-| `test_real_message_schedules_pending_removal` | Un messaggio reale programma la rimozione (grace period), non rimuove subito |
-| `test_grace_period_expiry_removes_indicator` | Dopo il grace period, l'indicatore viene rimosso |
-| `test_new_started_cancels_pending_removal` | Un nuovo `STARTED` durante il grace period annulla la rimozione |
-| `test_new_started_after_message_readds_indicator` | Dopo un messaggio, un nuovo `STARTED` riattiva l'indicatore |
+| `test_message_moves_typing_contact_to_mumbling` | Un messaggio da chi stava scrivendo lo sposta in mumbling (💭) |
+| `test_message_from_non_typing_contact_no_mumbling` | Un messaggio da un contatto che non scriveva non crea mumbling |
+| `test_message_refreshes_existing_mumbling` | Un messaggio da un contatto già in mumbling aggiorna il timer |
+| `test_new_started_after_message_readds_indicator` | Dopo un messaggio, un nuovo `STARTED` riattiva l'indicatore `✍️` |
 | `test_contact_label_includes_typing_icon` | La label del contatto include `✍️` quando sta scrivendo |
 | `test_contact_label_icon_after_unread_badge` | L'icona `✍️` va a destra del badge `*N` quando presente |
 | `test_contact_label_includes_mumbling_icon` | Un contatto in stato mumbling mostra `💭` (non `✍️`) |
 | `test_typing_timeout_moves_to_mumbling` | Dopo il timeout, `✍️` sparisce ma il contatto passa a `💭` |
 | `test_mumbling_expiry_removes_indicator` | Dopo la scadenza del mumbling, il contatto viene rimosso |
-| `test_message_clears_mumbling` | Un messaggio reale rimuove lo stato mumbling (ha inviato, ha finito) |
 | `test_started_clears_mumbling` | Un nuovo `STARTED` rimuove lo stato mumbling (sta scrivendo di nuovo) |
 | `test_sort_typing_above_normal` | Un contatto che sta scrivendo viene ordinato sopra i contatti normali |
 | `test_sort_unread_above_typing` | Un contatto con non letti resta sopra chi sta scrivendo |
 | `test_sort_mumbling_above_normal` | Un contatto in stato mumbling viene ordinato sopra i contatti normali |
+| `test_sort_selected_typing_not_reordered` | Il contatto selezionato che sta scrivendo NON viene spostato in cima |
+| `test_sort_selected_mumbling_not_reordered` | Il contatto selezionato in mumbling NON viene spostato in cima |
+| `test_selected_typing_still_shows_icon` | Il contatto selezionato che scrive mostra comunque `✍️` |
+| `test_selected_mumbling_still_shows_icon` | Il contatto selezionato in mumbling mostra comunque `💭` |
+
 
 
 

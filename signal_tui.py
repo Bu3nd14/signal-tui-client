@@ -315,11 +315,10 @@ class SignalTUI(App):
         self._last_flush_time = time.time()  # timestamp of last cache flush
         self._cache_lock = threading.RLock()  # reentrant lock: protects _cache from concurrent access
         self._typing_contacts: dict[str, float] = {}  # contact number → time of last typing STARTED
-        self._typing_pending_removal: dict[str, float] = {}  # contact number → time when the indicator should be removed
         self._typing_mumbling: dict[str, float] = {}  # contact number → time when the mumbling state expires
         self._TYPING_TIMEOUT = 10.0  # seconds before a typing indicator auto-expires
-        self._TYPING_GRACE_PERIOD = 1.5  # seconds the ✍️ icon stays visible after a message arrives
         self._TYPING_MUMBLING_DURATION = 60.0  # seconds a contact stays at the top with 💭 after stopping typing
+
 
 
 
@@ -626,17 +625,16 @@ class SignalTUI(App):
         if contact is None:
             return False
 
-        # When a real message arrives, the sender has stopped typing, so
-        # schedule the removal of their typing indicator after a short grace
-        # period.  This keeps the ✍️ icon visible briefly even when the
-        # STARTED envelope and the message arrive in the same poll batch
-        # (otherwise the icon would flash and disappear before being seen).
-        # A later STARTED envelope cancels the pending removal.
-        if contact.number in self._typing_contacts:
-            self._typing_pending_removal[contact.number] = time.time() + self._TYPING_GRACE_PERIOD
-        # A real message means the contact actually sent something, so they
-        # are no longer "mumbling" (recently stopped typing without sending).
-        self._typing_mumbling.pop(contact.number, None)
+        # When a real message arrives, the sender has stopped typing.  If
+        # they were typing (or recently stopped), move them to the "mumbling"
+        # state (💭) so they stay at the top of the list for a while instead
+        # of dropping back to their alphabetical position immediately.  This
+        # also keeps the contact visible at the top even when the STARTED
+        # envelope and the message arrive in the same poll batch.
+        if contact.number in self._typing_contacts or contact.number in self._typing_mumbling:
+            self._typing_contacts.pop(contact.number, None)
+            self._typing_mumbling[contact.number] = time.time() + self._TYPING_MUMBLING_DURATION
+
 
 
 
@@ -787,18 +785,16 @@ class SignalTUI(App):
 
         if action == "STARTED":
             self._typing_contacts[source] = now
-            # A new STARTED cancels any pending removal scheduled by a
-            # message that arrived during the grace period, and clears any
-            # mumbling state (they are actively typing again).
-            self._typing_pending_removal.pop(source, None)
+            # A new STARTED clears any mumbling state (they are actively
+            # typing again).
             self._typing_mumbling.pop(source, None)
         else:  # STOPPED
             self._typing_contacts.pop(source, None)
-            self._typing_pending_removal.pop(source, None)
             # The contact stopped typing without sending a message: keep them
             # at the top in a "mumbling" state (💭) for a while, so the list
             # doesn't jump around on every STOPPED.
             self._typing_mumbling[source] = now + self._TYPING_MUMBLING_DURATION
+
 
 
 
@@ -1000,16 +996,26 @@ class SignalTUI(App):
           2 — everyone else
         Within each group, contacts are sorted by unread count (descending)
         and then alphabetically by display name.
+
+        The currently selected contact is excluded from group 1: if we are
+        already chatting with them, there is no need to move them to the top
+        (the ✍️/💭 icon still shows in their label, but the list doesn't
+        jump around).
         """
+        selected_number = self.selected_contact.number if self.selected_contact else None
         self.contacts.sort(
             key=lambda c: (
                 0 if self._unread_counts.get(c.number, 0) > 0
-                else 1 if (c.number in self._typing_contacts or c.number in self._typing_mumbling)
+                else 1 if (
+                    c.number != selected_number
+                    and (c.number in self._typing_contacts or c.number in self._typing_mumbling)
+                )
                 else 2,
                 -self._unread_counts.get(c.number, 0),
                 c.display_name.lower(),
             )
         )
+
 
 
     def _update_contacts_ui(self, contacts: list[Contact]):
@@ -1344,24 +1350,8 @@ class SignalTUI(App):
                         self._typing_mumbling[num] = now + self._TYPING_MUMBLING_DURATION
                     self.call_from_thread(self._refresh_typing_indicator, expired[0])
 
-            # Typing-indicator grace period: when a message arrived, the
-            # indicator is kept visible for a short grace period so the user
-            # can see it even if the STARTED and the message arrived in the
-            # same poll batch.  Once the grace period expires, remove the
-            # indicator.
-            if self._typing_pending_removal:
-                now = time.time()
-                due = [
-                    num for num, remove_at in self._typing_pending_removal.items()
-                    if now >= remove_at
-                ]
-                if due:
-                    for num in due:
-                        self._typing_pending_removal.pop(num, None)
-                        self._typing_contacts.pop(num, None)
-                    self.call_from_thread(self._refresh_typing_indicator, due[0])
-
             # Mumbling expiry: a contact that stopped typing (or timed out)
+
             # stays at the top with 💭 for _TYPING_MUMBLING_DURATION seconds.
             # Once that expires, remove them so the list re-sorts back.
             if self._typing_mumbling:
