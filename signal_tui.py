@@ -936,6 +936,13 @@ class SignalTUI(App):
             item = contact_list.children[index]
             item.children[0].update(f"📱 {self.selected_contact.display_name}")
 
+            # Return focus to the message input so the user can start typing
+            # immediately after selecting a contact.
+            try:
+                self.query_one("#message-input", Input).focus()
+            except Exception:
+                pass
+
     # ─── Message logic ────────────────────────────────────────────────────
 
     def _load_messages_worker(self):
