@@ -8,10 +8,10 @@ as messages in the chat log.  Instead they toggle a ``✍️`` icon next to the
 contact in the contact list.
 
 A contact that stops typing without sending a message, or that sends a
-message while typing, moves to a "mumbling" state (💭) and stays at the top
-of the list for a while, so the list doesn't jump around.  The currently
-selected contact is never reordered to the top (we are already chatting with
-them), though the ✍️/💭 icon still shows in their label.
+message while typing, moves to a "mumbling" state (💭).  The contact list is
+always kept in alphabetical order: the ✍️/💭 icons and the unread *N badges
+are shown in the label but never reorder the list, so it doesn't jump around.
+
 """
 
 from __future__ import annotations
@@ -115,8 +115,9 @@ class TestSignalTUITyping:
             )
         assert result is True
         assert "+391234567890" not in app._typing_contacts
-        # The contact stays at the top in the mumbling state (💭)
+        # The contact moves to the mumbling state (💭)
         assert "+391234567890" in app._typing_mumbling
+
 
     def test_typing_envelope_not_saved_to_cache(self):
         """Un envelope di typing non deve finire nella cache messaggi."""
@@ -129,7 +130,7 @@ class TestSignalTUITyping:
 
     def test_message_moves_typing_contact_to_mumbling(self):
         """Quando arriva un messaggio da chi stava scrivendo, il contatto
-        passa allo stato mumbling (💭) e resta in alto."""
+        passa allo stato mumbling (💭)."""
         app = self._make_app()
         app._cache = {}
         app._typing_contacts["+391234567890"] = 100.0  # sta scrivendo
@@ -137,10 +138,10 @@ class TestSignalTUITyping:
         with patch.object(app, "call_from_thread"):
             app._process_envelope(_message_envelope("+391234567890"))
 
-        # The ✍️ indicator is gone, but the contact stays at the top in the
-        # mumbling state (💭) instead of dropping back to alphabetical order.
+        # The ✍️ indicator is gone, the contact moves to the mumbling state (💭).
         assert "+391234567890" not in app._typing_contacts
         assert "+391234567890" in app._typing_mumbling
+
 
     def test_message_from_non_typing_contact_no_mumbling(self):
         """Un messaggio da un contatto che NON stava scrivendo non crea
@@ -255,47 +256,52 @@ class TestSignalTUITyping:
         assert "+391234567890" not in app._typing_mumbling
         assert "+391234567890" in app._typing_contacts
 
-    def test_sort_typing_above_normal(self):
-        """Un contatto che sta scrivendo viene ordinato sopra i contatti normali."""
+    def test_sort_keeps_alphabetical_when_typing(self):
+        """La lista resta in ordine alfabetico anche quando un contatto sta
+        scrivendo (niente riordino)."""
         app = self._make_app()
-        normal = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
-        typing = Contact(number="+391234567890", name="Mario", aci="uuid-123")
-        app.contacts = [normal, typing]
+        anna = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
+        mario = Contact(number="+391234567890", name="Mario", aci="uuid-123")
+        app.contacts = [mario, anna]
         app._unread_counts = {}
-        app._typing_contacts[typing.number] = 100.0
+        app._typing_contacts[mario.number] = 100.0
 
         app._sort_contacts()
 
-        assert app.contacts[0].number == typing.number
-        assert app.contacts[1].number == normal.number
+        # Anna < Mario alfabeticamente, indipendentemente dal typing.
+        assert app.contacts[0].number == anna.number
+        assert app.contacts[1].number == mario.number
 
-    def test_sort_unread_above_typing(self):
-        """Un contatto con messaggi non letti resta sopra chi sta scrivendo."""
+    def test_sort_keeps_alphabetical_with_unread(self):
+        """La lista resta in ordine alfabetico anche con messaggi non letti."""
         app = self._make_app()
-        unread = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
-        typing = Contact(number="+391234567890", name="Mario", aci="uuid-123")
-        app.contacts = [typing, unread]
-        app._unread_counts = {unread.number: 2}
-        app._typing_contacts[typing.number] = 100.0
+        anna = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
+        mario = Contact(number="+391234567890", name="Mario", aci="uuid-123")
+        app.contacts = [mario, anna]
+        app._unread_counts = {mario.number: 2}
+        app._typing_contacts[mario.number] = 100.0
 
         app._sort_contacts()
 
-        assert app.contacts[0].number == unread.number
-        assert app.contacts[1].number == typing.number
+        # Anna < Mario alfabeticamente, indipendentemente da non letti/typing.
+        assert app.contacts[0].number == anna.number
+        assert app.contacts[1].number == mario.number
 
-    def test_sort_mumbling_above_normal(self):
-        """Un contatto in stato mumbling viene ordinato sopra i contatti normali."""
+    def test_sort_keeps_alphabetical_when_mumbling(self):
+        """La lista resta in ordine alfabetico anche in stato mumbling."""
         app = self._make_app()
-        normal = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
-        mumbling = Contact(number="+391234567890", name="Mario", aci="uuid-123")
-        app.contacts = [normal, mumbling]
+        anna = Contact(number="+391111111111", name="Anna", aci="uuid-anna")
+        mario = Contact(number="+391234567890", name="Mario", aci="uuid-123")
+        app.contacts = [mario, anna]
         app._unread_counts = {}
-        app._typing_mumbling[mumbling.number] = 100.0
+        app._typing_mumbling[mario.number] = 100.0
 
         app._sort_contacts()
 
-        assert app.contacts[0].number == mumbling.number
-        assert app.contacts[1].number == normal.number
+        # Anna < Mario alfabeticamente, indipendentemente dal mumbling.
+        assert app.contacts[0].number == anna.number
+        assert app.contacts[1].number == mario.number
+
 
     def test_sort_selected_typing_not_reordered(self):
         """Il contatto selezionato che sta scrivendo NON viene spostato in

@@ -627,13 +627,12 @@ class SignalTUI(App):
 
         # When a real message arrives, the sender has stopped typing.  If
         # they were typing (or recently stopped), move them to the "mumbling"
-        # state (💭) so they stay at the top of the list for a while instead
-        # of dropping back to their alphabetical position immediately.  This
-        # also keeps the contact visible at the top even when the STARTED
-        # envelope and the message arrive in the same poll batch.
+        # state (💭) so the 💭 icon stays visible for a while (the list is
+        # always alphabetical, so this only affects the icon, not the order).
         if contact.number in self._typing_contacts or contact.number in self._typing_mumbling:
             self._typing_contacts.pop(contact.number, None)
             self._typing_mumbling[contact.number] = time.time() + self._TYPING_MUMBLING_DURATION
+
 
 
 
@@ -790,10 +789,11 @@ class SignalTUI(App):
             self._typing_mumbling.pop(source, None)
         else:  # STOPPED
             self._typing_contacts.pop(source, None)
-            # The contact stopped typing without sending a message: keep them
-            # at the top in a "mumbling" state (💭) for a while, so the list
-            # doesn't jump around on every STOPPED.
+            # The contact stopped typing without sending a message: keep the
+            # 💭 icon visible for a while (the list is always alphabetical,
+            # so this only affects the icon, not the order).
             self._typing_mumbling[source] = now + self._TYPING_MUMBLING_DURATION
+
 
 
 
@@ -813,8 +813,10 @@ class SignalTUI(App):
         if not self.contacts:
             return
 
-        # Re-sort so typing/mumbling contacts move to the top (below unread).
+        # Re-sort alphabetically (the list is always alphabetical; this is a
+        # no-op if already sorted, but keeps the list consistent).
         self._sort_contacts()
+
 
         contact_list = self.query_one("#contact-list", ListView)
         contact_list.clear()
@@ -988,33 +990,16 @@ class SignalTUI(App):
         self.call_from_thread(self._update_contacts_ui, contacts)
 
     def _sort_contacts(self):
-        """Sort contacts by priority group, then unread count, then name.
+        """Sort contacts alphabetically by display name.
 
-        Priority groups:
-          0 — contacts with unread messages (highest unread count first)
-          1 — contacts that are typing (✍️) or recently stopped typing (💭)
-          2 — everyone else
-        Within each group, contacts are sorted by unread count (descending)
-        and then alphabetically by display name.
-
-        The currently selected contact is excluded from group 1: if we are
-        already chatting with them, there is no need to move them to the top
-        (the ✍️/💭 icon still shows in their label, but the list doesn't
-        jump around).
+        The list is always kept in alphabetical order: typing (✍️), mumbling
+        (💭) and unread (*N) states are shown as icons/badges in the label
+        but never reorder the list, so it doesn't jump around.
         """
-        selected_number = self.selected_contact.number if self.selected_contact else None
         self.contacts.sort(
-            key=lambda c: (
-                0 if self._unread_counts.get(c.number, 0) > 0
-                else 1 if (
-                    c.number != selected_number
-                    and (c.number in self._typing_contacts or c.number in self._typing_mumbling)
-                )
-                else 2,
-                -self._unread_counts.get(c.number, 0),
-                c.display_name.lower(),
-            )
+            key=lambda c: (c.display_name.lower(), c.number)
         )
+
 
 
 
@@ -1337,8 +1322,10 @@ class SignalTUI(App):
             # Typing-indicator timeout: if a contact sent STARTED but no
             # STOPPED arrived within _TYPING_TIMEOUT seconds, move them to
             # the "mumbling" state (💭) so the ✍️ icon doesn't stay stuck
-            # forever but the contact still stays at the top for a while.
+            # forever (the list is always alphabetical, so this only affects
+            # the icon, not the order).
             if self._typing_contacts:
+
                 now = time.time()
                 expired = [
                     num for num, started_at in self._typing_contacts.items()
@@ -1351,10 +1338,11 @@ class SignalTUI(App):
                     self.call_from_thread(self._refresh_typing_indicator, expired[0])
 
             # Mumbling expiry: a contact that stopped typing (or timed out)
-
-            # stays at the top with 💭 for _TYPING_MUMBLING_DURATION seconds.
-            # Once that expires, remove them so the list re-sorts back.
+            # keeps the 💭 icon for _TYPING_MUMBLING_DURATION seconds.  Once
+            # that expires, remove the icon (the list is always alphabetical,
+            # so this only affects the icon, not the order).
             if self._typing_mumbling:
+
                 now = time.time()
                 expired = [
                     num for num, expires_at in self._typing_mumbling.items()
