@@ -1,10 +1,9 @@
 """
-Regression tests for backend.py — message cache (save, load, prune, receipts).
+Regression tests for backend.py — message cache (SQLite: add, load, prune, receipts).
 """
 
 from __future__ import annotations
 
-import json
 import time
 import pytest
 import sys
@@ -14,173 +13,210 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# We'll test the cache functions by temporarily patching CACHE_FILE
+# We'll test the cache functions by temporarily patching DB_FILE / CACHE_DIR
 from backend import (
     _load_cache,
-    _save_cache,
+    _add_message_to_cache,
     _prune_cache,
-    _write_cache,
     _mark_as_read,
+    _update_message_status,
     _process_receipt,
     CACHE_RETENTION_DAYS,
 )
 
 
-class TestCacheSaveLoad:
-    """💾 Salvataggio e caricamento della cache."""
+@pytest.fixture
+def tmp_db(tmp_path: Path):
+    """Point backend at a temporary SQLite DB and reset it between tests."""
+    db_file = tmp_path / "messages.db"
+    with patch("backend.DB_FILE", db_file), \
+         patch("backend.CACHE_DIR", tmp_path):
+        yield db_file
 
-    def test_save_and_load(self, tmp_cache_file, sample_messages):
-        """Salva messaggi, ricarica, verifica contenuto."""
-        with patch("backend.CACHE_FILE", tmp_cache_file):
-            _save_cache(sample_messages)
-            loaded = _load_cache()
-        assert loaded == sample_messages
 
-    def test_load_missing_file(self, tmp_cache_file):
-        """File inesistente → dict vuoto."""
-        with patch("backend.CACHE_FILE", tmp_cache_file):
-            # Il file non esiste
-            loaded = _load_cache()
+class TestCacheAddLoad:
+    """💾 Aggiunta e caricamento della cache SQLite."""
+
+    def test_add_and_load(self, tmp_db):
+        """Aggiunge messaggi, ricarica, verifica contenuto."""
+        _add_message_to_cache(
+            "+391234567890", "Ciao!", False, "Mario", 1000,
+        )
+        _add_message_to_cache(
+            "+391234567890", "Come stai?", True, "You", 1001,
+        )
+        loaded = _load_cache()
+        assert "+391234567890" in loaded
+        msgs = loaded["+391234567890"]
+        assert len(msgs) == 2
+        assert msgs[0]["text"] == "Ciao!"
+        assert msgs[0]["is_mine"] is False
+        assert msgs[0]["status"] == "read"
+        assert msgs[1]["text"] == "Come stai?"
+        assert msgs[1]["is_mine"] is True
+        assert msgs[1]["status"] == "sent"
+
+    def test_load_empty_db(self, tmp_db):
+        """DB vuoto → dict vuoto."""
+        loaded = _load_cache()
         assert loaded == {}
 
-    def test_load_corrupted_json(self, tmp_cache_file):
-        """File JSON corrotto → dict vuoto."""
-        tmp_cache_file.write_text("{corrupted json!")
-        with patch("backend.CACHE_FILE", tmp_cache_file):
-            loaded = _load_cache()
-        assert loaded == {}
-
-    def test_save_creates_directory(self, tmp_path):
-        """Salva in una directory che non esiste → viene creata."""
+    def test_add_creates_directory(self, tmp_path):
+        """Aggiunge in una directory che non esiste → viene creata."""
         cache_dir = tmp_path / "nested" / "dir"
-        cache_file = cache_dir / "messages.json"
-        with patch("backend.CACHE_FILE", cache_file):
-            with patch("backend.CACHE_DIR", cache_dir):
-                _save_cache({"+39": []})
-        assert cache_file.exists()
+        db_file = cache_dir / "messages.db"
+        with patch("backend.DB_FILE", db_file), \
+             patch("backend.CACHE_DIR", cache_dir):
+            _add_message_to_cache("+39", "test", True, "You", 1)
+        assert db_file.exists()
+
+    def test_add_preserves_optional_fields(self, tmp_db):
+        """I campi opzionali (quote, attachment, msg_type) vengono salvati."""
+        _add_message_to_cache(
+            "+391234567890", "img", False, "Mario", 2000,
+            quote_text="citazione",
+            msg_type="image",
+            attachment_info="photo.jpg",
+            attachment_id="att-123",
+        )
+        loaded = _load_cache()
+        msg = loaded["+391234567890"][0]
+        assert msg["quote_text"] == "citazione"
+        assert msg["msg_type"] == "image"
+        assert msg["attachment_info"] == "photo.jpg"
+        assert msg["attachment_id"] == "att-123"
 
 
 class TestCachePrune:
     """✂️ Potatura della cache (messaggi vecchi e limite 200)."""
 
-    def test_prune_old_messages(self, tmp_cache_file):
+    def test_prune_old_messages(self, tmp_db):
         """Messaggi più vecchi di CACHE_RETENTION_DAYS vengono rimossi."""
         now_ms = int(time.time() * 1000)
         cutoff = now_ms - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
         old_ts = cutoff - 1000  # un secondo prima del cutoff
         recent_ts = now_ms
 
-        cache = {
-            "+39": [
-                {"text": "vecchio", "timestamp": old_ts},
-                {"text": "nuovo", "timestamp": recent_ts},
-            ]
-        }
-        with patch("backend.CACHE_FILE", tmp_cache_file):
-            _save_cache(cache)
-            _prune_cache()
-            pruned = _load_cache()
+        _add_message_to_cache("+39", "vecchio", False, "Mario", old_ts)
+        _add_message_to_cache("+39", "nuovo", False, "Mario", recent_ts)
+
+        _prune_cache()
+        pruned = _load_cache()
         assert len(pruned["+39"]) == 1
         assert pruned["+39"][0]["text"] == "nuovo"
 
-    def test_prune_max_200_messages(self, tmp_cache_file):
+    def test_prune_max_200_messages(self, tmp_db):
         """Limite 200 messaggi per contatto."""
         now_ms = int(time.time() * 1000)
-        cache = {
-            "+39": [
-                {"text": f"msg-{i}", "timestamp": now_ms + i}
-                for i in range(250)
-            ]
-        }
-        with patch("backend.CACHE_FILE", tmp_cache_file):
-            _save_cache(cache)
-            _prune_cache()
-            pruned = _load_cache()
+        for i in range(250):
+            _add_message_to_cache("+39", f"msg-{i}", False, "Mario", now_ms + i)
+
+        _prune_cache()
+        pruned = _load_cache()
         assert len(pruned["+39"]) == 200
         # Verifica che siano gli ultimi 200
         assert pruned["+39"][0]["text"] == "msg-50"
 
-    def test_prune_empty_contact_removed(self, tmp_cache_file):
-        """Contatto senza messaggi dopo prune → rimosso."""
-        now_ms = int(time.time() * 1000)
-        cache = {
-            "+39": [
-                {"text": "vecchio", "timestamp": 1},  # molto vecchio
-            ]
-        }
-        with patch("backend.CACHE_FILE", tmp_cache_file):
-            _save_cache(cache)
-            _prune_cache()
-            pruned = _load_cache()
+    def test_prune_empty_contact_removed(self, tmp_db):
+        """Contatto con solo messaggi vecchi → rimosso dopo prune."""
+        _add_message_to_cache("+39", "vecchio", False, "Mario", 1)  # molto vecchio
+        _prune_cache()
+        pruned = _load_cache()
         assert "+39" not in pruned
 
-    def test_prune_no_modification(self, tmp_cache_file, sample_messages):
+    def test_prune_no_modification(self, tmp_db):
         """Se nessun messaggio va potato, il contenuto rimane invariato."""
-        with patch("backend.CACHE_FILE", tmp_cache_file):
-            _save_cache(sample_messages)
-            content_before = tmp_cache_file.read_text()
-            _prune_cache()
-            content_after = tmp_cache_file.read_text()
-        # Il contenuto del file deve rimanere invariato
-        assert content_after == content_before
+        now_ms = int(time.time() * 1000)
+        _add_message_to_cache("+39", "nuovo", False, "Mario", now_ms)
+        _prune_cache()
+        pruned = _load_cache()
+        assert len(pruned["+39"]) == 1
+        assert pruned["+39"][0]["text"] == "nuovo"
 
 
 class TestCacheMarkAsRead:
     """✅ Marcatura messaggi come letti."""
 
-    def test_mark_as_read(self, tmp_cache_file, sample_messages):
+    def test_mark_as_read(self, tmp_db):
         """Messaggi non letti diventano letti."""
-        with patch("backend.CACHE_FILE", tmp_cache_file):
-            _save_cache(sample_messages)
-            _mark_as_read("+391234567890")
-            loaded = _load_cache()
-        for msg in loaded["+391234567890"]:
-            if not msg["is_mine"]:
-                assert msg["read"] is True
+        _add_message_to_cache("+391234567890", "Ciao!", False, "Mario", 1000)
+        _add_message_to_cache("+391234567890", "Mio", True, "You", 1001)
 
-    def test_mark_as_read_no_contact(self, tmp_cache_file):
+        _mark_as_read("+391234567890")
+        loaded = _load_cache()
+        for msg in loaded["+391234567890"]:
+            assert msg["read"] is True
+
+    def test_mark_as_read_no_contact(self, tmp_db):
         """Contatto inesistente → nessun errore."""
-        with patch("backend.CACHE_FILE", tmp_cache_file):
-            _mark_as_read("+999")  # non deve sollevare eccezioni
+        _mark_as_read("+999")  # non deve sollevare eccezioni
+
+
+class TestUpdateMessageStatus:
+    """📝 Aggiornamento dello status di un messaggio."""
+
+    def test_update_status(self, tmp_db):
+        """Lo status di un messaggio viene aggiornato per timestamp."""
+        _add_message_to_cache("+391234567890", "Ciao!", True, "You", 1000)
+        _update_message_status(1000, "delivered")
+        loaded = _load_cache()
+        assert loaded["+391234567890"][0]["status"] == "delivered"
+
+    def test_update_status_no_match(self, tmp_db):
+        """Timestamp inesistente → nessun errore, nessuna modifica."""
+        _add_message_to_cache("+391234567890", "Ciao!", True, "You", 1000)
+        _update_message_status(9999, "delivered")
+        loaded = _load_cache()
+        assert loaded["+391234567890"][0]["status"] == "sent"
 
 
 class TestProcessReceipt:
     """📬 Elaborazione receiptMessage (delivery e read)."""
 
-    def test_receipt_delivery(self, tmp_cache_file, sample_messages):
+    def _make_cache(self):
+        """Return an in-memory cache with a sent message."""
+        return {
+            "+391234567890": [
+                {"text": "Ciao!", "is_mine": True, "sender": "You",
+                 "timestamp": 1000001, "quote_text": None, "msg_type": "text",
+                 "attachment_info": None, "attachment_id": None, "read": True,
+                 "status": "sent"},
+            ]
+        }
+
+    def test_receipt_delivery(self, tmp_db):
         """Receipt di delivery → status 'delivered'."""
-        # Prendi il timestamp del primo messaggio (non mine)
-        ts = sample_messages["+391234567890"][0]["timestamp"]
+        cache = self._make_cache()
         envelope = {
             "sourceNumber": "+391234567890",
             "receiptMessage": {
                 "isDelivery": True,
                 "isRead": False,
-                "timestamps": [ts],
+                "timestamps": [1000001],
             },
         }
-        updated = _process_receipt(envelope, sample_messages)
+        updated = _process_receipt(envelope, cache)
         assert len(updated) == 1
         assert updated[0]["status"] == "delivered"
 
-    def test_receipt_read(self, tmp_cache_file, sample_messages):
+    def test_receipt_read(self, tmp_db):
         """Receipt di read → status 'read'."""
-        # Prendi il timestamp del primo messaggio (non mine)
-        ts = sample_messages["+391234567890"][0]["timestamp"]
+        cache = self._make_cache()
         envelope = {
             "sourceNumber": "+391234567890",
             "receiptMessage": {
                 "isDelivery": False,
                 "isRead": True,
-                "timestamps": [ts],
+                "timestamps": [1000001],
             },
         }
-        updated = _process_receipt(envelope, sample_messages)
+        updated = _process_receipt(envelope, cache)
         assert len(updated) == 1
         assert updated[0]["status"] == "read"
 
-    def test_receipt_no_match(self, sample_messages):
+    def test_receipt_no_match(self, tmp_db):
         """Timestamp che non matcha → lista vuota."""
+        cache = self._make_cache()
         envelope = {
             "sourceNumber": "+391234567890",
             "receiptMessage": {
@@ -189,20 +225,22 @@ class TestProcessReceipt:
                 "timestamps": [999999999],
             },
         }
-        updated = _process_receipt(envelope, sample_messages)
+        updated = _process_receipt(envelope, cache)
         assert updated == []
 
-    def test_receipt_no_timestamps(self, sample_messages):
+    def test_receipt_no_timestamps(self, tmp_db):
         """Receipt senza timestamps → lista vuota."""
+        cache = self._make_cache()
         envelope = {
             "sourceNumber": "+391234567890",
             "receiptMessage": {"isDelivery": True, "isRead": False},
         }
-        updated = _process_receipt(envelope, sample_messages)
+        updated = _process_receipt(envelope, cache)
         assert updated == []
 
-    def test_receipt_no_source(self, sample_messages):
+    def test_receipt_no_source(self, tmp_db):
         """Envelope senza source → lista vuota."""
+        cache = self._make_cache()
         envelope = {
             "receiptMessage": {
                 "isDelivery": True,
@@ -210,10 +248,10 @@ class TestProcessReceipt:
                 "timestamps": [1000001],
             },
         }
-        updated = _process_receipt(envelope, sample_messages)
+        updated = _process_receipt(envelope, cache)
         assert updated == []
 
-    def test_receipt_only_upgrades_status(self, sample_messages):
+    def test_receipt_only_upgrades_status(self, tmp_db):
         """Non deve downgradare: sent → delivered OK, delivered → sent NO."""
         messages = {
             "+391234567890": [

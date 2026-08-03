@@ -1,9 +1,10 @@
 # Test Report — Signal TUI Client
 
 **Data:** 2026-08-03  
-**Git commit:** `40eff20`  
+**Git commit:** `feature/sqlite-cache`  
 **Python:** 3.12.3  
-**Stato:** ✅ 141/141 test superati
+**Stato:** ✅ 142/142 test superati
+
 
 
 
@@ -20,7 +21,7 @@
 |--------|------|------|-------|
 | Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
 | Contact Picker | `test_contact_picker.py` | 9 | ✅ |
-| Cache | `test_backend_cache.py` | 16 | ✅ |
+| Cache (SQLite) | `test_backend_cache.py` | 18 | ✅ |
 | Contatti | `test_backend_contacts.py` | 4 | ✅ |
 | Attachment | `test_backend_attachments.py` | 5 | ✅ |
 | RPC / Daemon | `test_backend_rpc.py` | 8 | ✅ |
@@ -28,10 +29,12 @@
 | UI Components | `test_ui_components.py` | 11 | ✅ |
 | Lock file | `test_signal_tui_lock.py` | 6 | ✅ |
 | Script installazione | `test_install_script.py` | 16 | ✅ |
-| Cache debounce | `test_cache_debounce.py` | 15 | ✅ |
+| Cache SQLite (ex debounce) | `test_cache_debounce.py` | 12 | ✅ |
+| Migrazione SQLite | `test_migrate_sqlite.py` | 4 | ✅ |
 | Refresh chat | `test_refresh_chat.py` | 4 | ✅ |
 | Indicatori di typing | `test_typing_indicator.py` | 25 | ✅ |
-| **Totale** | | **141** | **✅ 141/141** |
+| **Totale** | | **142** | **✅ 142/142** |
+
 
 
 
@@ -80,27 +83,31 @@ Test della funzionalità di ricerca contatti (attivata con `Ctrl+S`): l'helper `
 | `test_search_max_results` | Verifica il limite massimo di risultati |
 | `test_search_contact_without_name` | Contatto senza nome → match sul numero |
 
-### 💾 Cache (`test_backend_cache.py`) — 16 test
+### 💾 Cache SQLite (`test_backend_cache.py`) — 18 test
 
+Test della cache messaggi migrata da JSON a **SQLite**. Le scritture sono incrementali (INSERT/UPDATE/DELETE) e protette da `_DB_LOCK`.
 
 | Test | Descrizione |
 |------|-------------|
-| `test_save_and_load` | Salva e ricarica messaggi |
-| `test_load_missing_file` | File inesistente → dict vuoto |
-| `test_load_corrupted_json` | JSON corrotto → dict vuoto |
-| `test_save_creates_directory` | Directory creata automaticamente |
+| `test_add_and_load` | Aggiunge messaggi e li ricarica da SQLite |
+| `test_load_empty_db` | DB vuoto → dict vuoto |
+| `test_add_creates_directory` | Directory creata automaticamente |
+| `test_add_preserves_optional_fields` | Campi opzionali (quote, attachment, msg_type) salvati |
 | `test_prune_old_messages` | Messaggi vecchi rimossi |
 | `test_prune_max_200_messages` | Limite 200 messaggi per contatto |
 | `test_prune_empty_contact_removed` | Contatto senza messaggi → rimosso |
 | `test_prune_no_modification` | Contenuto invariato se nulla da potare |
 | `test_mark_as_read` | Messaggi non letti → letti |
 | `test_mark_as_read_no_contact` | Contatto inesistente → nessun errore |
+| `test_update_status` | Status aggiornato per timestamp |
+| `test_update_status_no_match` | Timestamp inesistente → nessuna modifica |
 | `test_receipt_delivery` | Receipt delivery → status "delivered" |
 | `test_receipt_read` | Receipt read → status "read" |
 | `test_receipt_no_match` | Timestamp non matcha → lista vuota |
 | `test_receipt_no_timestamps` | Receipt senza timestamps → lista vuota |
 | `test_receipt_no_source` | Envelope senza source → lista vuota |
 | `test_receipt_only_upgrades_status` | Non deve downgradare lo status |
+
 
 ### 📇 Contatti (`test_backend_contacts.py`) — 4 test
 
@@ -195,25 +202,34 @@ Test dello script `install.sh` (eseguito come subprocess in ambienti temporanei 
 | `test_venv_created` | Crea `.venv` quando `DO_VENV=1` |
 | `test_no_venv_flag` | `--no-venv` non crea `.venv` |
 
-### 🔄 Cache debounce (`test_cache_debounce.py`) — 15 test
+### 🔄 Cache SQLite (ex debounce) (`test_cache_debounce.py`) — 12 test
+
+Il vecchio meccanismo di debounce (`_maybe_flush_cache`/`_flush_cache`) è stato **rimosso**: con SQLite ogni messaggio viene scritto subito (incrementale). I test verificano la persistenza immediata e l'aggiornamento incrementale dei badge unread.
 
 | Test | Descrizione |
 |------|-------------|
-| `test_maybe_flush_does_not_write_before_threshold` | Prima di 5 messaggi, `_maybe_flush_cache` non scrive su disco |
-| `test_maybe_flush_writes_at_threshold` | Al 5° messaggio, `_maybe_flush_cache` scrive su disco |
-| `test_flush_cache_resets_counter` | `_flush_cache()` forza la scrittura e resetta il contatore |
-| `test_maybe_flush_after_flush_restarts_counting` | Dopo un flush, il contatore riparte da zero |
-| `test_on_exit_flushes_pending_saves` | `on_exit()` chiama `_flush_cache()` quando ci sono modifiche pendenti |
-| `test_on_exit_no_flush_when_no_pending` | `on_exit()` NON chiama `_flush_cache()` se non ci sono modifiche pendenti |
-| `test_flush_cache_updates_last_flush_time` | `_flush_cache()` aggiorna `_last_flush_time` |
-| `test_poll_worker_flushes_after_interval` | `_poll_worker()` chiama `_flush_cache()` quando `_pending_saves > 0` e sono passati più di 30s |
-| `test_poll_worker_no_flush_within_interval` | `_poll_worker()` NON chiama `_flush_cache()` se l'ultimo flush è recente |
-| `test_receipt_updates_current_cache` | `_process_receipt_envelope` aggiorna `self._cache` direttamente (non un riferimento stale) |
-| `test_receipt_survives_flush_cache` | Le modifiche del receipt non vengono perse quando `_flush_cache()` viene chiamato dopo |
+| `test_add_message_persists_immediately` | Ogni `_add_message_to_cache()` scrive subito su SQLite |
+| `test_multiple_adds_all_persisted` | Più messaggi vengono tutti persistiti (nessun batch) |
+| `test_no_debounce_attributes` | Gli attributi di debounce non esistono più |
+| `test_mark_as_read_persists` | `_mark_as_read()` aggiorna lo stato read nel DB |
+| `test_update_status_persists` | `_update_message_status()` aggiorna lo status nel DB |
+| `test_receipt_updates_cache_and_db` | `_process_receipt_envelope` aggiorna `self._cache` e il DB |
 | `test_receipt_no_match_returns_false` | Se il timestamp del receipt non matcha, non aggiorna nulla |
 | `test_incremental_only_updates_given_contact` | Con `contact_number`, calcola solo per quel contatto |
 | `test_incremental_no_change_returns_early` | Se il conteggio non cambia, non ricostruisce la lista |
 | `test_full_update_all_contacts` | Senza `contact_number`, calcola per tutti i contatti |
+
+### 🔄 Migrazione SQLite (`test_migrate_sqlite.py`) — 4 test
+
+Test dello script `migrate_cache_sqlite.py` che converte la cache JSON esistente in SQLite.
+
+| Test | Descrizione |
+|------|-------------|
+| `test_migrate_creates_db` | La migrazione crea `messages.db` con i messaggi |
+| `test_migrate_backs_up_json` | Il file JSON originale viene rinominato in `.bak` |
+| `test_migrate_no_json_is_noop` | Se `messages.json` non esiste, la migrazione non fa nulla |
+| `test_migrate_preserves_optional_fields` | I campi opzionali (quote, attachment, msg_type) vengono salvati |
+
 
 ### 🔄 Refresh chat (`test_refresh_chat.py`) — 4 test
 

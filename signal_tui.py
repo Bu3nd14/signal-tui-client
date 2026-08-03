@@ -91,8 +91,10 @@ from backend import (
     Contact,
     SignalRPCClient,
     _load_cache,
-    _save_cache,
     _prune_cache,
+    _mark_as_read,
+    _add_message_to_cache,
+    _update_message_status,
     _is_daemon_running,
     _run_subprocess,
     _send_subprocess,
@@ -106,6 +108,7 @@ from backend import (
     USER_NUMBER,
     DAEMON_HTTP_PORT,
 )
+
 from ui_components import (
     ContactListWidget,
     ChatAreaWidget,
@@ -313,12 +316,8 @@ class SignalTUI(App):
         self._loaded_all = False
         self._reply_to: Optional[dict] = None  # message being replied to
         self._download_mode = False  # Ctrl+D download mode active
-        self._pending_saves = 0  # debounce counter for cache writes
-        self._CACHE_FLUSH_THRESHOLD = 5  # flush cache to disk every N messages
-        self._CACHE_FLUSH_INTERVAL = 30  # max seconds between cache flushes
-        self._last_flush_time = time.time()  # timestamp of last cache flush
-        self._cache_lock = threading.RLock()  # reentrant lock: protects _cache from concurrent access
         self._typing_contacts: dict[str, float] = {}  # contact number → time of last typing STARTED
+
         self._typing_mumbling: dict[str, float] = {}  # contact number → time when the mumbling state expires
         self._TYPING_TIMEOUT = 10.0  # seconds before a typing indicator auto-expires
         self._TYPING_MUMBLING_DURATION = 60.0  # seconds a contact stays at the top with 💭 after stopping typing
@@ -348,9 +347,8 @@ class SignalTUI(App):
     def on_exit(self):
         """On exit, stop polling and do NOT kill the daemon."""
         self._polling_active = False
-        # Flush any pending cache changes (e.g. read receipts) to disk
-        if self._pending_saves > 0:
-            self._flush_cache()
+        # No flush needed — SQLite writes are incremental
+
 
     # ─── Chat helper methods ────────────────────────────────────────────────
 
@@ -646,25 +644,35 @@ class SignalTUI(App):
         if data is None:
             return False
 
+        # Save to SQLite (incremental INSERT)
+        _add_message_to_cache(
+            contact.number,
+            data["text"],
+            data["is_mine"],
+            data["sender"],
+            ts,
+            quote_text=data["quote_text"],
+            msg_type=data["msg_type"],
+            attachment_info=data["attachment_info"],
+            attachment_id=data.get("attachment_id"),
+        )
 
-        with self._cache_lock:
-            if contact.number not in self._cache:
-                self._cache[contact.number] = []
+        # Update in-memory cache for UI
+        if contact.number not in self._cache:
+            self._cache[contact.number] = []
+        self._cache[contact.number].append({
+            "text": data["text"],
+            "is_mine": data["is_mine"],
+            "sender": data["sender"],
+            "timestamp": ts,
+            "quote_text": data["quote_text"],
+            "msg_type": data["msg_type"],
+            "attachment_info": data["attachment_info"],
+            "attachment_id": data.get("attachment_id"),
+            "read": data["is_mine"],
+            "status": "sent" if data["is_mine"] else "read",
+        })
 
-            # Save to cache
-            self._cache[contact.number].append({
-                "text": data["text"],
-                "is_mine": data["is_mine"],
-                "sender": data["sender"],
-                "timestamp": ts,
-                "quote_text": data["quote_text"],
-                "msg_type": data["msg_type"],
-                "attachment_info": data["attachment_info"],
-                "attachment_id": data.get("attachment_id"),
-                "read": data["is_mine"],
-                "status": "sent" if data["is_mine"] else "read",
-            })
-            self._maybe_flush_cache()
 
         # If it's the current contact, show the message in the UI immediately
 
@@ -689,33 +697,6 @@ class SignalTUI(App):
 
         return True
 
-    def _flush_cache(self):
-        """Force a full cache flush to disk: save, prune, and reload.
-
-        This keeps the in-memory cache in sync with the pruned version on
-        disk (so RAM doesn't grow unboundedly), but only runs when the
-        debounce threshold is reached or the safety timer expires.
-        """
-        with self._cache_lock:
-            _save_cache(self._cache)
-            _prune_cache()
-            self._cache = _load_cache()
-            self._pending_saves = 0
-            self._last_flush_time = time.time()
-
-    def _maybe_flush_cache(self):
-        """Increment the pending-save counter and flush when the threshold
-        (5 messages) is reached.
-
-        This debounces disk I/O: instead of writing the full JSON cache file
-        for every single message, we accumulate in memory and write at most
-        once every 5 messages.
-        """
-        with self._cache_lock:
-            self._pending_saves += 1
-            if self._pending_saves >= self._CACHE_FLUSH_THRESHOLD:
-                self._flush_cache()
-
     def _process_receipt_envelope(self, envelope: dict) -> bool:
         """Process a receiptMessage envelope (delivery or read receipt).
 
@@ -723,19 +704,18 @@ class SignalTUI(App):
         the corresponding widgets in the UI if the contact is currently
         selected.
 
-        The cache lock ensures that _process_receipt modifies the *current*
-        self._cache dict. Without it, a concurrent _flush_cache() could
-        replace self._cache (via self._cache = _load_cache()) between the
-        in-place modification and the save, losing the receipt updates.
+        ``_process_receipt`` mutates the in-memory ``self._cache`` dict;
+        the status changes are then persisted to SQLite via
+        ``_update_message_status``.
         """
-        with self._cache_lock:
-            # Process the receipt using the backend function on the current cache
-            updated = _process_receipt(envelope, self._cache)
-            if not updated:
-                return False
+        # Process the receipt using the backend function on the current cache
+        updated = _process_receipt(envelope, self._cache)
+        if not updated:
+            return False
 
-            # Increment the debounce counter (may trigger a flush)
-            self._maybe_flush_cache()
+        # Persist status changes to SQLite
+        for msg in updated:
+            _update_message_status(msg["timestamp"], msg["status"])
 
         # Get the source contact number from the envelope
         source = envelope.get("sourceNumber", "") or envelope.get("source", "")
@@ -748,6 +728,7 @@ class SignalTUI(App):
             self.call_from_thread(self._update_message_widgets_status, updated)
 
         return True
+
 
     def _update_message_widgets_status(self, updated_messages: list[dict]) -> None:
         """Update the visual status of MessageWidget instances in the chat log.
@@ -855,9 +836,9 @@ class SignalTUI(App):
 
     def _startup(self):
         """Start signal-cli daemon and load contacts."""
-        self._cache = _load_cache()
         _prune_cache()
-        self._cache = _load_cache()  # reload after prune
+        self._cache = _load_cache()
+
 
         self.call_from_thread(self._add_message, "⏳ Starting signal-cli daemon...", is_info=True)
         self.rpc = SignalRPCClient()
@@ -1052,13 +1033,13 @@ class SignalTUI(App):
 
         # Mark all messages from this contact as read
         number = self.selected_contact.number
-        with self._cache_lock:
-            if number in self._cache:
-                for msg in self._cache[number]:
-                    if not msg.get("read", True):
-                        msg["read"] = True
-                self._flush_cache()
+        if number in self._cache:
+            for msg in self._cache[number]:
+                if not msg.get("read", True):
+                    msg["read"] = True
+        _mark_as_read(number)  # UPDATE in SQLite
         self._unread_counts[number] = 0
+
 
         # Highlight the contact in the left list and remove the *N badge
         contact_list = self.query_one("#contact-list", ListView)
@@ -1365,14 +1346,8 @@ class SignalTUI(App):
                 except Exception:
                     pass
 
-            # Safety timer: flush pending cache changes even if the debounce
-            # threshold (5 messages) hasn't been reached. This guarantees
-            # that read receipts and other status changes are persisted to
-            # disk within _CACHE_FLUSH_INTERVAL seconds.
-            if self._pending_saves > 0 and time.time() - self._last_flush_time > self._CACHE_FLUSH_INTERVAL:
-                self._flush_cache()
-
             # Typing-indicator timeout: if a contact sent STARTED but no
+
             # STOPPED arrived within _TYPING_TIMEOUT seconds, move them to
             # the "mumbling" state (💭) so the ✍️ icon doesn't stay stuck
             # forever (the list is always alphabetical, so this only affects
@@ -1741,22 +1716,28 @@ class SignalTUI(App):
         reply_data = self._reply_to
         quote_text = reply_data.get("text") if reply_data else None
 
-        with self._cache_lock:
-            if number not in self._cache:
-                self._cache[number] = []
-            self._cache[number].append({
-                "text": message,
-                "is_mine": True,
-                "sender": "You",
-                "timestamp": ts,
-                "quote_text": quote_text,
-                "msg_type": "text",
-                "attachment_info": None,
-                "attachment_id": None,
-                "read": True,
-                "status": "sent",
-            })
-            self._maybe_flush_cache()
+        # Save to SQLite (incremental INSERT)
+        _add_message_to_cache(
+            number, message, True, "You", ts,
+            quote_text=quote_text,
+        )
+
+        # Update in-memory cache for UI
+        if number not in self._cache:
+            self._cache[number] = []
+        self._cache[number].append({
+            "text": message,
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": ts,
+            "quote_text": quote_text,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+            "read": True,
+            "status": "sent",
+        })
+
 
         # Show the message in the UI immediately (with quote if replying)
 

@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import socketserver
+import sqlite3
 import subprocess
 import threading
 import time
@@ -17,6 +18,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 from typing import Optional
+
 
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -51,7 +53,9 @@ DAEMON_HTTP_PORT = 8080
 DAEMON_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/rpc"
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 CACHE_FILE = CACHE_DIR / "messages.json"
+DB_FILE = CACHE_DIR / "messages.db"
 CACHE_RETENTION_DAYS = 3
+
 
 # Directory where signal-cli stores downloaded attachments
 SIGNAL_CLI_ATTACHMENTS_DIR = Path.home() / ".local" / "share" / "signal-cli" / "attachments"
@@ -137,36 +141,79 @@ def get_attachment_path(attachment_id: str) -> Optional[Path]:
     return None
 
 
-# ─── Message cache ──────────────────────────────────────────────────────────
+# ─── Message cache (SQLite) ─────────────────────────────────────────────────
+
+# Lock to serialize concurrent SQLite writes (poll worker thread + UI thread).
+_DB_LOCK = threading.RLock()
+
 
 def _ensure_cache_dir():
     """Create the cache directory if it doesn't exist."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _init_db():
+    """Create the SQLite database and schema if it doesn't exist."""
+    _ensure_cache_dir()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contact_number TEXT NOT NULL,
+                    text TEXT,
+                    is_mine INTEGER NOT NULL DEFAULT 0,
+                    sender TEXT,
+                    timestamp INTEGER NOT NULL,
+                    quote_text TEXT,
+                    msg_type TEXT DEFAULT 'text',
+                    attachment_info TEXT,
+                    attachment_id TEXT,
+                    read INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'read'
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_contact "
+                "ON messages(contact_number, timestamp)"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def _load_cache() -> dict[str, list[dict]]:
-    """Load all messages from cache."""
-    _ensure_cache_dir()
-    if not CACHE_FILE.exists():
-        return {}
-    try:
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def _save_cache(data: dict[str, list[dict]]):
-    """Save all messages to cache."""
-    _ensure_cache_dir()
-    with open(CACHE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-def _get_cached_messages(contact_number: str) -> list[dict]:
-    """Return cached messages for a contact."""
-    cache = _load_cache()
-    return cache.get(contact_number, [])
+    """Load all messages from SQLite into a dict {contact: [messages]}."""
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM messages ORDER BY timestamp"
+            ).fetchall()
+        finally:
+            conn.close()
+    cache: dict[str, list[dict]] = {}
+    for row in rows:
+        contact = row["contact_number"]
+        if contact not in cache:
+            cache[contact] = []
+        cache[contact].append({
+            "text": row["text"],
+            "is_mine": bool(row["is_mine"]),
+            "sender": row["sender"],
+            "timestamp": row["timestamp"],
+            "quote_text": row["quote_text"],
+            "msg_type": row["msg_type"],
+            "attachment_info": row["attachment_info"],
+            "attachment_id": row["attachment_id"],
+            "read": bool(row["read"]),
+            "status": row["status"],
+        })
+    return cache
 
 
 def _add_message_to_cache(
@@ -180,77 +227,83 @@ def _add_message_to_cache(
     attachment_info: str | None = None,
     attachment_id: str | None = None,
 ):
-    """Add a message to the cache.
+    """Add a message to the SQLite cache (incremental INSERT).
     msg_type: "text", "image", "sticker", "attachment"
     attachment_info: additional details (filename, sticker emoji, etc.)
     attachment_id: signal-cli attachment UUID for resolving the file on disk.
     """
-    cache = _load_cache()
-    if contact_number not in cache:
-        cache[contact_number] = []
-    cache[contact_number].append({
-        "text": text,
-        "is_mine": is_mine,
-        "sender": sender,
-        "timestamp": timestamp,
-        "quote_text": quote_text,
-        "msg_type": msg_type,
-        "attachment_info": attachment_info,
-        "attachment_id": attachment_id,
-        "read": is_mine,  # our messages are already read
-        "status": "sent" if is_mine else "read",
-    })
-    _save_cache(cache)
-    _prune_cache()
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.execute(
+                """INSERT INTO messages
+                   (contact_number, text, is_mine, sender, timestamp, quote_text,
+                    msg_type, attachment_info, attachment_id, read, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (contact_number, text, int(is_mine), sender, timestamp, quote_text,
+                 msg_type, attachment_info, attachment_id, int(is_mine),
+                 "sent" if is_mine else "read"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def _prune_cache():
-    """Remove messages older than CACHE_RETENTION_DAYS days
-    and limit to 200 messages per contact."""
-    cache = _load_cache()
-    now_ms = int(time.time() * 1000)
-    cutoff = now_ms - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
-    modified = False
-
-    for contact in list(cache.keys()):
-        # Remove old messages
-        before = len(cache[contact])
-        cache[contact] = [m for m in cache[contact] if m.get("timestamp", 0) >= cutoff]
-        after = len(cache[contact])
-        if before != after:
-            modified = True
-
-        # Limit to 200 messages per contact
-        if len(cache[contact]) > 200:
-            cache[contact] = cache[contact][-200:]
-            modified = True
-
-        if not cache[contact]:
-            del cache[contact]
-            modified = True
-
-    if modified:
-        _write_cache(cache)
-
-
-def _write_cache(data: dict[str, list[dict]]):
-    """Write cache to disk (without calling _prune_cache)."""
-    _ensure_cache_dir()
-    with open(CACHE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    """Remove messages older than CACHE_RETENTION_DAYS and limit to 200 per contact."""
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            now_ms = int(time.time() * 1000)
+            cutoff = now_ms - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
+            # Delete old messages
+            conn.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
+            # Limit to 200 per contact: delete messages beyond the 200 most recent
+            conn.execute("""
+                DELETE FROM messages WHERE id NOT IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY contact_number ORDER BY timestamp DESC
+                        ) AS rn FROM messages
+                    ) WHERE rn <= 200
+                )
+            """)
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def _mark_as_read(contact_number: str):
     """Mark all messages for a contact as read."""
-    cache = _load_cache()
-    if contact_number in cache:
-        modified = False
-        for msg in cache[contact_number]:
-            if not msg.get("read", True):
-                msg["read"] = True
-                modified = True
-        if modified:
-            _save_cache(cache)
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.execute(
+                "UPDATE messages SET read = 1 WHERE contact_number = ?",
+                (contact_number,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _update_message_status(timestamp: int, status: str):
+    """Update the status of a message in SQLite by timestamp."""
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.execute(
+                "UPDATE messages SET status = ? WHERE timestamp = ?",
+                (status, timestamp),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
 
 
 def _process_typing(envelope: dict) -> tuple[str, str] | None:
@@ -367,18 +420,19 @@ def _process_receipt(envelope: dict, cache: dict) -> list[dict]:
 
 
 def _count_unread() -> dict[str, int]:
-    """Count unread messages per contact.
-    Messages without 'read' field (old cache) are considered read."""
-    cache = _load_cache()
-    counts = {}
-    for number, messages in cache.items():
-        unread = sum(
-            1 for m in messages
-            if not m.get("is_mine") and not m.get("read", True)
-        )
-        if unread > 0:
-            counts[number] = unread
-    return counts
+    """Count unread messages per contact."""
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            rows = conn.execute(
+                "SELECT contact_number, COUNT(*) as cnt FROM messages "
+                "WHERE is_mine = 0 AND read = 0 GROUP BY contact_number"
+            ).fetchall()
+        finally:
+            conn.close()
+    return {row[0]: row[1] for row in rows}
+
 
 
 # ─── JSON-RPC Client via HTTP ────────────────────────────────────────────────
