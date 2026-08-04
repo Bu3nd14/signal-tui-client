@@ -976,32 +976,56 @@ class SignalTUI(App):
 
         Textual, dopo un ``clear()``+ri-append, ricostruisce man mano gli item:
         con ~350 contatti e un refresh frequente (poll ~1s) questo smonta/rimonta
-        continuamente i ``ListItem``, logora la UI e può far fallire un click in
-        corso (``ListItem not in list``).  Qui, se gli id restano gli stessi in
-        ordine, aggiorniamo solo testo/classi dei ``ListItem`` esistenti senza
-        toccare l'albero; la ricostruzione completa avviene solo quando cambia
-        la composizione (filtro/ordinamento per nuovo messaggio).
+        continuamente i ``ListItem`` (la lista diventa momentaneamente VUOTA), e
+        la sola costruzione dei ~350 ListItem sul main thread bloccava la UI
+        (finestra di chat in seconda priorità).  Qui i 3 casi:
+          - stesso ordine        -> aggiorna solo testo/classi in-place;
+          - stesso INSIEME ma    -> RIORDINA i ListItem esistenti in-place
+            ordine diverso         (nessun clear, nessuna nuova costruzione),
+                                  per via di un nuovo messaggio che sposta un
+                                  contatto in cima;
+          - insieme diverso      -> rebuild completo (solo filtro/startup).
         """
         contact_list = self.query_one("#contact-list", ListView)
         existing = list(contact_list.children)
         cur_ids = [getattr(it, "_contact_id", None) for it in existing]
         want_ids = [c.cache_key for c in filtered]
 
+        def _sync_item(item, c):
+            """Aggiorna testo/classe di un ListItem esistente per il contatto c."""
+            label = item.children[0] if item.children else None
+            new_text = self._contact_label(c)
+            if getattr(item, "_label_text", None) != new_text and label is not None:
+                label.update(new_text)
+                item._label_text = new_text
+            if not item.has_class(self._protocol_class(c)):
+                for cl in ("protocol-signal", "protocol-whatsapp"):
+                    item.remove_class(cl)
+                item.add_class(self._protocol_class(c))
+
         if cur_ids == want_ids:
-            # Fast path: composizione invariata -> aggiorna in-place.
+            # Fast path: composizione+ordine invariati -> aggiorna in-place.
             for item, c in zip(existing, filtered):
-                label = item.children[0] if item.children else None
-                new_text = self._contact_label(c)
-                if getattr(item, "_label_text", None) != new_text and label is not None:
-                    label.update(new_text)
-                    item._label_text = new_text
-                # Sync classe protocollo (es. filtro/ordinamento che cambia tipo)
-                if not item.has_class(self._protocol_class(c)):
-                    for cl in ("protocol-signal", "protocol-whatsapp"):
-                        item.remove_class(cl)
-                    item.add_class(self._protocol_class(c))
+                _sync_item(item, c)
+        elif set(cur_ids) == set(want_ids):
+            # Stesso INSIEME di contatti ma ordine diverso (un nuovo messaggio
+            # ha spostato un contatto in cima): riordina i ListItem ESISTENTI
+            # in-place.  Niente clear(), niente costruzione di nuovi widget ->
+            # la lista non diventa mai vuota e il main non si blocca.
+            by_id = {getattr(it, "_contact_id", None): it for it in existing}
+            reordered = [by_id[cid] for cid in want_ids if cid in by_id]
+            for item, c in zip(reordered, filtered):
+                _sync_item(item, c)
+            if existing != reordered:
+                # Move_child sposta i nodi esistenti nel DOM senza smontarli,
+                # un elemento alla volta costruendo l'ordine voluto (idempotente:
+                # un elemento già nella posizione giusta è un no-op effettivo).
+                # La lista non risulta mai vuota in mezzo.
+                for i in range(1, len(reordered)):
+                    contact_list.move_child(reordered[i], after=reordered[i - 1])
         else:
-            # Composizione/ordine cambiato -> rebuild completo.
+            # Composizione/insieme cambiato (filtro nuovo/stato iniziale) ->
+            # rebuild completo.
             contact_list.clear()
             for c in filtered:
                 text = self._contact_label(c)
@@ -1013,6 +1037,7 @@ class SignalTUI(App):
 
         if self.selected_contact and self.selected_contact in filtered:
             contact_list.index = filtered.index(self.selected_contact)
+
 
 
     def _apply_contact_filter(self) -> None:
@@ -1534,20 +1559,19 @@ class SignalTUI(App):
                     keys = tuple(self._dirty_contact_keys)
                     self._dirty_contact_keys.clear()
                     if keys and len(keys) <= self._CONTACT_UPDATE_BATCH_MAX:
-                        # Percorso incrementale: ricalcola l'unread SOLO per i
-                        # contatti del batch (O(M) ciascuno) invece di fare il
-                        # giro completo su tutti (O(N×M) -> blocco UI temporaneo).
+                        # Percorso incrementale: ricalcola l'unread SOLO nei dati
+                        # (_recompute_unread, nessun render) per i contatti del
+                        # batch (O(M) ciascuno), e fa poi UN SOLO render di lista.
                         for k in keys:
-                            self.call_from_thread(self._update_unread_badges, k)
-                        # Riordina SEMPRE: l'update unread salta sort/render se
-                        # il badge non cambia, ma il contatto va comunque messo
-                        # in cima se il nuovo arrivo ne aggiorna il last_message_ts.
-                        self.call_from_thread(self._reorder_contact_list)
+                            self.call_from_thread(self._recompute_unread, k)
                     else:
-                        # Batch grande (> soglia) o senza key note: update full
-                        # (stato attuale, conservativo).
-                        self.call_from_thread(self._update_unread_badges)
-                        self.call_from_thread(self._reorder_contact_list)
+                        # Batch grande (> soglia) o senza key note: ricalcolo
+                        # completo dei dati (nessun render qui dentro).
+                        self.call_from_thread(self._recompute_unread)
+                    # UN solo sort+render a fine batch, in-place e non distruttivo.
+                    # Ciò lascia il main libero per la finestra di chat (prioritaria)
+                    # invece di rifare il giro completo due volte.
+                    self.call_from_thread(self._reorder_contact_list)
 
 
                 # Prompt-exit inner sleep.  This runs every cycle (even when no
@@ -1619,6 +1643,44 @@ class SignalTUI(App):
             chat_log.scroll_end(animate=False)
 
 
+    def _recompute_unread(self, contact_cache_key_value: str | None = None) -> bool:
+        """Ricalcola i conteggi unread in ``self._unread_counts`` SOLO nei dati.
+
+        Non tocca i widget: è il passo \"dati\" del flush di fine batch, così il
+        render della lista avviene una volta sola (e mai a scapito della chat).
+        Ritorna ``True`` se almeno un conteggio è cambiato.
+        """
+        if not self.contacts:
+            return False
+
+        changed = False
+
+        if contact_cache_key_value is not None:
+            # Incrementale: solo il contatto indicato (O(M)).
+            messages = self._cache.get(contact_cache_key_value, [])
+            unread = sum(
+                1 for m in messages
+                if not m.get("is_mine") and not m.get("read", True)
+            )
+            old = self._unread_counts.get(contact_cache_key_value, 0)
+            if unread != old:
+                self._unread_counts[contact_cache_key_value] = unread
+                changed = True
+        else:
+            # Full: tutti i contatti (startup / ricalcolo globale).
+            for contact in self.contacts:
+                messages = self._cache.get(contact.cache_key, [])
+                unread = sum(
+                    1 for m in messages
+                    if not m.get("is_mine") and not m.get("read", True)
+                )
+                old = self._unread_counts.get(contact.cache_key, 0)
+                if unread != old:
+                    self._unread_counts[contact.cache_key] = unread
+                    changed = True
+
+        return changed
+
     def _update_unread_badges(self, contact_cache_key_value: str | None = None):
         """Check the in-memory cache and update *N badges on contacts.
         If counts change, re-sort the list and rebuild it.
@@ -1633,40 +1695,12 @@ class SignalTUI(App):
         if not self.contacts:
             return
 
-        changed = False
-
-        if contact_cache_key_value is not None:
-            # Incremental update: only recompute the given contact.
-            messages = self._cache.get(contact_cache_key_value, [])
-            unread = sum(
-                1 for m in messages
-                if not m.get("is_mine") and not m.get("read", True)
-            )
-            old = self._unread_counts.get(contact_cache_key_value, 0)
-            if unread != old:
-                self._unread_counts[contact_cache_key_value] = unread
-                changed = True
-        else:
-            # Full update: recompute all contacts (startup / list load).
-            for contact in self.contacts:
-                messages = self._cache.get(contact.cache_key, [])
-                unread = sum(
-                    1 for m in messages
-                    if not m.get("is_mine") and not m.get("read", True)
-                )
-                old = self._unread_counts.get(contact.cache_key, 0)
-                if unread != old:
-                    self._unread_counts[contact.cache_key] = unread
-                    changed = True
-
-        if not changed:
+        if not self._recompute_unread(contact_cache_key_value):
             return
 
         # Re-sort and rebuild the list
         self._sort_contacts()
         self._render_contact_list(self._filtered_contacts())
-
-
 
     # ─── Reply-to (quote) handling ───────────────────────────────────────────
 

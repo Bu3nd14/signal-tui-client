@@ -48,6 +48,15 @@ class _FakeListView:
     def append(self, item):
         self.items.append(item)
 
+    def move_child(self, child, *, before=None, after=None):
+        # Emula Widget.move_child: estrae `child` e lo riposiziona subito prima
+        # di `before` o dopo `after`, senza ricreare nulla.
+        self.items.remove(child)
+        if before is not None:
+            self.items.insert(self.items.index(before), child)
+        else:
+            self.items.insert(self.items.index(after) + 1, child)
+
 
 class TestProtocolLabel:
     """🏷️ Label di contatto protocol-aware (emoji)."""
@@ -553,6 +562,45 @@ class TestContactListViewCrashFix:
         # il rebuild completo è avvenuto solo la prima volta
         assert len(clears) == 1
 
+    def test_reorder_in_place_when_order_changes(self):
+        """Quando cambia SOLO l'ordine (nuovo messaggio sposta un contatto in
+        cima), i ListItem ESISTENTI vengono riusati e riordinati in-place:
+        niente clear (lista mai blank) e nessuna nuova costruzione."""
+        app = _make_app(_signal("+1", "Vecchio"), _signal("+2", "Nuovo"))
+        fake = _FakeListView()
+        clears = []
+        fake.clear = lambda: (clears.append(True), fake.items.clear()) or None
+        app.query_one = MagicMock(return_value=fake)
+        app.selected_contact = None
+        app._protocol_filter = "all"
+
+        a, b = app.contacts  # +1 "Vecchio" (prima), +2 "Nuovo" (dopo)
+        # ordine iniziale: nuovo messaggio su "+2" => +2 in cima
+        a.last_message_ts = 100
+        b.last_message_ts = 200
+
+        app._sort_contacts()  # come fa il flusso reale prima del render
+        filtered = app._filtered_contacts()
+        app._render_contact_list(filtered)  # rebuild iniziale
+        assert len(fake.items) == 2
+        assert [it._contact_id for it in fake.items] == [b.cache_key, a.cache_key]
+        objs_before = list(fake.items)
+
+        # nuovo messaggio arriva ancora su "+2": l'ordine resta identico
+        app._render_contact_list(filtered)
+        assert fake.items == objs_before  # stessi oggetti, fast-path
+
+        # ora un messaggio su "+1" lo riporta in cima => ORDINE CAMBIA
+        a.last_message_ts = 300
+        app._sort_contacts()
+        filtered = app._filtered_contacts()
+        app._render_contact_list(filtered)
+        # nessun clear (lista mai vuota) e stessi oggetti riusati, solo riordinati
+        assert len(clears) == 1  # solo il rebuild iniziale
+        assert [it._contact_id for it in fake.items] == [a.cache_key, b.cache_key]
+        assert set(fake.items) == set(objs_before)  # stessi oggetti, nessun nuovo
+
+
 
 class TestSendOptimisticRouting:
     """📤 L'ottimista dell'invio va nel backend del contatto (non hardcoded Signal)."""
@@ -635,19 +683,24 @@ class TestContactListFlush:
         return calls
 
     def test_flush_incremental_with_single_dirty_key(self):
-        """Con una sola chat sporca, _update_unread_badges è chiamato IN MODO
-        INCREMENTALE (con il cache_key) e _reorder_contact_list UNA volta sola."""
+        """Con una sola chat sporca, i DATI unread sono ricalcolati in modalità
+        incrementale (con il cache_key, senza render), e _reorder_contact_list
+        viene chiamato UNA volta sola (render unico a fine batch)."""
         app = _make_app()
         key = contact_cache_key(PROTOCOL_SIGNAL, "+391")
         calls = self._run_one_poll_cycle(app, [key])
 
-        updates = [c for c in calls if c[0].__name__ == "_update_unread_badges"]
+        recomputes = [c for c in calls if c[0].__name__ == "_recompute_unread"]
         reorders = [c for c in calls if c[0].__name__ == "_reorder_contact_list"]
+        # nessun render dentro l'aggiornamento dati (l'update distruttivo non c'è più)
+        direct_render = [c for c in calls if c[0].__name__ == "_update_unread_badges"]
 
-        # update unread incrementale, NON full: chiamato con il cache_key.
-        assert len(updates) == 1
-        assert updates[0][1] == (key,), f"atteso argomento incrementale {key!r}, avuto {updates[0][1]}"
-        # riordino presente e singolo (niente doppio sort/render).
+        # ricalcolo dati INCREMENTALE: chiamato con il cache_key, senza render.
+        assert len(recomputes) == 1
+        assert recomputes[0][1] == (key,), f"atteso argomento incrementale {key!r}, avuto {recomputes[0][1]}"
+        # il vecchio percorso "sort+render interni" è scomparso.
+        assert direct_render == []
+        # UN solo render a fine batch (niente doppio sort/render).
         assert len(reorders) == 1
         # flag e set azzerati a fine flush.
         assert app._contact_list_dirty is False
@@ -655,28 +708,32 @@ class TestContactListFlush:
 
     def test_flush_falls_back_to_full_when_no_keys(self):
         """Vincolo anti-regressione: se il set non ha key note (batch strano),
-        il flush resta il comportamento originario (update full, senza argomento)."""
+        il ricalcolo dati ricade sul percorso FULL (senza argomento)."""
         app = _make_app()
         calls = self._run_one_poll_cycle(app, [])
 
-        updates = [c for c in calls if c[0].__name__ == "_update_unread_badges"]
-        # update full invocato SENZA argomento (stato attuale originario).
-        assert len(updates) == 1
-        assert updates[0][1] == (), f"atteso update full (no argomenti), avuto {updates[0][1]}"
-        # _reorder_contact_list continua a essere chiamato.
+        recomputes = [c for c in calls if c[0].__name__ == "_recompute_unread"]
+        # ricalcolo dati completo, invocato SENZA argomento.
+        assert len(recomputes) == 1
+        assert recomputes[0][1] == (), f"atteso ricalcolo full (no argomenti), avuto {recomputes[0][1]}"
+        # _reorder_contact_list continua a essere chiamato (render unico).
         reorders = [c for c in calls if c[0].__name__ == "_reorder_contact_list"]
         assert len(reorders) == 1
 
     def test_flush_falls_back_to_full_when_too_many(self):
         """Se in batch hanno scritto più di _CONTACT_UPDATE_BATCH_MAX chat,
-        si ricade sull'update full (conservativo)."""
+        il ricalcolo dati ricade sul percorso full (conservativo)."""
         app = _make_app()
         too_many = [f"signal:+{i}" for i in range(app._CONTACT_UPDATE_BATCH_MAX + 1)]
         calls = self._run_one_poll_cycle(app, too_many)
 
-        updates = [c for c in calls if c[0].__name__ == "_update_unread_badges"]
-        assert len(updates) == 1
-        assert updates[0][1] == (), "atteso update full con batch troppo grande"
+        recomputes = [c for c in calls if c[0].__name__ == "_recompute_unread"]
+        assert len(recomputes) == 1
+        assert recomputes[0][1] == (), "atteso ricalcolo full con batch troppo grande"
+        # un solo render a fine batch.
+        reorders = [c for c in calls if c[0].__name__ == "_reorder_contact_list"]
+        assert len(reorders) == 1
+
 
     def test_message_for_other_contact_populates_dirty_keys(self):
         """_handle_message_event per una chat non aperta registra il cache_key
