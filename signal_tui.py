@@ -371,6 +371,15 @@ class SignalTUI(App):
         # Flag "lista contatti sporca": se True, a fine batch di messaggi il
         # poll worker esegue UN solo re-render della lista (non uno per evento).
         self._contact_list_dirty = False
+        # cache_key dei contatti che hanno "sporchi" l'unread/ordine nel batch
+        # corrente.  Il poll worker lo legge e svuota a fine batch: permette al
+        # flush lista di ricalcolare l'unread in modo INCREMENTALE (per singolo
+        # contatto, O(M)) invece di rifare il giro completo su tutti i contatti
+        # (O(N×M)) — fonte di un blocco temporaneo della UI a ogni messaggio.
+        self._dirty_contact_keys: set[str] = set()
+        #: Se in un batch hanno scritto più di questo numero di chat distinte,
+        #: il flush ricade sull'update unread "full" (conservativo).
+        self._CONTACT_UPDATE_BATCH_MAX = 4
         self._cache: dict[str, list[dict]] = {}   # keyed by contact_cache_key
         self._loaded_all = False
         # Incremented on every contact selection; a load worker checks it to
@@ -610,6 +619,7 @@ class SignalTUI(App):
             contact.last_message_ts = ts
             if cache_key != (self.selected_contact.cache_key if self.selected_contact else None):
                 self._contact_list_dirty = True
+                self._dirty_contact_keys.add(cache_key)
 
         # Save to DB + backend cache.  Returns True only if newly added;
         # if the identity already exists (e.g. an optimistic save is confirmed
@@ -660,6 +670,7 @@ class SignalTUI(App):
             # Message for another contact: mark the list dirty; the unread
             # badge / reorder is refreshed ONCE per poll batch (not per event).
             self._contact_list_dirty = True
+            self._dirty_contact_keys.add(cache_key)
 
         return True
 
@@ -1502,8 +1513,24 @@ class SignalTUI(App):
                 # evento.  Entrambi devono girare nel thread della UI.
                 if self._contact_list_dirty:
                     self._contact_list_dirty = False
-                    self.call_from_thread(self._update_unread_badges)
-                    self.call_from_thread(self._reorder_contact_list)
+                    keys = tuple(self._dirty_contact_keys)
+                    self._dirty_contact_keys.clear()
+                    if keys and len(keys) <= self._CONTACT_UPDATE_BATCH_MAX:
+                        # Percorso incrementale: ricalcola l'unread SOLO per i
+                        # contatti del batch (O(M) ciascuno) invece di fare il
+                        # giro completo su tutti (O(N×M) -> blocco UI temporaneo).
+                        for k in keys:
+                            self.call_from_thread(self._update_unread_badges, k)
+                        # Riordina SEMPRE: l'update unread salta sort/render se
+                        # il badge non cambia, ma il contatto va comunque messo
+                        # in cima se il nuovo arrivo ne aggiorna il last_message_ts.
+                        self.call_from_thread(self._reorder_contact_list)
+                    else:
+                        # Batch grande (> soglia) o senza key note: update full
+                        # (stato attuale, conservativo).
+                        self.call_from_thread(self._update_unread_badges)
+                        self.call_from_thread(self._reorder_contact_list)
+
 
                 # Prompt-exit inner sleep.  This runs every cycle (even when no
                 # messages arrived) so the worker exits as soon as the user quits.

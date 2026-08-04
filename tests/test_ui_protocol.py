@@ -14,7 +14,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import ChatContact, PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP
+from models import ChatContact, PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP, contact_cache_key
 from signal_tui import SignalTUI
 from ui_components import MessageWidget, ContactListView, ContactListWidget
 
@@ -597,6 +597,129 @@ class TestSendOptimisticRouting:
         assert app._add_message.call_count >= 1
         # Il Signal backend NON ha ricevuto l'ottimista
         signal_backend.ingest_message.assert_not_called()
+
+
+class TestContactListFlush:
+    """🗂️ Il flush della lista a fine batch usa l'update unread INCREMENTALE
+    (per singolo contatto) invece del giro completo su tutti i contatti —
+    che causava un blocco temporaneo della UI a ogni messaggio WhatsApp.
+    """
+
+    def _run_one_poll_cycle(self, app, dirty_keys):
+        """Esegue _poll_worker in un thread e raccoglie le call_from_thread
+        del PRIMO flush, poi ferma il loop in modo deterministico."""
+        import threading
+
+        app.manager = MagicMock()
+        app.manager.all.return_value = []  # nessun backend reale
+        app._contact_list_dirty = True
+        app._dirty_contact_keys = set(dirty_keys)
+        app._polling_active = True
+
+        calls = []
+        flush_done = threading.Event()
+
+        def fake_cft(fn, *a, **k):
+            calls.append((fn, a, k))
+            # dopo l'ultima call del flush (_reorder_contact_list) ferma il loop
+            if calls and calls[-1][0].__name__ == "_reorder_contact_list":
+                app._polling_active = False
+                flush_done.set()
+
+        app.call_from_thread = MagicMock(side_effect=fake_cft)
+
+        t = threading.Thread(target=app._poll_worker, daemon=True)
+        t.start()
+        assert flush_done.wait(timeout=3), "flush non completato nel tempo massimo"
+        t.join(timeout=3)
+        return calls
+
+    def test_flush_incremental_with_single_dirty_key(self):
+        """Con una sola chat sporca, _update_unread_badges è chiamato IN MODO
+        INCREMENTALE (con il cache_key) e _reorder_contact_list UNA volta sola."""
+        app = _make_app()
+        key = contact_cache_key(PROTOCOL_SIGNAL, "+391")
+        calls = self._run_one_poll_cycle(app, [key])
+
+        updates = [c for c in calls if c[0].__name__ == "_update_unread_badges"]
+        reorders = [c for c in calls if c[0].__name__ == "_reorder_contact_list"]
+
+        # update unread incrementale, NON full: chiamato con il cache_key.
+        assert len(updates) == 1
+        assert updates[0][1] == (key,), f"atteso argomento incrementale {key!r}, avuto {updates[0][1]}"
+        # riordino presente e singolo (niente doppio sort/render).
+        assert len(reorders) == 1
+        # flag e set azzerati a fine flush.
+        assert app._contact_list_dirty is False
+        assert app._dirty_contact_keys == set()
+
+    def test_flush_falls_back_to_full_when_no_keys(self):
+        """Vincolo anti-regressione: se il set non ha key note (batch strano),
+        il flush resta il comportamento originario (update full, senza argomento)."""
+        app = _make_app()
+        calls = self._run_one_poll_cycle(app, [])
+
+        updates = [c for c in calls if c[0].__name__ == "_update_unread_badges"]
+        # update full invocato SENZA argomento (stato attuale originario).
+        assert len(updates) == 1
+        assert updates[0][1] == (), f"atteso update full (no argomenti), avuto {updates[0][1]}"
+        # _reorder_contact_list continua a essere chiamato.
+        reorders = [c for c in calls if c[0].__name__ == "_reorder_contact_list"]
+        assert len(reorders) == 1
+
+    def test_flush_falls_back_to_full_when_too_many(self):
+        """Se in batch hanno scritto più di _CONTACT_UPDATE_BATCH_MAX chat,
+        si ricade sull'update full (conservativo)."""
+        app = _make_app()
+        too_many = [f"signal:+{i}" for i in range(app._CONTACT_UPDATE_BATCH_MAX + 1)]
+        calls = self._run_one_poll_cycle(app, too_many)
+
+        updates = [c for c in calls if c[0].__name__ == "_update_unread_badges"]
+        assert len(updates) == 1
+        assert updates[0][1] == (), "atteso update full con batch troppo grande"
+
+    def test_message_for_other_contact_populates_dirty_keys(self):
+        """_handle_message_event per una chat non aperta registra il cache_key
+        nel set (così il flush usa la via incrementale)."""
+        app = _make_app(self._whatsapp_contact("wa:1@s.whatsapp.net", "Anna"))
+        app.selected_contact = None
+        app._contact_list_dirty = False
+        app._dirty_contact_keys = set()
+
+        backend = MagicMock()
+        backend.ingest_message.return_value = True
+        backend._identify_contact.return_value = self._whatsapp_contact("wa:1@s.whatsapp.net", "Anna")
+        app.manager = MagicMock()
+        app.manager.get.return_value = backend
+
+        event = MagicMock()
+        event.protocol = PROTOCOL_WHATSAPP
+        event.contact_id = "wa:1@s.whatsapp.net"
+        event.payload = {
+            "contact": self._whatsapp_contact("wa:1@s.whatsapp.net", "Anna"),
+            "timestamp": 1234567890000,
+            "text": "hey",
+            "is_mine": False,
+            "sender": "Anna",
+            "quote_text": None,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+        }
+
+        with patch.object(app, "call_from_thread"):
+            handled = app._handle_message_event(event)
+
+        assert handled is True
+        assert app._contact_list_dirty is True
+        assert contact_cache_key(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net") in app._dirty_contact_keys
+
+    @staticmethod
+    def _whatsapp_contact(cid, name):
+        return ChatContact(id=cid, display_name=name, protocol=PROTOCOL_WHATSAPP)
+
+
+
 
 
 
