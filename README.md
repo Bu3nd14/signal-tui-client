@@ -26,6 +26,8 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 - Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
 - Contact search (`Ctrl+S`) — search contacts by name or number with a live-updating picker
 - Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
+- Unified multi-protocol contact list with `Ctrl+W` cycle filter: all → Signal → WhatsApp
+- Protocol-aware theming — 📱 Signal vs 💬 WhatsApp accents in the contact list and message borders
 - Message delivery and read receipts — sent messages show status: sent (italic), delivered (bold), read (normal)
 - Typing indicators — see when a contact is typing (✍️ icon next to their name); a 💭 icon shows briefly after they stop typing or send a message
 
@@ -128,6 +130,68 @@ Or create a `config.json` file in the project root:
 
 > **Note:** `config.json` is in `.gitignore` and will not be committed.
 
+#### 6. (Optional) Enable the WhatsApp backend
+
+WhatsApp is an **optional** backend that talks to a lightweight WhatsApp HTTP API.
+The recommended way is to run the official **WAHA** (`devlikeapro/waha`) container
+via Docker Compose — **no Node.js to install, no manual service to run**.  If it
+is not configured/started, the client runs exactly as before (Signal only) and
+gracefully skips WhatsApp.
+
+##### 6a. One-command startup (Docker)
+
+```bash
+docker compose up -d            # start WAHA (WhatsApp HTTP API) on http://127.0.0.1:3005
+./scripts/start_whatsapp.sh     # (optional) start + wait until the API is ready
+```
+
+or use the installer:
+
+```bash
+./install.sh --whatsapp
+```
+
+The API then listens on `127.0.0.1:3005` by default (override with
+`WHATSAPP_API_PORT`); session + media persist in `./whatsapp-data/` (git-ignored).
+If Docker isn't installed, the instructions in section 6b below still let you
+point the backend at any compatible Baileys API.
+
+##### 6b. Configuration (env or `config.json`)
+
+Env variables:
+
+```bash
+export WHATSAPP_API_PORT="3005"                       # docker-compose host port (default 3005)
+export WHATSAPP_API_URL="http://127.0.0.1:3005"      # base URL of the WAHA API
+export WHATSAPP_SESSION_NAME="default"               # session name (default "default")
+export WHATSAPP_MEDIA_DIR="/srv/whatsapp-media"      # local media download dir
+```
+
+…or via `config.json`:
+
+```json
+{
+    "user_number": "+1234567890",
+    "whatsapp_api_url": "http://127.0.0.1:3005",
+    "whatsapp_session_name": "default",
+    "whatsapp_media_dir": "/srv/whatsapp-media"
+}
+```
+
+##### 6c. Pair the device
+
+With the API running, link the device with:
+
+```bash
+source .venv/bin/activate        # use the project venv (has qrcode + deps)
+python3 link_whatsapp.py         # prints a QR to scan with WhatsApp
+```
+
+> Tip: `link_whatsapp.py` **auto-restarts** inside `.venv/bin/python` if you run
+> it with the system python, so `python3 link_whatsapp.py` works either way.
+
+
+
 ## Virtual environment (optional but recommended)
 
 A Python virtual environment is **recommended** to avoid polluting your system Python and to prevent dependency conflicts. It is **not strictly required** — the app is a standalone script launched with `python3 signal_tui.py`.
@@ -187,6 +251,7 @@ python3 signal_tui.py
 | `Ctrl+E` | Open emoji picker |
 | `Ctrl+S` | Open contact search picker |
 | `Ctrl+D` | Toggle download mode |
+| `Ctrl+W` | Cycle contact filter: all → Signal → WhatsApp |
 | `Ctrl+N` / `Ctrl+P` | Navigate emoji suggestions / emoji picker categories |
 | `Ctrl+Q` | Quit |
 | `Ctrl+C` | Quit |

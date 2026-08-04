@@ -34,7 +34,7 @@ class ContactListWidget(Vertical):
     """Left column: contact list."""
 
     def compose(self):
-        yield Label("📇 Contacts", classes="section-title")
+        yield Label("📇 Contacts", classes="section-title", id="ContactsTitle")
         yield ListView(id="contact-list")
 
     def on_mount(self):
@@ -106,6 +106,7 @@ class MessageWidget(Static):
         is_mine: bool = False,
         classes: str = "",
         status: str = "sent",
+        protocol: str = "",
     ) -> None:
         """Initialise the message widget.
 
@@ -124,6 +125,9 @@ class MessageWidget(Static):
         status:
             Delivery status for sent messages: "sent", "delivered", or "read".
             Defaults to "sent".
+        protocol:
+            Source protocol ("signal", "whatsapp", ...).  Stored for future
+            per-protocol styling (color accents); defaults to "".
         """
         self._msg_text = text
         self._msg_timestamp = timestamp
@@ -131,10 +135,35 @@ class MessageWidget(Static):
         self._msg_is_mine = is_mine
         self._selected = False
         self._status = status
+        self._protocol = protocol
 
         super().__init__(text, markup=False, classes=classes)
         self.can_focus = True
         self._apply_status_style()
+        self._apply_protocol_accent()
+
+    _PROTOCOL_ACCENT = {
+        "signal": "msg-signal",
+        "whatsapp": "msg-whatsapp",
+    }
+
+    def _remove_protocol_accent(self) -> None:
+        """Remove any protocol accent class from the widget."""
+        for cls in self._PROTOCOL_ACCENT.values():
+            if self.has_class(cls):
+                self.remove_class(cls)
+
+    def _apply_protocol_accent(self) -> None:
+        """Apply a subtle CSS accent for the message's protocol.
+
+        Toggling a CSS class keeps the widget's inline borders free for the
+        reply/focus highlight and is easy to style and test.  When not selected
+        the accent is applied; when selected the reply highlight wins.
+        """
+        accent = self._PROTOCOL_ACCENT.get(self._protocol)
+        self._remove_protocol_accent()
+        if accent and not self._selected:
+            self.add_class(accent)
 
     def _apply_status_style(self) -> None:
         """Apply the CSS text style based on the current status.
@@ -167,9 +196,13 @@ class MessageWidget(Static):
         """Toggle the visual "selected" state (reply highlight)."""
         self._selected = selected
         if selected:
+            # Selection/focus uses a clear full border; drop the accent so the
+            # reply highlight is unambiguous.
             self.styles.border = ("solid", "#4ebf71")
+            self._remove_protocol_accent()
         else:
             self.styles.border = None
+            self._apply_protocol_accent()
 
     def on_click(self) -> None:
         """Mouse click → emit ``MessageClicked``."""
@@ -186,11 +219,13 @@ class MessageWidget(Static):
         """Visual feedback when focused."""
         if not self._selected:
             self.styles.border = ("solid", "#4ebf71")
+            self._remove_protocol_accent()
 
     def on_blur(self) -> None:
         """Remove focus border if not in selected state."""
         if not self._selected:
             self.styles.border = None
+            self._apply_protocol_accent()
 
     def key_enter(self) -> None:
         """Enter key → emit ``MessageClicked``."""

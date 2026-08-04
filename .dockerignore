@@ -1,0 +1,15 @@
+# Local WhatsApp API data (sessions + media) never enters an image or the repo.
+whatsapp-data/
+
+# Python artifacts
+.venv/
+.venv-test/
+__pycache__/
+*.pyc
+
+# Local config (phone number, etc.)
+config.json
+
+# signal-cli downloads / logs
+bin/
+*.log

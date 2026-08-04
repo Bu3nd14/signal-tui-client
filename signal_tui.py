@@ -5,12 +5,9 @@ If the daemon is unavailable, falls back to subprocess (slower but works).
 Messages are saved in a local cache for persistence across sessions.
 """
 
-import asyncio
 import logging
 import os
-import subprocess
 import sys
-import threading
 import time
 import traceback
 from pathlib import Path
@@ -87,24 +84,24 @@ from textual.widgets import (
 )
 
 
-from backend import (
-    Contact,
-    SignalRPCClient,
-    _load_cache,
-    _prune_cache,
-    _mark_as_read,
-    _add_message_to_cache,
-    _update_message_status,
-    _is_daemon_running,
-    _run_subprocess,
-    _send_subprocess,
-    _process_receipt,
-    _process_typing,
-    get_attachment_path,
+from models import (
+    ChatContact,
+    ChatEvent,
+    PROTOCOL_SIGNAL,
+    contact_cache_key,
+    protocol_emoji,
+)
 
+from backends import (
+    BackendManager,
+    SignalBackend,
+    WhatsAppBackend,
+)
+from backends.config import whatsapp_enabled
+
+from backend import (
     serve_attachment_for_download,
     serve_text_as_file,
-    SIGNAL_CLI_PATH,
     USER_NUMBER,
     DAEMON_HTTP_PORT,
 )
@@ -164,6 +161,20 @@ class SignalTUI(App):
         background: $accent 40%;
     }
 
+    /* Protocol accents in the contact list */
+    .protocol-signal {
+        color: #2ecc71;
+    }
+
+    .protocol-whatsapp {
+        color: #20c997;
+    }
+
+    #contact-list .protocol-signal:hover,
+    #contact-list .protocol-whatsapp:hover {
+        color: $text;
+    }
+
     #chat-log {
         height: 1fr;
         border: solid $border;
@@ -188,6 +199,15 @@ class SignalTUI(App):
         text-align: left;
         padding: 0 1;
         color: $text-muted;
+    }
+
+    /* Subtle per-protocol accent for messages (left border) */
+    .msg-signal {
+        border-left: solid #2ecc71;
+    }
+
+    .msg-whatsapp {
+        border-left: solid #20c997;
     }
 
     .msg-quote {
@@ -288,6 +308,7 @@ class SignalTUI(App):
         Binding("ctrl+e", "open_emoji_picker", "Emoji", priority=True),
         Binding("ctrl+s", "open_contact_picker", "Search", priority=True),
         Binding("ctrl+d", "download_mode", "Download", priority=True),
+        Binding("ctrl+w", "cycle_protocol_filter", "Filter", show=True),
         Binding("ctrl+n", "next_suggestion", "Next", show=False),
         Binding("ctrl+p", "prev_suggestion", "Prev", show=False),
     ]
@@ -303,24 +324,46 @@ class SignalTUI(App):
 
     def __init__(self):
         super().__init__()
-        self.contacts: list[Contact] = []
+        # Multi-protocol backend manager + the always-registered Signal backend.
+        self.manager = BackendManager()
+        self.signal_backend = SignalBackend()
+        self.manager.register(self.signal_backend)
 
-        self.selected_contact: Optional[Contact] = None
-        self.daemon_proc: Optional[subprocess.Popen] = None
-        self.rpc: Optional[SignalRPCClient] = None
-        self._use_daemon = False
+        # WhatsApp backend is registered only when configured (env/config.json);
+        # otherwise it's skipped gracefully and the Signal TUI keeps working.
+        self.whatsapp_backend: Optional[WhatsAppBackend] = None
+        if whatsapp_enabled():
+            self.whatsapp_backend = WhatsAppBackend()
+            self.manager.register(self.whatsapp_backend)
+
+        self.contacts: list[ChatContact] = []
+        self.selected_contact: Optional[ChatContact] = None
+
+        # Active protocol filter for the unified contact list:
+        # "all" -> "signal" -> "whatsapp" (cycled with Ctrl+W).
+        self._protocol_filter: str = "all"
+
         self._polling_active = False
-        self._seen_timestamps: set[int] = set()
-        self._unread_counts: dict[str, int] = {}
-        self._cache: dict[str, list[dict]] = {}
+        # Message identity: (protocol, contact_id, timestamp_ms).  Timestamps
+        # alone are no longer unique across protocols.
+        self._seen_timestamps: set[tuple[str, str, int]] = set()
+        self._unread_counts: dict[str, int] = {}  # keyed by contact_cache_key
+        self._cache: dict[str, list[dict]] = {}   # keyed by contact_cache_key
         self._loaded_all = False
+        # Incremented on every contact selection; a load worker checks it to
+        # detect a stale reload after a newer _clear_chat (prevents duplicates).
+        self._chat_reload_token = 0
+        # Identities of real messages already mounted in the current chat log,
+        # used as a render-level de-dup safety net so _refresh_chat and the
+        # load workers never mount the same message twice.
+        self._shown_in_log: set[tuple[str, str, int]] = set()
         self._reply_to: Optional[dict] = None  # message being replied to
         self._download_mode = False  # Ctrl+D download mode active
-        self._typing_contacts: dict[str, float] = {}  # contact number → time of last typing STARTED
+        self._typing_contacts: dict[str, float] = {}  # contact cache_key → time of last typing STARTED
 
-        self._typing_mumbling: dict[str, float] = {}  # contact number → time when the mumbling state expires
+        self._typing_mumbling: dict[str, float] = {}  # contact cache_key → mumbling expiry
         self._TYPING_TIMEOUT = 10.0  # seconds before a typing indicator auto-expires
-        self._TYPING_MUMBLING_DURATION = 60.0  # seconds a contact stays at the top with 💭 after stopping typing
+        self._TYPING_MUMBLING_DURATION = 60.0  # seconds a contact stays with 💭 after stopping typing
 
 
 
@@ -364,6 +407,7 @@ class SignalTUI(App):
         timestamp: int = 0,
         sender: str = "",
         status: str = "sent",
+        protocol: str | None = None,
     ):
         """Add a message to the chat with correct alignment.
 
@@ -379,9 +423,35 @@ class SignalTUI(App):
         status:
             Delivery status for sent messages: "sent", "delivered", or "read".
             Only meaningful when ``is_mine=True``.
+        protocol:
+            Source protocol for the message widget.  Defaults to the selected
+            contact's protocol when available.
         """
         if text is None:
             text = ""
+
+        if protocol is None and self.selected_contact is not None:
+            protocol = self.selected_contact.protocol
+
+        # Render-level de-dup: never mount the same real message twice in the
+        # current view, regardless of _seen_timestamps state.  Info messages
+        # (headers, separators, hints) are not part of the message feed and so
+        # are not de-duplicated here.
+        if not is_info:
+            if (
+                self.selected_contact is not None
+                and timestamp
+                and (protocol, self.selected_contact.cache_key, timestamp)
+                in self._shown_in_log
+            ):
+                return
+            if (
+                self.selected_contact is not None
+                and timestamp
+            ):
+                self._shown_in_log.add(
+                    (protocol, self.selected_contact.cache_key, timestamp)
+                )
 
         chat_log = self.query_one("#chat-log", Vertical)
 
@@ -418,6 +488,7 @@ class SignalTUI(App):
                 is_mine=is_mine,
                 classes="msg-right" if is_mine else "msg-left",
                 status=status,
+                protocol=protocol or "",
             )
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
@@ -435,10 +506,10 @@ class SignalTUI(App):
         The actual image rendering happens on-demand when the user presses
         Enter or clicks the widget, which opens a fullscreen modal.
         """
-        # Resolve the file path
+        # Resolve the file path via the active backend (Signal).
         att_path: Path | None = None
         if attachment_id:
-            att_path = get_attachment_path(attachment_id)
+            att_path = self.signal_backend.get_attachment_path(attachment_id)
 
         if att_path is None:
             fallback = f"[🖼️ Image: {attachment_info}]"
@@ -459,274 +530,149 @@ class SignalTUI(App):
         chat_log.scroll_end(animate=False)
 
     def _clear_chat(self):
-        """Clear the chat."""
+        """Clear the chat and reset the render-level de-dup set."""
         chat_log = self.query_one("#chat-log", Vertical)
         chat_log.remove_children()
-
-    # ─── Contact identification for envelope ────────────────────────────────
-
-    def _identify_contact_for_envelope(self, envelope: dict) -> Optional[Contact]:
-        """Identify which contact an envelope belongs to."""
-        sync = envelope.get("syncMessage", {})
-        sent = sync.get("sentMessage", {})
-        if sent:
-            dest = sent.get("destination", "")
-            dest_number = sent.get("destinationNumber", "")
-            dest_uuid = sent.get("destinationUuid", "")
-            for contact in self.contacts:
-                if dest == contact.number or dest_number == contact.number:
-                    return contact
-                if dest_uuid and contact.aci and dest_uuid == contact.aci:
-                    return contact
-
-        source = envelope.get("source", "")
-        source_number = envelope.get("sourceNumber", "")
-        source_uuid = envelope.get("sourceUuid", "")
-        for contact in self.contacts:
-            if source == contact.number or source_number == contact.number:
-                return contact
-            if source_uuid and contact.aci and source_uuid == contact.aci:
-                return contact
-
-        if sent:
-            dest = sent.get("destination", "")
-            for contact in self.contacts:
-                if dest == contact.number:
-                    return contact
-
-        return None
-
-    def _extract_message_data(self, envelope: dict) -> dict | None:
-        """Extract message data from an envelope."""
-        source_name = envelope.get("sourceName", "")
-        source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
-
-        def _classify_attachments(attachments: list) -> tuple[str, str, str | None]:
-            """Classify attachments and return (msg_type, info, first_attachment_id)."""
-            if not attachments:
-                return ("text", None, None)
-            for att in attachments:
-                content_type = att.get("contentType", "") or ""
-                fname = att.get("filename", "") or ""
-                caption = att.get("caption", "") or ""
-                att_id = att.get("id") or att.get("attachmentId") or None
-                if content_type.startswith("image/"):
-                    info = caption or f"Image: {fname}" if fname else "🖼️ Image"
-                    return ("image", info, att_id)
-                if content_type.startswith("video/"):
-                    info = caption or f"Video: {fname}" if fname else "🎬 Video"
-                    return ("attachment", info, att_id)
-                if content_type.startswith("audio/"):
-                    info = caption or f"Audio: {fname}" if fname else "🎵 Audio"
-                    return ("attachment", info, att_id)
-                info = caption or fname or content_type or "📎 File"
-                return ("attachment", info, att_id)
-            return ("attachment", "📎 File", None)
-
-        def _extract_sticker(sticker: dict | None) -> tuple[str, str] | None:
-            if not sticker:
-                return None
-            pack_id = sticker.get("packId", "")
-            sticker_id = sticker.get("stickerId", "")
-            info = f"Sticker #{sticker_id}"
-            if pack_id:
-                info = f"Sticker #{sticker_id} (pack:{pack_id[:8]}…)"
-            return ("sticker", info)
-
-        data_msg = envelope.get("dataMessage", {})
-        if data_msg:
-            text = data_msg.get("message", "") or ""
-            sender = source_name or source_number
-            quote = data_msg.get("quote", {})
-            quote_text = quote.get("text", "") if quote else None
-
-            sticker_data = _extract_sticker(data_msg.get("sticker"))
-            if sticker_data:
-                msg_type, att_info = sticker_data
-                if not text:
-                    text = att_info or "🎨 Sticker"
-                return {
-                    "sender": sender, "text": text, "is_mine": False,
-                    "quote_text": quote_text, "msg_type": msg_type,
-                    "attachment_info": att_info,
-                }
-
-            attachments = data_msg.get("attachments", [])
-            msg_type, att_info, att_id = _classify_attachments(attachments)
-            if not text and attachments:
-                text = att_info or "Media"
-            return {
-                "sender": sender, "text": text, "is_mine": False,
-                "quote_text": quote_text, "msg_type": msg_type,
-                "attachment_info": att_info,
-                "attachment_id": att_id,
-            }
-
-        sync = envelope.get("syncMessage", {})
-        sent = sync.get("sentMessage", {})
-        if sent:
-            text = sent.get("message", "") or ""
-            quote = sent.get("quote", {})
-            quote_text = quote.get("text", "") if quote else None
-
-            sticker_data = _extract_sticker(sent.get("sticker"))
-            if sticker_data:
-                msg_type, att_info = sticker_data
-                if not text:
-                    text = att_info or "🎨 Sticker"
-                return {
-                    "sender": "You", "text": text, "is_mine": True,
-                    "quote_text": quote_text, "msg_type": msg_type,
-                    "attachment_info": att_info,
-                }
-
-            attachments = sent.get("attachments", [])
-            msg_type, att_info, att_id = _classify_attachments(attachments)
-            if not text and attachments:
-                text = att_info or "Media"
-            return {
-                "sender": "You", "text": text, "is_mine": True,
-                "quote_text": quote_text, "msg_type": msg_type,
-                "attachment_info": att_info,
-                "attachment_id": att_id,
-            }
-
-        return None
-
-    def _get_message_timestamp(self, envelope: dict) -> int:
-        """Return the message timestamp."""
-        ts = envelope.get("timestamp", 0)
-        if not ts:
-            data = envelope.get("dataMessage", {})
-            ts = data.get("timestamp", 0)
-        if not ts:
-            sync = envelope.get("syncMessage", {})
-            sent = sync.get("sentMessage", {})
-            ts = sent.get("timestamp", 0)
-        return ts
+        self._shown_in_log.clear()
 
     # ─── Envelope processing ─────────────────────────────────────────────────
 
-    def _process_envelope(self, envelope: dict) -> bool:
-        """Process an envelope: identify the contact, save to cache.
-        If the contact is currently selected, show the message immediately.
+    def _handle_event(self, event: ChatEvent) -> bool:
+        """Dispatch a normalized ``ChatEvent`` from a backend poll worker.
 
-        Also handles receiptMessage envelopes (delivery and read receipts)
-        for messages we sent, updating their status in the cache and UI.
+        This is the single entry point for all incoming data.  It handles
+        message ingestion (via the backend), typing indicators, and receipts,
+        and applies only UI-side side effects (display, unread badges).
+
+        Returns ``True`` if the event was handled.
         """
-        # ── Check if this is a typing indicator ─────────────────────────────
-        if _process_typing(envelope) is not None:
-            return self._process_typing_envelope(envelope)
+        if event.type == "typing":
+            return self._handle_typing_event(event)
+        if event.type == "receipt":
+            return self._handle_receipt_event(event)
+        if event.type == "message":
+            return self._handle_message_event(event)
+        return False
 
-        # ── Check if this is a receipt message ──────────────────────────────
-        if "receiptMessage" in envelope:
-            return self._process_receipt_envelope(envelope)
+    def _handle_message_event(self, event: ChatEvent) -> bool:
+        """Ingest and display a normalized incoming/outgoing message."""
+        # Resolve the owning backend by protocol (Signal, WhatsApp, ...).
+        backend = self.manager.get(event.protocol)
+        if backend is None:
+            return False
 
-        contact = self._identify_contact_for_envelope(envelope)
-
+        contact = event.payload.get("contact")
         if contact is None:
-            return False
+            # Resolve via the backend's contact table, or fall back to a
+            # placeholder built from the event's contact id.
+            identify = getattr(backend, "_identify_contact", None)
+            if identify is not None:
+                contact = identify(event.contact_id)
+            if contact is None:
+                contact = ChatContact(
+                    id=event.contact_id,
+                    display_name=event.contact_id,
+                    protocol=event.protocol,
+                )
+        cache_key = contact.cache_key
+        ts = event.payload.get("timestamp", 0)
+        is_mine = event.payload.get("is_mine", False)
 
-        # When a real message arrives, the sender has stopped typing.  If
-        # they were typing (or recently stopped), move them to the "mumbling"
-        # state (💭) so the 💭 icon stays visible for a while (the list is
-        # always alphabetical, so this only affects the icon, not the order).
-        if contact.number in self._typing_contacts or contact.number in self._typing_mumbling:
-            self._typing_contacts.pop(contact.number, None)
-            self._typing_mumbling[contact.number] = time.time() + self._TYPING_MUMBLING_DURATION
+        # Save to DB + backend cache.  Returns True only if newly added;
+        # if the identity already exists (e.g. an optimistic save is confirmed
+        # by a sync sent-envelope), nothing is duplicated.
+        ingest = getattr(backend, "ingest_message", None)
+        added = ingest(contact.id, event.payload, ts) if ingest is not None else True
 
+        # Mirror into the UI's protocol-aware cache only when actually new.
+        if added:
+            if cache_key not in self._cache:
+                self._cache[cache_key] = []
+            self._cache[cache_key].append({
+                "text": event.payload["text"],
+                "is_mine": is_mine,
+                "sender": event.payload.get("sender", ""),
+                "timestamp": ts,
+                "quote_text": event.payload.get("quote_text"),
+                "msg_type": event.payload.get("msg_type", "text"),
+                "attachment_info": event.payload.get("attachment_info"),
+                "attachment_id": event.payload.get("attachment_id"),
+                "read": is_mine,
+                "status": "sent" if is_mine else "read",
+            })
 
+        # When a real message arrives, the sender stopped typing: move to the
+        # mumbling (💭) state if they were typing.
+        if cache_key in self._typing_contacts or cache_key in self._typing_mumbling:
+            self._typing_contacts.pop(cache_key, None)
+            self._typing_mumbling[cache_key] = time.time() + self._TYPING_MUMBLING_DURATION
 
-
-
-        ts = self._get_message_timestamp(envelope)
-        data = self._extract_message_data(envelope)
-        if data is None:
-            return False
-
-        # Save to SQLite (incremental INSERT)
-        _add_message_to_cache(
-            contact.number,
-            data["text"],
-            data["is_mine"],
-            data["sender"],
-            ts,
-            quote_text=data["quote_text"],
-            msg_type=data["msg_type"],
-            attachment_info=data["attachment_info"],
-            attachment_id=data.get("attachment_id"),
-        )
-
-        # Update in-memory cache for UI
-        if contact.number not in self._cache:
-            self._cache[contact.number] = []
-        self._cache[contact.number].append({
-            "text": data["text"],
-            "is_mine": data["is_mine"],
-            "sender": data["sender"],
-            "timestamp": ts,
-            "quote_text": data["quote_text"],
-            "msg_type": data["msg_type"],
-            "attachment_info": data["attachment_info"],
-            "attachment_id": data.get("attachment_id"),
-            "read": data["is_mine"],
-            "status": "sent" if data["is_mine"] else "read",
-        })
-
-
-        # If it's the current contact, show the message in the UI immediately
-
-        if self.selected_contact and contact.number == self.selected_contact.number:
-            if ts and ts not in self._seen_timestamps:
-                self._seen_timestamps.add(ts)
+        # If it's the current contact, show it immediately; else bump unread.
+        if self.selected_contact and self.selected_contact.cache_key == cache_key:
+            if ts and (event.protocol, cache_key, ts) not in self._seen_timestamps:
+                self._seen_timestamps.add((event.protocol, cache_key, ts))
                 self.call_from_thread(
                     self._add_message,
-                    data["text"],
-                    is_mine=data["is_mine"],
-                    quote_text=data["quote_text"],
-                    msg_type=data["msg_type"],
-                    attachment_info=data["attachment_info"],
-                    attachment_id=data.get("attachment_id"),
+                    event.payload["text"],
+                    is_mine=is_mine,
+                    quote_text=event.payload.get("quote_text"),
+                    msg_type=event.payload.get("msg_type", "text"),
+                    attachment_info=event.payload.get("attachment_info"),
+                    attachment_id=event.payload.get("attachment_id"),
                     timestamp=ts,
-                    sender=data.get("sender", ""),
-                    status="sent" if data["is_mine"] else "read",
+                    sender=event.payload.get("sender", ""),
+                    status="sent" if is_mine else "read",
                 )
         else:
             # Message for another contact: update unread badge
-            self.call_from_thread(self._update_unread_badges, contact.number)
+            self.call_from_thread(self._update_unread_badges, cache_key)
 
         return True
 
-    def _process_receipt_envelope(self, envelope: dict) -> bool:
-        """Process a receiptMessage envelope (delivery or read receipt).
+    def _handle_receipt_event(self, event: ChatEvent) -> bool:
+        """Process a receipt event (delivery / read receipts).
 
-        Updates the status of sent messages in the cache and refreshes
-        the corresponding widgets in the UI if the contact is currently
-        selected.
-
-        ``_process_receipt`` mutates the in-memory ``self._cache`` dict;
-        the status changes are then persisted to SQLite via
-        ``_update_message_status``.
+        The backend updates its own cache (and SQLite for Signal); the status
+        changes are mirrored into the UI cache, and widgets are refreshed if
+        the affected contact is currently selected.
         """
-        # Process the receipt using the backend function on the current cache
-        updated = _process_receipt(envelope, self._cache)
+        backend = self.manager.get(event.protocol)
+        if backend is None:
+            return False
+        process = getattr(backend, "process_receipt", None)
+        if process is None:
+            return False
+
+        if event.protocol == PROTOCOL_SIGNAL:
+            # Reconstruct the Signal receipt envelope the backend expects.
+            receipt = event.payload.get("receipt", {})
+            envelope = {
+                "sourceNumber": event.contact_id,
+                "source": event.contact_id,
+                "receiptMessage": receipt,
+            }
+            updated = process(envelope)
+        else:
+            # Generic backend (WhatsApp) uses a message-ids receipt payload.
+            updated = process({
+                "message_ids": event.payload.get("message_ids", []),
+                "is_read": event.payload.get("is_read", False),
+            })
         if not updated:
             return False
 
-        # Persist status changes to SQLite
-        for msg in updated:
-            _update_message_status(msg["timestamp"], msg["status"])
+        # Mirror the updated statuses into the UI's cache.
+        ui_key = contact_cache_key(event.protocol, event.contact_id)
+        ui_msgs = self._cache.get(ui_key)
+        if ui_msgs is not None:
+            by_ts = {m.get("timestamp"): m for m in ui_msgs}
+            for msg in updated:
+                target = by_ts.get(msg.get("timestamp"))
+                if target is not None:
+                    target["status"] = msg.get("status", target.get("status", "sent"))
 
-        # Get the source contact number from the envelope
-        source = envelope.get("sourceNumber", "") or envelope.get("source", "")
-        if not source:
-            return False
-
-        # If the contact whose messages got receipts is currently selected,
-        # update the corresponding widgets in the UI
-        if self.selected_contact and source == self.selected_contact.number:
+        if self.selected_contact and self.selected_contact.id == event.contact_id:
             self.call_from_thread(self._update_message_widgets_status, updated)
-
         return True
 
 
@@ -750,45 +696,41 @@ class SignalTUI(App):
 
     # ─── Typing indicators ──────────────────────────────────────────────────
 
-    def _process_typing_envelope(self, envelope: dict) -> bool:
-        """Process a typing-indicator envelope.
+    def _handle_typing_event(self, event: ChatEvent) -> bool:
+        """Process a typing-indicator event.
 
-        Updates ``self._typing_contacts`` (contact number → time of last
+        Updates ``self._typing_contacts`` (contact cache_key → time of last
         STARTED) and refreshes the contact list label so the ``✍️`` icon
         appears/disappears next to the contact.
 
         Typing indicators are ephemeral: they are never saved to cache and
         never shown as messages in the chat log.
         """
-        result = _process_typing(envelope)
-        if result is None:
+        action = event.payload.get("action", "")
+        if action not in ("STARTED", "STOPPED"):
             return False
 
-        source, action = result
+        cache_key = contact_cache_key(event.protocol, event.contact_id)
         now = time.time()
 
         if action == "STARTED":
-            self._typing_contacts[source] = now
+            self._typing_contacts[cache_key] = now
             # A new STARTED clears any mumbling state (they are actively
             # typing again).
-            self._typing_mumbling.pop(source, None)
+            self._typing_mumbling.pop(cache_key, None)
         else:  # STOPPED
-            self._typing_contacts.pop(source, None)
+            self._typing_contacts.pop(cache_key, None)
             # The contact stopped typing without sending a message: keep the
             # 💭 icon visible for a while (the list is always alphabetical,
             # so this only affects the icon, not the order).
-            self._typing_mumbling[source] = now + self._TYPING_MUMBLING_DURATION
-
-
-
-
+            self._typing_mumbling[cache_key] = now + self._TYPING_MUMBLING_DURATION
 
         # Refresh the contact list label (non-invasive: only the label text
         # of the affected contact changes, selection is preserved).
-        self.call_from_thread(self._refresh_typing_indicator, source)
+        self.call_from_thread(self._refresh_typing_indicator, event.protocol, event.contact_id)
         return True
 
-    def _refresh_typing_indicator(self, contact_number: str) -> None:
+    def _refresh_typing_indicator(self, protocol: str, contact_id: str) -> None:
         """Rebuild the contact list labels to reflect typing state.
 
         Only the label of the affected contact changes; the list is rebuilt
@@ -802,31 +744,24 @@ class SignalTUI(App):
         # no-op if already sorted, but keeps the list consistent).
         self._sort_contacts()
 
+        self._render_contact_list(self._filtered_contacts())
 
-        contact_list = self.query_one("#contact-list", ListView)
-        contact_list.clear()
-        for c in self.contacts:
-            contact_list.append(ListItem(Label(self._contact_label(c))))
-
-        # Restore selection on the current contact (if present)
-        if self.selected_contact and self.selected_contact in self.contacts:
-            contact_list.index = self.contacts.index(self.selected_contact)
-
-    def _contact_label(self, contact: Contact) -> str:
+    def _contact_label(self, contact: ChatContact) -> str:
 
         """Build the contact list label.
 
-        Format: ``📱 {name}`` + (if unread) `` *{N}`` + (if typing) `` ✍️``.
+        Format: ``{emoji} {name}`` + (if unread) `` *{N}`` + (if typing) `` ✍️``.
+        The emoji is chosen per protocol (📱 for Signal, 💬 for WhatsApp).
         The typing icon appears to the right of the unread badge when present,
         otherwise to the right of the name.
         """
-        label = f"📱 {contact.display_name}"
-        unread = self._unread_counts.get(contact.number, 0)
+        label = f"{protocol_emoji(contact.protocol)} {contact.display_name}"
+        unread = self._unread_counts.get(contact.cache_key, 0)
         if unread > 0 and contact != self.selected_contact:
             label += f" *{unread}"
-        if contact.number in self._typing_contacts:
+        if contact.cache_key in self._typing_contacts:
             label += " ✍️"
-        elif contact.number in self._typing_mumbling:
+        elif contact.cache_key in self._typing_mumbling:
             label += " 💭"
         return label
 
@@ -835,144 +770,61 @@ class SignalTUI(App):
 
 
     def _startup(self):
-        """Start signal-cli daemon and load contacts."""
-        _prune_cache()
-        self._cache = _load_cache()
-
-
-        self.call_from_thread(self._add_message, "⏳ Starting signal-cli daemon...", is_info=True)
-        self.rpc = SignalRPCClient()
-
-        if _is_daemon_running():
-            self._use_daemon = True
-            self.call_from_thread(
-                self._add_message, "✅ Daemon already active, connecting directly...", is_info=True
-            )
-            self._load_contacts_rpc()
-
-            self._polling_active = True
-            self.run_worker(self._poll_worker, exclusive=True, thread=True)
-            return
-
+        """Connect all backends, load contacts, and start the poll workers."""
         self.call_from_thread(
             self._add_message, "⏳ Starting signal-cli daemon...", is_info=True
         )
 
-        self.daemon_proc = subprocess.Popen(
-            [
-                str(SIGNAL_CLI_PATH),
-                "-u", USER_NUMBER,
-                "daemon",
-                "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",
-                "--receive-mode", "on-connection",
-                "--no-receive-stdout",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # Backend connect is synchronous-friendly (it wraps blocking daemon
+        # startup).  This runs in the mount worker thread.
+        self.signal_backend._connect_sync()
 
-        for _ in range(15):
-            try:
-                test = self.rpc._call("listContacts")
-                if "result" in test:
-                    self._use_daemon = True
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
+        # Report which transport is in use (mirrors the pre-refactor message).
+        if self.signal_backend._use_daemon:
+            self.call_from_thread(
+                self._add_message,
+                "✅ Daemon already active, connecting directly...",
+                is_info=True,
+            )
         else:
             self.call_from_thread(
                 self._add_message,
-                "❌ Daemon not available. Using subprocess mode (slower).",
+                "⚠️ Daemon not available. Using subprocess mode (slower).",
                 is_info=True,
             )
-            self._use_daemon = False
-            self._load_contacts_subprocess()
-            return
 
-        self._load_contacts_rpc()
+        # Connect the WhatsApp backend when configured (non-fatal if it's
+        # unreachable or unpaired — the Signal client keeps working).
+        if self.whatsapp_backend is not None:
+            try:
+                self.whatsapp_backend.connect_sync()
+                n = len(self.whatsapp_backend.contacts)
+                self.call_from_thread(
+                    self._add_message,
+                    f"💬 WhatsApp backend active ({n} contacts).",
+                    is_info=True,
+                )
+            except Exception as exc:
+                self.call_from_thread(
+                    self._add_message,
+                    f"💬 WhatsApp backend unavailable: {exc}",
+                    is_info=True,
+                )
 
+        # Pull the merged, protocol-aware contact list from the manager.
+        contacts = self.manager.list_contacts()
+        self.contacts = contacts
+        # Convert each backend's cache (keyed by raw contact id) into the UI's
+        # protocol-aware cache (keyed by contact_cache_key).
+        self._cache = {}
+        for backend in self.manager.all():
+            for cid, msgs in backend.cache.items():
+                self._cache[contact_cache_key(backend.protocol, cid)] = msgs
+        self.call_from_thread(self._update_contacts_ui, contacts)
+
+        # Start polling for incoming messages.
         self._polling_active = True
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
-
-    def _load_contacts_rpc(self):
-        """Load contacts via JSON-RPC (daemon already active)."""
-        self.call_from_thread(
-            self._add_message, "⏳ Loading contacts...", is_info=True
-        )
-
-        contacts_data = self.rpc.list_contacts()
-        if isinstance(contacts_data, list) and len(contacts_data) > 0:
-            self._parse_and_update_contacts(contacts_data)
-        else:
-            self.call_from_thread(
-                self._add_message,
-                "⚠️ RPC returned no contacts. Trying subprocess...",
-                is_info=True,
-            )
-            self._load_contacts_subprocess()
-
-    def _load_contacts_subprocess(self):
-        """Load contacts via subprocess (fallback)."""
-        self.call_from_thread(
-            self._add_message, "⏳ Loading contacts (subprocess)...", is_info=True
-        )
-
-        try:
-            output = _run_subprocess(["listContacts"])
-            contacts = self._parse_contacts_from_output(output)
-            self.contacts = contacts
-            self.call_from_thread(self._update_contacts_ui, contacts)
-        except Exception as e:
-            self.call_from_thread(
-                self._add_message,
-                f"❌ Error loading contacts: {e}",
-                is_info=True,
-            )
-
-    def _parse_contacts_from_output(self, output: str) -> list[Contact]:
-        """Parse the output of 'signal-cli listContacts'."""
-        contacts = []
-        for line in output.strip().split("\n"):
-            if not line.strip():
-                continue
-            parts = line.split()
-            number = ""
-            name = ""
-            aci = ""
-            for i, p in enumerate(parts):
-                if p.startswith("Number:"):
-                    number = p.split(":", 1)[1].strip()
-                elif p.startswith("Name:"):
-                    name = p.split(":", 1)[1].strip()
-                elif p.startswith("ACI:"):
-                    aci_val = p.split(":", 1)[1].strip()
-                    if aci_val and aci_val != "-":
-                        aci = aci_val
-                elif p == "Profile" and i + 1 < len(parts) and parts[i + 1].startswith("name:"):
-                    profile_name = parts[i + 1].split(":", 1)[1].strip()
-                    if profile_name and not name:
-                        name = profile_name
-            if number:
-                contacts.append(Contact(number=number, name=name, aci=aci))
-        return contacts
-
-    def _parse_and_update_contacts(self, contacts_data: list[dict]):
-        """Parse contact data and update the UI."""
-        contacts = []
-        for c in contacts_data:
-            number = c.get("number", "")
-            name = (
-                c.get("name")
-                or c.get("givenName")
-                or (c.get("profile") or {}).get("givenName")
-                or number
-            )
-            aci = c.get("uuid", "") or c.get("aci", "")
-            contacts.append(Contact(number=number, name=name, aci=aci))
-
-        self.contacts = contacts
-        self.call_from_thread(self._update_contacts_ui, contacts)
 
     def _sort_contacts(self):
         """Sort contacts alphabetically by display name.
@@ -982,21 +834,74 @@ class SignalTUI(App):
         but never reorder the list, so it doesn't jump around.
         """
         self.contacts.sort(
-            key=lambda c: (c.display_name.lower(), c.number)
+            key=lambda c: (c.display_name.lower(), c.id)
         )
 
+    def _filtered_contacts(self) -> list[ChatContact]:
+        """Return contacts matching the active protocol filter."""
+        if self._protocol_filter in ("signal", "whatsapp"):
+            return [c for c in self.contacts if c.protocol == self._protocol_filter]
+        return list(self.contacts)
 
+    def _protocol_class(self, contact: ChatContact) -> str:
+        """Return the CSS accent class for a contact's protocol."""
+        return f"protocol-{contact.protocol}"
 
+    def _filter_title_suffix(self) -> str:
+        """Human-readable suffix describing the active filter state."""
+        if self._protocol_filter == "signal":
+            return " — Signal"
+        if self._protocol_filter == "whatsapp":
+            return " — WhatsApp"
+        return ""
 
-    def _update_contacts_ui(self, contacts: list[Contact]):
-        """Update the UI with the contact list."""
-        self._sort_contacts()
+    def _render_contact_list(self, filtered: list[ChatContact]) -> None:
+        """Rebuild the contact ListView from *filtered* contacts.
+
+        Contacts are given their protocol accent class; selection is preserved
+        when the selected contact is still visible under the active filter.
+        """
         contact_list = self.query_one("#contact-list", ListView)
         contact_list.clear()
-        for c in self.contacts:
-            contact_list.append(ListItem(Label(self._contact_label(c))))
+        for c in filtered:
+            item = ListItem(Label(self._contact_label(c)))
+            item.add_class(self._protocol_class(c))
+            contact_list.append(item)
+        if self.selected_contact and self.selected_contact in filtered:
+            contact_list.index = filtered.index(self.selected_contact)
 
-        self._add_message(f"✅ Loaded {len(contacts)} contacts.", is_info=True)
+    def _apply_contact_filter(self) -> None:
+        """Re-apply the active protocol filter to the contact list view.
+
+        Filters the in-memory contact collection (no DB reload) and updates the
+        contacts section title to reflect the current state.
+        """
+        filtered = self._filtered_contacts()
+        self._render_contact_list(filtered)
+        try:
+            section_lbl = self.query_one("ContactsTitle", Label)
+        except Exception:
+            section_lbl = None
+        if section_lbl is not None:
+            section_lbl.update(f"📇 Contacts{self._filter_title_suffix()}")
+
+    def action_cycle_protocol_filter(self):
+        """Ctrl+W: cycle the contact list filter ALL -> SIGNAL -> WHATSAPP."""
+        order = ["all", "signal", "whatsapp"]
+        idx = order.index(self._protocol_filter) if self._protocol_filter in order else 0
+        self._protocol_filter = order[(idx + 1) % len(order)]
+        self._apply_contact_filter()
+        self._add_message(
+            f"🔀 Filter: {self._protocol_filter.title()}{self._filter_title_suffix()}",
+            is_info=True,
+        )
+
+    def _update_contacts_ui(self, contacts: list[ChatContact]):
+        """Update the UI with the (merged) contact list."""
+        self._sort_contacts()
+        self._render_contact_list(self._filtered_contacts())
+
+        self._add_message(f"✅ Loaded {len(self.contacts)} contacts.", is_info=True)
 
         self._add_message("💡 Select a contact to view chat", is_info=True)
 
@@ -1004,7 +909,7 @@ class SignalTUI(App):
 
     # ─── Contact selection ─────────────────────────────────────────────────
 
-    def _select_contact(self, contact: Contact) -> None:
+    def _select_contact(self, contact: ChatContact) -> None:
         """Select a contact and show its chat.
 
         Shared by both the contact list (``on_list_view_selected``) and the
@@ -1022,23 +927,33 @@ class SignalTUI(App):
         self._cancel_reply()
         self._clear_chat()
         self._add_message(
-            f"📱 Chat with: {self.selected_contact.display_name}", is_info=True
+            f"[{protocol_emoji(contact.protocol)} {contact.protocol.title()}] Chat with: "
+            f"{self.selected_contact.display_name}",
+            is_info=True,
         )
-        self._add_message(self.selected_contact.number, is_info=True)
+        self._add_message(self.selected_contact.id, is_info=True)
         self._add_message("─" * 40, is_info=True)
 
+        # Bump the reload token so any in-flight load worker from a previous
+        # selection is invalidated (avoids mounting messages after _clear_chat).
+        self._chat_reload_token += 1
         self.run_worker(
-            self._load_messages_worker, exclusive=True, thread=True
+            self._load_messages_worker,
+            exclusive=True,
+            thread=True,
         )
 
         # Mark all messages from this contact as read
-        number = self.selected_contact.number
-        if number in self._cache:
-            for msg in self._cache[number]:
+        cache_key = self.selected_contact.cache_key
+        if cache_key in self._cache:
+            for msg in self._cache[cache_key]:
                 if not msg.get("read", True):
                     msg["read"] = True
-        _mark_as_read(number)  # UPDATE in SQLite
-        self._unread_counts[number] = 0
+        # Mark read via the backend (persists to SQLite).
+        self.manager.get(self.selected_contact.protocol).mark_read_sync(
+            self.selected_contact.id
+        )
+        self._unread_counts[cache_key] = 0
 
 
         # Highlight the contact in the left list and remove the *N badge
@@ -1074,26 +989,43 @@ class SignalTUI(App):
 
     def _load_messages_worker(self):
         """Load messages: last 20 from cache.
-        If there are more than 20 messages, show a widget to load the rest."""
+        If there are more than 20 messages, show a widget to load the rest.
+
+        Runs in a worker thread; before each render it verifies the reload
+        token is still current (no newer contact selection happened) so a
+        stale worker stops mounting messages after a more recent ``_clear_chat``
+        — otherwise re-selecting a contact can double the messages.
+        """
         if not self.selected_contact:
             return
 
         contact = self.selected_contact
+        reload_token = self._chat_reload_token
         self._loaded_all = False
 
-        cached = self._cache.get(contact.number, [])
+        cached = self._cache.get(contact.cache_key, [])
         total = len(cached)
+
+        def _is_stale() -> bool:
+            """True if a newer selection happened or the contact changed."""
+            return (
+                self._chat_reload_token != reload_token
+                or self.selected_contact != contact
+            )
 
         if cached:
             if total > 20:
                 messages_to_show = cached[-20:]
-                self.call_from_thread(self._add_load_more_widget, total - 20)
+                if not _is_stale():
+                    self.call_from_thread(self._add_load_more_widget, total - 20)
             else:
                 messages_to_show = cached
                 self._loaded_all = True
 
             for msg in messages_to_show:
                 try:
+                    if _is_stale():
+                        return
                     text = msg.get("text", "")
                     is_mine = msg.get("is_mine", False)
                     quote_text = msg.get("quote_text")
@@ -1105,7 +1037,7 @@ class SignalTUI(App):
                     status = msg.get("status", "sent" if is_mine else "read")
 
                     if ts:
-                        self._seen_timestamps.add(ts)
+                        self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
 
                     self.call_from_thread(
                         self._add_message,
@@ -1179,7 +1111,7 @@ class SignalTUI(App):
 
     def _open_contact_picker(self) -> None:
         """Open the contact search picker modal."""
-        def _on_contact_selected(contact: Contact | None) -> None:
+        def _on_contact_selected(contact: ChatContact | None) -> None:
             if contact:
                 # Select the contact's chat (also highlights it in the left list).
                 # _select_contact already reloads the full chat from cache, so
@@ -1293,7 +1225,7 @@ class SignalTUI(App):
             return
 
         contact = self.selected_contact
-        cached = self._cache.get(contact.number, [])
+        cached = self._cache.get(contact.cache_key, [])
 
         self._clear_chat()
         self._seen_timestamps.clear()
@@ -1310,7 +1242,7 @@ class SignalTUI(App):
             status = msg.get("status", "sent" if is_mine else "read")
 
             if ts:
-                self._seen_timestamps.add(ts)
+                self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
 
             self._add_message(
                 text,
@@ -1328,65 +1260,71 @@ class SignalTUI(App):
         self._add_message(f"📋 Loaded all {len(cached)} messages", is_info=True)
 
     def _poll_worker(self):
-        """Thread worker that polls every 1 second.
-        Processes ALL incoming messages and saves them to cache.
-        Starts ONCE in _startup() and lives for the entire app lifetime."""
+        """Thread worker that polls the backend receive loop.
+
+        Runs as a plain (non-async) thread loop exactly like the original, so
+        quitting is prompt: every cycle it checks ``_polling_active`` and
+        sleeps briefly.  Each round pulls a batch of events via
+        ``backend.poll_once()`` and dispatches them through ``_handle_event``.
+        """
         while self._polling_active:
             try:
-                if self._use_daemon and self.rpc:
-                    messages = self.rpc.receive()
-                    for msg in messages:
-                        envelope = msg.get("envelope", {})
-                        self._process_envelope(envelope)
+                # Drain events from every registered backend (Signal, WhatsApp, ...).
+                for backend in self.manager.all():
+                    if not self._polling_active:
+                        return
+                    try:
+                        events = backend.poll_once()
+                    except AttributeError:
+                        events = []
+                    for event in events:
+                        if not self._polling_active:
+                            return
+                        self._handle_event(event)
+
+                        # Typing timeout: a STARTED without a STOPPED within
+                        # _TYPING_TIMEOUT seconds moves the contact to mumbling (💭).
+                        if self._typing_contacts:
+                            now = time.time()
+                            expired = [
+                                key for key, started_at in self._typing_contacts.items()
+                                if now - started_at > self._TYPING_TIMEOUT
+                            ]
+                            if expired:
+                                for key in expired:
+                                    self._typing_contacts.pop(key, None)
+                                    self._typing_mumbling[key] = now + self._TYPING_MUMBLING_DURATION
+                                protocol, cid = expired[0].split(":", 1)
+                                self.call_from_thread(self._refresh_typing_indicator, protocol, cid)
+
+                        # Mumbling expiry: once the mumbling window passes, remove it.
+                        if self._typing_mumbling:
+                            now = time.time()
+                            expired = [
+                                key for key, expires_at in self._typing_mumbling.items()
+                                if now >= expires_at
+                            ]
+                            if expired:
+                                for key in expired:
+                                    self._typing_mumbling.pop(key, None)
+                                protocol, cid = expired[0].split(":", 1)
+                                self.call_from_thread(self._refresh_typing_indicator, protocol, cid)
+
+                # Prompt-exit inner sleep.  This runs every cycle (even when no
+                # messages arrived) so the worker exits as soon as the user quits.
+                for _ in range(10):
+                    if not self._polling_active:
+                        return
+                    time.sleep(0.1)
             except Exception as exc:
-                # Log any polling error to file for debugging
                 try:
                     with open("/tmp/signal-poll-error.log", "a") as f:
                         f.write(f"{time.time()}: {exc}\n")
                 except Exception:
                     pass
-
-            # Typing-indicator timeout: if a contact sent STARTED but no
-
-            # STOPPED arrived within _TYPING_TIMEOUT seconds, move them to
-            # the "mumbling" state (💭) so the ✍️ icon doesn't stay stuck
-            # forever (the list is always alphabetical, so this only affects
-            # the icon, not the order).
-            if self._typing_contacts:
-
-                now = time.time()
-                expired = [
-                    num for num, started_at in self._typing_contacts.items()
-                    if now - started_at > self._TYPING_TIMEOUT
-                ]
-                if expired:
-                    for num in expired:
-                        self._typing_contacts.pop(num, None)
-                        self._typing_mumbling[num] = now + self._TYPING_MUMBLING_DURATION
-                    self.call_from_thread(self._refresh_typing_indicator, expired[0])
-
-            # Mumbling expiry: a contact that stopped typing (or timed out)
-            # keeps the 💭 icon for _TYPING_MUMBLING_DURATION seconds.  Once
-            # that expires, remove the icon (the list is always alphabetical,
-            # so this only affects the icon, not the order).
-            if self._typing_mumbling:
-
-                now = time.time()
-                expired = [
-                    num for num, expires_at in self._typing_mumbling.items()
-                    if now >= expires_at
-                ]
-                if expired:
-                    for num in expired:
-                        self._typing_mumbling.pop(num, None)
-                    self.call_from_thread(self._refresh_typing_indicator, expired[0])
-
-
-
-            for _ in range(10):
-                if not self._polling_active:
-                    return
-                time.sleep(0.1)
+            # Re-check before the next poll so an empty round still exits.
+            if not self._polling_active:
+                return
 
 
     def _refresh_chat(self):
@@ -1402,16 +1340,19 @@ class SignalTUI(App):
             return
 
         contact = self.selected_contact
-        cached = self._cache.get(contact.number, [])
+        cached = self._cache.get(contact.cache_key, [])
         new_count = 0
 
         # Only consider messages newer than the newest one already shown.
-        max_seen = max(self._seen_timestamps) if self._seen_timestamps else 0
+        max_seen = max(
+            (t for (_p, _k, t) in self._seen_timestamps), default=0
+        )
 
         for msg in cached:
             ts = msg.get("timestamp", 0)
-            if ts and ts > max_seen and ts not in self._seen_timestamps:
-                self._seen_timestamps.add(ts)
+            in_seen = (contact.protocol, contact.cache_key, ts) in self._seen_timestamps
+            if ts and ts > max_seen and not in_seen:
+                self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
                 text = msg.get("text", "")
                 is_mine = msg.get("is_mine", False)
                 quote_text = msg.get("quote_text")
@@ -1438,44 +1379,44 @@ class SignalTUI(App):
             chat_log.scroll_end(animate=False)
 
 
-    def _update_unread_badges(self, contact_number: str | None = None):
+    def _update_unread_badges(self, contact_cache_key_value: str | None = None):
         """Check the in-memory cache and update *N badges on contacts.
         If counts change, re-sort the list and rebuild it.
 
         Parameters
         ----------
-        contact_number:
-            If provided, only recompute the unread count for this single
-            contact (O(M) instead of O(N×M)).  If None, recompute for all
-            contacts (used at startup / contact list load).
+        contact_cache_key_value:
+            If provided (a ``contact_cache_key`` string), only recompute the
+            unread count for this single contact (O(M) instead of O(N×M)).
+            If None, recompute for all contacts (startup / list load).
         """
         if not self.contacts:
             return
 
         changed = False
 
-        if contact_number is not None:
+        if contact_cache_key_value is not None:
             # Incremental update: only recompute the given contact.
-            messages = self._cache.get(contact_number, [])
+            messages = self._cache.get(contact_cache_key_value, [])
             unread = sum(
                 1 for m in messages
                 if not m.get("is_mine") and not m.get("read", True)
             )
-            old = self._unread_counts.get(contact_number, 0)
+            old = self._unread_counts.get(contact_cache_key_value, 0)
             if unread != old:
-                self._unread_counts[contact_number] = unread
+                self._unread_counts[contact_cache_key_value] = unread
                 changed = True
         else:
             # Full update: recompute all contacts (startup / list load).
             for contact in self.contacts:
-                messages = self._cache.get(contact.number, [])
+                messages = self._cache.get(contact.cache_key, [])
                 unread = sum(
                     1 for m in messages
                     if not m.get("is_mine") and not m.get("read", True)
                 )
-                old = self._unread_counts.get(contact.number, 0)
+                old = self._unread_counts.get(contact.cache_key, 0)
                 if unread != old:
-                    self._unread_counts[contact.number] = unread
+                    self._unread_counts[contact.cache_key] = unread
                     changed = True
 
         if not changed:
@@ -1483,14 +1424,7 @@ class SignalTUI(App):
 
         # Re-sort and rebuild the list
         self._sort_contacts()
-        contact_list = self.query_one("#contact-list", ListView)
-        contact_list.clear()
-        for c in self.contacts:
-            contact_list.append(ListItem(Label(self._contact_label(c))))
-
-        # Restore selection on the current contact (if present)
-        if self.selected_contact and self.selected_contact in self.contacts:
-            contact_list.index = self.contacts.index(self.selected_contact)
+        self._render_contact_list(self._filtered_contacts())
 
 
 
@@ -1709,23 +1643,32 @@ class SignalTUI(App):
         if not message:
             return
 
-        number = self.selected_contact.number
+        contact = self.selected_contact
+        contact_id = contact.id
+        cache_key = contact.cache_key
         ts = int(time.time() * 1000)
 
         # Capture reply data before clearing it
         reply_data = self._reply_to
         quote_text = reply_data.get("text") if reply_data else None
 
-        # Save to SQLite (incremental INSERT)
-        _add_message_to_cache(
-            number, message, True, "You", ts,
-            quote_text=quote_text,
-        )
+        # Save to SQLite (incremental INSERT), protocol-aware.
+        data = {
+            "text": message,
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": ts,
+            "quote_text": quote_text,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+        }
+        self.signal_backend.ingest_message(contact_id, data, ts)
 
         # Update in-memory cache for UI
-        if number not in self._cache:
-            self._cache[number] = []
-        self._cache[number].append({
+        if cache_key not in self._cache:
+            self._cache[cache_key] = []
+        self._cache[cache_key].append({
             "text": message,
             "is_mine": True,
             "sender": "You",
@@ -1749,7 +1692,7 @@ class SignalTUI(App):
             sender="You",
             status="sent",
         )
-        self._seen_timestamps.add(ts)
+        self._seen_timestamps.add((contact.protocol, cache_key, ts))
 
         event.input.value = ""
 
@@ -1763,7 +1706,7 @@ class SignalTUI(App):
         )
 
     def _send_message_worker(self, message: str, timestamp: int, reply_data: dict | None = None):
-        """Send a message (via RPC or subprocess fallback).
+        """Send a message via the active backend's send path.
 
         Parameters
         ----------
@@ -1771,51 +1714,49 @@ class SignalTUI(App):
             The message text to send.
         timestamp:
             The client-generated timestamp (ms) used as the message ID.
-            Passed to signal-cli so that receiptMessage timestamps match.
+            Passed to the backend so that receipt timestamps match.
         reply_data:
             If provided, the message is sent as a quote/reply.
         """
         if not self.selected_contact:
             return
 
+        contact = self.selected_contact
+
         # Extract quote parameters from reply_data
-        # quote_author MUST be a phone number, not a display name.
-        # We always use the selected contact's number because we are
+        # quote_author MUST be a contact id, not a display name.
+        # We always use the selected contact's id because we are
         # replying to the person we are chatting with.
         quote_timestamp = reply_data.get("timestamp") if reply_data else None
-        quote_author = self.selected_contact.number if reply_data else None
+        quote_author = contact.id if reply_data else None
         quote_message = reply_data.get("text") if reply_data else None
 
-        if self._use_daemon and self.rpc:
-            result = self.rpc.send_message(
+        # Send synchronously through the selected contact's backend.  This is
+        # a sync call running in a worker thread; it is NOT an async coroutine
+        # that needs awaiting, which would otherwise be silently dropped.
+        backend = self.manager.get(contact.protocol)
+        if backend is None:
+            self.call_from_thread(
+                self._add_message,
+                f"❌ No backend for protocol: {contact.protocol}",
+                is_info=True,
+            )
+            return
+
+        try:
+            backend.send_message_sync(
+                contact.id,
                 message,
-                self.selected_contact.number,
-                timestamp=timestamp,
                 quote_timestamp=quote_timestamp,
                 quote_author=quote_author,
                 quote_message=quote_message,
             )
-            if "error" in result:
-                self.call_from_thread(
-                    self._add_message,
-                    f"❌ Send error: {result['error']}",
-                    is_info=True,
-                )
-        else:
-            try:
-                _send_subprocess(
-                    message,
-                    self.selected_contact.number,
-                    quote_timestamp=quote_timestamp,
-                    quote_author=quote_author,
-                    quote_message=quote_message,
-                )
-            except Exception as e:
-                self.call_from_thread(
-                    self._add_message,
-                    f"❌ Send error: {e}",
-                    is_info=True,
-                )
+        except Exception as e:
+            self.call_from_thread(
+                self._add_message,
+                f"❌ Send error: {e}",
+                is_info=True,
+            )
 
 
 if __name__ == "__main__":

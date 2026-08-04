@@ -1,0 +1,108 @@
+"""
+Configuration for the WhatsApp backend.
+
+Reads settings from environment variables or the project ``config.json``:
+
+- ``WHATSAPP_API_URL``      — base URL of the Baileys-based HTTP API
+                              (e.g. ``http://127.0.0.1:3000``).
+- ``WHATSAPP_SESSION_NAME`` — name of the WhatsApp session on the API
+                              (default ``"default"``).
+- ``WHATSAPP_MEDIA_DIR``    — local directory where the API stores downloaded
+                              media files (used by ``get_attachment_path``).
+
+All settings are optional: when the API URL is missing/empty the client is
+considered disabled and the ``BackendManager`` simply skips the WhatsApp
+backend without affecting the Signal TUI client.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+from pathlib import Path
+
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_config() -> dict:
+    """Return the parsed ``config.json`` (or an empty dict)."""
+    config_file = PROJECT_DIR / "config.json"
+    if not config_file.exists():
+        return {}
+    try:
+        with open(config_file) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _get(key: str, env_name: str, default: str = "") -> str:
+    """Return the env var if set, else the config.json value, else default."""
+    env = os.environ.get(env_name)
+    if env:
+        return env
+    cfg = _load_config()
+    value = cfg.get(key, default)
+    return value if value is not None else default
+
+
+def get_whatsapp_api_url() -> str:
+    """Return the configured WhatsApp API base URL, or ``""`` if not set."""
+    return _get("whatsapp_api_url", "WHATSAPP_API_URL").strip().rstrip("/")
+
+
+def get_whatsapp_api_port() -> int:
+    """Return the host port of the local WAHA service (default ``3005``)."""
+    raw = os.environ.get("WHATSAPP_API_PORT", "3005") or "3005"
+    try:
+        return int(raw)
+    except ValueError:
+        return 3005
+
+
+def resolve_whatsapp_api_url() -> str:
+    """Return the URL to use for WhatsApp.
+
+    Prefers an explicitly configured ``WHATSAPP_API_URL``/``whatsapp_api_url``;
+    otherwise falls back to the local WAHA default ``http://127.0.0.1:{port}``
+    (port from ``WHATSAPP_API_PORT``, default 3005).
+    """
+    configured = get_whatsapp_api_url()
+    if configured:
+        return configured
+    return f"http://127.0.0.1:{get_whatsapp_api_port()}"
+
+
+def _local_waha_reachable(timeout: float = 1.0) -> bool:
+    """Return True if a WhatsApp HTTP API is reachable on the local port."""
+    try:
+        with socket.create_connection(
+            ("127.0.0.1", get_whatsapp_api_port()), timeout=timeout
+        ):
+            return True
+    except OSError:
+        return False
+
+
+def get_whatsapp_session_name() -> str:
+    """Return the WhatsApp session name (default ``"default"``)."""
+    value = _get("whatsapp_session_name", "WHATSAPP_SESSION_NAME", "default").strip()
+    return value or "default"
+
+
+def get_whatsapp_media_dir() -> str:
+    """Return the local media download directory (may be empty)."""
+    return _get("whatsapp_media_dir", "WHATSAPP_MEDIA_DIR").strip()
+
+
+def whatsapp_enabled() -> bool:
+    """Return True if the WhatsApp backend should be registered.
+
+    Enables when an API URL is explicitly configured *or* a local WAHA
+    service is already reachable on the default port (auto-detect).
+    """
+    if get_whatsapp_api_url():
+        return True
+    return _local_waha_reachable()

@@ -11,17 +11,18 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend import Contact
+from models import ChatContact, PROTOCOL_SIGNAL
 from contact_picker import search_contacts
 
 
-def _make_contacts() -> list[Contact]:
+def _make_contacts() -> list[ChatContact]:
     """Build a small sample contact list for tests."""
     return [
-        Contact(number="+391234567890", name="Alice Rossi"),
-        Contact(number="+391234567891", name="Bob Bianchi"),
-        Contact(number="+391234567892", name="Carla Verdi"),
-        Contact(number="+391234567893", name=""),  # name falls back to number
+        ChatContact(id="+391234567890", display_name="Alice Rossi", protocol=PROTOCOL_SIGNAL),
+        ChatContact(id="+391234567891", display_name="Bob Bianchi", protocol=PROTOCOL_SIGNAL),
+        ChatContact(id="+391234567892", display_name="Carla Verdi", protocol=PROTOCOL_SIGNAL),
+        # display_name empty → search falls back to the id (number)
+        ChatContact(id="+391234567893", display_name="", protocol=PROTOCOL_SIGNAL),
     ]
 
 
@@ -32,26 +33,26 @@ class TestSearchContacts:
         """Cerca 'alice' → deve trovare Alice Rossi."""
         results = search_contacts(_make_contacts(), "alice")
         assert len(results) == 1
-        assert results[0].name == "Alice Rossi"
+        assert results[0].display_name == "Alice Rossi"
 
     def test_search_case_insensitive(self):
         """Cerca 'ALICE' (maiuscolo) → stesso risultato di 'alice'."""
         lower = search_contacts(_make_contacts(), "alice")
         upper = search_contacts(_make_contacts(), "ALICE")
-        assert [c.number for c in lower] == [c.number for c in upper]
+        assert [c.id for c in lower] == [c.id for c in upper]
 
 
     def test_search_by_number(self):
         """Cerca parte del numero → deve trovare il contatto."""
         results = search_contacts(_make_contacts(), "567890")
         assert len(results) == 1
-        assert results[0].number == "+391234567890"
+        assert results[0].id == "+391234567890"
 
     def test_search_partial_name(self):
         """Cerca 'ross' → deve trovare Alice Rossi (substring)."""
         results = search_contacts(_make_contacts(), "ross")
         assert len(results) == 1
-        assert results[0].name == "Alice Rossi"
+        assert results[0].display_name == "Alice Rossi"
 
     def test_search_no_results(self):
         """Cerca stringa inesistente → lista vuota."""
@@ -77,7 +78,7 @@ class TestSearchContacts:
         assert len(results) == 2
 
     def test_search_contact_without_name(self):
-        """Contatto senza nome → match sul numero."""
+        """Contatto senza display name → match sul numero (id)."""
         results = search_contacts(_make_contacts(), "567893")
         assert len(results) == 1
-        assert results[0].number == "+391234567893"
+        assert results[0].id == "+391234567893"

@@ -152,8 +152,41 @@ def _ensure_cache_dir():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
+    """Upgrade a legacy ``messages`` table to the multi-protocol schema.
+
+    If the table already has a ``protocol`` column this is a no-op.  When the
+    column is missing (an existing database created before the multi-protocol
+    refactor), it is added with a ``DEFAULT 'signal'`` so every existing
+    message is assigned to the Signal protocol.  The contact index is then
+    rebuilt to include the protocol prefix.
+
+    Works on the connection passed in; the caller is responsible for
+    committing / closing.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+
+    if "protocol" not in columns:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN protocol TEXT NOT NULL DEFAULT 'signal'"
+        )
+
+    # Rebuild the index so it is namespaced by protocol.  Dropping and
+    # re-creating is idempotent on both migrated and fresh tables.
+    conn.execute("DROP INDEX IF EXISTS idx_messages_contact")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_contact "
+        "ON messages(protocol, contact_number, timestamp)"
+    )
+
+
 def _init_db():
-    """Create the SQLite database and schema if it doesn't exist."""
+    """Create the SQLite database and schema if it doesn't exist.
+
+    Also auto-migrates an existing (legacy) database that predates the
+    multi-protocol schema by adding the ``protocol`` column, so old caches
+    keep working without manual migration.
+    """
     _ensure_cache_dir()
     with _DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
@@ -162,6 +195,7 @@ def _init_db():
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    protocol TEXT NOT NULL DEFAULT 'signal',
                     contact_number TEXT NOT NULL,
                     text TEXT,
                     is_mine INTEGER NOT NULL DEFAULT 0,
@@ -175,10 +209,8 @@ def _init_db():
                     status TEXT DEFAULT 'read'
                 )
             """)
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_messages_contact "
-                "ON messages(contact_number, timestamp)"
-            )
+            # Upgrade a pre-existing legacy DB in place (idempotent).
+            _migrate_protocol_schema(conn)
             conn.commit()
         finally:
             conn.close()
@@ -212,6 +244,7 @@ def _load_cache() -> dict[str, list[dict]]:
             "attachment_id": row["attachment_id"],
             "read": bool(row["read"]),
             "status": row["status"],
+            "protocol": row["protocol"],
         })
     return cache
 
@@ -226,11 +259,14 @@ def _add_message_to_cache(
     msg_type: str = "text",
     attachment_info: str | None = None,
     attachment_id: str | None = None,
+    protocol: str = "signal",
 ):
     """Add a message to the SQLite cache (incremental INSERT).
     msg_type: "text", "image", "sticker", "attachment"
     attachment_info: additional details (filename, sticker emoji, etc.)
     attachment_id: signal-cli attachment UUID for resolving the file on disk.
+    protocol: source protocol ("signal", "whatsapp", ...). Defaults to signal
+        for backward compatibility.
     """
     _init_db()
     with _DB_LOCK:
@@ -238,11 +274,13 @@ def _add_message_to_cache(
         try:
             conn.execute(
                 """INSERT INTO messages
-                   (contact_number, text, is_mine, sender, timestamp, quote_text,
-                    msg_type, attachment_info, attachment_id, read, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (contact_number, text, int(is_mine), sender, timestamp, quote_text,
-                 msg_type, attachment_info, attachment_id, int(is_mine),
+                   (protocol, contact_number, text, is_mine, sender, timestamp,
+                    quote_text, msg_type, attachment_info, attachment_id,
+                    read, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (protocol, contact_number, text, int(is_mine), sender, timestamp,
+                 quote_text, msg_type, attachment_info, attachment_id,
+                 int(is_mine),
                  "sent" if is_mine else "read"),
             )
             conn.commit()
@@ -265,7 +303,8 @@ def _prune_cache():
                 DELETE FROM messages WHERE id NOT IN (
                     SELECT id FROM (
                         SELECT id, ROW_NUMBER() OVER (
-                            PARTITION BY contact_number ORDER BY timestamp DESC
+                            PARTITION BY protocol, contact_number
+                            ORDER BY timestamp DESC
                         ) AS rn FROM messages
                     ) WHERE rn <= 200
                 )
@@ -275,15 +314,15 @@ def _prune_cache():
             conn.close()
 
 
-def _mark_as_read(contact_number: str):
+def _mark_as_read(contact_number: str, protocol: str = "signal"):
     """Mark all messages for a contact as read."""
     _init_db()
     with _DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         try:
             conn.execute(
-                "UPDATE messages SET read = 1 WHERE contact_number = ?",
-                (contact_number,),
+                "UPDATE messages SET read = 1 WHERE contact_number = ? AND protocol = ?",
+                (contact_number, protocol),
             )
             conn.commit()
         finally:

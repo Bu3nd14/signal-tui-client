@@ -1,0 +1,38 @@
+#
+# docker-compose.yml — WhatsApp HTTP API (WAHA) for signal-tui-client
+#
+# Runs ONLY the lightweight WhatsApp HTTP API container (devlikeapro/waha),
+# the official "WhatsApp HTTP API". The Python TUI runs natively on the host
+# (it is a terminal UI), and talks to this service at
+# http://127.0.0.1:${WHATSAPP_API_PORT:-3005} (default 3005).
+#
+# Start:
+#   docker compose up -d
+#
+# The session and media files persist in ./whatsapp-data (git-ignored).
+# Pair the device with:  python3 link_whatsapp.py
+#
+
+services:
+  whatsapp:
+    image: devlikeapro/waha:latest
+    container_name: signal-tui-whatsapp
+    restart: unless-stopped
+    ports:
+      # External port defaults to 3005 (configurable via WHATSAPP_API_PORT);
+      # WAHA itself listens on 3000 inside the container.
+      - "127.0.0.1:${WHATSAPP_API_PORT:-3005}:3000/tcp"
+    environment:
+      # WAHA stores sessions and media under this data dir inside the container.
+      WAHA_DATA_DIR: "/app/.sessions"
+      # The default session name used by the Python backend/link tool.
+      WAHA_DEFAULT_SESSION: "${WHATSAPP_SESSION_NAME:-default}"
+    volumes:
+      # Persist session auth + media across container restarts / updates.
+      - ./whatsapp-data:/app/.sessions
+    networks:
+      - default
+
+networks:
+  default:
+    driver: bridge

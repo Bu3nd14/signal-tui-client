@@ -20,19 +20,19 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, ListView, ListItem, Label, Static
 
-from backend import Contact
+from models import ChatContact, protocol_emoji
 
 logger = logging.getLogger(__name__)
 
 
 # ─── Search helper ───────────────────────────────────────────────────────────
 
-def search_contacts(contacts: list[Contact], query: str, max_results: int = 50) -> list[Contact]:
-    """Filter *contacts* by *query* (case-insensitive) on name or number.
+def search_contacts(contacts: list[ChatContact], query: str, max_results: int = 50) -> list[ChatContact]:
+    """Filter *contacts* by *query* (case-insensitive) on name or id.
 
     A contact matches if the query is a substring of its display name or its
-    phone number.  The query is stripped; an empty query returns all contacts
-    (up to ``max_results``).
+    contact id (e.g. phone number).  The query is stripped; an empty query
+    returns all contacts (up to ``max_results``).
 
     Parameters
     ----------
@@ -45,18 +45,18 @@ def search_contacts(contacts: list[Contact], query: str, max_results: int = 50) 
 
     Returns
     -------
-    list[Contact]
+    list[ChatContact]
         The matching contacts, in their original order.
     """
     q = query.strip().lower()
     if not q:
         return contacts[:max_results]
 
-    results: list[Contact] = []
+    results: list[ChatContact] = []
     for contact in contacts:
         name = contact.display_name.lower()
-        number = contact.number.lower()
-        if q in name or q in number:
+        cid = contact.id.lower()
+        if q in name or q in cid:
             results.append(contact)
             if len(results) >= max_results:
                 break
@@ -65,7 +65,7 @@ def search_contacts(contacts: list[Contact], query: str, max_results: int = 50) 
 
 # ─── Contact Picker Screen ───────────────────────────────────────────────────
 
-class ContactPickerScreen(ModalScreen[Contact]):
+class ContactPickerScreen(ModalScreen[ChatContact]):
     """Modal screen to search and select a contact.
 
     When the user selects a contact, the screen dismisses and returns the
@@ -136,7 +136,7 @@ class ContactPickerScreen(ModalScreen[Contact]):
         Binding("enter", "select_contact", "Select", priority=True),
     ]
 
-    def __init__(self, contacts: list[Contact]) -> None:
+    def __init__(self, contacts: list[ChatContact]) -> None:
         """Initialise the picker with the full list of contacts.
 
         Parameters
@@ -146,7 +146,7 @@ class ContactPickerScreen(ModalScreen[Contact]):
         """
         super().__init__()
         self._all_contacts = contacts
-        self._results: list[Contact] = []
+        self._results: list[ChatContact] = []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="contact-picker-container"):
@@ -169,7 +169,7 @@ class ContactPickerScreen(ModalScreen[Contact]):
 
     # ── Rendering ────────────────────────────────────────────────────────
 
-    def _render_results(self, contacts: list[Contact]) -> None:
+    def _render_results(self, contacts: list[ChatContact]) -> None:
         """Fill the results ListView with the given contacts."""
         self._results = contacts
         results_list = self.query_one("#contact-results", ListView)
@@ -178,9 +178,9 @@ class ContactPickerScreen(ModalScreen[Contact]):
             results_list.append(ListItem(Label(self._contact_label(contact))))
 
     @staticmethod
-    def _contact_label(contact: Contact) -> str:
+    def _contact_label(contact: ChatContact) -> str:
         """Build the display label for a contact in the results list."""
-        return f"📱 {contact.display_name}"
+        return f"{protocol_emoji(contact.protocol)} {contact.display_name}"
 
     # ── Search ───────────────────────────────────────────────────────────
 

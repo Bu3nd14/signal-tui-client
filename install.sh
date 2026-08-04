@@ -46,6 +46,7 @@ REQUIRED_JAVA_MAJOR=25
 DO_VENV=1
 DO_SIGNAL_CLI=1
 DO_UPDATE=0
+DO_WHATSAPP=0
 SPECIFIC_VERSION=""
 
 # ─── Parsing argomenti ────────────────────────────────────────────────────────
@@ -61,12 +62,14 @@ Opzioni:
   --version X.Y.Z      Scarica una versione specifica di signal-cli (es. 0.14.7)
   --skip-signal-cli    Non scaricare signal-cli (se già presente in ./bin/)
   --update             Aggiorna signal-cli all'ultima versione disponibile
+  --whatsapp           Avvia il WhatsApp HTTP API (WAHA) via Docker Compose
   --help               Mostra questo aiuto
 
 Esempi:
   ./install.sh                          # installazione completa
   ./install.sh --no-venv                # senza virtualenv
   ./install.sh --update                 # aggiorna signal-cli
+  ./install.sh --whatsapp               # avvia WAHA (WhatsApp HTTP API)
 EOF
 }
 
@@ -75,6 +78,7 @@ while [ $# -gt 0 ]; do
         --no-venv)          DO_VENV=0; shift ;;
         --skip-signal-cli)  DO_SIGNAL_CLI=0; shift ;;
         --update)           DO_UPDATE=1; shift ;;
+        --whatsapp)         DO_WHATSAPP=1; shift ;;
         --version)
             [ $# -lt 2 ] && die "--version richiede un argomento (es. 0.14.7)"
             SPECIFIC_VERSION="$2"; shift 2 ;;
@@ -291,6 +295,24 @@ fi
 # 5. Installazione dipendenze Python
 install_python_deps
 
+# 5.5 Avvio WhatsApp HTTP API (WAHA) se richiesto (--whatsapp)
+if [ "$DO_WHATSAPP" -eq 1 ]; then
+    echo
+    info "Avvio del WhatsApp HTTP API (WAHA) via Docker Compose ..."
+    if command -v docker >/dev/null 2>&1; then
+        if docker compose version >/dev/null 2>&1; then
+            docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d
+            WA_PORT="${WHATSAPP_API_PORT:-3005}"
+            ok "WAHA avviato. URL: http://127.0.0.1:${WA_PORT}"
+        else
+            err "Docker Compose non trovato. Installalo oppure usa 'scripts/start_whatsapp.sh'."
+        fi
+    else
+        err "Docker non trovato. Per usare WhatsApp installa Docker (vedi README) oppure lancia l'API manualmente (nessuna Node.js nel tuo server? segui il README sezione WhatsApp)."
+    fi
+    echo
+fi
+
 # 6. Riepilogo finale
 echo
 echo "${C_GREEN}${C_BOLD}=== Installazione completata! ===${C_RESET}"
@@ -307,7 +329,20 @@ if [ "$DO_VENV" -eq 1 ]; then
 else
     echo "       python3 link_account.py"
 fi
-echo "  3. Avvia il client:"
+if [ "$DO_WHATSAPP" -eq 1 ]; then
+    echo "  3. Avvia il WhatsApp HTTP API (WAHA) e collega WhatsApp (QR):"
+    echo "       docker compose up -d                 # avvia WAHA su porta 3005"
+    echo "       export WHATSAPP_API_URL=\"http://127.0.0.1:3005\""
+    if [ "$DO_VENV" -eq 1 ]; then
+        echo "       source .venv/bin/activate"
+        echo "       python3 link_whatsapp.py"
+    else
+        echo "       python3 link_whatsapp.py   # oppure: ./scripts/start_whatsapp.sh"
+    fi
+    echo "  4. Avvia il client:"
+else
+    echo "  3. Avvia il client:"
+fi
 if [ "$DO_VENV" -eq 1 ]; then
     echo "       source .venv/bin/activate"
 fi
