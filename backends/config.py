@@ -5,6 +5,8 @@ Reads settings from environment variables or the project ``config.json``:
 
 - ``WHATSAPP_API_URL``      — base URL of the Baileys-based HTTP API
                               (e.g. ``http://127.0.0.1:3000``).
+- ``WHATSAPP_API_KEY``      — API key sent as the ``X-Api-Key`` header (auto-read
+                              from the project ``.env`` ``WAHA_API_KEY`` if unset).
 - ``WHATSAPP_SESSION_NAME`` — name of the WhatsApp session on the API
                               (default ``"default"``).
 - ``WHATSAPP_MEDIA_DIR``    — local directory where the API stores downloaded
@@ -23,6 +25,31 @@ import socket
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_dotenv() -> dict:
+    """Best-effort parse of the project ``.env`` (KEY=VALUE lines).
+
+    Returns an empty dict if the file is missing or unreadable.  This lets the
+    Python client reuse the ``WAHA_API_KEY`` that docker-compose already loads
+    into the WAHA container via ``env_file``, without requiring the user to
+    export it twice.
+    """
+    env_file = PROJECT_DIR / ".env"
+    if not env_file.exists():
+        return {}
+    data: dict[str, str] = {}
+    try:
+        with env_file.open() as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                data[key.strip()] = value.strip()
+    except OSError:
+        return {}
+    return data
 
 
 def _load_config() -> dict:
@@ -84,6 +111,28 @@ def _local_waha_reachable(timeout: float = 1.0) -> bool:
             return True
     except OSError:
         return False
+
+
+def get_whatsapp_api_key() -> str:
+    """Return the WAHA API key used for the ``X-Api-Key`` header.
+
+    Read from (in order):
+    1. the ``WHATSAPP_API_KEY`` environment variable,
+    2. the ``whatsapp_api_key`` field in ``config.json``,
+    3. the ``WAHA_API_KEY`` line in the project ``.env`` file.
+
+    Returns ``\"\"`` if none is configured.  WAHA REST returns ``401`` for any
+    request without a valid key, so a non-empty value is required once the
+    container has been started with ``docker compose up -d``.
+    """
+    env = os.environ.get("WHATSAPP_API_KEY")
+    if env:
+        return env.strip()
+    cfg = _load_config()
+    value = cfg.get("whatsapp_api_key")
+    if value:
+        return str(value).strip()
+    return _load_dotenv().get("WAHA_API_KEY", "").strip()
 
 
 def get_whatsapp_session_name() -> str:

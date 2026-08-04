@@ -10,6 +10,9 @@ __pycache__/
 # Local config (phone number, etc.)
 config.json
 
+# WAHA credentials (API key, dashboard/swagger auth)
+.env
+
 # signal-cli downloads / logs
 bin/
 *.log

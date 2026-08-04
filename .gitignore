@@ -4,6 +4,8 @@ bin/signal-cli-*/
 __pycache__/
 *.pyc
 config.json
+# WAHA credentials (API key, dashboard/swagger auth)
+.env
 signal-tui-client.code-workspace
 *.log
 profiling/output/

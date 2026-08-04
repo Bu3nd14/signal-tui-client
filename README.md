@@ -156,6 +156,21 @@ The API then listens on `127.0.0.1:3005` by default (override with
 If Docker isn't installed, the instructions in section 6b below still let you
 point the backend at any compatible Baileys API.
 
+> **API key (authentication):** WAHA generates credentials on its **first** start
+> and requires them afterwards — REST calls without the correct key return `401`.
+> Copy the defaults and fill in the values the container printed/logged:
+>
+> ```bash
+> cp .env.example .env       # then edit `.env` and set WAHA_API_KEY etc.
+> docker compose up -d       # (re)start WAHA so it picks up the key
+> ```
+>
+> `docker-compose.yml` loads `.env` via `env_file`, so WAHA reuses the key across
+> restarts instead of regenerating it.  The Python client reads the same
+> `WAHA_API_KEY` from `.env` automatically; it can also be set explicitly with
+> `WHATSAPP_API_KEY` (see 6b).  To grab the current values from a running
+> container: `docker exec signal-tui-whatsapp env | grep WAHA_API_KEY`.
+
 ##### 6b. Configuration (env or `config.json`)
 
 Env variables:
@@ -163,6 +178,7 @@ Env variables:
 ```bash
 export WHATSAPP_API_PORT="3005"                       # docker-compose host port (default 3005)
 export WHATSAPP_API_URL="http://127.0.0.1:3005"      # base URL of the WAHA API
+export WHATSAPP_API_KEY="<api-key>"                  # X-Api-Key (auto-read from .env if unset)
 export WHATSAPP_SESSION_NAME="default"               # session name (default "default")
 export WHATSAPP_MEDIA_DIR="/srv/whatsapp-media"      # local media download dir
 ```
@@ -173,6 +189,7 @@ export WHATSAPP_MEDIA_DIR="/srv/whatsapp-media"      # local media download dir
 {
     "user_number": "+1234567890",
     "whatsapp_api_url": "http://127.0.0.1:3005",
+    "whatsapp_api_key": "<api-key>",
     "whatsapp_session_name": "default",
     "whatsapp_media_dir": "/srv/whatsapp-media"
 }

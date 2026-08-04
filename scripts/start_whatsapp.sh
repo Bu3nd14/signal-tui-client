@@ -33,9 +33,23 @@ echo "🟢 Avvio WhatsApp HTTP API (WAHA) via Docker Compose..."
 docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d
 
 if [ "$WAIT" -eq 1 ]; then
+    # Carica la chiave API dal .env (stessa che docker-compose passa al container)
+    # così l'healthcheck autentica correttamente e non ottiene 401.  Usiamo
+    # /api/version (esiste su tutte le build "core"); /api/server non è più
+    # esposto su quelle recenti (404).
+    WA_API_KEY="${WAHA_API_KEY:-}"
+    if [ -f "$PROJECT_DIR/.env" ]; then
+        WA_API_KEY="$(grep -E '^WAHA_API_KEY=' "$PROJECT_DIR/.env" | head -1 | cut -d= -f2- | tr -d '[:space:]')"
+    fi
+
     echo "⏳ Attendo che l'API risponda su $API_URL ..."
     for i in $(seq 1 60); do
-        if curl -fsS "$API_URL/api/server" >/dev/null 2>&1; then
+        if [ -n "$WA_API_KEY" ]; then
+            ok=$(curl -fsS -H "X-Api-Key: $WA_API_KEY" "$API_URL/api/version" >/dev/null 2>&1 && echo 1 || echo 0)
+        else
+            ok=$(curl -fsS "$API_URL/api/version" >/dev/null 2>&1 && echo 1 || echo 0)
+        fi
+        if [ "$ok" -eq 1 ]; then
             echo "✅ WhatsApp HTTP API pronta: $API_URL"
             exit 0
         fi

@@ -27,6 +27,10 @@ services:
       WAHA_DATA_DIR: "/app/.sessions"
       # The default session name used by the Python backend/link tool.
       WAHA_DEFAULT_SESSION: "${WHATSAPP_SESSION_NAME:-default}"
+    env_file:
+      # Credentials (WAHA_API_KEY, dashboard/swagger auth) persist here so they
+      # are NOT regenerated on every container start.  See .env.example.
+      - .env
     volumes:
       # Persist session auth + media across container restarts / updates.
       - ./whatsapp-data:/app/.sessions
