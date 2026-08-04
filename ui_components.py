@@ -30,12 +30,26 @@ def _log_debug(msg: str) -> None:
         pass
 
 
+class ContactListView(ListView):
+    """ListView per la lista contatti.
+
+    ``ALLOW_SELECT = False`` disabilita la selezione di testo con il mouse che
+    Textual prova a gestire a ogni ``MouseDown``.  Con la lista contatti oggi
+    ricostruita spesso (poll ~1s), quella selezione (che usa
+    ``content_widget.parent.region``) poteva scattare su un elemento già
+    smontato -> ``AttributeError: 'NoneType' object has no attribute 'region'``.
+    La selezione di *riga* (``ListView.index``) resta attiva.
+    """
+
+    ALLOW_SELECT = False
+
+
 class ContactListWidget(Vertical):
     """Left column: contact list."""
 
     def compose(self):
         yield Label("📇 Contacts", classes="section-title", id="ContactsTitle")
-        yield ListView(id="contact-list")
+        yield ContactListView(id="contact-list")
 
     def on_mount(self):
         self.styles.width = 30
@@ -45,7 +59,7 @@ class ChatAreaWidget(Vertical):
     """Right column: messages area + reply bar + input."""
 
     def compose(self):
-        yield Label("💬 Chat", classes="section-title")
+        yield Label("💬 Chat", classes="section-title", id="ChatTitle")
         yield Vertical(id="chat-log")
         yield Horizontal(
             Static("", id="reply-text"),

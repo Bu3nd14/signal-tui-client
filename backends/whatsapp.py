@@ -36,6 +36,7 @@ from .config import (
     resolve_whatsapp_api_url,
     get_whatsapp_session_name,
     get_whatsapp_media_dir,
+    get_whatsapp_api_key,
 )
 
 
@@ -51,31 +52,69 @@ class WhatsAppRESTClient:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
         self.session_name = get_whatsapp_session_name()
+        self.api_key = get_whatsapp_api_key()
+        # HTTP status of the most recent _request (0 if never attempted).
+        self.last_status: int = 0
 
     def _request(self, method: str, path: str, payload: dict | None = None,
                  timeout: int = 30) -> dict | None:
         """Execute an HTTP request and return the JSON body.
 
-        Returns ``None`` on any transport/HTTP error (callers treat it as an
+        When a WAHA API key is configured, it is sent as the ``X-Api-Key``
+        header (WAHA returns ``401`` for unauthenticated calls).  Returns
+        ``None`` on any transport/HTTP error (callers treat it as an
         unavailable service, matching Signal's error-tolerant style).
         """
         url = f"{self.base_url}{path}"
         data = None
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-Api-Key"] = self.api_key
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method=method,
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
+                self.last_status = getattr(resp, "status", 200)
                 raw = resp.read().decode("utf-8")
                 if not raw:
                     return {}
                 return json.loads(raw)
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError):
+        except urllib.error.HTTPError as err:
+            self.last_status = err.code
+            return None
+        except (urllib.error.URLError, OSError, json.JSONDecodeError):
+            self.last_status = 0
+            return None
+
+    def _request_raw(self, method: str, path: str, timeout: int = 30) -> bytes | None:
+        """Execute an HTTP request and return the raw (possibly binary) body.
+
+        Used for endpoints WAHA serves as binary (e.g. the pairing QR as a PNG
+        image).  Returns ``None`` on transport/HTTP error.
+        """
+        headers = {"Accept": "*/*"}
+        if self.api_key:
+            headers["X-Api-Key"] = self.api_key
+        req = urllib.request.Request(
+            f"{self.base_url}{path}",
+            headers=headers,
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                self.last_status = getattr(resp, "status", 200)
+                return resp.read()
+        except urllib.error.HTTPError as err:
+            self.last_status = err.code
+            return None
+        except (urllib.error.URLError, OSError):
+            self.last_status = 0
             return None
 
     # ── Sessions / pairing ────────────────────────────────────────────
@@ -90,20 +129,65 @@ class WhatsAppRESTClient:
         """Return the current session status dict, or ``None`` on error."""
         return self._request("GET", f"/api/sessions/{self.session_name}")
 
-    def get_pairing_qr(self) -> str | None:
-        """Return the current pairing QR string, or ``None`` if not available.
+    def start_session(self) -> dict | None:
+        """Create (if needed) and start the session via WAHA ``/api/sessions/start``."""
+        return self._request("POST", "/api/sessions/start", {
+            "name": self.session_name,
+        })
 
-        WAHA exposes the QR under ``/api/sessions/{name}/qr``.  Fall back to
-        creating the session (which may also return a QR on first start).
+    def reset_session(self, logout: bool = True) -> dict | None:
+        """Force a clean pairing state so the next QR is guaranteed fresh and valid.
+
+        A stale/expired QR is the most common reason WhatsApp answers *"can't link
+        a new device right now"*.  We tear down the old session (logout/stop it)
+        and let ``get_fresh_pairing_qr()`` start a brand-new one.  Uses WAHA's
+        ``/api/sessions/logout`` (keeps the session object but invalidates the
+        linked device), falling back to ``/api/sessions/stop``.
+        """
+        if logout:
+            result = self._request("POST", "/api/sessions/logout", {"name": self.session_name})
+            if result is not None or self.last_status in (200, 201, 204):
+                return result
+        return self._request("POST", "/api/sessions/stop", {"name": self.session_name})
+
+    def get_fresh_pairing_qr(self, reset: bool = True) -> str | bytes | None:
+        """Return a freshly-generated, valid pairing QR for immediate scanning.
+
+        Always tears down any existing session first (so the QR is brand-new and
+        not a stale/expired token) then asks WAHA to start a new session and
+        returns its current QR (PNG bytes or text).  Returns ``None`` on failure.
+        """
+        if reset:
+            self.reset_session()
+        self.start_session()
+        return self.get_session_qr()
+
+    def get_pairing_qr(self) -> str | bytes | None:
+        """Return the current pairing QR, or ``None`` if not available.
+
+        WAHA exposes the QR as a binary PNG under ``/api/{session}/auth/qr``
+        (current versions) or as text under ``/api/sessions/{session}/qr``
+        (older/NOWEB versions).  This returns whatever QR WAHA currently has; use
+        ``get_fresh_pairing_qr()`` for a guaranteed-fresh one.
         """
         qr = self.get_session_qr()
         if qr:
             return qr
-        self.create_session()
+        # A STOPPED session has no QR — ask WAHA to start it first.
+        self.start_session()
         return self.get_session_qr()
 
-    def get_session_qr(self) -> str | None:
-        """Return the QR string from WAHA, or ``None``."""
+    def get_session_qr(self) -> str | bytes | None:
+        """Return the QR (PNG bytes or text string), or ``None``.
+
+        Tries the current WAHA binary-PNG endpoint first, then falls back to the
+        older textual endpoint.
+        """
+        # Current WAHA: PNG image under /api/{session}/auth/qr.
+        png = self._request_raw("GET", f"/api/{self.session_name}/auth/qr")
+        if png:
+            return png
+        # Older WAHA: JSON/text under /api/sessions/{session}/qr.
         result = self._request("GET", f"/api/sessions/{self.session_name}/qr")
         if not result:
             return None
@@ -123,15 +207,62 @@ class WhatsAppRESTClient:
     # ── Contacts ──────────────────────────────────────────────────────
 
     def list_contacts(self) -> list[dict]:
-        """Return the raw contacts list (may contain nested ``data``)."""
-        result = self._request("GET", "/api/contacts")
+        """Return the raw contacts list (may contain nested ``data``).
+
+        Tries the classic ``GET /api/contacts?session=...`` first.  On the
+        current WAHA "core" builds that endpoint is broken (it may return 500
+        with a ``TypeError`` in ``ContactsController``) — in that case we fall
+        back to ``GET /api/{session}/chats``, which returns the session's chats
+        (aka the active contacts) with ``id._serialized`` + ``name``.
+        """
+        result = self._request("GET", f"/api/contacts?session={self.session_name}")
+        contacts = self._unwrap_contacts(result)
+        if contacts:
+            return contacts
+        # Fallback: per-session chats endpoint (works on WAHA CORE 2026.x).
+        chats = self._request("GET", f"/api/{self.session_name}/chats")
+        if not chats or not isinstance(chats, list):
+            return []
+        out: list[dict] = []
+        for chat in chats:
+            cid = chat.get("id")
+            if isinstance(cid, dict):
+                cid = cid.get("_serialized") or cid.get("id")
+            name = chat.get("name") or chat.get("pushName") or chat.get("notifyName")
+            # Timestamp (seconds) of the last message/activity.  On WAHA
+            # ``/api/{session}/chats`` the field is ``timestamp`` (epoch s) and
+            # optionally ``lastMessage`` (object with ``t``).  Best-effort, 0
+            # if absent so the contact simply sorts as "no messages yet".
+            last_ts = 0
+            raw_t = chat.get("timestamp") or chat.get("t")
+            if isinstance(raw_t, (int, float)):
+                last_ts = int(raw_t * 1000) if raw_t < 10**12 else int(raw_t)
+            else:
+                lm = chat.get("lastMessage") or chat.get("last_message")
+                if isinstance(lm, dict):
+                    ts = lm.get("t") or lm.get("timestamp")
+                    if isinstance(ts, (int, float)):
+                        last_ts = int(ts * 1000) if ts < 10**12 else int(ts)
+            if cid:
+                out.append({
+                    "id": cid,
+                    "name": name or cid,
+                    "isGroup": bool(chat.get("isGroup")),
+                    "last_ts": last_ts,
+                    "unread": int(chat.get("unreadCount") or 0),
+                })
+        return out
+
+    @staticmethod
+    def _unwrap_contacts(result) -> list[dict]:
+        """Normalize a contacts REST response into a flat list of dicts."""
         if not result:
             return []
         if isinstance(result, list):
             return result
-        # Defensive handling of { "data": [...] } wrappers.
         data = result.get("data") or result.get("contacts") or []
         return data if isinstance(data, list) else []
+
 
     # ── Messaging ─────────────────────────────────────────────────────
 
@@ -151,6 +282,21 @@ class WhatsAppRESTClient:
         if quote_message is not None:
             payload["quotedMessage"] = quote_message
         return self._request("POST", "/api/sendText", payload)
+
+    def list_messages(self, chat_id: str, limit: int = 1) -> list[dict]:
+        """Fetch recent messages of a chat via ``GET /api/messages``.
+
+        WAHA returns a list of message objects (``body`` holds the text, ``from``
+        the JID, ``fromMe`` a bool, ``timestamp`` in seconds).  Returns ``[]`` on
+        any error so callers can treat a slow/unreachable API as non-fatal.
+        """
+        result = self._request(
+            "GET",
+            f"/api/messages?session={self.session_name}&chatId={chat_id}&limit={int(limit)}",
+        )
+        if not isinstance(result, list):
+            return []
+        return result
 
     def mark_read(self, contact_id: str) -> dict | None:
         """Best-effort mark-read (WAHA Core may need a proxy/module).
@@ -187,9 +333,39 @@ def _msg_type(raw: dict) -> str:
     return "text"
 
 
+
+def _jid_string(value) -> str | None:
+    """Normalize a JID into a plain string regardless of shape.
+
+    WAHA may represent a chat/jid either as a plain string ("3112@c.us")
+    or as an object like ``{"id": {"_serialized": "3112@c.us", "_id": ...}}``
+    (or ``{"_serialized": "..."}``).  Return the string JID in both cases,
+    ``None`` if it cannot be resolved.
+    """
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, dict):
+        # Forma più comune: {"id": {"_serialized": ...}}
+        inner = value.get("id") or value.get("_serialized")
+        if isinstance(inner, dict):
+            return inner.get("_serialized") or inner.get("_id") or None
+        if isinstance(inner, str):
+            return inner or None
+        # Forma: {"_serialized": "..."}
+        serialized = value.get("_serialized")
+        if isinstance(serialized, str) and serialized:
+            return serialized
+    return None
+
+
 def _event_from_message(raw: dict) -> ChatEvent | None:
     """Normalize a raw incoming message dict into a ``ChatEvent``."""
-    chat_jid = raw.get("chatId") or raw.get("from") or raw.get("chat") or raw.get("remoteJid")
+    chat_jid = _jid_string(
+        raw.get("chatId")
+        or raw.get("from")
+        or raw.get("remoteJid")
+        or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
+    )
     if not chat_jid:
         return None
 
@@ -235,7 +411,12 @@ def _event_from_message(raw: dict) -> ChatEvent | None:
 
 def _event_from_receipt(raw: dict) -> ChatEvent | None:
     """Normalize a delivery/read receipt into a ``ChatEvent`` (type 'receipt')."""
-    chat_jid = raw.get("chatId") or raw.get("from") or raw.get("chat") or raw.get("remoteJid")
+    chat_jid = _jid_string(
+        raw.get("chatId")
+        or raw.get("from")
+        or raw.get("remoteJid")
+        or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
+    )
     if not chat_jid:
         return None
     receipt = raw.get("receipt") or raw.get("receipt_message") or raw
@@ -253,7 +434,12 @@ def _event_from_receipt(raw: dict) -> ChatEvent | None:
 
 def _event_from_typing(raw: dict) -> ChatEvent | None:
     """Normalize a typing/presence indicator into a ``ChatEvent`` (type 'typing')."""
-    chat_jid = raw.get("chatId") or raw.get("from") or raw.get("chat") or raw.get("remoteJid")
+    chat_jid = _jid_string(
+        raw.get("chatId")
+        or raw.get("from")
+        or raw.get("remoteJid")
+        or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
+    )
     if not chat_jid:
         return None
     pr = raw.get("presence") or raw.get("typing") or raw.get("type") or ""
@@ -276,10 +462,9 @@ def _event_from_raw(raw: dict) -> ChatEvent | None:
     payload = raw.get("payload")
     content = payload if isinstance(payload, dict) else raw
 
-    if evt in ("message", "messages.upsert", "messages/upsert", "message.new"):
+    if evt in ("message", "message.any", "message.new", "messages.upsert", "messages/upsert"):
         return _event_from_message(content)
-    if evt in ("typing", "presence.update", "presence/update", "presence", "presence.update",
-               "presence.update"):
+    if evt in ("typing", "presence.update", "presence/update", "presence", "presence.update"):
         return _event_from_typing(content)
     if evt in ("receipt", "receipts.update", "receipt/update", "message.receipt"):
         return _event_from_receipt(content)
@@ -320,6 +505,24 @@ class WhatsAppBackend(ChatBackend):
         self._events: queue.Queue[ChatEvent | None] = queue.Queue()
         self._ws_thread: threading.Thread | None = None
         self._ws_stop = threading.Event()
+        # Ricezione via polling su GET /api/messages (la build WAHA CORE/WEBJS
+        # non espone lo stream WS ``/api/{session}/server`` -> 404).  Un thread
+        # dedicato interroga periodicamente le chat attive ed accoda gli eventi.
+        self._seen_msg_ids: set[str] = set()
+        self._bootstrapped = False
+        self._poll_thread: threading.Thread | None = None
+        self._poll_stop = threading.Event()
+        #: Intervallo (s) tra un giro di polling "veloce" (chat calde, ~1s).
+        self._POLL_INTERVAL = 1.0
+        #: Numero massimo di chat attive interrogate ad ogni giro veloce.
+        self._POLL_TOP = 6
+        #: Intervallo (s) tra gli aggiornamenti "lenti" della mappa chat attive
+        #: (GET /chats, ~1.3MB).  Raro per non saturare banda/CPU della UI.
+        self._CHATS_REFRESH_INTERVAL = 15.0
+        #: Timestamp (epoch) dell'ultimo refresh della mappa chat attive.
+        self._chats_last_refresh = 0.0
+        #: Chat attive note: {chat_id: (unread, timestamp)}.
+        self._active_chats: dict[str, tuple[int, int]] = {}
 
     @property
     def needs_pairing(self) -> bool:
@@ -328,10 +531,13 @@ class WhatsAppBackend(ChatBackend):
             return False
         status = self._rest.get_session_status() or {}
         s = str(status.get("status") or "").lower()
-        return s in ("pending", "connecting", "unauthorized", "not_authenticated", "unpaired")
+        return s in (
+            "pending", "connecting", "unauthorized", "not_authenticated",
+            "unpaired", "scan_qr", "scan_qr_code",
+        )
 
-    async def get_pairing_qr(self) -> str | None:
-        """Return the current pairing QR string, or ``None`` if not pairing."""
+    async def get_pairing_qr(self) -> str | bytes | None:
+        """Return the current pairing QR (text or PNG bytes), or ``None``."""
         if not self._rest:
             return None
         return self._rest.get_pairing_qr()
@@ -357,7 +563,7 @@ class WhatsAppBackend(ChatBackend):
             self._load_contacts()
         except Exception:
             pass
-        self._start_ws_consumer()
+        self._start_receiver()
         self._connected = True
 
     async def disconnect(self) -> None:
@@ -365,13 +571,124 @@ class WhatsAppBackend(ChatBackend):
         self.disconnect_sync()
 
     def disconnect_sync(self) -> None:
-        """Synchronous disconnect; stops the WebSocket consumer thread."""
+        """Synchronous disconnect; stops the receiver threads."""
         self._polling_active = False
         self._ws_stop.set()
+        self._poll_stop.set()
         if self._ws_thread is not None and self._ws_thread.is_alive():
             self._ws_thread.join(timeout=1.0)
         self._ws_thread = None
+        if self._poll_thread is not None and self._poll_thread.is_alive():
+            self._poll_thread.join(timeout=1.0)
+        self._poll_thread = None
         self._connected = False
+
+    # ─── Event receiver (polling) ─────────────────────────────────────
+    # La build WAHA CORE/WEBJS non espone lo stream WS ``/api/{session}/``
+    # server (404) e non consente di registrare webhook a runtime su una
+    # sessione esistente.  La ricezione è quindi basata su polling di
+    # ``GET /api/messages`` sulle chat attive — robusto e senza modifiche
+    # al container.
+
+    def _start_receiver(self) -> None:
+        """Start the polling thread (and attempt the WS as a graceful extra)."""
+        self._poll_stop.clear()
+        self._start_ws_consumer()  # tentativo: su WAHA CORE fallisce (404)
+        if self._poll_thread is not None and self._poll_thread.is_alive():
+            return
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop, daemon=True, name="whatsapp-poll"
+        )
+        self._poll_thread.start()
+
+    def _poll_loop(self) -> None:
+        """Two-speed polling: a slow /chats refresh (discover active chats)
+        interleaved with a fast ~1s poll of only the hot chats' latest message."""
+        while not self._poll_stop.is_set():
+            try:
+                # Aggiornamento lento e raro della mappa "chat attive"
+                # (GET /chats ~1.3MB): scopre quali chat sono calde/ nuove.
+                n = self._refresh_active_chats()
+                # Giro veloce (~1s) sulle chat calde: list_messages limit=1.
+                if n:
+                    self._fetch_fast_recent()
+            except Exception:
+                pass
+            if self._poll_stop.wait(timeout=self._POLL_INTERVAL):
+                break
+
+    def _refresh_active_chats(self) -> bool:
+        """(Raro) Aggiorna ``self._active_chats`` con un solo GET /chats.
+
+        Ritorna ``True`` se la mappa è stata aggiornata in questo giro, ``False``
+        se non è ancora il momento (usato dal giro veloce per sapere se conviene
+        ri-ordinare i candidati).  Non usa ``list_contacts`` (che farebbe il
+        doppio /api/contacts->500 + /chats): va dritto a ``/chats``.
+        """
+        if not self._rest:
+            return False
+        now = time.time()
+        if now - self._chats_last_refresh < self._CHATS_REFRESH_INTERVAL:
+            return False
+        raw = self._rest._request("GET", f"/api/{self.session_name}/chats")
+        if not isinstance(raw, list):
+            return False
+        m = {}
+        for c in raw:
+            cid = c.get("id")
+            if isinstance(cid, dict):
+                cid = cid.get("_serialized") or cid.get("id")
+            if not cid or c.get("isGroup"):
+                continue
+            unread = int(c.get("unreadCount") or 0)
+            ts = int(c.get("timestamp") or 0)
+            m[cid] = (unread, ts)
+        self._active_chats = m
+        self._chats_last_refresh = now
+        return True
+
+    def _active_chat_ids(self) -> list[str]:
+        """Ordina le chat note per priorità (non lette prima, poi attività)."""
+        now = int(time.time())
+        scored = []
+        for cid, (unread, ts) in self._active_chats.items():
+            recency = max(now - ts, 0) if ts else 2**31
+            scored.append((unread, -recency if ts else 0, cid))
+        scored.sort(key=lambda x: (x[0] == 0, x[0], x[1]))
+        return [cid for _u, _r, cid in scored]
+
+    def _fetch_fast_recent(self) -> None:
+        """Giro veloce: per le ``_POLL_TOP`` chat più calde interroga l'ultimo
+        messaggio (limit=1) e accoda i nuovi eventi (dedup per id)."""
+        if not self._rest or not self._active_chats:
+            return
+        cutoff_s = int(time.time()) - 30 * 24 * 3600  # 30 giorni (ms più sotto)
+        limit = 1 if not self._bootstrapped else 1
+        for cid in self._active_chat_ids()[: self._POLL_TOP]:
+            try:
+                msgs = self._rest.list_messages(cid, limit=limit)
+            except Exception:
+                continue
+            for m in msgs or []:
+                if not isinstance(m, dict):
+                    continue
+                mid = m.get("id") or ""
+                if mid and mid in self._seen_msg_ids:
+                    continue
+                event = _event_from_message(m)
+                if event is None or event.payload.get("is_mine"):
+                    continue
+                ts = event.payload.get("timestamp") or 0
+                if ts and ts < cutoff_s * 1000:
+                    continue  # ignora cronologia troppo vecchia
+                # Attribuisci l'evento alla chat interrogata (jid della chat,
+                # es. ``@lid``) invece del ``from`` (che può essere ``@c.us``):
+                # così `_identify_contact` ritrova il contatto nella lista.
+                event.contact_id = cid
+                if mid:
+                    self._seen_msg_ids.add(mid)
+                self._enqueue_event(event)
+        self._bootstrapped = True
 
     # ─── Contact loading ──────────────────────────────────────────────
 
@@ -386,11 +703,12 @@ class WhatsAppBackend(ChatBackend):
             if not jid:
                 continue
             name = c.get("name") or c.get("pushName") or c.get("notifyName") or ""
+            last_ts = int(c.get("last_ts") or 0)
             contacts.append(ChatContact(
                 id=jid,
                 display_name=name or jid,
                 protocol=PROTOCOL_WHATSAPP,
-                extras={"jid": jid},
+                extras={"jid": jid, "last_message_ts": last_ts},
             ))
         self.contacts = contacts
         self._contacts_by_jid = {cc.id: cc for cc in contacts}
@@ -486,19 +804,16 @@ class WhatsAppBackend(ChatBackend):
     def _ws_url(self) -> str | None:
         """Build the WebSocket URL for WAHA, or ``None``.
 
-        WAHA exposes its event stream at ``/api/server`` (unauthenticated) or
-        ``/api/{session}/server``.  Tried in order; the first is used.
+        WAHA exposes its event stream at the session-scoped ``/api/{session}/``
+        server endpoint.  Authentication is done via the ``X-Api-Key`` header
+        when a key is configured (see ``_ws_loop``), so a key-less socket is
+        rejected by an authenticated WAHA.
         """
         if not self.api_url:
             return None
-        for path in (f"/api/{self.session_name}/server", "/api/server"):
-            url = f"{self.api_url}{path}"
-            if url.startswith("https://"):
-                url = "wss://" + url[len("https://"):]
-            elif url.startswith("http://"):
-                url = "ws://" + url[len("http://"):]
-            return url
-        return None
+        scheme = "wss" if self.api_url.startswith("https://") else "ws"
+        netloc = self.api_url.split("://", 1)[-1]
+        return f"{scheme}://{netloc}/api/{self.session_name}/server"
 
     def _start_ws_consumer(self) -> None:
         """Start the dedicated thread that consumes the WebSocket stream."""
@@ -525,9 +840,23 @@ class WhatsAppBackend(ChatBackend):
         if not url:
             return
 
+        # Autenticazione: WAHA con API key richiede X-Api-Key anche sul WS;
+        # senza, un stream autenticato viene rifiutato e i messaggi in ingresso
+        # non arriverebbero mai (mentre l'invio REST funzionerebbe).
+        headers: dict[str, str] | None = None
+        if self._rest is not None and self._rest.api_key:
+            headers = {"X-Api-Key": self._rest.api_key}
+
+        # Su WAHA CORE/WEBJS lo stream /api/{session}/server non esiste (404);
+        # dopo pochi tentativi falliti rinunciamo al WS (il polling è il
+        # ricevitore effettivo) per non spammare log all'infinito.
+        consecutive_failures = 0
+        MAX_WS_RETRIES = 3
+
         while not self._ws_stop.is_set():
             try:
-                ws = websocket.create_connection(url, timeout=5)
+                ws = websocket.create_connection(url, timeout=5, header=headers)
+                consecutive_failures = 0  # connessione ok: azzera il contatore
                 while not self._ws_stop.is_set():
                     opcode, raw = ws.recv_data(control_frame=True)
                     if raw is None:
@@ -549,8 +878,20 @@ class WhatsAppBackend(ChatBackend):
                     ws.close()
                 except Exception:
                     pass
-            except Exception:
-                # Reconnect with backoff unless we're stopping.
+            except Exception as exc:
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_WS_RETRIES:
+                    break  # WS non disponibile: il polling gestisce la ricezione
+                import sys as _sys
+                try:
+                    print(f"[whatsapp-ws] WS error (retry in 2s): {exc}", file=_sys.stderr)
+                except Exception:
+                    pass
+                try:
+                    with open("/tmp/signal-ws-error.log", "a") as f:
+                        f.write(f"{time.time()}: {exc}\n")
+                except Exception:
+                    pass
                 if self._ws_stop.wait(timeout=2.0):
                     break
                 continue

@@ -146,7 +146,15 @@ class SignalTUI(App):
 
     #contact-list {
         height: 100%;
-        border: solid $border;
+        border: solid $accent;
+    }
+
+    #contact-list.chat-filter-signal {
+        border: solid #39c5e0;
+    }
+
+    #contact-list.chat-filter-whatsapp {
+        border: solid #25d366;
     }
 
     #contact-list ListItem {
@@ -177,7 +185,7 @@ class SignalTUI(App):
 
     #chat-log {
         height: 1fr;
-        border: solid $border;
+        border: solid $accent;
         margin: 0 1;
         overflow-y: auto;
         overflow-x: hidden;
@@ -201,15 +209,27 @@ class SignalTUI(App):
         color: $text-muted;
     }
 
-    /* Subtle per-protocol accent for messages (left border) */
-    .msg-signal {
-        border-left: solid #2ecc71;
+    /* Colore del bordo della chat in base al filtro Ctrl+W (azzurro Signal,
+       verde WhatsApp, default/giallo per ALL).  Non usiamo più una "barra"
+       laterale (border-left) su ogni messaggio. */
+    #chat-log.chat-filter-signal {
+        border: solid #39c5e0;
     }
 
-    .msg-whatsapp {
-        border-left: solid #20c997;
+    #chat-log.chat-filter-whatsapp {
+        border: solid #25d366;
     }
 
+    /* Banner (titoli di sezione) sincroni col bordo della chat per filtro. */
+    #ContactsTitle.chat-filter-signal,
+    #ChatTitle.chat-filter-signal {
+        background: #39c5e0;
+    }
+
+    #ContactsTitle.chat-filter-whatsapp,
+    #ChatTitle.chat-filter-whatsapp {
+        background: #25d366;
+    }
     .msg-quote {
         text-align: left;
         padding: 0 1 0 3;
@@ -308,7 +328,7 @@ class SignalTUI(App):
         Binding("ctrl+e", "open_emoji_picker", "Emoji", priority=True),
         Binding("ctrl+s", "open_contact_picker", "Search", priority=True),
         Binding("ctrl+d", "download_mode", "Download", priority=True),
-        Binding("ctrl+w", "cycle_protocol_filter", "Filter", show=True),
+        Binding("ctrl+w", "cycle_protocol_filter", "Filter", show=True, priority=True),
         Binding("ctrl+n", "next_suggestion", "Next", show=False),
         Binding("ctrl+p", "prev_suggestion", "Prev", show=False),
     ]
@@ -348,6 +368,9 @@ class SignalTUI(App):
         # alone are no longer unique across protocols.
         self._seen_timestamps: set[tuple[str, str, int]] = set()
         self._unread_counts: dict[str, int] = {}  # keyed by contact_cache_key
+        # Flag "lista contatti sporca": se True, a fine batch di messaggi il
+        # poll worker esegue UN solo re-render della lista (non uno per evento).
+        self._contact_list_dirty = False
         self._cache: dict[str, list[dict]] = {}   # keyed by contact_cache_key
         self._loaded_all = False
         # Incremented on every contact selection; a load worker checks it to
@@ -578,6 +601,16 @@ class SignalTUI(App):
         ts = event.payload.get("timestamp", 0)
         is_mine = event.payload.get("is_mine", False)
 
+        # Aggiorna il timestamp dell'ultimo messaggio del contatto così la
+        # lista contatti (ordinata per "ultimo messaggio") risente subito del
+        # nuovo arrivo.  Il re-sort/render è differito a FINE batch dal poll
+        # worker (flag _contact_list_dirty), per non ricostruire 320 contatti
+        # ad ogni singolo messaggio.
+        if isinstance(ts, int) and ts > (contact.last_message_ts or 0):
+            contact.last_message_ts = ts
+            if cache_key != (self.selected_contact.cache_key if self.selected_contact else None):
+                self._contact_list_dirty = True
+
         # Save to DB + backend cache.  Returns True only if newly added;
         # if the identity already exists (e.g. an optimistic save is confirmed
         # by a sync sent-envelope), nothing is duplicated.
@@ -624,8 +657,9 @@ class SignalTUI(App):
                     status="sent" if is_mine else "read",
                 )
         else:
-            # Message for another contact: update unread badge
-            self.call_from_thread(self._update_unread_badges, cache_key)
+            # Message for another contact: mark the list dirty; the unread
+            # badge / reorder is refreshed ONCE per poll batch (not per event).
+            self._contact_list_dirty = True
 
         return True
 
@@ -820,22 +854,70 @@ class SignalTUI(App):
         for backend in self.manager.all():
             for cid, msgs in backend.cache.items():
                 self._cache[contact_cache_key(backend.protocol, cid)] = msgs
+        # Recover per-contact last-message timestamps from the local cache so
+        # the contact list is sorted "most recent first" right from startup.
+        self._sync_last_ts()
         self.call_from_thread(self._update_contacts_ui, contacts)
 
         # Start polling for incoming messages.
         self._polling_active = True
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
 
-    def _sort_contacts(self):
-        """Sort contacts alphabetically by display name.
+    @staticmethod
+    def _contact_sort_key(c: ChatContact) -> tuple:
+        """Key per ordinare i contatti: ultimi messaggi in alto.
 
-        The list is always kept in alphabetical order: typing (✍️), mumbling
-        (💭) and unread (*N) states are shown as icons/badges in the label
-        but never reorder the list, so it doesn't jump around.
+        Gruppi (in ordine):
+          1. contatti CON messaggi      -> per ``last_message_ts`` desc;
+          2. contatti SENZA messaggi ma con un nome -> alfabetici;
+          3. contatti SENZA messaggi e SOLO numero (display_name == id) -> in coda.
         """
-        self.contacts.sort(
-            key=lambda c: (c.display_name.lower(), c.id)
+        ts = c.last_message_ts or 0
+        name = (c.display_name or "").lower()
+        unnamed = True  # "solo numero": display_name manca o coincide con l'id
+        if c.display_name and c.display_name != c.id:
+            unnamed = False
+        has_messages = ts > 0
+        return (
+            not has_messages,               # 0 = con messaggi (prima), 1 = senza
+            -ts,                            # più recente in alto (solo se has_messages)
+            1 if (not has_messages and unnamed) else 0,  # "solo numero senza msg" in coda
+            name,                           # alfabetico per i senza messaggi
+            c.id,
         )
+
+    def _sort_contacts(self):
+        """Sort contacts: contacts with messages first (most recent first),
+        then those without messages (alphabetical), unnamed ones last."""
+        self.contacts.sort(key=self._contact_sort_key)
+
+    def _reorder_contact_list(self):
+        """Re-sort in-memory contacts and refresh the visible list.
+
+        Preserves the current selection (if still visible under the active
+        filter) and does not touch the chat log.  Runs in the UI thread.
+        """
+        self._sort_contacts()
+        self._render_contact_list(self._filtered_contacts())
+
+    def _sync_last_ts(self):
+        """Recover ``last_message_ts`` for every contact from the local cache.
+
+        Best-effort fallback for whichever backend did not already populate it
+        (e.g. WhatsApp whose /chats payload may lack ``t``).  Uses ``_cache``
+        (keyed by ``contact_cache_key``), where each message dict carries a
+        ``timestamp``.  Keeps the highest timestamp found.
+        """
+        for c in self.contacts:
+            cache_key = c.cache_key
+            msgs = self._cache.get(cache_key) or []
+            ts = c.last_message_ts
+            for m in msgs:
+                mts = int(m.get("timestamp") or 0)
+                if mts > ts:
+                    ts = mts
+            if ts > c.last_message_ts:
+                c.last_message_ts = ts
 
     def _filtered_contacts(self) -> list[ChatContact]:
         """Return contacts matching the active protocol filter."""
@@ -850,9 +932,11 @@ class SignalTUI(App):
     def _filter_title_suffix(self) -> str:
         """Human-readable suffix describing the active filter state."""
         if self._protocol_filter == "signal":
-            return " — Signal"
+            return " - Signal"
         if self._protocol_filter == "whatsapp":
-            return " — WhatsApp"
+            return " - WhatsApp"
+        if self._protocol_filter == "all":
+            return " - All"
         return ""
 
     def _render_contact_list(self, filtered: list[ChatContact]) -> None:
@@ -873,17 +957,37 @@ class SignalTUI(App):
     def _apply_contact_filter(self) -> None:
         """Re-apply the active protocol filter to the contact list view.
 
-        Filters the in-memory contact collection (no DB reload) and updates the
-        contacts section title to reflect the current state.
+        Filters the in-memory contact collection (no DB reload), updates the
+        contacts section title AND colors the chat border + the two section
+        banners (📇 Contacts / 💬 Chat) to match the active filter (Ctrl+W):
+        azure for Signal, green for WhatsApp, and the default (yellow) for ALL.
         """
         filtered = self._filtered_contacts()
         self._render_contact_list(filtered)
         try:
-            section_lbl = self.query_one("ContactsTitle", Label)
+            section_lbl = self.query_one("#ContactsTitle", Label)
         except Exception:
             section_lbl = None
         if section_lbl is not None:
             section_lbl.update(f"📇 Contacts{self._filter_title_suffix()}")
+
+        # Sync the filter accent across the chat border, the contact list border
+        # and the two section banners (📇 Contacts / 💬 Chat).
+        cls_signal = "chat-filter-signal"
+        cls_whats = "chat-filter-whatsapp"
+        for selector in ("#chat-log", "#contact-list", "#ContactsTitle", "#ChatTitle"):
+            node = None
+            try:
+                node = self.query_one(selector)
+            except Exception:
+                node = None
+            if node is not None:
+                node.remove_class(cls_signal, cls_whats)
+                if self._protocol_filter == "signal":
+                    node.add_class(cls_signal)
+                elif self._protocol_filter == "whatsapp":
+                    node.add_class(cls_whats)
+                # filtro "all": nessuna classe -> default (giallo).
 
     def action_cycle_protocol_filter(self):
         """Ctrl+W: cycle the contact list filter ALL -> SIGNAL -> WHATSAPP."""
@@ -891,15 +995,16 @@ class SignalTUI(App):
         idx = order.index(self._protocol_filter) if self._protocol_filter in order else 0
         self._protocol_filter = order[(idx + 1) % len(order)]
         self._apply_contact_filter()
-        self._add_message(
-            f"🔀 Filter: {self._protocol_filter.title()}{self._filter_title_suffix()}",
-            is_info=True,
-        )
+        # NB: volutamente NON scriviamo niente nella chat qui: il ctrl+W aggiorna
+        # solo il titolo della barra contatti e la lista visibile, senza inquinare
+        # la cronologia della conversazione in corso.
 
     def _update_contacts_ui(self, contacts: list[ChatContact]):
         """Update the UI with the (merged) contact list."""
         self._sort_contacts()
-        self._render_contact_list(self._filtered_contacts())
+        # _apply_contact_filter rebuilds the filtered list AND syncs the
+        # "Contacts" title + the banner/chat-border filter accent on startup.
+        self._apply_contact_filter()
 
         self._add_message(f"✅ Loaded {len(self.contacts)} contacts.", is_info=True)
 
@@ -956,12 +1061,22 @@ class SignalTUI(App):
         self._unread_counts[cache_key] = 0
 
 
-        # Highlight the contact in the left list and remove the *N badge
+        # Highlight the contact in the left list and remove the *N badge.
+        # The ListView holds only the filtered/visible contacts, so we must
+        # index it by the position in that filtered list — not in self.contacts
+        # (a contact picked from the picker may be beyond the visible subset,
+        # which used to raise IndexError: list index out of range).
         contact_list = self.query_one("#contact-list", ListView)
-        index = self.contacts.index(contact)
-        contact_list.index = index
-        item = contact_list.children[index]
-        item.children[0].update(self._contact_label(self.selected_contact))
+        visible = self._filtered_contacts()
+        try:
+            idx = visible.index(contact)
+            contact_list.index = idx
+            item = contact_list.children[idx]
+            item.children[0].update(self._contact_label(self.selected_contact))
+        except ValueError:
+            # Contact is filtered out of the visible list; still select it but
+            # don't try to highlight a row that isn't rendered.
+            pass
 
         # Return focus to the message input so the user can start typing
         # immediately after selecting a contact.
@@ -973,8 +1088,12 @@ class SignalTUI(App):
     def on_list_view_selected(self, event: ListView.Selected):
         """When a contact is selected, show the chat."""
         index = self.query_one("#contact-list", ListView).index
-        if index is not None and 0 <= index < len(self.contacts):
-            contact = self.contacts[index]
+        # The ListView is built from the filtered/visible contacts, so resolve
+        # the selected row against that filtered list (not self.contacts) to
+        # avoid picking the wrong contact when the protocol filter is active.
+        visible = self._filtered_contacts()
+        if index is not None and 0 <= index < len(visible):
+            contact = visible[index]
             # Guard: when _select_contact sets contact_list.index programmatically
             # (e.g. from the contact picker), Textual fires ListView.Selected again.
             # If the contact is already selected, skip to avoid reloading the chat
@@ -1126,7 +1245,7 @@ class SignalTUI(App):
                 self._refresh_chat()
 
 
-        self.push_screen(ContactPickerScreen(self.contacts), _on_contact_selected)
+        self.push_screen(ContactPickerScreen(self._filtered_contacts()), _on_contact_selected)
 
     def action_open_contact_picker(self) -> None:
         """Action to open the contact picker (bound to Ctrl+S)."""
@@ -1309,6 +1428,15 @@ class SignalTUI(App):
                                     self._typing_mumbling.pop(key, None)
                                 protocol, cid = expired[0].split(":", 1)
                                 self.call_from_thread(self._refresh_typing_indicator, protocol, cid)
+
+                # Flush differito della lista contatti: se durante il batch è
+                # arrivato qualcosa (messaggio/typing), esegue UN solo aggiornamento
+                # unread + un solo re-sort/render della lista invece di uno per
+                # evento.  Entrambi devono girare nel thread della UI.
+                if self._contact_list_dirty:
+                    self._contact_list_dirty = False
+                    self.call_from_thread(self._update_unread_badges)
+                    self.call_from_thread(self._reorder_contact_list)
 
                 # Prompt-exit inner sleep.  This runs every cycle (even when no
                 # messages arrived) so the worker exits as soon as the user quits.

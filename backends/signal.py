@@ -178,6 +178,17 @@ class SignalBackend(ChatBackend):
         self._set_contacts([self._to_chat_contact(c) for c in contacts])
 
     def _set_contacts(self, contacts: list[ChatContact]) -> None:
+        # Recupera per ogni contatto il timestamp dell'ultimo messaggio dalla
+        # cache SQLite locale (costo ~0, offline): così l'ordinamento "ultimi
+        # messaggi in alto" funziona già all'avvio senza fetch di rete.
+        for c in contacts:
+            msgs = self.cache.get(c.id) or []
+            ts = 0
+            for m in msgs:
+                mts = m.get("timestamp") or 0
+                if mts > ts:
+                    ts = mts
+            c.last_message_ts = ts
         self.contacts = contacts
         self._contacts_by_key = {c.cache_key: c for c in contacts}
 

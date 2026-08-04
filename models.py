@@ -70,6 +70,20 @@ class ChatContact:
         """Unique key for this contact across all protocols."""
         return contact_cache_key(self.protocol, self.id)
 
+    @property
+    def last_message_ts(self) -> int:
+        """Timestamp (ms) of the last known message, or ``0`` if none.
+
+        Stored in ``extras`` by the UI / backends whenever a new message is
+        ingested or when the timestamp is recovered from the SQLite cache or
+        the WhatsApp ``/chats`` payload.  Used for "most recent first" sorting.
+        """
+        return int(self.extras.get("last_message_ts", 0) or 0)
+
+    @last_message_ts.setter
+    def last_message_ts(self, value: int) -> None:
+        self.extras["last_message_ts"] = int(value or 0)
+
 
 @dataclass
 class ChatMessage:

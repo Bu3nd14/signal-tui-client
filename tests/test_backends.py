@@ -111,6 +111,24 @@ class TestSignalBackend:
         assert contacts[0].id == "+391234567890"
         assert contacts[0].extras["aci"] == "uuid-123"
 
+    def test_set_contacts_recovers_last_message_ts_from_cache(self):
+        """_set_contacts calcola last_message_ts dal MAX timestamp della cache."""
+        backend = SignalBackend()
+        backend.cache = {
+            "+391234567890": [
+                {"timestamp": 1111},
+                {"timestamp": 7777},
+            ],
+            "+391111111111": [],  # nessun messaggio -> 0
+        }
+        contacts = [
+            ChatContact(id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL),
+            ChatContact(id="+391111111111", display_name="Luigi", protocol=PROTOCOL_SIGNAL),
+        ]
+        backend._set_contacts(contacts)
+        assert contacts[0].last_message_ts == 7777
+        assert contacts[1].last_message_ts == 0
+
     def test_envelope_to_event_message(self):
         """Un envelope di messaggio produce un ChatEvent type='message'."""
         backend = SignalBackend()
