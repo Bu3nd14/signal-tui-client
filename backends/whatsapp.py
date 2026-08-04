@@ -676,11 +676,20 @@ class WhatsAppBackend(ChatBackend):
                 if mid and mid in self._seen_msg_ids:
                     continue
                 event = _event_from_message(m)
-                if event is None or event.payload.get("is_mine"):
+                if event is None:
                     continue
+                is_mine = event.payload.get("is_mine", False)
                 ts = event.payload.get("timestamp") or 0
                 if ts and ts < cutoff_s * 1000:
                     continue  # ignora cronologia troppo vecchia
+                # Per i messaggi miei: accodali SOLO se non già noti.  Se il
+                # messaggio (timestamp+testo) è già in cache è un echo di un
+                # invio fatto dalla TUI -> skip (no doppioni).  Se non è in
+                # cache è un invio fatto da un ALTRO client (WhatsApp Web/
+                # telefono) che la TUI non ha ancora visto -> andiamo a mostrarlo.
+                if is_mine:
+                    if self._message_already_cached(cid, ts, True, event.payload.get("text", "")):
+                        continue
                 # Attribuisci l'evento alla chat interrogata (jid della chat,
                 # es. ``@lid``) invece del ``from`` (che può essere ``@c.us``):
                 # così `_identify_contact` ritrova il contatto nella lista.
@@ -720,6 +729,50 @@ class WhatsAppBackend(ChatBackend):
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
 
+    def fetch_history(self, contact_id: str, limit: int = 20) -> list[dict]:
+        """Scarica lo storico remoto di una chat da WAHA e lo salva nel cache.
+
+        Usato quando l'utente apre un contatto: WAHA CORE espone
+        ``GET /api/messages?chatId=...`` (niente WS/stream) e senza questo lo
+        storico non verrebbe mai caricato (il cache locale si riempie solo con
+        gli arrivi live, limitati).  Normalizza i messaggi con
+        ``_event_from_message`` e li ingerisce nel cache locale.
+
+        Ritorna la lista (già ordinata) dei messaggi normalizzati per il
+        contatto, oppure ``[]`` se l'API non risponde (fallback non distruttivo).
+        """
+        if not self._rest:
+            return []
+        raw = self._rest.list_messages(contact_id, limit=limit)
+        if not isinstance(raw, list):
+            return []
+        # WAHA ritorna i messaggi dal più recente in giù; li riordiniamo
+        # cronologicamente, poi li ingeriamo nel cache.
+        msgs = [m for m in raw if isinstance(m, dict)]
+        msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
+        for m in msgs:
+            event = _event_from_message(m)
+            if event is None:
+                continue
+            payload = event.payload
+            is_mine = payload.get("is_mine", False)
+            # ingest_message fa dedup interno (stesso (contact, ts, text) non
+            # viene ri-salvato) e aggiorna il cache locale + SQLite.  Includiamo
+            # sia i ricevuti sia i miei inviati così lo storico è completo.
+            self.ingest_message(
+                contact_id,
+                {
+                    "text": payload.get("text", ""),
+                    "is_mine": is_mine,
+                    "sender": payload.get("sender", "You" if is_mine else ""),
+                    "quote_text": payload.get("quote_text"),
+                    "msg_type": payload.get("msg_type", "text"),
+                    "attachment_info": payload.get("attachment_info"),
+                    "attachment_id": payload.get("attachment_id"),
+                },
+                payload.get("timestamp", 0),
+            )
+        return msgs
 
     # ─── Messaging ────────────────────────────────────────────────────
 

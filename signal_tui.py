@@ -1132,6 +1132,35 @@ class SignalTUI(App):
                 or self.selected_contact != contact
             )
 
+        # Per WhatsApp: WAHA CORE non spinge lo storico (niente WS/stream) e il
+        # cache locale si riempie solo tramite il polling live (limitatо alle chat
+        # "calde") e dagli invii della TUI.  Per avere sempre i messaggi più
+        # recenti — inclusi quelli inviati da UN ALTRO client — scarichiamo lo
+        # storico remoto (default ~20) a ogni apertura: `fetch_history` usa il
+        # dedup interno di `ingest_message`, quindi i messaggi già presenti non
+        # vengono duplicati.  Fallisce in modo non distruttivo.
+        if contact.protocol == WhatsAppBackend.protocol and not _is_stale():
+            backend = self.manager.get(contact.protocol)
+            fetch = getattr(backend, "fetch_history", None)
+            if fetch is not None:
+                try:
+                    fetch(contact.id, limit=20)
+                    # fetch_history alimenta il cache del backend; lo specchiamo
+                    # nel cache protocol-aware dell'UI per renderizzarlo.
+                    backend_msgs = getattr(backend, "cache", {}).get(contact.id, [])
+                    if backend_msgs:
+                        self._cache[contact.cache_key] = list(backend_msgs)
+                    if contact.cache_key in self._cache:
+                        cached = self._cache[contact.cache_key]
+                        total = len(cached)
+                    # Li sto visualizzando: i messaggi appena scaricati non
+                    # devono gonfiare i badge unread (già azzerati da _select_contact).
+                    for msg in self._cache.get(contact.cache_key, []):
+                        if not msg.get("is_mine"):
+                            msg["read"] = True
+                except Exception:
+                    pass  # fallback: resta sul cache locale
+
         if cached:
             if total > 20:
                 messages_to_show = cached[-20:]

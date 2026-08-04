@@ -429,3 +429,93 @@ class TestContactListSelect:
         assert issubclass(ContactListView, ListView)
 
 
+class TestWhatsAppHistoryLoad:
+    """📩 All'apertura di un contatto WhatsApp con cache vuoto, viene scaricato
+    lo storico remoto (fetch_history) così i messaggi (anche non letti) si vedono."""
+
+    def test_load_messages_worker_fetches_history_for_empty_whatsapp_cache(self):
+        app = _make_app()
+        c = ChatContact(id="16660245291231@lid", display_name="Pix Tim",
+                        protocol=PROTOCOL_WHATSAPP)
+        app.contacts = [c]
+        app.selected_contact = c
+        app._chat_reload_token = 1
+        app._cache = {}
+        app._seen_timestamps = set()
+        app._loaded_all = False
+
+        backend = MagicMock()
+        # fetch_history riempie il cache del backend; il worker poi lo specchia
+        # nel cache UI.
+        backend.cache = {
+            c.id: [
+                {"text": "ciao 1", "is_mine": False, "read": False, "timestamp": 1},
+                {"text": "ciao 2", "is_mine": False, "read": False, "timestamp": 2},
+            ]
+        }
+        backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
+        app.manager = MagicMock()
+        app.manager.get.return_value = backend
+
+        # evita operazioni su widget reali; call_from_thread esegue sincronico
+        app._add_message = MagicMock()
+        app._add_load_more_widget = MagicMock()
+        app.call_from_thread = MagicMock(
+            side_effect=lambda fn, *a, **k: fn(*a, **k)
+        )
+        app.query_one = MagicMock()
+
+        app._load_messages_worker()
+
+        # fetch_history è stato chiamato con il jid del contatto
+        backend.fetch_history.assert_called_once_with("16660245291231@lid", limit=20)
+        # il cache UI è stato popolato dallo specchio del backend
+        assert len(app._cache[c.cache_key]) == 2
+        # mostra i messaggi (per ogni msg chiama _add_message)
+        assert app._add_message.call_count >= 2
+
+    def test_load_messages_worker_fetches_history_even_when_cache_nonempty(self):
+        """Con cache già popolato, lo storico remoto viene comunque riscaricato
+        (per recuperare anche i messaggi inviati da un altro client)."""
+        app = _make_app()
+        c = ChatContact(id="16660245291231@lid", display_name="Pix Tim",
+                        protocol=PROTOCOL_WHATSAPP)
+        app.contacts = [c]
+        app.selected_contact = c
+        app._chat_reload_token = 1
+        # cache UI già popolato (es. da live/send della TUI)
+        app._cache = {c.cache_key: [
+            {"text": "esistente", "is_mine": False, "read": True, "timestamp": 1},
+        ]}
+        app._seen_timestamps = set()
+        app._loaded_all = False
+
+        backend = MagicMock()
+        backend.cache = {
+            c.id: [
+                {"text": "esistente", "is_mine": False, "read": True, "timestamp": 1},
+                {"text": "da altro client", "is_mine": True, "read": True, "timestamp": 2},
+            ]
+        }
+        backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
+        app.manager = MagicMock()
+        app.manager.get.return_value = backend
+
+        app._add_message = MagicMock()
+        app._add_load_more_widget = MagicMock()
+        app.call_from_thread = MagicMock(
+            side_effect=lambda fn, *a, **k: fn(*a, **k)
+        )
+        app.query_one = MagicMock()
+
+        app._load_messages_worker()
+
+        # Nonostante il cache non vuoto, viene riscaricato lo storico remoto
+        backend.fetch_history.assert_called_once_with("16660245291231@lid", limit=20)
+        # il cache UI ora include anche il messaggio "da altro client"
+        texts = [m["text"] for m in app._cache[c.cache_key]]
+        assert "da altro client" in texts
+
+
+
+

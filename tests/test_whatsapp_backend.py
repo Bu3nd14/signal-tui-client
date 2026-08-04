@@ -493,6 +493,46 @@ class TestWhatsAppPollingReceiver:
         assert n1 == 1
         assert n2 == 0  # già visto
 
+    def test_fetch_fast_recent_enqueues_my_message_sent_from_other_client(self):
+        """Un mio messaggio inviato da UN ALTRO client (non in cache) va mostrato."""
+        import time
+        now = int(time.time())
+        backend = self._backend()
+        backend.cache = {}  # nessun messaggio noto
+        backend._active_chats = {"15771304468671@lid": (0, now)}
+        backend._rest.list_messages.return_value = [
+            {"id": "m_web", "from": "19645297868955@lid", "fromMe": True,
+             "body": "inviato dal telefono", "timestamp": now},
+        ]
+        backend._fetch_fast_recent()
+        ev = backend.poll_once()
+        assert len(ev) == 1
+        assert ev[0].payload["is_mine"] is True
+        assert ev[0].contact_id == "15771304468671@lid"  # attribuito alla chat
+        assert ev[0].payload["text"] == "inviato dal telefono"
+
+    def test_fetch_fast_recent_skips_my_message_already_cached(self):
+        """Un mio messaggio GIÀ in cache (echo inviato dalla TUI) non va duplicato."""
+        import time
+        now_ms = int(time.time() * 1000)
+        now_s = now_ms // 1000
+        cid = "15771304468671@lid"
+        backend = self._backend()
+        backend.cache = {
+            cid: [
+                {"text": "già inviato", "is_mine": True, "timestamp": now_ms,
+                 "read": True, "status": "sent"},
+            ]
+        }
+        backend._active_chats = {cid: (0, now_s)}
+        backend._rest.list_messages.return_value = [
+            {"id": "m_echo", "from": "19645297868955@lid", "fromMe": True,
+             "body": "già inviato", "timestamp": now_s},
+        ]
+        backend._fetch_fast_recent()
+        assert backend.poll_once() == []  # nessun doppione
+
+
     def test_fetch_fast_recent_skips_groups_not_in_map(self):
         """I gruppi non entrano in _active_chats (vengono esclusi a monte)."""
         import time
@@ -524,6 +564,40 @@ class TestWhatsAppPollingReceiver:
         assert len(msgs) == 1
         assert seen[0][0] == "GET"
         assert "/api/messages?session=default&chatId=X@lid&limit=3" in seen[0][1]
+
+    def test_fetch_history_normalizes_and_ingests(self):
+        """fetch_history normalizza lo storico remoto e lo ingerisce nel cache."""
+        import time
+        now = int(time.time())
+        backend = self._backend()  # _rest = MagicMock
+        # WAHA ritorna i messaggi dal più recente in giù; li riordina e li ingerisce.
+        backend._rest.list_messages.return_value = [
+            {"id": "m_new", "from": "393400716440@c.us", "fromMe": False,
+             "body": "più recente", "timestamp": now},
+            {"id": "m_my", "from": "19645297868955@lid", "fromMe": True,
+             "body": "il mio inviato", "timestamp": now - 50},
+            {"id": "m_old", "from": "393400716440@c.us", "fromMe": False,
+             "body": "più vecchio", "timestamp": now - 100},
+        ]
+        # isola ingest_message (toccherebbe SQLite)
+        ingested = []
+        backend.ingest_message = lambda cid, data, ts: ingested.append(
+            (cid, data.get("text"), data.get("is_mine"), ts)
+        ) or True
+        result = backend.fetch_history("15771304468671@lid", limit=20)
+        # la versione REST è stata chiamata col jid e limit
+        backend._rest.list_messages.assert_called_once_with(
+            "15771304468671@lid", limit=20
+        )
+        # i 3 messaggi sono stati ingeriti, inclusi i miei (is_mine=True)
+        assert len(ingested) == 3
+        assert ingested[0][1] == "più vecchio"   # ordinato cronologico
+        assert ingested[1][1] == "il mio inviato"
+        assert ingested[2][1] == "più recente"
+        assert ingested[1][2] is True            # il mio -> is_mine=True
+        assert ingested[0][2] is False and ingested[2][2] is False
+        # risultato ritornato non vuoto
+        assert len(result) == 3
 
 
 # ─── Optional configuration gating ────────────────────────────────────────────
