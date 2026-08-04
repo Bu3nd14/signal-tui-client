@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -368,3 +368,113 @@ class TestSignalTUITyping:
         app.selected_contact = contact
         app._typing_mumbling[contact.cache_key] = 100.0
         assert "💭" in app._contact_label(contact)
+
+
+class TestUpdateTypingLabel:
+    """🎯 _update_typing_label aggiorna SOLO la riga del contatto interessato,
+    senza ricostruire l'intera lista (sort + render O(N)) — causa del lag di
+    digitazione con raffiche di eventi typing."""
+
+    def _make_app(self):
+        app = SignalTUI()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario",
+            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+        )
+        app.contacts = [contact]
+        app.signal_backend.contacts = [contact]
+        app._unread_counts = {}
+        app._typing_contacts = {}
+        app._typing_mumbling = {}
+        app.call_from_thread = MagicMock()
+        return app
+
+    def _render_one(self, app, cache_key, text):
+        """Crea una lista finta con un solo item per il contatto."""
+        class Label:
+            def __init__(self):
+                self._refreshed = 0
+            def update(self, t):
+                self._refreshed += 1
+                self._text = t
+        class Item:
+            def __init__(self, ck):
+                self._contact_id = ck
+                self._label_text = text
+                self._label = Label()
+                self.children = [self._label]
+        class List:
+            def __init__(self):
+                self.children = []
+
+        lst = List()
+        lst.children = [Item(cache_key)]
+        app.query_one = lambda *a, **k: lst
+        # la lista contatti NON deve essere riordinata né ridisegnata.
+        app._sort_contacts = MagicMock()
+        app._render_contact_list = MagicMock()
+        return lst, app._sort_contacts, app._render_contact_list
+
+    def test_updates_only_matching_row(self):
+        app = self._make_app()
+        contact = app.contacts[0]
+        app._typing_contacts[contact.cache_key] = 100.0
+        lst, sort_mock, render_mock = self._render_one(
+            app, contact.cache_key, "vecchia etichetta"
+        )
+        item = lst.children[0]
+        # forza il cambio: l'etichetta attuale non ha più l'icona
+        item._label_text = "vecchia etichetta"
+
+        app._update_typing_label(contact.cache_key)
+
+        assert item._label._refreshed == 1
+        assert "✍️" in item._label_text
+        # niente sort/render della lista intera
+        sort_mock.assert_not_called()
+        render_mock.assert_not_called()
+
+    def test_updates_mumbling_icon(self):
+        app = self._make_app()
+        contact = app.contacts[0]
+        app._typing_mumbling[contact.cache_key] = 100.0
+        lst, sort_mock, render_mock = self._render_one(
+            app, contact.cache_key, "vecchia etichetta"
+        )
+        item = lst.children[0]
+        item._label_text = "vecchia etichetta"
+
+        app._update_typing_label(contact.cache_key)
+
+        assert "💭" in item._label_text
+        sort_mock.assert_not_called()
+        render_mock.assert_not_called()
+
+    def test_noop_when_row_not_rendered(self):
+        """Se il contatto non è nella lista (es. filtrato), non fa nulla."""
+        app = self._make_app()
+        contact = app.contacts[0]
+        app._typing_contacts[contact.cache_key] = 100.0
+        lst, sort_mock, render_mock = self._render_one(
+            app, "signal:+999999999", "etichetta-altro"
+        )
+        other = lst.children[0]
+        other._label_text = "etichetta-altro"
+
+        app._update_typing_label(contact.cache_key)
+
+        # la riga di un altro contatto non viene toccata
+        assert other._label._refreshed == 0
+        sort_mock.assert_not_called()
+        render_mock.assert_not_called()
+
+    def test_noop_when_contact_unknown(self):
+        app = self._make_app()
+        lst, sort_mock, render_mock = self._render_one(
+            app, "signal:+391234567890", "x"
+        )
+        app._typing_contacts["signal:+0000"] = 100.0
+        app._update_typing_label("signal:+0000")
+        assert lst.children[0]._label._refreshed == 0
+        sort_mock.assert_not_called()
+        render_mock.assert_not_called()

@@ -770,26 +770,46 @@ class SignalTUI(App):
             # so this only affects the icon, not the order).
             self._typing_mumbling[cache_key] = now + self._TYPING_MUMBLING_DURATION
 
-        # Refresh the contact list label (non-invasive: only the label text
-        # of the affected contact changes, selection is preserved).
-        self.call_from_thread(self._refresh_typing_indicator, event.protocol, event.contact_id)
+        # Refresh del label del contatto (in-place, solo la riga interessata:
+        # niente rebuild dell'intera lista a ogni evento typing).
+        self.call_from_thread(self._update_typing_label, cache_key)
         return True
 
-    def _refresh_typing_indicator(self, protocol: str, contact_id: str) -> None:
-        """Rebuild the contact list labels to reflect typing state.
+    def _update_typing_label(self, cache_key: str) -> None:
+        """Aggiorna SOLO la riga del contatto che ha cambiato stato di typing.
 
-        Only the label of the affected contact changes; the list is rebuilt
-        preserving the current selection (same approach as
-        ``_update_unread_badges``).
+        Sostituisce ``_refresh_typing_indicator`` nel flusso di arrivo degli
+        eventi typing, che ricostruiva l'intera lista (sort + render O(N) su
+        350 righe) per via di un singolo cambio di icona ``✍️``/``💭``: su
+        raffiche di eventi typing (WhatsApp manda STARTED/STOPPED per molte
+        chat) questo saturava il main thread e rendeva la digitazione lenta.
+
+        Il typing cambia solo il testo della riga (mai l'ordinamento), quindi
+        qui ci limitiamo a ri-etichettare in-place il ``ListItem`` interessato,
+        senza toccare l'albero né gli altri ~350 item.
         """
         if not self.contacts:
             return
-
-        # Re-sort alphabetically (the list is always alphabetical; this is a
-        # no-op if already sorted, but keeps the list consistent).
-        self._sort_contacts()
-
-        self._render_contact_list(self._filtered_contacts())
+        try:
+            contact_list = self.query_one("#contact-list", ListView)
+        except Exception:
+            return
+        # Trova il contatto in memoria per calcolare il nuovo label (che legge
+        # _typing_contacts/_typing_mumbling, già aggiornati dall'evento).
+        contact = next((c for c in self.contacts if c.cache_key == cache_key), None)
+        if contact is None:
+            return
+        new_text = self._contact_label(contact)
+        for item in contact_list.children:
+            if getattr(item, "_contact_id", None) != cache_key:
+                continue
+            label = item.children[0] if item.children else None
+            if label is None:
+                return
+            if getattr(item, "_label_text", None) != new_text:
+                label.update(new_text)
+                item._label_text = new_text
+            return
 
     def _contact_label(self, contact: ChatContact) -> str:
 
@@ -1491,8 +1511,7 @@ class SignalTUI(App):
                                 for key in expired:
                                     self._typing_contacts.pop(key, None)
                                     self._typing_mumbling[key] = now + self._TYPING_MUMBLING_DURATION
-                                protocol, cid = expired[0].split(":", 1)
-                                self.call_from_thread(self._refresh_typing_indicator, protocol, cid)
+                                    self.call_from_thread(self._update_typing_label, key)
 
                         # Mumbling expiry: once the mumbling window passes, remove it.
                         if self._typing_mumbling:
@@ -1504,8 +1523,7 @@ class SignalTUI(App):
                             if expired:
                                 for key in expired:
                                     self._typing_mumbling.pop(key, None)
-                                protocol, cid = expired[0].split(":", 1)
-                                self.call_from_thread(self._refresh_typing_indicator, protocol, cid)
+                                    self.call_from_thread(self._update_typing_label, key)
 
                 # Flush differito della lista contatti: se durante il batch è
                 # arrivato qualcosa (messaggio/typing), esegue UN solo aggiornamento
