@@ -580,6 +580,28 @@ class TestWhatsAppPollingReceiver:
         assert len(ev) == 1
         assert ev[0].contact_id == "obs@lid"  # attribuito alla chat osservata
 
+    def test_set_poll_priorities_polls_top_contacts_even_outside_active(self):
+        """Un contatto in cima alla lista TUI (set_poll_priorities) deve essere
+        interrogato anche se NON è nella mappa ``_active_chats`` di /chats
+        (era il buco: badge/riordino non si aggiornavano per una chat non
+        aperta ma in cima alla lista)."""
+        import time
+        now = int(time.time())
+        backend = self._backend()
+        backend._active_chats = {"hot@lid": (1, now)}  # solo una chat "attiva"
+        backend.set_poll_priorities(["second@lid", "first@lid", "hot@lid"])
+        # side_effect callable: risponde a ogni chat (l'ordine di completamento
+        # dei GET paralleli non è deterministico, ma devono comparire tutte).
+        def fake_list(cid, limit=1):
+            return [{"id": f"m_{cid}", "from": "1@c.us", "fromMe": False,
+                     "body": "per il " + cid, "timestamp": now}]
+        backend._rest.list_messages.side_effect = fake_list
+        backend._fetch_fast_recent()
+        # la priorità (lista TUI) determina i candidati, anche se fuori /chats
+        ev = backend.poll_once()
+        assert len(ev) == 3
+        assert {e.contact_id for e in ev} == {"second@lid", "first@lid", "hot@lid"}
+
     def test_list_messages_uses_short_poll_timeout(self):
         """list_messages usa un timeout BREVE (per il giro veloce ~1s)."""
         client = WhatsAppRESTClient("http://api.test")

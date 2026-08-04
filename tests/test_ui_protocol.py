@@ -775,6 +775,34 @@ class TestContactListFlush:
     def _whatsapp_contact(cid, name):
         return ChatContact(id=cid, display_name=name, protocol=PROTOCOL_WHATSAPP)
 
+    def test_badge_visible_after_recompute_for_unselected_wa(self):
+        """Un messaggio non letto per una chat WhatsApp NON selezionata fa
+        comparire il badge `` *N`` nella label appena il flush ricalcola i dati.
+
+        Questo blindà il lato UI: se il messaggio è stato pollato e ingerito
+        nel cache, il badge e il riordino scattano per i contatti non aperti.
+        """
+        cid = "wa:2@s.whatsapp.net"
+        contact = self._whatsapp_contact(cid, "Bea")
+        app = _make_app(contact)
+        app.selected_contact = None
+        app._protocol_filter = "all"
+        key = contact.cache_key
+        # Il messaggio è già nel cache UI (ingerito dal polling) e NON è letto.
+        app._cache[key] = [
+            {"text": "ciao", "is_mine": False, "read": False, "timestamp": 9999},
+        ]
+        app._unread_counts = {}
+
+        # Flush dei dati: ricalcola unread (passo dati, senza render).
+        assert app._recompute_unread(key) is True
+        assert app._unread_counts.get(key) == 1
+        # Il badge appare nella label per un contatto non selezionato.
+        label = app._contact_label(contact)
+        assert " *1" in label, f"badge atteso nella label, avuto: {label!r}"
+
+
+
 
 
 

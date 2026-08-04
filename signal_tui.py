@@ -88,6 +88,7 @@ from models import (
     ChatContact,
     ChatEvent,
     PROTOCOL_SIGNAL,
+    PROTOCOL_WHATSAPP,
     contact_cache_key,
     protocol_emoji,
 )
@@ -921,6 +922,27 @@ class SignalTUI(App):
         """Sort contacts: contacts with messages first (most recent first),
         then those without messages (alphabetical), unnamed ones last."""
         self.contacts.sort(key=self._contact_sort_key)
+        # Sincronizza l'ordine della lista (che l'utente vede) con la priorità
+        # di polling del backend WhatsApp: così i contatti in cima vengono
+        # SEMPRE interrogati dal giro veloce, anche se non rientrano nella
+        # piccola mappa "chat attive" di /chats.  Senza, badge e riordino non
+        # si aggiornavano per una chat non ancora aperta ma in cima alla lista.
+        self._notify_wa_poll_priorities()
+
+    def _notify_wa_poll_priorities(self) -> None:
+        """Informa il backend WhatsApp dell'ordine dei contatti, così il polling
+        interroga per primi quelli visibili in cima alla lista."""
+        try:
+            wa = self.manager.get(PROTOCOL_WHATSAPP)
+        except Exception:
+            wa = None
+        set_prio = getattr(wa, "set_poll_priorities", None) if wa else None
+        if set_prio is not None:
+            jids = [c.id for c in self.contacts if c.protocol == PROTOCOL_WHATSAPP]
+            try:
+                set_prio(jids)
+            except Exception:
+                pass  # best-effort: il polling ricade sulla mappa attiva
 
     def _reorder_contact_list(self):
         """Re-sort in-memory contacts and refresh the visible list.

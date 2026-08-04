@@ -535,6 +535,24 @@ class WhatsAppBackend(ChatBackend):
         #: Jid di chat osservate (es. contatto aperto nella TUI) che vanno
         #: SEMPRE interrogate ad ogni giro veloce, anche se fuori dalle top-6.
         self._observed_jids: list[str] = []
+        #: Priorità di polling derivate dall'ORDINE della lista contatti della
+        #: TUI (set_poll_priorities).  Collega la ricezione alla lista che
+        #: l'utente vede: i contatti in cima (ultimo messaggio più recente)
+        #: vengono sempre interrogati, anche se non rientrano nella piccola
+        #: mappa ``_active_chats`` (/chats ogni 15s).  Senza questo, un contatto
+        #: 2° in lista (per storico recente) poteva restare mai pollato e badge/
+        #: riordino non aggiornarsi finché non veniva aperto.
+        self._poll_priorities: list[str] = []
+
+    def set_poll_priorities(self, jids: list[str]) -> None:
+        """Registra l'ordine per-priorità dei jid WhatsApp come mostrato nella
+        lista contatti della TUI (prima = contatto più in alto).
+
+        Chiamato dalla TUI dopo ogni riordinamento della lista.  Il giro veloce
+        userà questi per costruire i candidati, così i messaggi live arrivano
+        per chi l'utente vede in cima anche se fuori dalle top-``_POLL_TOP``.
+        """
+        self._poll_priorities = [j for j in jids if j]
 
     @property
     def needs_pairing(self) -> bool:
@@ -748,9 +766,25 @@ class WhatsAppBackend(ChatBackend):
         """
         if not self._rest:
             return
-        if not self._active_chats and not self._observed_jids:
+        if (not self._active_chats and not self._observed_jids
+                and not self._poll_priorities):
             return
-        candidates = self._active_chat_ids()[: self._POLL_TOP]
+        # Candidati = chat osservate (aperte, sempre) + primi ``_POLL_TOP``
+        # della lista TUI (priorità) + chat "attive" da /chats a riempimento
+        # dei rimanenti slot del budget.  Così un contatto in cima alla lista
+        # viene SEMPRE interrogato anche se non è tra le top-_POLL_TOP della
+        # mappa attiva (era il buco: badge/riordino non si aggiornavano finché
+        # non aprivi il contatto), senza perdere la scoperta di chat nuove.
+        observed = [j for j in self._observed_jids]
+        priorities = observed + list(self._poll_priorities[: self._POLL_TOP])
+        if priorities:
+            active = self._active_chat_ids()
+            seen = set(priorities)
+            candidates = priorities + [
+                cid for cid in active if cid not in seen
+            ][: self._POLL_TOP]
+        else:
+            candidates = self._active_chat_ids()[: self._POLL_TOP]
         if not candidates:
             return
         limit = 1 if not self._bootstrapped else 1
