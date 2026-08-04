@@ -1302,7 +1302,13 @@ class SignalTUI(App):
             fetch = getattr(backend, "fetch_history", None)
             if fetch is not None:
                 try:
-                    fetch(contact.id, limit=20)
+                    # Finestra più ampia: `fetch_history` riconcilia lo storico
+                    # remoto con il DB (aggiunge i messaggi mancanti, aggiorna
+                    # le entry senza id).  Con limit=20 un DB a cui mancavano
+                    # messaggi (corrotto dai vecchi bug di dedup) non veniva
+                    # mai riparato perché i 20 più recenti erano già presenti.
+                    fetch(contact.id, limit=50)
+
                     # fetch_history alimenta il cache del backend; lo specchiamo
                     # nel cache protocol-aware dell'UI per renderizzarlo.
                     backend_msgs = getattr(backend, "cache", {}).get(contact.id, [])

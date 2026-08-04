@@ -647,7 +647,15 @@ class WhatsAppBackend(ChatBackend):
         Starts the WebSocket consumer thread (if a ws endpoint is configured)
         and populates the ``contacts`` list from the REST API.  Safe to call
         when the API is unreachable — the backend simply remains idle.
+
+        The in-memory cache is seeded from the SQLite DB (only this protocol's
+        messages) so that messages persisted in a previous session are
+        immediately available to the UI and the existing ``ingest_message``
+        dedup works across sessions — otherwise ``fetch_history`` would
+        re-insert the same remote messages on every chat open, duplicating
+        them in the DB.
         """
+        self.cache = self._load_protocol_cache()
         if not self._rest:
             self._connected = False
             return
@@ -657,6 +665,7 @@ class WhatsAppBackend(ChatBackend):
             pass
         self._start_receiver()
         self._connected = True
+
 
     async def disconnect(self) -> None:
         """Stop the WebSocket consumer and release resources."""
@@ -791,7 +800,13 @@ class WhatsAppBackend(ChatBackend):
         for m in msgs:
             if not isinstance(m, dict):
                 continue
-            mid = m.get("id") or ""
+            # Estrai l'id con la stessa logica di ``_event_from_message``
+            # (WAHA può annidarlo sotto ``key.id``): se usassimo solo
+            # ``m.get("id")`` un echo con id annidato verrebbe deduplicato
+            # col solo fallback timestamp (finestra 5s) e, se il ts server
+            # dista più di 5s dal ts client, finirebbe per essere aggiunto
+            # di nuovo -> doppione.
+            mid = m.get("id") or (m.get("key") or {}).get("id") or ""
             if mid and mid in self._seen_msg_ids:
                 continue
             event = _event_from_message(m, self._contacts_by_jid)
@@ -810,10 +825,34 @@ class WhatsAppBackend(ChatBackend):
             # Passiamo l'id: due messaggi miei distinti con stesso testo e
             # stesso secondo non devono essere confusi con un echo.
             if is_mine:
-                if self._message_already_cached(
+                existing = self._message_already_cached(
                     cid, ts, True, event.payload.get("text", ""), mid or None
-                ):
+                )
+                if existing is not None:
+                    # Echo di un invio già noto: non lo mostriamo di nuovo, ma
+                    # registriamo comunque il suo id reale in ``_seen_msg_ids``
+                    # così non viene ri-scaricato ad ogni giro di polling.
+                    if mid:
+                        self._seen_msg_ids.add(mid)
+                        # Se l'entry in cache era un invio ottimistico senza id
+                        # (fatto dalla TUI), aggiornala subito con l'id reale
+                        # dell'echo: così il dedup per id vale da ora e non
+                        # resta un'entry "senza id" che potrebbe confondersi
+                        # con un messaggio mio nuovo con lo stesso testo.
+                        if not existing.get("id"):
+                            existing["id"] = mid
+                            existing["timestamp"] = ts
+                            from backend import _update_message_id
+                            _update_message_id(
+                                cid,
+                                event.payload.get("text", ""),
+                                True,
+                                ts,
+                                mid,
+                                protocol=PROTOCOL_WHATSAPP,
+                            )
                     continue
+
 
             # Attribuisci l'evento alla chat interrogata (jid della chat,
             # es. ``@lid``) invece del ``from`` (che può essere ``@c.us``):
@@ -822,6 +861,7 @@ class WhatsAppBackend(ChatBackend):
             if mid:
                 self._seen_msg_ids.add(mid)
             self._enqueue_event(event)
+
 
     def _fetch_fast_recent(self) -> None:
         """Giro veloce: per le ``_POLL_TOP`` chat più calde interroga l'ultimo
@@ -1184,6 +1224,18 @@ class WhatsAppBackend(ChatBackend):
 
     # ─── Cache / ingestion helpers ────────────────────────────────────
 
+    def _load_protocol_cache(self) -> dict[str, list[dict]]:
+        """Load this protocol's persisted messages from SQLite.
+
+        Mirrors ``SignalBackend._load_protocol_cache`` but filters by the
+        WhatsApp protocol so the in-memory cache only contains WhatsApp
+        messages (keyed by the raw JID).  Seeding the cache from the DB at
+        startup makes the existing ``ingest_message`` dedup work across
+        sessions and makes persisted messages immediately available to the UI.
+        """
+        from backend import _load_cache
+        return _load_cache(protocol=PROTOCOL_WHATSAPP)
+
     def _add_cached_message(self, contact_id: str, msg: dict) -> None:
         """Append a message dict to the in-memory protocol cache (raw id key)."""
         if contact_id not in self.cache:
@@ -1191,10 +1243,11 @@ class WhatsAppBackend(ChatBackend):
         self.cache[contact_id].append(msg)
 
 
+
     def _message_already_cached(
         self, contact_id: str, ts: int, is_mine: bool, text: str, msg_id: str | None = None
-    ) -> bool:
-        """Return True if a message with the same identity is already cached.
+    ) -> dict | None:
+        """Return the cached message matching the same identity, or ``None``.
 
         Mirrors Signal's dedup: for outgoing messages within a short window the
         echo of an optimistic send is not stored twice; for incoming, the
@@ -1206,6 +1259,10 @@ class WhatsAppBackend(ChatBackend):
         the timestamp alone (second granularity) is not a unique identity and
         would drop the second message from the DB entirely (it never reappeared,
         not even on re-entry).
+
+        Returns the matched cached message dict (not just a bool) so the caller
+        can upgrade an optimistic send (``id=None``) with the real WhatsApp id
+        when its echo arrives, instead of leaving a duplicate behind.
         """
         for msg in self.cache.get(contact_id, []):
             if not msg.get("is_mine") == is_mine:
@@ -1215,7 +1272,7 @@ class WhatsAppBackend(ChatBackend):
                 if cached_id:
                     # Primary identity: the stable message id.  Same id -> dup.
                     if cached_id == msg_id:
-                        return True
+                        return msg
                     # Different id -> definitely a distinct message, never a dup.
                     continue
                 # Cached message has NO id (e.g. an optimistic send made by the
@@ -1226,10 +1283,23 @@ class WhatsAppBackend(ChatBackend):
                 continue
             if not is_mine:
                 if msg.get("timestamp") == ts:
-                    return True
+                    return msg
+            elif msg_id:
+                # Echo (ha un id reale) che corrisponde a un invio ottimistico
+                # (entry senza id): il timestamp dell'echo può distare molto dal
+                # ts client (WAHA usa il proprio), quindi si abbina per testo.
+                # MA solo se l'entry senza id è RECENTE: un'entry legacy (pre-fix,
+                # id=None) molto vecchia NON deve "inghiottire" un messaggio mio
+                # genuinamente nuovo (es. inviato da un altro client) che ha lo
+                # stesso testo.  La finestra copre il normale ritardo dell'echo
+                # senza confondere messaggi distinti.
+                if abs(msg.get("timestamp", 0) - ts) <= _ECHO_MATCH_WINDOW_MS:
+                    return msg
             elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:
-                return True
-        return False
+                return msg
+        return None
+
+
 
 
     def ingest_message(self, contact_id: str, data: dict, ts: int) -> bool:
@@ -1237,13 +1307,33 @@ class WhatsAppBackend(ChatBackend):
 
         Returns ``True`` if newly added, ``False`` if it was a duplicate.
         """
-        from backend import _add_message_to_cache
+        from backend import _add_message_to_cache, _update_message_id
         text = data["text"]
         is_mine = data["is_mine"]
         msg_id = data.get("id")
 
-        if self._message_already_cached(contact_id, ts, is_mine, text, msg_id):
+        existing = self._message_already_cached(contact_id, ts, is_mine, text, msg_id)
+        if existing is not None:
+            # The echo of an optimistic send (cached with id=None) has arrived
+            # with its real WhatsApp id.  Upgrade the cached entry so the
+            # id-based dedup works from now on and no duplicate is left behind.
+            # Only applies to SENT messages: a received message with id=None is
+            # just a legacy DB entry (pre-fix), not an optimistic send awaiting
+            # its echo, so it must NOT be re-inserted.
+            if is_mine and msg_id and not existing.get("id"):
+                existing["id"] = msg_id
+                existing["timestamp"] = ts
+                _update_message_id(
+                    contact_id,
+                    text,
+                    is_mine,
+                    ts,
+                    msg_id,
+                    protocol=PROTOCOL_WHATSAPP,
+                )
             return False
+
+
 
 
         _add_message_to_cache(
@@ -1257,6 +1347,7 @@ class WhatsAppBackend(ChatBackend):
             attachment_info=data.get("attachment_info"),
             attachment_id=data.get("attachment_id"),
             protocol=PROTOCOL_WHATSAPP,
+            msg_id=msg_id,
         )
         self._add_cached_message(contact_id, {
             "id": msg_id,
@@ -1272,6 +1363,7 @@ class WhatsAppBackend(ChatBackend):
             "status": "sent" if is_mine else "read",
         })
         return True
+
 
 
     def process_receipt(self, envelope: dict) -> list[dict]:
@@ -1299,4 +1391,13 @@ class WhatsAppBackend(ChatBackend):
 
 
 _SEND_DEDUP_WINDOW_MS = 5000
+
+# Window (ms) entro cui un'entry SENT senza id (invio ottimistico della TUI)
+# può essere considerata l'echo di un messaggio con id reale, abbinandola per
+# testo.  Copre il normale ritardo dell'echo di WAHA (che usa il proprio
+# timestamp server, distante dal ts client) senza però far "inghiottire" a
+# un'entry legacy (pre-fix, id=None) molto vecchia un messaggio mio
+# genuinamente nuovo (es. inviato da un altro client) con lo stesso testo.
+_ECHO_MATCH_WINDOW_MS = 600000  # 10 minuti
+
 

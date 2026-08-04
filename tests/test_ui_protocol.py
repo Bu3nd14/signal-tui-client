@@ -481,7 +481,8 @@ class TestWhatsAppHistoryLoad:
         app._load_messages_worker()
 
         # fetch_history è stato chiamato con il jid del contatto
-        backend.fetch_history.assert_called_once_with("16660245291231@lid", limit=20)
+        backend.fetch_history.assert_called_once_with("16660245291231@lid", limit=50)
+
         # il cache UI è stato popolato dallo specchio del backend
         assert len(app._cache[c.cache_key]) == 2
         # mostra i messaggi (per ogni msg chiama _add_message)
@@ -524,7 +525,8 @@ class TestWhatsAppHistoryLoad:
         app._load_messages_worker()
 
         # Nonostante il cache non vuoto, viene riscaricato lo storico remoto
-        backend.fetch_history.assert_called_once_with("16660245291231@lid", limit=20)
+        backend.fetch_history.assert_called_once_with("16660245291231@lid", limit=50)
+
         # il cache UI ora include anche il messaggio "da altro client"
         texts = [m["text"] for m in app._cache[c.cache_key]]
         assert "da altro client" in texts

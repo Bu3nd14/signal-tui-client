@@ -171,6 +171,14 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
             "ALTER TABLE messages ADD COLUMN protocol TEXT NOT NULL DEFAULT 'signal'"
         )
 
+    # The WhatsApp backend carries a stable per-message ``id`` (the Baileys
+    # message id).  Persisting it lets the id-based dedup in
+    # ``_message_already_cached`` work across sessions — without it, DB-seeded
+    # cache entries have no id and distinct messages sharing the same second
+    # AND text get merged/dropped (chats appear "behind" when opened).
+    if "msg_id" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN msg_id TEXT")
+
     # Rebuild the index so it is namespaced by protocol.  Dropping and
     # re-creating is idempotent on both migrated and fresh tables.
     conn.execute("DROP INDEX IF EXISTS idx_messages_contact")
@@ -178,6 +186,7 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_messages_contact "
         "ON messages(protocol, contact_number, timestamp)"
     )
+
 
 
 def _init_db():
@@ -216,16 +225,28 @@ def _init_db():
             conn.close()
 
 
-def _load_cache() -> dict[str, list[dict]]:
-    """Load all messages from SQLite into a dict {contact: [messages]}."""
+def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
+    """Load messages from SQLite into a dict {contact: [messages]}.
+
+    When ``protocol`` is given, only messages of that protocol are returned
+    (e.g. ``"whatsapp"``), so each backend seeds its in-memory cache with only
+    its own messages.  ``None`` (default) loads everything, preserving the
+    legacy behaviour.
+    """
     _init_db()
     with _DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         try:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM messages ORDER BY timestamp"
-            ).fetchall()
+            if protocol is None:
+                rows = conn.execute(
+                    "SELECT * FROM messages ORDER BY timestamp"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM messages WHERE protocol = ? ORDER BY timestamp",
+                    (protocol,),
+                ).fetchall()
         finally:
             conn.close()
     cache: dict[str, list[dict]] = {}
@@ -234,6 +255,7 @@ def _load_cache() -> dict[str, list[dict]]:
         if contact not in cache:
             cache[contact] = []
         cache[contact].append({
+            "id": row["msg_id"],
             "text": row["text"],
             "is_mine": bool(row["is_mine"]),
             "sender": row["sender"],
@@ -249,6 +271,8 @@ def _load_cache() -> dict[str, list[dict]]:
     return cache
 
 
+
+
 def _add_message_to_cache(
     contact_number: str,
     text: str,
@@ -260,6 +284,7 @@ def _add_message_to_cache(
     attachment_info: str | None = None,
     attachment_id: str | None = None,
     protocol: str = "signal",
+    msg_id: str | None = None,
 ):
     """Add a message to the SQLite cache (incremental INSERT).
     msg_type: "text", "image", "sticker", "attachment"
@@ -267,6 +292,8 @@ def _add_message_to_cache(
     attachment_id: signal-cli attachment UUID for resolving the file on disk.
     protocol: source protocol ("signal", "whatsapp", ...). Defaults to signal
         for backward compatibility.
+    msg_id: stable per-message id (e.g. the Baileys WhatsApp message id).
+        Persisting it lets the id-based dedup work across sessions.
     """
     _init_db()
     with _DB_LOCK:
@@ -276,12 +303,44 @@ def _add_message_to_cache(
                 """INSERT INTO messages
                    (protocol, contact_number, text, is_mine, sender, timestamp,
                     quote_text, msg_type, attachment_info, attachment_id,
-                    read, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    read, status, msg_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (protocol, contact_number, text, int(is_mine), sender, timestamp,
                  quote_text, msg_type, attachment_info, attachment_id,
                  int(is_mine),
-                 "sent" if is_mine else "read"),
+                 "sent" if is_mine else "read",
+                 msg_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+
+def _update_message_id(
+    contact_number: str,
+    text: str,
+    is_mine: bool,
+    timestamp: int,
+    msg_id: str,
+    protocol: str = "signal",
+):
+    """Attach a real message id to an existing (optimistic) row.
+
+    When the echo of an optimistic send arrives with its real WhatsApp id, the
+    row that was inserted optimistically (``msg_id IS NULL``) is updated in
+    place instead of inserting a duplicate.  Matching is by
+    ``(protocol, contact_number, text, is_mine)`` on the id-less row.
+    """
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.execute(
+                "UPDATE messages SET msg_id = ?, timestamp = ? "
+                "WHERE protocol = ? AND contact_number = ? AND text = ? "
+                "AND is_mine = ? AND msg_id IS NULL",
+                (msg_id, timestamp, protocol, contact_number, text, int(is_mine)),
             )
             conn.commit()
         finally:
@@ -290,6 +349,7 @@ def _add_message_to_cache(
 
 def _prune_cache():
     """Remove messages older than CACHE_RETENTION_DAYS and limit to 200 per contact."""
+
     _init_db()
     with _DB_LOCK:
         conn = sqlite3.connect(DB_FILE)

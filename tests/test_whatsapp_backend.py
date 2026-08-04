@@ -1103,3 +1103,280 @@ class TestWAHAContract:
         assert len(calls) >= 1
         assert calls[0] is None
 
+
+# ─── Regression: seed cache from DB at startup ───────────────────────────────
+
+class TestSeedCacheFromDB:
+    """Il backend WhatsApp deve caricare i messaggi persistiti dal DB all'avvio.
+
+    Prima del fix, ``connect_sync`` partiva con ``self.cache = {}`` (a differenza
+    del backend Signal): la cache dell'UI restava vuota per i contatti WhatsApp e
+    i messaggi già nel DB non comparivano finché ``fetch_history`` non li
+    riscaricava (e li re-inseriva, duplicandoli).  Questo test verifica che
+    ``connect_sync`` semini la cache dal DB, filtrando SOLO il protocollo
+    WhatsApp.
+    """
+
+    def test_connect_sync_seeds_cache_from_db(self, tmp_path, monkeypatch):
+        import backend as backend_mod
+
+        # Isola il DB su un file temporaneo.
+        monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
+
+        cid = "391234567890@s.whatsapp.net"
+        ts = 1700000000000
+        backend_mod._add_message_to_cache(
+            cid, "Ok  ci sentiamo", False, "Giovanni", ts,
+            protocol=PROTOCOL_WHATSAPP,
+        )
+        # Un messaggio di un ALTRO protocollo non deve finire nella cache WhatsApp.
+        backend_mod._add_message_to_cache(
+            "+391234567890", "msg signal", False, "Mario", ts + 1,
+            protocol="signal",
+        )
+
+        backend = _make_backend("http://api.test")
+        # connect_sync tenta _load_contacts (REST) e _start_receiver (thread):
+        # li neutralizziamo per non toccare la rete.
+        with patch.object(backend, "_load_contacts"), \
+             patch.object(backend, "_start_receiver"):
+            backend.connect_sync()
+
+        msgs = backend.cache.get(cid, [])
+        assert len(msgs) == 1
+        assert msgs[0]["text"] == "Ok  ci sentiamo"
+        assert msgs[0]["is_mine"] is False
+        assert msgs[0]["timestamp"] == ts
+        # Il messaggio Signal non deve essere presente nella cache WhatsApp.
+        assert "+391234567890" not in backend.cache
+
+    def test_connect_sync_dedup_prevents_db_duplicates(self, tmp_path, monkeypatch):
+        """Con la cache seminata dal DB, fetch_history non re-inserisce i
+        messaggi già persistiti (il dedup di ingest_message ora funziona anche
+        tra sessioni)."""
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
+
+        cid = "391234567890@s.whatsapp.net"
+        ts = 1700000000000
+        backend_mod._add_message_to_cache(
+            cid, "Ok  ci sentiamo", False, "Giovanni", ts,
+            protocol=PROTOCOL_WHATSAPP,
+        )
+
+        backend = _make_backend("http://api.test")
+        with patch.object(backend, "_load_contacts"), \
+             patch.object(backend, "_start_receiver"):
+            backend.connect_sync()
+
+        # Simula fetch_history che riscarica lo stesso messaggio remoto.
+        added = backend.ingest_message(
+            cid,
+            {"id": "wa-msg-1", "text": "Ok  ci sentiamo", "is_mine": False,
+             "sender": "Giovanni", "quote_text": None, "msg_type": "text",
+             "attachment_info": None, "attachment_id": None},
+            ts,
+        )
+        assert added is False  # già in cache (dal DB) -> non duplicato
+
+        # Il DB deve contenere ancora UNA sola copia.
+        loaded = backend_mod._load_cache(protocol=PROTOCOL_WHATSAPP)
+        assert len(loaded.get(cid, [])) == 1
+
+    def test_db_seeded_cache_keeps_distinct_same_second_with_ids(self, tmp_path, monkeypatch):
+        """🛡️ Regressione "chat indietro": due messaggi DISTINTI con stesso testo
+        E stesso secondo, uno persistito nel DB (con id), non devono essere fusi
+        quando fetch_history li riscarica.
+
+        Prima del fix, ``_load_cache`` non ricaricava l'id WhatsApp: le entry
+        seminate dal DB avevano ``id=None``, quindi il dedup di ingest_message
+        ricadeva su (testo, timestamp) e il secondo messaggio (stesso secondo +
+        stesso testo) veniva scartato -> la chat appariva "indietro" quando
+        veniva aperta.
+        """
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
+
+        cid = "391234567890@s.whatsapp.net"
+        ts = 1700000000000
+        # Due messaggi distinti, stesso testo e stesso secondo, con id diversi.
+        backend_mod._add_message_to_cache(
+            cid, "ok", False, "Giovanni", ts,
+            protocol=PROTOCOL_WHATSAPP, msg_id="wa-1",
+        )
+        backend_mod._add_message_to_cache(
+            cid, "ok", False, "Giovanni", ts,
+            protocol=PROTOCOL_WHATSAPP, msg_id="wa-2",
+        )
+
+        backend = _make_backend("http://api.test")
+        with patch.object(backend, "_load_contacts"), \
+             patch.object(backend, "_start_receiver"):
+            backend.connect_sync()
+
+        # La cache seminata dal DB deve contenere ENTRAMBI i messaggi (con id).
+        seeded = backend.cache.get(cid, [])
+        assert len(seeded) == 2
+        assert {m.get("id") for m in seeded} == {"wa-1", "wa-2"}
+
+        # fetch_history riscarica gli stessi due messaggi: nessuno deve essere
+        # scartato come falso duplicato.
+        added1 = backend.ingest_message(
+            cid,
+            {"id": "wa-1", "text": "ok", "is_mine": False, "sender": "Giovanni",
+             "quote_text": None, "msg_type": "text",
+             "attachment_info": None, "attachment_id": None},
+            ts,
+        )
+        added2 = backend.ingest_message(
+            cid,
+            {"id": "wa-2", "text": "ok", "is_mine": False, "sender": "Giovanni",
+             "quote_text": None, "msg_type": "text",
+             "attachment_info": None, "attachment_id": None},
+            ts,
+        )
+        assert added1 is False  # già in cache (stesso id) -> dedup corretto
+        assert added2 is False  # già in cache (stesso id) -> dedup corretto
+        # Nessun duplicato aggiunto: il DB resta con 2 sole copie.
+        loaded = backend_mod._load_cache(protocol=PROTOCOL_WHATSAPP)
+        assert len(loaded.get(cid, [])) == 2
+
+    def test_optimistic_send_echo_upgrades_id_no_duplicate(self, tmp_path, monkeypatch):
+        """🛡️ Regressione "messaggi inviati duplicati": l'echo di un invio
+        ottimistico (id=None) che arriva con l'id reale e timestamp distante
+        (> finestra 5s) NON deve creare un duplicato, e deve aggiornare l'entry
+        ottimistica con l'id reale.
+        """
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
+
+        cid = "391234567890@s.whatsapp.net"
+        backend = _make_backend("http://api.test")
+        with patch.object(backend, "_load_contacts"), \
+             patch.object(backend, "_start_receiver"):
+            backend.connect_sync()
+
+        # 1) Invio ottimistico dalla TUI: id sconosciuto (None), ts client.
+        ts_opt = 1700000000000
+        added = backend.ingest_message(
+            cid,
+            {"id": None, "text": "ciao", "is_mine": True, "sender": "You",
+             "quote_text": None, "msg_type": "text",
+             "attachment_info": None, "attachment_id": None},
+            ts_opt,
+        )
+        assert added is True
+
+        # 2) Echo di WAHA: id reale, timestamp molto più tardi (> 5s).
+        ts_echo = ts_opt + 60000  # 60s dopo -> fuori dalla finestra di dedup
+        added_echo = backend.ingest_message(
+            cid,
+            {"id": "wa-echo-1", "text": "ciao", "is_mine": True, "sender": "You",
+             "quote_text": None, "msg_type": "text",
+             "attachment_info": None, "attachment_id": None},
+            ts_echo,
+        )
+        # Non deve essere aggiunto come nuovo messaggio.
+        assert added_echo is False
+
+        # L'entry ottimistica è stata aggiornata con l'id reale.
+        cached = backend.cache.get(cid, [])
+        assert len(cached) == 1
+        assert cached[0]["id"] == "wa-echo-1"
+        assert cached[0]["timestamp"] == ts_echo
+
+        # Il DB contiene una sola copia, con l'id reale.
+        loaded = backend_mod._load_cache(protocol=PROTOCOL_WHATSAPP)
+        assert len(loaded.get(cid, [])) == 1
+        assert loaded[cid][0]["id"] == "wa-echo-1"
+
+    def test_legacy_idless_sent_does_not_swallow_new_message(self):
+        """🛡️ Regressione "chat incompleta": un'entry SENT senza id (legacy,
+        pre-fix, molto vecchia) NON deve "inghiottire" un messaggio mio
+        genuinamente nuovo (es. inviato da un altro client) con lo stesso testo.
+
+        Prima il fallback per testo abbinava QUALSIASI entry senza id con lo
+        stesso testo, indipendentemente dall'età: un'entry legacy di giorni fa
+        faceva scartare un messaggio nuovo arrivato da un altro client -> la
+        chat risultava incompleta (il messaggio era nel DB remoto ma non
+        veniva mai mostrato).  Ora il fallback è limitato a una finestra
+        temporale (``_ECHO_MATCH_WINDOW_MS``).
+        """
+        import backend as backend_mod
+        backend = _make_backend()
+        cid = "391234567890@s.whatsapp.net"
+        # Entry legacy SENT senza id, molto vecchia (es. 1 giorno fa).
+        backend.cache[cid] = [{
+            "id": None, "text": "ciao", "is_mine": True, "sender": "You",
+            "timestamp": 1700000000000, "quote_text": None, "msg_type": "text",
+            "attachment_info": None, "attachment_id": None,
+        }]
+        # Messaggio mio NUOVO (da un altro client) con lo stesso testo, id reale.
+        ts_new = 1700000000000 + 24 * 3600 * 1000  # 1 giorno dopo
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            added = backend.ingest_message(
+                cid,
+                {"id": "wa-new-1", "text": "ciao", "is_mine": True, "sender": "You",
+                 "quote_text": None, "msg_type": "text",
+                 "attachment_info": None, "attachment_id": None},
+                ts_new,
+            )
+        # Deve essere aggiunto come messaggio NUOVO (non scartato come echo).
+        assert added is True
+        mock_add.assert_called_once()
+        assert len(backend.cache[cid]) == 2
+
+    def test_echo_with_nested_key_id_deduped_and_upgrades(self):
+        """🛡️ Regressione "messaggi duplicati": un echo il cui id è annidato
+        sotto ``key.id`` (WAHA) deve essere riconosciuto come duplicato (non
+        aggiunto di nuovo) e deve aggiornare l'entry ottimistica senza id.
+
+        Prima ``_process_recent_messages`` leggeva solo ``m.get("id")``: con
+        l'id annidato sotto ``key.id`` l'echo veniva deduplicato col solo
+        fallback timestamp (finestra 5s) e, se il ts server distava più di 5s
+        dal ts client, veniva aggiunto di nuovo -> doppione.
+        """
+        import time
+        import backend as backend_mod
+        backend = _make_backend()
+        cid = "391234567890@s.whatsapp.net"
+        # Timestamp recenti (entro la finestra di 30 giorni di _process_recent_messages).
+        ts_opt = int(time.time() * 1000)
+        # Invio ottimistico senza id.
+        backend.cache[cid] = [{
+            "id": None, "text": "ciao", "is_mine": True, "sender": "You",
+            "timestamp": ts_opt, "quote_text": None, "msg_type": "text",
+            "attachment_info": None, "attachment_id": None,
+        }]
+        # Echo con id annidato sotto key.id e ts distante (> 5s).
+        ts_echo = ts_opt + 60000
+        raw = {
+            "chatId": cid,
+            "fromMe": True,
+            "key": {"id": "wa-echo-nested"},
+            "body": "ciao",
+            "timestamp": ts_echo // 1000,
+        }
+
+        with patch.object(backend_mod, "_update_message_id") as mock_upd:
+            backend._process_recent_messages(cid, [raw])
+        # L'echo non deve essere accodato come nuovo evento.
+        assert backend.poll_once() == []
+        # L'entry ottimistica è stata aggiornata con l'id reale.
+        assert len(backend.cache[cid]) == 1
+        assert backend.cache[cid][0]["id"] == "wa-echo-nested"
+        # Il timestamp è stato aggiornato a quello dell'echo (granularità al
+        # secondo: il ts server di WAHA è in secondi, quindi può differire di
+        # qualche ms dal ts client).
+        assert backend.cache[cid][0]["timestamp"] >= ts_opt
+        mock_upd.assert_called_once()
+        # L'id è registrato in _seen_msg_ids (non ri-scaricato ad ogni giro).
+        assert "wa-echo-nested" in backend._seen_msg_ids
+
+
+
+
+
