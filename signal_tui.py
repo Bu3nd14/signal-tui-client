@@ -940,19 +940,49 @@ class SignalTUI(App):
         return ""
 
     def _render_contact_list(self, filtered: list[ChatContact]) -> None:
-        """Rebuild the contact ListView from *filtered* contacts.
+        """Renderizza la lista contatti, aggiornandola *in-place* quando la
+        composizione/ordine non cambia.
 
-        Contacts are given their protocol accent class; selection is preserved
-        when the selected contact is still visible under the active filter.
+        Textual, dopo un ``clear()``+ri-append, ricostruisce man mano gli item:
+        con ~350 contatti e un refresh frequente (poll ~1s) questo smonta/rimonta
+        continuamente i ``ListItem``, logora la UI e può far fallire un click in
+        corso (``ListItem not in list``).  Qui, se gli id restano gli stessi in
+        ordine, aggiorniamo solo testo/classi dei ``ListItem`` esistenti senza
+        toccare l'albero; la ricostruzione completa avviene solo quando cambia
+        la composizione (filtro/ordinamento per nuovo messaggio).
         """
         contact_list = self.query_one("#contact-list", ListView)
-        contact_list.clear()
-        for c in filtered:
-            item = ListItem(Label(self._contact_label(c)))
-            item.add_class(self._protocol_class(c))
-            contact_list.append(item)
+        existing = list(contact_list.children)
+        cur_ids = [getattr(it, "_contact_id", None) for it in existing]
+        want_ids = [c.cache_key for c in filtered]
+
+        if cur_ids == want_ids:
+            # Fast path: composizione invariata -> aggiorna in-place.
+            for item, c in zip(existing, filtered):
+                label = item.children[0] if item.children else None
+                new_text = self._contact_label(c)
+                if getattr(item, "_label_text", None) != new_text and label is not None:
+                    label.update(new_text)
+                    item._label_text = new_text
+                # Sync classe protocollo (es. filtro/ordinamento che cambia tipo)
+                if not item.has_class(self._protocol_class(c)):
+                    for cl in ("protocol-signal", "protocol-whatsapp"):
+                        item.remove_class(cl)
+                    item.add_class(self._protocol_class(c))
+        else:
+            # Composizione/ordine cambiato -> rebuild completo.
+            contact_list.clear()
+            for c in filtered:
+                text = self._contact_label(c)
+                item = ListItem(Label(text))
+                item._contact_id = c.cache_key
+                item._label_text = text
+                item.add_class(self._protocol_class(c))
+                contact_list.append(item)
+
         if self.selected_contact and self.selected_contact in filtered:
             contact_list.index = filtered.index(self.selected_contact)
+
 
     def _apply_contact_filter(self) -> None:
         """Re-apply the active protocol filter to the contact list view.
@@ -1028,6 +1058,14 @@ class SignalTUI(App):
 
         self.selected_contact = contact
         self._seen_timestamps.clear()
+        # Per WhatsApp: segnala al backend di tenere SEMPRE sotto osservazione
+        # la chat appena aperta, così i messaggi live (anche inviati da un altro
+        # client) arrivano in tempo reale anche se la chat non è tra le top-N.
+        if contact.protocol == WhatsAppBackend.protocol:
+            wa_backend = self.manager.get(contact.protocol)
+            observe = getattr(wa_backend, "observe_chat", None)
+            if observe is not None:
+                observe(contact.id)
         # Cancel any pending reply so we don't reply to the wrong contact
         self._cancel_reply()
         self._clear_chat()
@@ -1820,7 +1858,14 @@ class SignalTUI(App):
             "attachment_info": None,
             "attachment_id": None,
         }
-        self.signal_backend.ingest_message(contact_id, data, ts)
+        # Ingerisci l'ottimista nel backend CORRETTO del contatto (non hardcoded
+        # su signal_backend): per WhatsApp deve finire nel WhatsAppBackend.cache,
+        # altrimenti il polling dei messaggi non lo riconosce e ri-accoderebbe
+        # l'echo -> messaggio mostrato DOPPIO (che si sistemava solo rientrando).
+        ingest_backend = self.manager.get(contact.protocol)
+        if ingest_backend is None:
+            ingest_backend = self.signal_backend
+        ingest_backend.ingest_message(contact_id, data, ts)
 
         # Update in-memory cache for UI
         if cache_key not in self._cache:

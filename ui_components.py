@@ -11,7 +11,7 @@ from rich.text import Text as RichText
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Label, ListView, Input, Static, RichLog, Button
+from textual.widgets import Label, ListView, ListItem, Input, Static, RichLog, Button
 
 from emoji_picker import EmojiCompletionWidget
 
@@ -42,6 +42,24 @@ class ContactListView(ListView):
     """
 
     ALLOW_SELECT = False
+
+    def _on_list_item__child_clicked(self, event: ListItem._ChildClicked) -> None:
+        """Gestisci il click su un elemento senza crash se è stato rimosso.
+
+        La lista contatti viene ricostruita in modo non-distruttivo (update
+        in-place), ma nel breve intervallo di un update un ``ListItem`` può non
+        essere più figlio dell'albero quando il click viene elaborato: Textual
+        farebbe ``self._nodes.index(event.item)`` e solleverebbe ValueError.
+        Qui ignoriamo il click su un item ormai estraneo (l'utente ricliccherà).
+        """
+        event.stop()
+        self.focus()
+        try:
+            index = self._nodes.index(event.item)
+        except ValueError:
+            return  # item già rimosso/ricostruito: ignora il click
+        self.index = index
+        self.post_message(self.Selected(self, event.item, index))
 
 
 class ContactListWidget(Vertical):

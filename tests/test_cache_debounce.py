@@ -182,7 +182,7 @@ class TestIncrementalUnreadBadges:
         # Patch _sort_contacts and query_one to avoid UI interaction
         with patch.object(app, "_sort_contacts") as mock_sort, \
              patch.object(app, "query_one") as mock_query:
-            mock_list = type("FakeList", (), {"clear": lambda self: None, "append": lambda self, x: None, "index": 0})()
+            mock_list = type("FakeList", (), {"clear": lambda self: None, "append": lambda self, x: None, "index": 0, "children": []})()
             mock_query.return_value = mock_list
 
             app._update_unread_badges(contact_cache_key(PROTOCOL_SIGNAL, "+391"))
@@ -213,7 +213,7 @@ class TestIncrementalUnreadBadges:
 
         with patch.object(app, "_sort_contacts") as mock_sort, \
              patch.object(app, "query_one") as mock_query:
-            mock_list = type("FakeList", (), {"clear": lambda self: None, "append": lambda self, x: None, "index": 0})()
+            mock_list = type("FakeList", (), {"clear": lambda self: None, "append": lambda self, x: None, "index": 0, "children": []})()
             mock_query.return_value = mock_list
 
             app._update_unread_badges()

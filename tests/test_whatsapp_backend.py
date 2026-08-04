@@ -543,6 +543,43 @@ class TestWhatsAppPollingReceiver:
         backend._rest.list_messages.assert_not_called()
         assert backend.poll_once() == []
 
+    def test_active_chat_ids_prefers_observed(self):
+        """La chat osservata va SEMPRE in testa, anche se non tra le più attive."""
+        import time
+        now = int(time.time())
+        backend = self._backend()
+        backend._active_chats = {
+            "hot1@lid": (3, now),       # la più attiva (unread alto)
+            "last@lid": (0, now - 999), # meno attiva
+        }
+        backend.observe_chat("last@lid")
+        ids = backend._active_chat_ids()
+        # "last@lid" (osservata) viene prima di "hot1@lid"
+        assert ids[0] == "last@lid"
+        assert "last@lid" in ids and "hot1@lid" in ids
+
+    def test_observe_chat_none_clears(self):
+        backend = self._backend()
+        backend.observe_chat("X@lid")
+        backend.observe_chat(None)
+        assert backend._observed_jids == []
+
+    def test_fetch_fast_recent_polls_observed_even_when_active_empty(self):
+        """Anche con _active_chats vuoto, la chat osservata viene interrogata."""
+        import time
+        now = int(time.time())
+        backend = self._backend()
+        backend._active_chats = {}
+        backend.observe_chat("obs@lid")
+        backend._rest.list_messages.return_value = [
+            {"id": "m_obs", "from": "1@c.us", "fromMe": False,
+             "body": "guardami", "timestamp": now},
+        ]
+        backend._fetch_fast_recent()
+        ev = backend.poll_once()
+        assert len(ev) == 1
+        assert ev[0].contact_id == "obs@lid"  # attribuito alla chat osservata
+
     def test_list_messages_rest(self):
         """RESTClient.list_messages costruisce la GET corretta."""
         client = WhatsAppRESTClient("http://api.test")

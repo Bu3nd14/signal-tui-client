@@ -38,6 +38,10 @@ class _FakeListView:
         self.items = []
         self.index = None
 
+    @property
+    def children(self):
+        return self.items
+
     def clear(self):
         self.items = []
 
@@ -515,6 +519,85 @@ class TestWhatsAppHistoryLoad:
         # il cache UI ora include anche il messaggio "da altro client"
         texts = [m["text"] for m in app._cache[c.cache_key]]
         assert "da altro client" in texts
+
+
+class TestContactListViewCrashFix:
+    """🖱️ Fase A+B: click su item rimosso non crasha + render in-place."""
+
+    def test_click_on_removed_item_does_not_crash(self):
+        """Un click su un ListItem ormai non più figlio non deve lanciare."""
+        from textual.widgets import ListItem
+        lv = ContactListView()
+        stale = ListItem()
+        ev = MagicMock()
+        ev.item = stale
+        lv.focus = MagicMock()  # evito il focus su widget non montato
+        # _nodes è vuoto (non montato) -> index(stale) -> ValueError -> ritorna
+        lv._on_list_item__child_clicked(ev)  # non deve lanciare ValueError
+        ev.stop.assert_called_once()
+
+    def test_render_in_place_when_composition_unchanged(self):
+        """Se la composizione della lista non cambia, nessun rebuild (no clear)."""
+        app = _make_app(_signal("+1", "A"), _whatsapp())
+        fake = _FakeListView()
+        clears = []
+        fake.clear = lambda: (clears.append(True), fake.items.clear()) or None
+        app.query_one = MagicMock(return_value=fake)
+        app.selected_contact = None
+
+        filtered = app._filtered_contacts()
+        app._render_contact_list(filtered)  # primo: rebuild
+        assert len(fake.items) == 2
+        app._render_contact_list(filtered)  # composizione uguale -> in-place
+        assert len(fake.items) == 2
+        # il rebuild completo è avvenuto solo la prima volta
+        assert len(clears) == 1
+
+
+class TestSendOptimisticRouting:
+    """📤 L'ottimista dell'invio va nel backend del contatto (non hardcoded Signal)."""
+
+    def test_whatsapp_send_ingest_uses_whatsapp_backend(self):
+        from unittest.mock import patch, MagicMock
+
+        app = _make_app()
+        contact = ChatContact(id="16660245291231@lid", display_name="Pix",
+                              protocol=PROTOCOL_WHATSAPP)
+        app.selected_contact = contact
+        app._reply_to = None
+        app._cache = {}
+
+        wa_backend = MagicMock()
+        wa_backend.ingest_message = MagicMock(return_value=True)
+        wa_backend.send_message_sync = MagicMock()
+        signal_backend = MagicMock()
+
+        app.manager = MagicMock()
+        app.manager.get.return_value = wa_backend  # manager.get(whatsapp) -> wa
+        app.signal_backend = signal_backend
+
+        # Evita side-effetti di on_input_submitted
+        app._is_completion_visible = MagicMock(return_value=False)
+        app.query_one = MagicMock()
+        app._add_message = MagicMock()
+        app._cancel_reply = MagicMock()
+        app.run_worker = MagicMock(return_value=None)
+
+        event = MagicMock()
+        event.value = "ciao"
+
+        import signal_tui as stui
+        with patch.object(stui, "replace_emoji_aliases", side_effect=lambda x: x):
+            app.on_input_submitted(event)
+
+        # L'ottimista è andato al backend WHATSAPP (non a quello Signal)
+        wa_backend.ingest_message.assert_called_once()
+        assert wa_backend.ingest_message.call_args.args[0] == contact.id
+        # E il messaggio è mostrato subito
+        assert app._add_message.call_count >= 1
+        # Il Signal backend NON ha ricevuto l'ottimista
+        signal_backend.ingest_message.assert_not_called()
+
 
 
 

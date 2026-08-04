@@ -523,6 +523,9 @@ class WhatsAppBackend(ChatBackend):
         self._chats_last_refresh = 0.0
         #: Chat attive note: {chat_id: (unread, timestamp)}.
         self._active_chats: dict[str, tuple[int, int]] = {}
+        #: Jid di chat osservate (es. contatto aperto nella TUI) che vanno
+        #: SEMPRE interrogate ad ogni giro veloce, anche se fuori dalle top-6.
+        self._observed_jids: list[str] = []
 
     @property
     def needs_pairing(self) -> bool:
@@ -603,15 +606,16 @@ class WhatsAppBackend(ChatBackend):
 
     def _poll_loop(self) -> None:
         """Two-speed polling: a slow /chats refresh (discover active chats)
-        interleaved with a fast ~1s poll of only the hot chats' latest message."""
+        interleaved with a fast ~1s poll of the hot chats' latest message."""
         while not self._poll_stop.is_set():
             try:
-                # Aggiornamento lento e raro della mappa "chat attive"
-                # (GET /chats ~1.3MB): scopre quali chat sono calde/ nuove.
-                n = self._refresh_active_chats()
-                # Giro veloce (~1s) sulle chat calde: list_messages limit=1.
-                if n:
-                    self._fetch_fast_recent()
+                # Refresh lento e raro (interno: esegue la GET solo se scaduto).
+                # Va a ogni ciclo ma ritorna subito se non è il momento.  È
+                # importante NON subordinare il giro veloce al lento, altrimenti
+                # la ricezione avverrebbe ogni ~15s invece che ~1s (bug).
+                self._refresh_active_chats()
+                # Giro veloce SEMPRE (~1s) sulle chat calde + contatto osservato.
+                self._fetch_fast_recent()
             except Exception:
                 pass
             if self._poll_stop.wait(timeout=self._POLL_INTERVAL):
@@ -647,20 +651,41 @@ class WhatsAppBackend(ChatBackend):
         self._chats_last_refresh = now
         return True
 
+    def observe_chat(self, jid: str | None) -> None:
+        """Registra (o rimuove, se ``None``) una chat da osservare sempre.
+
+        Usato dalla TUI quando un contatto WhatsApp viene aperto: la chat resta
+        interrogata ad ogni giro veloce anche se non tra le prime ``_POLL_TOP``,
+        così i messaggi live (anche inviati da un altro client) arrivano in
+        tempo reale.
+        """
+        if not jid:
+            self._observed_jids = []
+            return
+        if jid not in self._observed_jids:
+            self._observed_jids.append(jid)
+
     def _active_chat_ids(self) -> list[str]:
-        """Ordina le chat note per priorità (non lette prima, poi attività)."""
+        """Ordina le chat note per priorità (non lette prima, poi attività) e
+        antepone SEMPRE le chat osservate (contatti aperti)."""
         now = int(time.time())
         scored = []
         for cid, (unread, ts) in self._active_chats.items():
             recency = max(now - ts, 0) if ts else 2**31
             scored.append((unread, -recency if ts else 0, cid))
         scored.sort(key=lambda x: (x[0] == 0, x[0], x[1]))
-        return [cid for _u, _r, cid in scored]
+        ordered = [cid for _u, _r, cid in scored]
+        # Le chat osservate vanno in testa (mantenendo l'ordine con cui
+        # sono state aggiunte), senza duplicarle.
+        observed = [j for j in self._observed_jids]
+        return list(dict.fromkeys(observed + ordered))
 
     def _fetch_fast_recent(self) -> None:
         """Giro veloce: per le ``_POLL_TOP`` chat più calde interroga l'ultimo
         messaggio (limit=1) e accoda i nuovi eventi (dedup per id)."""
-        if not self._rest or not self._active_chats:
+        if not self._rest:
+            return
+        if not self._active_chats and not self._observed_jids:
             return
         cutoff_s = int(time.time()) - 30 * 24 * 3600  # 30 giorni (ms più sotto)
         limit = 1 if not self._bootstrapped else 1
