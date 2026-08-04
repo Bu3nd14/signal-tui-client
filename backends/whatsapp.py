@@ -22,6 +22,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterator
 
@@ -289,10 +290,14 @@ class WhatsAppRESTClient:
         WAHA returns a list of message objects (``body`` holds the text, ``from``
         the JID, ``fromMe`` a bool, ``timestamp`` in seconds).  Returns ``[]`` on
         any error so callers can treat a slow/unreachable API as non-fatal.
+
+        Uses a short timeout on purpose: this is called every poll cycle and a
+        hung request must not freeze the whole fast poll (see ``_fetch_fast_recent``).
         """
         result = self._request(
             "GET",
             f"/api/messages?session={self.session_name}&chatId={chat_id}&limit={int(limit)}",
+            timeout=3,
         )
         if not isinstance(result, list):
             return []
@@ -512,6 +517,10 @@ class WhatsAppBackend(ChatBackend):
         self._bootstrapped = False
         self._poll_thread: threading.Thread | None = None
         self._poll_stop = threading.Event()
+        #: Pool di thread per eseguire in PARALLELO i GET del giro veloce di
+        #: polling.  Una richiesta lenta non deve congelare le altre chat (era
+        #: il collo di bottiglia che ritardava anche contatti in cima alla lista).
+        self._poll_pool: ThreadPoolExecutor | None = None
         #: Intervallo (s) tra un giro di polling "veloce" (chat calde, ~1s).
         self._POLL_INTERVAL = 1.0
         #: Numero massimo di chat attive interrogate ad ogni giro veloce.
@@ -578,6 +587,9 @@ class WhatsAppBackend(ChatBackend):
         self._polling_active = False
         self._ws_stop.set()
         self._poll_stop.set()
+        if self._poll_pool is not None:
+            self._poll_pool.shutdown(wait=False, cancel_futures=True)
+            self._poll_pool = None
         if self._ws_thread is not None and self._ws_thread.is_alive():
             self._ws_thread.join(timeout=1.0)
         self._ws_thread = None
@@ -599,6 +611,13 @@ class WhatsAppBackend(ChatBackend):
         self._start_ws_consumer()  # tentativo: su WAHA CORE fallisce (404)
         if self._poll_thread is not None and self._poll_thread.is_alive():
             return
+        # Pool riusabile per i GET paralleli del giro veloce (mai ricreato ad
+        # ogni giro: il thread pool minimizza overhead thread per ~1s di giro).
+        if self._poll_pool is None:
+            self._poll_pool = ThreadPoolExecutor(
+                max_workers=min(self._POLL_TOP, 8) or 1,
+                thread_name_prefix="wa-poll",
+            )
         self._poll_thread = threading.Thread(
             target=self._poll_loop, daemon=True, name="whatsapp-poll"
         )
@@ -680,48 +699,91 @@ class WhatsAppBackend(ChatBackend):
         observed = [j for j in self._observed_jids]
         return list(dict.fromkeys(observed + ordered))
 
+    def _process_recent_messages(self, cid: str, msgs) -> None:
+        """Dedup/accoda gli ultimi messaggi di una chat (nel poll thread).
+
+        Messo fuori dai worker del pool perché ``_seen_msg_ids`` e la coda
+        eventi vanno toccati solo dal thread di polling (nessuna contesa).
+        """
+        if not msgs:
+            return
+        cutoff_s = int(time.time()) - 30 * 24 * 3600  # 30 giorni (ms più sotto)
+        for m in msgs:
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("id") or ""
+            if mid and mid in self._seen_msg_ids:
+                continue
+            event = _event_from_message(m)
+            if event is None:
+                continue
+            is_mine = event.payload.get("is_mine", False)
+            ts = event.payload.get("timestamp") or 0
+            if ts and ts < cutoff_s * 1000:
+                continue  # ignora cronologia troppo vecchia
+            # Per i messaggi miei: accodali SOLO se non già noti.  Se il
+            # messaggio (timestamp+testo) è già in cache è un echo di un
+            # invio fatto dalla TUI -> skip (no doppioni).  Se non è in
+            # cache è un invio fatto da un ALTRO client (WhatsApp Web/
+            # telefono) che la TUI non ha ancora visto -> andiamo a mostrarlo.
+            if is_mine:
+                if self._message_already_cached(cid, ts, True, event.payload.get("text", "")):
+                    continue
+            # Attribuisci l'evento alla chat interrogata (jid della chat,
+            # es. ``@lid``) invece del ``from`` (che può essere ``@c.us``):
+            # così `_identify_contact` ritrova il contatto nella lista.
+            event.contact_id = cid
+            if mid:
+                self._seen_msg_ids.add(mid)
+            self._enqueue_event(event)
+
     def _fetch_fast_recent(self) -> None:
         """Giro veloce: per le ``_POLL_TOP`` chat più calde interroga l'ultimo
-        messaggio (limit=1) e accoda i nuovi eventi (dedup per id)."""
+        messaggio (limit=1) e accoda i nuovi eventi (dedup per id).
+
+        I GET ``/api/messages`` sono lanciati in PARALLELO (ThreadPoolExecutor):
+        una richiesta lenta non deve più congelare l'intero giro e affamare le
+        altre chat (incluso il 4° contatto in lista).  Il solo GET avviene nei
+        worker; dedup/eventi restano nel poll thread, in ordine di priorità.
+        """
         if not self._rest:
             return
         if not self._active_chats and not self._observed_jids:
             return
-        cutoff_s = int(time.time()) - 30 * 24 * 3600  # 30 giorni (ms più sotto)
+        candidates = self._active_chat_ids()[: self._POLL_TOP]
+        if not candidates:
+            return
         limit = 1 if not self._bootstrapped else 1
-        for cid in self._active_chat_ids()[: self._POLL_TOP]:
-            try:
-                msgs = self._rest.list_messages(cid, limit=limit)
-            except Exception:
-                continue
-            for m in msgs or []:
-                if not isinstance(m, dict):
-                    continue
-                mid = m.get("id") or ""
-                if mid and mid in self._seen_msg_ids:
-                    continue
-                event = _event_from_message(m)
-                if event is None:
-                    continue
-                is_mine = event.payload.get("is_mine", False)
-                ts = event.payload.get("timestamp") or 0
-                if ts and ts < cutoff_s * 1000:
-                    continue  # ignora cronologia troppo vecchia
-                # Per i messaggi miei: accodali SOLO se non già noti.  Se il
-                # messaggio (timestamp+testo) è già in cache è un echo di un
-                # invio fatto dalla TUI -> skip (no doppioni).  Se non è in
-                # cache è un invio fatto da un ALTRO client (WhatsApp Web/
-                # telefono) che la TUI non ha ancora visto -> andiamo a mostrarlo.
-                if is_mine:
-                    if self._message_already_cached(cid, ts, True, event.payload.get("text", "")):
-                        continue
-                # Attribuisci l'evento alla chat interrogata (jid della chat,
-                # es. ``@lid``) invece del ``from`` (che può essere ``@c.us``):
-                # così `_identify_contact` ritrova il contatto nella lista.
-                event.contact_id = cid
-                if mid:
-                    self._seen_msg_ids.add(mid)
-                self._enqueue_event(event)
+        # 1) GET paralleli e read-only nei worker del pool.
+        results: dict[str, list[dict]] = {}
+        if self._poll_pool is None:
+            self._poll_pool = ThreadPoolExecutor(
+                max_workers=min(self._POLL_TOP, 8) or 1,
+                thread_name_prefix="wa-poll",
+            )
+        future_to_cid = {
+            self._poll_pool.submit(self._rest.list_messages, cid, limit): cid
+            for cid in candidates
+        }
+        # Raccogli i risultati dei GET finiti entro il timeout del giro.  Se
+        # il timeout scade davanti a future ancora in corso, processiamo ciò che
+        # è già pronto: le chat rimaste vengono riprese al giro successivo.
+        try:
+            done_iter = as_completed(future_to_cid, timeout=3.5)
+            for future in done_iter:
+                cid = future_to_cid[future]
+                try:
+                    results[cid] = future.result()
+                except Exception:
+                    results[cid] = []
+        except TimeoutError:
+            pass
+        # 2) Processing nel poll thread, in ordine di priorità dei candidati.
+        for cid in candidates:
+            self._process_recent_messages(cid, results.get(cid) or [])
+        for future in future_to_cid:
+            if not future.done():
+                future.cancel()
         self._bootstrapped = True
 
     # ─── Contact loading ──────────────────────────────────────────────

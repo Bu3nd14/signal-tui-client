@@ -580,6 +580,69 @@ class TestWhatsAppPollingReceiver:
         assert len(ev) == 1
         assert ev[0].contact_id == "obs@lid"  # attribuito alla chat osservata
 
+    def test_list_messages_uses_short_poll_timeout(self):
+        """list_messages usa un timeout BREVE (per il giro veloce ~1s)."""
+        client = WhatsAppRESTClient("http://api.test")
+        seen_timeout = []
+
+        def fake_urlopen(req, timeout=30):
+            seen_timeout.append(timeout)
+            resp = MagicMock()
+            resp.status = 200
+            resp.read.return_value = b"[]"
+            ctx = MagicMock()
+            ctx.__enter__.return_value = resp
+            return ctx
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client.list_messages("X@lid", limit=1)
+        # un GET di poll non deve mai poter affamare per decine di secondi
+        assert seen_timeout and seen_timeout[0] == 3
+
+    def test_fetch_fast_recent_polls_all_top_chats_in_parallel(self):
+        """Il giro veloce interroga TUTTE le top chat (oggi le prime _POLL_TOP),
+        e gli eventi vengono accodati nell'ordine di priorità della mappa."""
+        import time
+        now = int(time.time())
+        backend = self._backend()
+        backend._POLL_TOP = 4
+        ids = [f"c{i}@lid" for i in range(4)]
+        backend._active_chats = {cid: (1, now) for cid in ids}
+
+        def fake_list(cid, limit=1):
+            return [{"id": f"m_{cid}", "from": f"{cid}", "fromMe": False,
+                     "body": "ciao", "timestamp": now}]
+
+        backend._rest.list_messages.side_effect = fake_list
+        backend._fetch_fast_recent()
+        ev = backend.poll_once()
+        # tutte e 4 le chat sono state interrogate e hanno prodotto un evento
+        assert len(ev) == 4
+        assert {e.contact_id for e in ev} == set(ids)
+
+    def test_fetch_fast_recent_slow_get_does_not_block_others(self):
+        """Un GET lento (oltre il timeout di giro) non deve impedire alle altre
+        chat di essere processate nello stesso giro (era il collo di bottiglia)."""
+        import time
+        now = int(time.time())
+        backend = self._backend()
+        backend._POLL_TOP = 3
+        ids = [f"c{i}@lid" for i in range(3)]
+
+        def fake_list(cid, limit=1):
+            if cid == ids[0]:  # la prima chat è lenta
+                raise TimeoutError("giro scaduto")  # simula GET appeso oltre il giro
+            return [{"id": f"m_{cid}", "from": f"{cid}", "fromMe": False,
+                     "body": "ciao", "timestamp": now}]
+
+        backend._rest.list_messages.side_effect = fake_list
+        backend._active_chats = {cid: (1, now) for cid in ids}
+        backend._fetch_fast_recent()
+        ev = backend.poll_once()
+        # le altre chat vengono comunque accodate; quella lenta è rimandata al giro dopo
+        assert {e.contact_id for e in ev} == set(ids[1:])
+
+
     def test_list_messages_rest(self):
         """RESTClient.list_messages costruisce la GET corretta."""
         client = WhatsAppRESTClient("http://api.test")
