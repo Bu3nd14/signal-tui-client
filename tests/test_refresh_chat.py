@@ -357,4 +357,69 @@ class TestRenderDedup:
         assert added.index("ULTIMO") > added.index("primo")
 
 
+class TestRenderDedupSameSecond:
+    """🛡️ Regressione: due messaggi DISTINTI nello stesso secondo (stesso ts)
+    devono essere mostrati ENTRAMBI, anche passando dal VERO ``_add_message``.
+
+    Il bug era a tre livelli, tutti chiavati sul solo timestamp (granularità al
+    secondo): ``_shown_in_log`` in ``_add_message``, ``_seen_timestamps`` nel
+    percorso live e ``_message_already_cached`` nel backend WhatsApp.  Il test
+    esistente ``test_refresh_chat_keeps_last_when_same_timestamp_as_previous``
+    mocca ``_add_message`` e quindi NON copriva il dedup di rendering: qui
+    usiamo il VERO ``_add_message`` per verificare che il secondo messaggio
+    dello stesso secondo non venga scartato.
+    """
+
+    def _make_app(self) -> SignalTUI:
+        app = SignalTUI()
+        c = ChatContact(id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL)
+        app.selected_contact = c
+        app._loaded_all = False
+        return app
+
+    def test_add_message_shows_two_distinct_same_second(self):
+        """Due messaggi con lo STESSO timestamp ma testo diverso: entrambi montati."""
+        app = self._make_app()
+        fake_log = _FakeChatLog()
+        with patch.object(app, "query_one", return_value=fake_log):
+            app._add_message("primo", is_mine=False, timestamp=5000,
+                             sender="M", status="read")
+            app._add_message("ULTIMO", is_mine=False, timestamp=5000,
+                             sender="M", status="read")
+        texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
+        assert texts.count("primo") == 1
+        assert texts.count("ULTIMO") == 1
+
+    def test_add_message_still_dedups_exact_duplicate(self):
+        """Lo STESSO messaggio (stesso ts E stesso testo) resta deduplicato."""
+        app = self._make_app()
+        fake_log = _FakeChatLog()
+        with patch.object(app, "query_one", return_value=fake_log):
+            app._add_message("ciao", is_mine=False, timestamp=5000,
+                             sender="M", status="read")
+            app._add_message("ciao", is_mine=False, timestamp=5000,
+                             sender="M", status="read")
+        texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
+        assert texts.count("ciao") == 1
+
+    def test_refresh_chat_shows_both_same_second_via_real_add(self):
+        """_refresh_chat + VERO _add_message: due messaggi stesso secondo mostrati."""
+        app = self._make_app()
+        contact = app.selected_contact
+        app._cache = {
+            contact.cache_key: [
+                _make_message("primo", ts=5000),
+                _make_message("ULTIMO", ts=5000),
+            ]
+        }
+        app._seen_timestamps = set()
+        fake_log = _FakeChatLog()
+        with patch.object(app, "query_one", return_value=fake_log):
+            app._refresh_chat()
+        texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
+        assert texts.count("primo") == 1
+        assert texts.count("ULTIMO") == 1
+
+
+
 

@@ -395,7 +395,11 @@ class SignalTUI(App):
         # Identities of real messages already mounted in the current chat log,
         # used as a render-level de-dup safety net so _refresh_chat and the
         # load workers never mount the same message twice.
-        self._shown_in_log: set[tuple[str, str, int]] = set()
+        # Chiave = (protocol, cache_key, timestamp, testo): il timestamp da solo
+        # (granularità al secondo) non basta — due messaggi WhatsApp distinti
+        # nello stesso secondo verrebbero scartati (il secondo non compariva).
+        self._shown_in_log: set[tuple[str, str, int, str]] = set()
+
         self._reply_to: Optional[dict] = None  # message being replied to
         self._download_mode = False  # Ctrl+D download mode active
         self._typing_contacts: dict[str, float] = {}  # contact cache_key → time of last typing STARTED
@@ -476,11 +480,14 @@ class SignalTUI(App):
         # current view, regardless of _seen_timestamps state.  Info messages
         # (headers, separators, hints) are not part of the message feed and so
         # are not de-duplicated here.
+        # L'identità include il TESTO: il timestamp da solo (granularità al
+        # secondo) non basta — due messaggi WhatsApp distinti nello stesso
+        # secondo verrebbero scartati (il secondo non compariva mai).
         if not is_info:
             if (
                 self.selected_contact is not None
                 and timestamp
-                and (protocol, self.selected_contact.cache_key, timestamp)
+                and (protocol, self.selected_contact.cache_key, timestamp, text)
                 in self._shown_in_log
             ):
                 return
@@ -489,8 +496,9 @@ class SignalTUI(App):
                 and timestamp
             ):
                 self._shown_in_log.add(
-                    (protocol, self.selected_contact.cache_key, timestamp)
+                    (protocol, self.selected_contact.cache_key, timestamp, text)
                 )
+
 
         chat_log = self.query_one("#chat-log", Vertical)
 
@@ -519,7 +527,18 @@ class SignalTUI(App):
         if is_info:
             widget = Static(display_text, classes="msg-info")
         else:
-            # Use clickable MessageWidget for all non-info messages
+            # Use clickable MessageWidget for all non-info messages.
+            # Per i messaggi di gruppo WhatsApp (chat @g.us) non miei,
+            # prependiamo "<nome_contatto:>" con il nome in #DAA520 (goldenrod).
+            sender_color = None
+            if (
+                not is_mine
+                and sender
+                and self.selected_contact is not None
+                and self.selected_contact.id.endswith("@g.us")
+            ):
+                sender_color = "#DAA520"
+
             widget = MessageWidget(
                 text=display_text,
                 timestamp=timestamp,
@@ -528,7 +547,9 @@ class SignalTUI(App):
                 classes="msg-right" if is_mine else "msg-left",
                 status=status,
                 protocol=protocol or "",
+                sender_color=sender_color,
             )
+
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
 
@@ -660,11 +681,20 @@ class SignalTUI(App):
 
         # If it's the current contact, show it immediately; else bump unread.
         if self.selected_contact and self.selected_contact.cache_key == cache_key:
-            if ts and (event.protocol, cache_key, ts) not in self._seen_timestamps:
+            # Gate di visualizzazione LIVE: usa l'identità (protocol, key, ts,
+            # testo) come _refresh_chat, NON il solo timestamp.  Due messaggi
+            # WhatsApp distinti nello stesso secondo (stesso ts) devono essere
+            # mostrati entrambi; il timestamp da solo li renderebbe indistinguibili
+            # e il secondo verrebbe scartato (poi ricompariva solo rientrando).
+            identity = (
+                event.protocol,
+                cache_key,
+                int(ts),
+                event.payload.get("text", ""),
+            )
+            if ts and identity not in self._seen_message_ids:
                 self._seen_timestamps.add((event.protocol, cache_key, ts))
-                self._seen_message_ids.add(
-                    (event.protocol, cache_key, int(ts), event.payload.get("text", ""))
-                )
+                self._seen_message_ids.add(identity)
                 self.call_from_thread(
                     self._add_message,
                     event.payload["text"],
@@ -677,6 +707,7 @@ class SignalTUI(App):
                     sender=event.payload.get("sender", ""),
                     status="sent" if is_mine else "read",
                 )
+
         else:
             # Message for another contact: mark the list dirty; the unread
             # badge / reorder is refreshed ONCE per poll batch (not per event).

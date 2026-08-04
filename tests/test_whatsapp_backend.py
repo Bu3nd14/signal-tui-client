@@ -345,6 +345,124 @@ class TestWhatsAppEvents:
         ev = _event_from_raw(raw)
         assert ev is not None and ev.type == "message"
 
+    def test_group_message_extracts_sender_from_participant(self):
+        """Un messaggio di gruppo (@g.us) estrae il mittente dal campo participant."""
+        ev = _event_from_message({
+            "id": "g1",
+            "from": "123456789@g.us",
+            "timestamp": 1700000000,
+            "text": "ciao gruppo",
+            "fromMe": False,
+            "participant": "3912345678@c.us",
+            "pushName": "Mario",
+        })
+        assert ev is not None
+        assert ev.contact_id == "123456789@g.us"
+        assert ev.payload["is_group"] is True
+        assert ev.payload["sender"] == "Mario"  # pushName ha priorità
+
+    def test_group_message_sender_falls_back_to_jid(self):
+        """Senza pushName, il mittente del gruppo cade sul JID del participant."""
+        ev = _event_from_message({
+            "id": "g2",
+            "from": "123456789@g.us",
+            "timestamp": 1700000000,
+            "text": "ciao",
+            "fromMe": False,
+            "participant": "3912345678@c.us",
+        })
+        assert ev is not None
+        assert ev.payload["is_group"] is True
+        assert ev.payload["sender"] == "3912345678@c.us"
+
+    def test_group_message_sender_from_sender_field(self):
+        """Il mittente del gruppo può essere nel campo 'sender'."""
+        ev = _event_from_message({
+            "id": "g3",
+            "from": "123456789@g.us",
+            "timestamp": 1700000000,
+            "text": "ciao",
+            "fromMe": False,
+            "sender": "3912345678@c.us",
+            "notifyName": "Luigi",
+        })
+        assert ev is not None
+        assert ev.payload["is_group"] is True
+        assert ev.payload["sender"] == "Luigi"  # notifyName come fallback
+
+    def test_group_message_jid_resolved_to_contact_name(self):
+        """Il JID del mittente viene risolto al nome del contatto tramite la rubrica."""
+        from models import ChatContact
+        contacts = {
+            "220988985864200@c.us": ChatContact(
+                id="220988985864200@c.us",
+                display_name="Mario Rossi",
+                protocol=PROTOCOL_WHATSAPP,
+            ),
+        }
+        ev = _event_from_message({
+            "id": "g4",
+            "from": "123456789@g.us",
+            "timestamp": 1700000000,
+            "text": "ciao",
+            "fromMe": False,
+            "participant": "220988985864200@lid",
+        }, contacts)
+        assert ev is not None
+        assert ev.payload["is_group"] is True
+        # Il JID @lid viene risolto al nome del contatto @c.us con lo stesso numero.
+        assert ev.payload["sender"] == "Mario Rossi"
+
+    def test_group_message_jid_exact_match(self):
+        """Match esatto del JID nella rubrica."""
+        from models import ChatContact
+        contacts = {
+            "220988985864200@lid": ChatContact(
+                id="220988985864200@lid",
+                display_name="Mario",
+                protocol=PROTOCOL_WHATSAPP,
+            ),
+        }
+        ev = _event_from_message({
+            "id": "g5",
+            "from": "123456789@g.us",
+            "timestamp": 1700000000,
+            "text": "ciao",
+            "fromMe": False,
+            "participant": "220988985864200@lid",
+        }, contacts)
+        assert ev is not None
+        assert ev.payload["sender"] == "Mario"
+
+    def test_group_message_jid_not_in_contacts_keeps_jid(self):
+        """Se il JID non è in rubrica, resta il JID come fallback."""
+        ev = _event_from_message({
+            "id": "g6",
+            "from": "123456789@g.us",
+            "timestamp": 1700000000,
+            "text": "ciao",
+            "fromMe": False,
+            "participant": "999999999@lid",
+        }, {})
+        assert ev is not None
+        assert ev.payload["sender"] == "999999999@lid"
+
+    def test_direct_message_not_group(self):
+        """Un messaggio diretto (@c.us) non è un gruppo."""
+        ev = _event_from_message({
+            "id": "d1",
+            "from": "3912345678@c.us",
+            "timestamp": 1700000000,
+            "text": "ciao",
+            "fromMe": False,
+            "pushName": "Mario",
+        })
+        assert ev is not None
+        assert ev.payload["is_group"] is False
+        assert ev.payload["sender"] == "Mario"
+
+
+
 
 # ─── WhatsAppBackend behaviour ────────────────────────────────────────────────
 
@@ -413,8 +531,49 @@ class TestWhatsAppBackend:
             mock_add.assert_called_once()
         assert mock_add.call_args.kwargs["protocol"] == PROTOCOL_WHATSAPP
 
+    def test_ingest_message_keeps_distinct_same_second_with_ids(self):
+        """🛡️ Regressione: due messaggi DISTINTI con stesso testo E stesso
+        secondo (stesso timestamp) ma id diversi NON devono essere deduplicati.
+
+        Prima il dedup in ingresso usava (is_mine, testo, timestamp): due
+        messaggi WhatsApp con lo stesso testo nello stesso secondo venivano
+        considerati duplicati e il secondo veniva scartato dal DB del tutto
+        (non ricompariva mai, nemmeno rientrando).  Con l'id come identità
+        primaria, i due messaggi restano entrambi.
+        """
+        import backend as backend_mod
+        backend = _make_backend()
+        cid = "wa:1@s.whatsapp.net"
+        data1 = {"id": "m1", "text": "ok", "is_mine": False, "sender": "M",
+                 "timestamp": 1000, "quote_text": None, "msg_type": "text",
+                 "attachment_info": None, "attachment_id": None}
+        data2 = {"id": "m2", "text": "ok", "is_mine": False, "sender": "M",
+                 "timestamp": 1000, "quote_text": None, "msg_type": "text",
+                 "attachment_info": None, "attachment_id": None}
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            assert backend.ingest_message(cid, data1, 1000) is True
+            assert backend.ingest_message(cid, data2, 1000) is True  # id diverso -> nuovo
+            assert mock_add.call_count == 2
+        # Lo stesso id (stesso messaggio) resta deduplicato.
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            assert backend.ingest_message(cid, data1, 1000) is False
+            mock_add.assert_not_called()
+
+    def test_ingest_message_dedup_falls_back_without_id(self):
+        """Senza id, il dedup ricade su (is_mine, testo, timestamp) come prima."""
+        import backend as backend_mod
+        backend = _make_backend()
+        cid = "wa:1@s.whatsapp.net"
+        data = {"text": "ciao", "is_mine": True, "sender": "You", "timestamp": 1000,
+                "quote_text": None, "msg_type": "text", "attachment_info": None, "attachment_id": None}
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            assert backend.ingest_message(cid, data, 1000) is True
+            assert backend.ingest_message(cid, data, 1050) is False  # echo entro finestra
+            mock_add.assert_called_once()
+
 
 class TestWhatsAppPollingReceiver:
+
     """📤 Ricezione via polling a due velocità (niente WS/stream).
 
     La build WAHA CORE/WEBJS non espone ``/api/{session}/server`` (404): gli

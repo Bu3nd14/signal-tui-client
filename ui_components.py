@@ -139,6 +139,7 @@ class MessageWidget(Static):
         classes: str = "",
         status: str = "sent",
         protocol: str = "",
+        sender_color: str | None = None,
     ) -> None:
         """Initialise the message widget.
 
@@ -160,6 +161,11 @@ class MessageWidget(Static):
         protocol:
             Source protocol ("signal", "whatsapp", ...).  Stored for future
             per-protocol styling (color accents); defaults to "".
+        sender_color:
+            Optional color for the sender name prefix (e.g. "#DAA520").
+
+            When set and ``sender`` is non-empty, the message is rendered as
+            ``<sender:> text`` with the sender name in the given color.
         """
         self._msg_text = text
         self._msg_timestamp = timestamp
@@ -168,11 +174,21 @@ class MessageWidget(Static):
         self._selected = False
         self._status = status
         self._protocol = protocol
+        self._sender_color = sender_color
 
-        super().__init__(text, markup=False, classes=classes)
+        # Build the display content.  If a sender color is provided and the
+        # sender is non-empty, render "<sender:> text" with the sender in color.
+        if sender_color and sender:
+            rt = RichText()
+            rt.append(f"<{sender}:> ", style=sender_color)
+            rt.append(text)
+            super().__init__(rt, markup=False, classes=classes)
+        else:
+            super().__init__(text, markup=False, classes=classes)
         self.can_focus = True
         self._apply_status_style()
         self._apply_protocol_accent()
+
 
     _PROTOCOL_ACCENT = {
         "signal": "msg-signal",

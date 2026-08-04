@@ -363,8 +363,32 @@ def _jid_string(value) -> str | None:
     return None
 
 
-def _event_from_message(raw: dict) -> ChatEvent | None:
+def _resolve_sender_name(sender: str, contacts_by_jid: dict | None) -> str:
+    """Resolve a JID sender to a contact display name when possible.
+
+    If ``sender`` looks like a JID (contains ``@``), try to find a matching
+    contact in ``contacts_by_jid``.  First try an exact JID match, then a
+    match by phone number (the part before ``@``) to handle cases where the
+    message JID uses a different domain (e.g. ``@lid`` vs ``@c.us``).
+    """
+    if not contacts_by_jid or "@" not in sender:
+        return sender
+    # Exact JID match.
+    contact = contacts_by_jid.get(sender)
+    if contact is not None:
+        return contact.display_name
+    # Match by phone number (part before '@').
+    number = sender.split("@", 1)[0]
+    if number:
+        for cid, c in contacts_by_jid.items():
+            if cid.split("@", 1)[0] == number:
+                return c.display_name
+    return sender
+
+
+def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent | None:
     """Normalize a raw incoming message dict into a ``ChatEvent``."""
+
     chat_jid = _jid_string(
         raw.get("chatId")
         or raw.get("from")
@@ -394,7 +418,42 @@ def _event_from_message(raw: dict) -> ChatEvent | None:
         attachment_id = attachment.get("id") or attachment.get("url") or str(ts_ms)
         attachment_info = caption or attachment.get("filename") or attachment.get("mimetype") or "Media"
 
+    # Rileva se la chat è un gruppo WhatsApp (JID termina con @g.us).
+    is_group = chat_jid.endswith("@g.us")
+
+    # Determina il mittente.  Per i messaggi di gruppo, il mittente effettivo
+    # è spesso in un campo separato (participant/sender/author) che contiene il
+    # JID del mittente (es. "3912345678@c.us"), mentre pushName/senderName
+    # possono contenere il nome visualizzato.  Per i messaggi diretti, il
+    # mittente è la chat stessa.
+    sender = ""
+    if is_group:
+        # JID del mittente effettivo nel gruppo.
+        sender_jid = _jid_string(
+            raw.get("participant")
+            or raw.get("sender")
+            or raw.get("author")
+            or (raw.get("key", {}).get("participant")
+                if isinstance(raw.get("key"), dict) else None)
+        )
+
+        # Nome visualizzato se disponibile, altrimenti il JID del mittente.
+        sender = (
+            raw.get("pushName")
+            or raw.get("senderName")
+            or raw.get("notifyName")
+            or sender_jid
+            or ("You" if is_mine else chat_jid)
+        )
+    else:
+        sender = raw.get("pushName") or raw.get("senderName") or ("You" if is_mine else chat_jid)
+
+    # Se il sender è un JID (es. "220988985864200@lid"), prova a risolverlo
+    # al nome del contatto tramite la rubrica caricata dal backend.
+    sender = _resolve_sender_name(sender, contacts_by_jid)
+
     return ChatEvent(
+
         type="message",
         protocol=PROTOCOL_WHATSAPP,
         contact_id=chat_jid,
@@ -402,7 +461,8 @@ def _event_from_message(raw: dict) -> ChatEvent | None:
             "id": msg_id,
             "text": text,
             "is_mine": is_mine,
-            "sender": raw.get("pushName") or raw.get("senderName") or ("You" if is_mine else chat_jid),
+            "sender": sender,
+            "is_group": is_group,
             "timestamp": ts_ms,
             "quote_text": None,
             "msg_type": msg_type,
@@ -411,6 +471,7 @@ def _event_from_message(raw: dict) -> ChatEvent | None:
             "contact": None,  # resolved by identify_contact() later
         },
     )
+
 
 
 
@@ -457,7 +518,7 @@ def _event_from_typing(raw: dict) -> ChatEvent | None:
     )
 
 
-def _event_from_raw(raw: dict) -> ChatEvent | None:
+def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent | None:
     """Dispatch a raw WebSocket message to the right normalization function.
 
     WAHA frames look like ``{"event": "...", "session": "...", "payload": {...}}``;
@@ -468,7 +529,7 @@ def _event_from_raw(raw: dict) -> ChatEvent | None:
     content = payload if isinstance(payload, dict) else raw
 
     if evt in ("message", "message.any", "message.new", "messages.upsert", "messages/upsert"):
-        return _event_from_message(content)
+        return _event_from_message(content, contacts_by_jid)
     if evt in ("typing", "presence.update", "presence/update", "presence", "presence.update"):
         return _event_from_typing(content)
     if evt in ("receipt", "receipts.update", "receipt/update", "message.receipt"):
@@ -476,8 +537,9 @@ def _event_from_raw(raw: dict) -> ChatEvent | None:
     # Some APIs emit the message object directly without an 'event' field.
     if content.get("remoteJid") or content.get("from") or content.get("chatId"):
         if "text" in content or "body" in content or content.get("message") or content.get("attachments"):
-            return _event_from_message(content)
+            return _event_from_message(content, contacts_by_jid)
     return None
+
 
 
 
@@ -732,11 +794,12 @@ class WhatsAppBackend(ChatBackend):
             mid = m.get("id") or ""
             if mid and mid in self._seen_msg_ids:
                 continue
-            event = _event_from_message(m)
+            event = _event_from_message(m, self._contacts_by_jid)
             if event is None:
                 continue
             is_mine = event.payload.get("is_mine", False)
             ts = event.payload.get("timestamp") or 0
+
             if ts and ts < cutoff_s * 1000:
                 continue  # ignora cronologia troppo vecchia
             # Per i messaggi miei: accodali SOLO se non già noti.  Se il
@@ -744,9 +807,14 @@ class WhatsAppBackend(ChatBackend):
             # invio fatto dalla TUI -> skip (no doppioni).  Se non è in
             # cache è un invio fatto da un ALTRO client (WhatsApp Web/
             # telefono) che la TUI non ha ancora visto -> andiamo a mostrarlo.
+            # Passiamo l'id: due messaggi miei distinti con stesso testo e
+            # stesso secondo non devono essere confusi con un echo.
             if is_mine:
-                if self._message_already_cached(cid, ts, True, event.payload.get("text", "")):
+                if self._message_already_cached(
+                    cid, ts, True, event.payload.get("text", ""), mid or None
+                ):
                     continue
+
             # Attribuisci l'evento alla chat interrogata (jid della chat,
             # es. ``@lid``) invece del ``from`` (che può essere ``@c.us``):
             # così `_identify_contact` ritrova il contatto nella lista.
@@ -872,10 +940,11 @@ class WhatsAppBackend(ChatBackend):
         msgs = [m for m in raw if isinstance(m, dict)]
         msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
         for m in msgs:
-            event = _event_from_message(m)
+            event = _event_from_message(m, self._contacts_by_jid)
             if event is None:
                 continue
             payload = event.payload
+
             is_mine = payload.get("is_mine", False)
             # ingest_message fa dedup interno (stesso (contact, ts, text) non
             # viene ri-salvato) e aggiorna il cache locale + SQLite.  Includiamo
@@ -883,6 +952,7 @@ class WhatsAppBackend(ChatBackend):
             self.ingest_message(
                 contact_id,
                 {
+                    "id": payload.get("id"),
                     "text": payload.get("text", ""),
                     "is_mine": is_mine,
                     "sender": payload.get("sender", "You" if is_mine else ""),
@@ -893,6 +963,7 @@ class WhatsAppBackend(ChatBackend):
                 },
                 payload.get("timestamp", 0),
             )
+
         return msgs
 
     # ─── Messaging ────────────────────────────────────────────────────
@@ -1045,9 +1116,10 @@ class WhatsAppBackend(ChatBackend):
                         for item in items:
                             if not isinstance(item, dict):
                                 continue
-                            event = _event_from_raw(item)
+                            event = _event_from_raw(item, self._contacts_by_jid)
                             if event is not None:
                                 self._enqueue_event(event)
+
                 try:
                     ws.close()
                 except Exception:
@@ -1119,16 +1191,37 @@ class WhatsAppBackend(ChatBackend):
         self.cache[contact_id].append(msg)
 
 
-    def _message_already_cached(self, contact_id: str, ts: int, is_mine: bool, text: str) -> bool:
+    def _message_already_cached(
+        self, contact_id: str, ts: int, is_mine: bool, text: str, msg_id: str | None = None
+    ) -> bool:
         """Return True if a message with the same identity is already cached.
 
         Mirrors Signal's dedup: for outgoing messages within a short window the
         echo of an optimistic send is not stored twice; for incoming, the
         timestamp is part of the identity.
+
+        When a stable message ``id`` is available (WhatsApp messages carry one),
+        it is used as the PRIMARY identity: two distinct messages that happen to
+        share the same text AND the same second (timestamp) must NOT be merged —
+        the timestamp alone (second granularity) is not a unique identity and
+        would drop the second message from the DB entirely (it never reappeared,
+        not even on re-entry).
         """
         for msg in self.cache.get(contact_id, []):
             if not msg.get("is_mine") == is_mine:
                 continue
+            if msg_id:
+                cached_id = msg.get("id")
+                if cached_id:
+                    # Primary identity: the stable message id.  Same id -> dup.
+                    if cached_id == msg_id:
+                        return True
+                    # Different id -> definitely a distinct message, never a dup.
+                    continue
+                # Cached message has NO id (e.g. an optimistic send made by the
+                # TUI before the real WhatsApp id was known).  Fall through to
+                # the ts/text identity so the echo of that send is still
+                # recognized as a duplicate and not shown twice.
             if msg.get("text") != text:
                 continue
             if not is_mine:
@@ -1138,6 +1231,7 @@ class WhatsAppBackend(ChatBackend):
                 return True
         return False
 
+
     def ingest_message(self, contact_id: str, data: dict, ts: int) -> bool:
         """Save an incoming/outgoing message to the DB cache and in-memory cache.
 
@@ -1146,9 +1240,11 @@ class WhatsAppBackend(ChatBackend):
         from backend import _add_message_to_cache
         text = data["text"]
         is_mine = data["is_mine"]
+        msg_id = data.get("id")
 
-        if self._message_already_cached(contact_id, ts, is_mine, text):
+        if self._message_already_cached(contact_id, ts, is_mine, text, msg_id):
             return False
+
 
         _add_message_to_cache(
             contact_id,
@@ -1163,6 +1259,7 @@ class WhatsAppBackend(ChatBackend):
             protocol=PROTOCOL_WHATSAPP,
         )
         self._add_cached_message(contact_id, {
+            "id": msg_id,
             "text": text,
             "is_mine": is_mine,
             "sender": data.get("sender", ""),
@@ -1175,6 +1272,7 @@ class WhatsAppBackend(ChatBackend):
             "status": "sent" if is_mine else "read",
         })
         return True
+
 
     def process_receipt(self, envelope: dict) -> list[dict]:
         """Handle a receipt batch against the in-memory cache.

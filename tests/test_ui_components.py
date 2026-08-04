@@ -12,7 +12,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from rich.text import Text as RichText
 from ui_components import MessageWidget, ImageWidget, DownloadLinkWidget
+
 
 
 class TestMessageWidget:
@@ -68,6 +70,53 @@ class TestMessageWidget:
         assert events[0].timestamp == 1000
         assert events[0].sender == "Mario"
         assert events[0].is_mine is False
+
+    def test_sender_color_renders_prefix(self):
+        """Con sender_color, il testo mostra '<sender:> testo'."""
+        w = MessageWidget(
+            text="Ciao gruppo!",
+            timestamp=1000,
+            sender="Mario",
+            is_mine=False,
+            sender_color="#DAA520",
+        )
+        assert w._sender_color == "#DAA520"
+        # Il contenuto del widget deve essere un RichText con il prefisso <Mario:>
+        content = w._Static__content
+        assert isinstance(content, RichText)
+        assert "<Mario:>" in str(content)
+        assert "Ciao gruppo!" in str(content)
+
+
+
+
+    def test_sender_color_none_no_prefix(self):
+        """Senza sender_color, il testo resta invariato (nessun prefisso)."""
+        w = MessageWidget(
+            text="Ciao!",
+            timestamp=1000,
+            sender="Mario",
+            is_mine=False,
+        )
+        assert w._sender_color is None
+        rendered = str(w.render())
+        assert "<Mario:>" not in rendered
+        assert "Ciao!" in rendered
+
+    def test_sender_color_empty_sender_no_prefix(self):
+        """Con sender_color ma sender vuoto, nessun prefisso viene aggiunto."""
+        w = MessageWidget(
+            text="Ciao!",
+            timestamp=1000,
+            sender="",
+            is_mine=False,
+            sender_color="#DAA520",
+        )
+
+        rendered = str(w.render())
+        assert "<:>" not in rendered
+        assert "Ciao!" in rendered
+
 
 
 class TestImageWidget:
