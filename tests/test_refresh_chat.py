@@ -95,6 +95,11 @@ class TestRefreshChat:
         # only their timestamps are recorded in _seen_timestamps.
         shown = app._cache[contact.cache_key][-20:]
         app._seen_timestamps = self._seen(contact, [m["timestamp"] for m in shown])
+        # Coerente con il runtime: anche le identity dei messaggi già mostrati.
+        app._seen_message_ids = {
+            (PROTOCOL_SIGNAL, contact.cache_key, int(m["timestamp"]), m["text"])
+            for m in shown
+        }
 
         # Track how many messages _add_message would mount.
         added: list[str] = []
@@ -116,6 +121,11 @@ class TestRefreshChat:
         # Initial load shows the last 20 (timestamps 6..25).
         shown = app._cache[contact.cache_key][-20:]
         app._seen_timestamps = self._seen(contact, [m["timestamp"] for m in shown])
+        # Coerente con il runtime: anche le identity dei messaggi già mostrati.
+        app._seen_message_ids = {
+            (PROTOCOL_SIGNAL, contact.cache_key, int(m["timestamp"]), m["text"])
+            for m in shown
+        }
 
         # A new message arrives while the picker is open (timestamp 26).
         app._cache[contact.cache_key].append(
@@ -312,6 +322,39 @@ class TestRenderDedup:
         texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
         assert texts.count("session") == 1
         assert texts.count("other") == 1
+
+    def test_refresh_chat_keeps_last_when_same_timestamp_as_previous(self):
+        """L'ULTIMO messaggio non deve andare perso quando ha lo stesso
+        timestamp (secondi) del precedente — molto comune su WhatsApp contiguo.
+
+        Prima la chiave di dedup era timestamp-only: ``ts > max_seen`` scartava
+        il secondo messaggio con ts uguale, quindi mancava l'ultimo.
+        """
+        app = self._make_app()
+        contact = app.selected_contact
+        # Due messaggi con lo STESSO timestamp (stesso secondo).
+        app._cache = {
+            contact.cache_key: [
+                _make_message("primo", ts=5000),
+                _make_message("ULTIMO", ts=5000),
+            ]
+        }
+        app._seen_timestamps = set()
+
+        added: list[str] = []
+        fake_log = _FakeChatLog()
+
+        def fake_add(text, *args, **kwargs):
+            added.append(text)
+
+        with patch.object(app, "_add_message", side_effect=fake_add), \
+             patch.object(app, "query_one", return_value=fake_log):
+            app._refresh_chat()
+
+        # Entrambi devono essere mostrati: soprattutto l'ULTIMO.
+        assert "primo" in added
+        assert "ULTIMO" in added
+        assert added.index("ULTIMO") > added.index("primo")
 
 
 

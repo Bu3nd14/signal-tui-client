@@ -368,6 +368,12 @@ class SignalTUI(App):
         # Message identity: (protocol, contact_id, timestamp_ms).  Timestamps
         # alone are no longer unique across protocols.
         self._seen_timestamps: set[tuple[str, str, int]] = set()
+        # Identity discriminante (protocol, key, ts, testo) usata da _refresh_chat
+        # per NON disperdere l'ULTIMO messaggio quando condivide lo stesso
+        # timestamp (secondi) col precedente — molto comune su WhatsApp contiguo.
+        # _seen_timestamps (timestamp-only) da solo non basta: due messaggi
+        # nello stesso secondo sono indistinguibili e il secondo veniva scartato.
+        self._seen_message_ids: set[tuple[str, str, int, str]] = set()
         self._unread_counts: dict[str, int] = {}  # keyed by contact_cache_key
         # Flag "lista contatti sporca": se True, a fine batch di messaggi il
         # poll worker esegue UN solo re-render della lista (non uno per evento).
@@ -567,6 +573,7 @@ class SignalTUI(App):
         chat_log = self.query_one("#chat-log", Vertical)
         chat_log.remove_children()
         self._shown_in_log.clear()
+        self._seen_message_ids.clear()
 
     # ─── Envelope processing ─────────────────────────────────────────────────
 
@@ -655,6 +662,9 @@ class SignalTUI(App):
         if self.selected_contact and self.selected_contact.cache_key == cache_key:
             if ts and (event.protocol, cache_key, ts) not in self._seen_timestamps:
                 self._seen_timestamps.add((event.protocol, cache_key, ts))
+                self._seen_message_ids.add(
+                    (event.protocol, cache_key, int(ts), event.payload.get("text", ""))
+                )
                 self.call_from_thread(
                     self._add_message,
                     event.payload["text"],
@@ -1136,6 +1146,7 @@ class SignalTUI(App):
 
         self.selected_contact = contact
         self._seen_timestamps.clear()
+        self._seen_message_ids.clear()
         # Per WhatsApp: segnala al backend di tenere SEMPRE sotto osservazione
         # la chat appena aperta, così i messaggi live (anche inviati da un altro
         # client) arrivano in tempo reale anche se la chat non è tra le top-N.
@@ -1302,6 +1313,7 @@ class SignalTUI(App):
 
                     if ts:
                         self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
+                        self._seen_message_ids.add((contact.protocol, contact.cache_key, ts, text))
 
                     self.call_from_thread(
                         self._add_message,
@@ -1493,6 +1505,7 @@ class SignalTUI(App):
 
         self._clear_chat()
         self._seen_timestamps.clear()
+        self._seen_message_ids.clear()
 
         for msg in cached:
             text = msg.get("text", "")
@@ -1507,6 +1520,7 @@ class SignalTUI(App):
 
             if ts:
                 self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
+                self._seen_message_ids.add((contact.protocol, contact.cache_key, ts, text))
 
             self._add_message(
                 text,
@@ -1636,10 +1650,21 @@ class SignalTUI(App):
 
         for msg in cached:
             ts = msg.get("timestamp", 0)
-            in_seen = (contact.protocol, contact.cache_key, ts) in self._seen_timestamps
-            if ts and ts > max_seen and not in_seen:
-                self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
-                text = msg.get("text", "")
+            text = msg.get("text", "")
+            identity = (contact.protocol, contact.cache_key, int(ts), text)
+            # Un messaggio è da mostrare se è più recente dell'ultimo visto
+            # (ts > max_seen) OPPURE condivide lo stesso ts dell'ultimo (stesso
+            # secondo) ma è un messaggio DISTINTO non ancora mostrato — evita il
+            # baco "manca l'ULTIMO messaggio" quando due messaggi WhatsApp
+            # arrivano nello stesso secondo (identità = ts + testo, non solo ts).
+            is_new = (
+                bool(ts)
+                and (ts > max_seen or ts == max_seen)
+                and identity not in self._seen_message_ids
+            )
+            if is_new:
+                self._seen_timestamps.add((contact.protocol, contact.cache_key, int(ts)))
+                self._seen_message_ids.add(identity)
                 is_mine = msg.get("is_mine", False)
                 quote_text = msg.get("quote_text")
                 msg_type = msg.get("msg_type", "text")
@@ -1996,6 +2021,7 @@ class SignalTUI(App):
             status="sent",
         )
         self._seen_timestamps.add((contact.protocol, cache_key, ts))
+        self._seen_message_ids.add((contact.protocol, cache_key, int(ts), message))
 
         event.input.value = ""
 
