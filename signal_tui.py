@@ -1855,7 +1855,6 @@ class SignalTUI(App):
         else:
             # Full: tutti i contatti (startup / ricalcolo globale).
             for contact in self.contacts:
-                open("/tmp/wa_debug.log", "a").write(f"BADGE cid={contact.id[:30]} cache_key={contact.cache_key} cache_msgs={len(self._cache.get(contact.cache_key, []))}\n")
                 messages = self._cache.get(contact.cache_key, [])
                 unread = sum(
                     1 for m in messages

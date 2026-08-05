@@ -1201,7 +1201,6 @@ class WhatsAppBackend(ChatBackend):
         For **outgoing** messages (``is_mine=True``) the id is stable and
         used as the primary identity (optimistic-send echo dedup).
         """
-        if contact_id == "15771304468671@lid": open("/tmp/wa_debug.log", "a").write(f"DEDUP cid={contact_id} is_mine={is_mine} ts={ts} text={repr(text)[:50]} cache_msgs={len(self.cache.get(contact_id, []))}\n")
         for msg in self.cache.get(contact_id, []):
             if not msg.get("is_mine") == is_mine:
                 continue
