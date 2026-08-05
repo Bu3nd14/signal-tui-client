@@ -1,8 +1,11 @@
-# Signal TUI Client
+# Signal / WhatsApp TUI Client
 
-A terminal-based (TUI) Signal client built with [Textual](https://textual.textualize.io/).
+A terminal-based (TUI) multi-protocol client built with [Textual](https://textual.textualize.io/).
 
-Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automatic fallback to subprocess if the daemon is unavailable.
+- **Signal**: uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automatic
+  fallback to subprocess if the daemon is unavailable.
+- **WhatsApp**: optional backend via the lightweight [WAHA](https://waha.devlike.pro/) Docker
+  container — incoming messages arrive in real time through webhooks, no polling needed.
 
 ![Main interface](screenshot.png)
 *Main chat interface*
@@ -15,21 +18,22 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 
 ## Features
 
-- Full contact list with unread badges
-- Real-time message receiving and sending
+- Full contact list with unread badges — unified across Signal and WhatsApp
+- Real-time message receiving and sending on both protocols
 - Native terminal image rendering (via `catimg`) with fullscreen modal viewer
-- Message history with local cache (last 200 messages per contact, 3-day retention)
-- Device linking via QR code
-- Daemon mode for fast JSON-RPC communication
-- Automatic fallback to subprocess if daemon is not running
+- Message history with local SQLite cache (last 200 messages per contact, configurable retention)
+- Device linking via QR code — both Signal and WhatsApp
+- Daemon mode for fast JSON-RPC communication (Signal)
+- WhatsApp event-driven mode — webhook-based, no polling (WAHA + Docker)
+- Automatic fallback to subprocess if daemon is not running (Signal)
 - Reply to messages — click any message to quote it in your reply
 - Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
 - Contact search (`Ctrl+S`) — search contacts by name or number with a live-updating picker
 - Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
 - Unified multi-protocol contact list with `Ctrl+W` cycle filter: all → Signal → WhatsApp
 - Protocol-aware theming — 📱 Signal vs 💬 WhatsApp accents in the contact list and message borders
-- Message delivery and read receipts — sent messages show status: sent (italic), delivered (bold), read (normal)
-- Typing indicators — see when a contact is typing (✍️ icon next to their name); a 💭 icon shows briefly after they stop typing or send a message
+- Message delivery and read receipts — sent messages show status: *sent* (italic), **delivered** (bold), read (normal).  Works for both Signal and WhatsApp.
+- Typing indicators — see when a contact is typing (✍️ icon next to their name); a 💭 icon shows briefly after they stop typing or send a message.  Works for both protocols.
 
 
 
@@ -37,10 +41,12 @@ Uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automa
 ## Prerequisites
 
 - **Python 3.10+**
-- **Java 25 (JRE)** — required by `signal-cli` (the JVM build). Without it, `signal-cli` will not start.
-- **signal-cli** — download and place in `./bin/` directory (see Installation)
+- **Java 25 (JRE)** — required by `signal-cli` (the JVM build). Without it, Signal will not start.
+- **signal-cli** — download and place in `./bin/` directory (see Installation).  Required for the **Signal** backend only.
+- **Docker + Docker Compose** — required for the **WhatsApp** backend (runs the WAHA container).
+  Skip this if you only use Signal.
 - **catimg** — for rendering images in the terminal (optional; falls back to text placeholder if missing)
-- A linked Signal account (see Device Linking)
+- A linked account — Signal (via `link_account.py`) and/or WhatsApp (via `link_whatsapp.py`)
 
 > **Note:** A Python virtual environment (venv) is **recommended** but not strictly required. See [Virtual environment](#virtual-environment-optional-but-recommended).
 
@@ -316,11 +322,11 @@ A persistent HTTP server starts on port **10042** (first download only) and stay
 
 ### Tips
 
-- The app starts the `signal-cli` daemon automatically on first launch
-- Messages are cached locally in `~/.local/share/signal-tui-client/messages.json`
+- The app starts the `signal-cli` daemon automatically on first launch (for Signal) and a webhook HTTP server for WhatsApp push events
+- Messages are persisted locally in a SQLite database (`~/.local/share/signal-tui-client/messages.db`)
 - Only the last 20 messages are shown when opening a chat; click "Load more" to see all cached messages
 - Unread messages are shown with a `*N` badge next to the contact name
-- Sent messages show their delivery status: sent (italic), delivered (bold), read (normal)
+- Sent messages show their delivery status: *sent* (italic), **delivered** (bold), read (normal)
 - A `✍️` icon next to a contact name means they are typing; a `💭` icon shows briefly after they send the message or stop typing
 - The contact list is always kept in alphabetical order — typing, mumbling and unread states are shown as icons/badges but never reorder the list
 
@@ -351,21 +357,30 @@ Vedi [profiling/README.md](profiling/README.md) per istruzioni dettagliate, inte
 
 ```
 signal-tui-client/
-├── signal_tui.py          # Main TUI application (Textual App)
-├── backend.py             # Backend: signal-cli communication, cache, data models
-├── ui_components.py       # Custom Textual widgets (MessageWidget, ImageWidget, DownloadLinkWidget, …)
-├── emoji_picker.py        # Emoji picker modal screen and auto-completion widget
-├── emoji_data.py          # Emoji database (categories, aliases, search index)
-├── contact_picker.py      # Contact search picker modal screen (Ctrl+S)
-├── link_account.py        # Device linking script (QR code)
-├── install.sh             # Automatic installation script (downloads signal-cli, sets up venv)
-├── requirements.txt       # Python dependencies
-├── config.json            # Local configuration (not committed)
-├── BUGS.md                # Known bugs and limitations
-├── profiling/             # Performance profiling tools (CPU, RAM, I/O)
-├── bin/                   # signal-cli binaries (not committed)
-└── LICENSE                # GPLv3
-
+├── signal_tui.py            # Main TUI application (Textual App) — multi-protocol
+├── backend.py               # Shared backend: cache, SQLite persistence, receipts
+├── models.py                # Shared data models (ChatContact, ChatEvent, …)
+├── backends/                # Per-protocol backend implementations
+│   ├── base.py              #   Abstract ChatBackend interface
+│   ├── manager.py           #   Multi-backend registry and routing
+│   ├── signal.py            #   Signal backend (signal-cli daemon / subprocess)
+│   ├── whatsapp.py          #   WhatsApp backend (WAHA REST + webhook push)
+│   └── config.py            #   WhatsApp configuration helpers
+├── ui_components.py         # Custom Textual widgets (MessageWidget, ImageWidget, …)
+├── emoji_picker.py          # Emoji picker modal screen and auto-completion widget
+├── emoji_data.py            # Emoji database (categories, aliases, search index)
+├── contact_picker.py        # Contact search picker modal screen (Ctrl+S)
+├── link_account.py          # Signal device linking script (QR code)
+├── link_whatsapp.py         # WhatsApp device linking script (QR code)
+├── docker-compose.yml       # WAHA (WhatsApp HTTP API) container
+├── scripts/                 # Helper scripts (start_whatsapp.sh, …)
+├── install.sh               # Automatic installation script
+├── requirements.txt         # Python dependencies
+├── config.json              # Local configuration (not committed)
+├── BUGS.md                  # Known bugs and limitations
+├── profiling/               # Performance profiling tools (CPU, RAM, I/O)
+├── bin/                     # signal-cli binaries (not committed)
+└── LICENSE                  # GPLv3
 ```
 
 
