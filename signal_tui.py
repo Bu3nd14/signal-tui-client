@@ -918,6 +918,13 @@ class SignalTUI(App):
                     is_info=True,
                 )
 
+        # Re-sync dello storico WhatsApp best-effort all'avvio (unread ∪ chat
+        # con messaggi già nel DB locale) così le chat incomplete vengono
+        # riparate e i messaggi da un altro client compaiono senza dover
+        # aprire ogni chat.  Qui il DB del backend è già stato seminato da
+        # ``connect_sync``, e la mappa unread è appena stata rinfrescata.
+        self._resync_wa_history()
+
         # Pull the merged, protocol-aware contact list from the manager.
         contacts = self.manager.list_contacts()
         self.contacts = contacts
@@ -935,6 +942,40 @@ class SignalTUI(App):
         # Start polling for incoming messages.
         self._polling_active = True
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
+
+    def _resync_wa_history(self) -> int:
+        """Re-sync best-effort dello storico WhatsApp all'avvio.
+
+        Delega al backend ``resync_history`` (unread ∪ chat con messaggi nel DB)
+        e riporta un info-message se ha processato qualche chat.  Non solleva
+        mai eccezioni: all'avvio l'UI non deve fallire né per un errore remoto
+        né per il reporting.  Ritorna il numero di chat ri-sincronizzate
+        (0 se non applicabile).
+        """
+        if self.whatsapp_backend is None or not getattr(
+            self.whatsapp_backend, "_connected", False
+        ):
+            return 0
+        try:
+            resync = getattr(self.whatsapp_backend, "resync_history", None)
+        except Exception:
+            return 0
+        if resync is None:
+            return 0
+        try:
+            n = resync()
+        except Exception:
+            return 0
+        if n:
+            try:
+                self.call_from_thread(
+                    self._add_message,
+                    f"💬 WhatsApp history re-synced for {n} chats.",
+                    is_info=True,
+                )
+            except Exception:
+                pass  # il report è solo informativo
+        return n
 
     @staticmethod
     def _contact_sort_key(c: ChatContact) -> tuple:
@@ -1325,6 +1366,14 @@ class SignalTUI(App):
                 except Exception:
                     pass  # fallback: resta sul cache locale
 
+        # Ordina la cache della chat per timestamp (stabile) PRIMA di tagliare
+        # la finestra `[-N:]` per il render.  Fiss: la cache può essere popolata
+        # fuori ordine (append da più fonti) o riordinata dall'upgrade dell'echo;
+        # senza sort, ```[-20:]``` non selezionerebbe davvero gli ultimi messaggi
+        # e l'ultimo (es. "Ok ci sentiamo") spariva dalla vista.  sort stabile:
+        # a parità di timestamp preserva l'ordine di arrivo (niente tie-break).
+        cached = sorted(cached, key=lambda m: int(m.get("timestamp") or 0))
+
         if cached:
             if total > 20:
                 messages_to_show = cached[-20:]
@@ -1351,6 +1400,14 @@ class SignalTUI(App):
                     if ts:
                         self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
                         self._seen_message_ids.add((contact.protocol, contact.cache_key, ts, text))
+                        # Identity stabile via id: l'upgrade dell'echo cambia
+                        # ts/testo, ma l'id resta; così _refresh_chat non rimonta
+                        # un doppione del messaggio già aggiornato.
+                        mid = msg.get("id")
+                        if mid:
+                            self._seen_message_ids.add(
+                                (contact.protocol, contact.cache_key, mid)
+                            )
 
                     self.call_from_thread(
                         self._add_message,
@@ -1558,6 +1615,11 @@ class SignalTUI(App):
             if ts:
                 self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
                 self._seen_message_ids.add((contact.protocol, contact.cache_key, ts, text))
+                mid = msg.get("id")
+                if mid:
+                    self._seen_message_ids.add(
+                        (contact.protocol, contact.cache_key, mid)
+                    )
 
             self._add_message(
                 text,
@@ -1680,6 +1742,12 @@ class SignalTUI(App):
         cached = self._cache.get(contact.cache_key, [])
         new_count = 0
 
+        # Processa in ordine cronologico (stabile): con la cache ordinata, il
+        # "nuovo" rispetto a max_seen è calcolato correttamente e l'ULTIMO
+        # messaggio non viene saltato (stabile: stesse-ts restano in ordine di
+        # arrivo, niente tie-break alfabetico).
+        cached = sorted(cached, key=lambda m: int(m.get("timestamp") or 0))
+
         # Only consider messages newer than the newest one already shown.
         max_seen = max(
             (t for (_p, _k, t) in self._seen_timestamps), default=0
@@ -1699,9 +1767,19 @@ class SignalTUI(App):
                 and (ts > max_seen or ts == max_seen)
                 and identity not in self._seen_message_ids
             )
+            # Identity stabile via id: un messaggio già mostrato (e poi aggiornato
+            # dall'echo, con ts/testo nuovi) non deve essere rimontato come nuovo.
+            if is_new:
+                mid = msg.get("id")
+                if mid and (contact.protocol, contact.cache_key, mid) in self._seen_message_ids:
+                    is_new = False
             if is_new:
                 self._seen_timestamps.add((contact.protocol, contact.cache_key, int(ts)))
                 self._seen_message_ids.add(identity)
+                if msg.get("id"):
+                    self._seen_message_ids.add(
+                        (contact.protocol, contact.cache_key, msg.get("id"))
+                    )
                 is_mine = msg.get("is_mine", False)
                 quote_text = msg.get("quote_text")
                 msg_type = msg.get("msg_type", "text")

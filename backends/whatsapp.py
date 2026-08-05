@@ -842,6 +842,9 @@ class WhatsAppBackend(ChatBackend):
                         if not existing.get("id"):
                             existing["id"] = mid
                             existing["timestamp"] = ts
+                            # L'upgrade cambia ts/id: riordina la chat così i
+                            # ```[-N:]``` del render restano corretti.
+                            self._sort_contact_cache(cid)
                             from backend import _update_message_id
                             _update_message_id(
                                 cid,
@@ -1004,7 +1007,54 @@ class WhatsAppBackend(ChatBackend):
                 payload.get("timestamp", 0),
             )
 
+        # Ordina la cache della chat per timestamp (idempotente — ingest ha già
+        # riordinato a ogni aggiunta, ma riordinare qui è gratuito e garantisce
+        # uno stato deterministico per il render).
+        self._sort_contact_cache(contact_id)
         return msgs
+
+    def resync_history(self, limit: int = 50) -> int:
+        """Re-sync lo storico delle chat rilevanti da WAHA, best-effort.
+
+        Al rilevamento dell'avvio il backend parte con il cache seminato dal DB
+        (``_load_protocol_cache``): i messaggi persistiti nelle sessioni passate
+        ci sono, ma lo stato può essere incompleto/corrotto (entry senza id,
+        gap, invii da un altro client).  Questo metodo scarica di nuovo lo
+        storico (via ``fetch_history``) per l'UNIONE di due insiemi:
+
+        - le chat che hanno GIÀ messaggi nel DB locale (chiavi di ``self.cache``)
+          — così un DB compromesso dai vecchi bug di dedup viene riparato anche
+          se non apri la chat, e i messaggi arrivati da un altro client
+          compaiono fin da subito;
+        - le chat NON LETTE dichiarate da WAHA (``_active_chats`` con
+          ``unread > 0`` via ``GET /chats``) — copre i nuovi arrivi mai visti
+          dalla TUI.
+
+        Le chat già lette e senza storico locale NON vengono toccate (si
+        caricano all'apertura, come prima), così l'avvio resta veloce.
+        Fallisce in modo non distruttivo: ogni errore per chat viene ignorato,
+        e il metodo non solleva eccezioni.
+
+        Ritorna il numero di chat effettivamente interrogate.
+        """
+        if not self._rest or not self._connected:
+            return 0
+        targets: set[str] = set(self.cache.keys())
+        try:
+            # Al primo avvio ``_chats_last_refresh`` è 0.0 quindi il throttling
+            # (15s) passa e la mappa viene popolata adesso dagli unread reali.
+            self._refresh_active_chats()
+            targets.update(
+                jid for jid, (unread, _ts) in self._active_chats.items() if unread > 0
+            )
+        except Exception:
+            pass  # se /chats fallisce restiamo sulle sole chat-DB
+        for jid in targets:
+            try:
+                self.fetch_history(jid, limit=limit)
+            except Exception:
+                pass  # best-effort: mai far fallire l'avvio per una singola chat
+        return len(targets)
 
     # ─── Messaging ────────────────────────────────────────────────────
 
@@ -1241,6 +1291,36 @@ class WhatsAppBackend(ChatBackend):
         if contact_id not in self.cache:
             self.cache[contact_id] = []
         self.cache[contact_id].append(msg)
+        self._sort_contact_cache(contact_id)
+
+    @staticmethod
+    def _msg_sort_key(msg: dict) -> tuple:
+        """Key canonica per ordinare i messaggi di una chat.
+
+        Ordina per ``timestamp`` (default 0), con tie-break stabile su
+        ``id`` (o, in mancanza, sul testo) così due messaggi inviati nello
+        stesso secondo conservano un ordine deterministico — la sola
+        timestamp (granularità al secondo) non è mai unica tra più messaggi
+        WhatsApp ravvicinati.
+        """
+        ts = int(msg.get("timestamp") or 0)
+        identity = msg.get("id") or msg.get("text") or ""
+        return (ts, identity)
+
+    def _sort_contact_cache(self, contact_id: str) -> None:
+        """Ordina la cache in-memory di una chat per timestamp (stabile).
+
+        STRUTTURALE: la cache di una chat viene popolata da più fonti con
+        ordini diversi (``fetch_history``, polling live ``_process_recent_``,
+        ``ingest_message``, ``_load_cache`` dal DB) e l'upgrade in-place
+        dell'echo può cambiare ``timestamp``/``id`` senza riordinare.  Senza un
+        ordinamento deterministico, il render UI che prende gli ``[-N:]`` non
+        selezionerebbe davvero gli ultimi messaggi (il sintomo "l'ultimo
+        messaggio della chat non è più presente").
+        """
+        msgs = self.cache.get(contact_id)
+        if msgs:
+            msgs.sort(key=self._msg_sort_key)
 
 
 
@@ -1323,6 +1403,9 @@ class WhatsAppBackend(ChatBackend):
             if is_mine and msg_id and not existing.get("id"):
                 existing["id"] = msg_id
                 existing["timestamp"] = ts
+                # L'upgrade cambia timestamp/id senza riordinare: rimettiamo in
+                # ordine la chat così ```[-N:]``` del render resta corretto.
+                self._sort_contact_cache(contact_id)
                 _update_message_id(
                     contact_id,
                     text,

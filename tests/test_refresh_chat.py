@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from signal_tui import SignalTUI
-from models import ChatContact, contact_cache_key, PROTOCOL_SIGNAL
+from models import ChatContact, contact_cache_key, PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP
 
 
 def _make_message(text: str, ts: int, is_mine: bool = False) -> dict:
@@ -419,6 +419,89 @@ class TestRenderDedupSameSecond:
         texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
         assert texts.count("primo") == 1
         assert texts.count("ULTIMO") == 1
+
+    # ─── Regressione strutturale (WhatsApp) ─────────────────────────────────
+
+    def _make_wa_app(self):
+        """App con un contatto WhatsApp e cache potenzialmente non ordinata.
+
+        Il manager è finto (get -> None) per evitare che il worker attivi un
+        fetch_history REALE contro WAHA nei test (l'ambiente di test ha .env).
+        """
+        from unittest.mock import MagicMock
+        app = SignalTUI()
+        app.manager = MagicMock()
+        app.manager.get.return_value = None
+        from models import PROTOCOL_WHATSAPP
+        contact = ChatContact(
+            id="19645297868955@lid", display_name="Giovanni",
+            protocol=PROTOCOL_WHATSAPP,
+        )
+        app.selected_contact = contact
+        return app
+
+    def test_load_messages_worker_shows_newest_even_if_cache_unsorted(self):
+        """Cache WhatsApp FUORI ORDINE: l'ultimo messaggio per timestamp deve
+        comparire anche se non è l'ultimo elemento dell'array (fix strutturale:
+        [[-20:]] tagliava per posizione e perdeva l'ultimo)."""
+        app = self._make_wa_app()
+        contact = app.selected_contact
+        # Array volutamente NON ordinato per timestamp: l'ultimo (ts 3000) è in
+        # posizione non finale e un vecchio messaggio (ts 1000) è in coda.
+        app._cache = {
+            contact.cache_key: [
+                _make_message("Ok  ci sentiamo", ts=3000),
+                _make_message("vecchio", ts=1000),
+                _make_message("medio", ts=2000),
+            ]
+        }
+        app._chat_reload_token = 1
+        app._seen_timestamps = set()
+        app._seen_message_ids = set()
+        app._loaded_all = False
+
+        added: list[str] = []
+        fake_log = _FakeChatLog()
+
+        def fake_add(text, *args, **kwargs):
+            added.append(text)
+
+        with patch.object(app, "query_one", return_value=fake_log), \
+             patch.object(app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
+             patch.object(app, "_add_message", side_effect=fake_add), \
+             patch.object(app, "_add_load_more_widget"):
+            app._load_messages_worker()
+
+        # L'ultimo messaggio per timestamp deve essere mostrato.
+        assert "Ok  ci sentiamo" in added
+
+    def test_refresh_chat_keeps_newest_after_echo_ts_change(self):
+        """Dopo che l'echo aggiorna ts di un messaggio (in-place), l'ULTIMO
+        resta mostrato e non viene duplicato (identity stabile via id)."""
+        app = self._make_wa_app()
+        contact = app.selected_contact
+        # Messaggio mostrato con ts client (5000), poi l'echo cambia ts a 6000
+        # e assegna l'id reale (come fa ingest_message/_process_recent_messages).
+        app._cache = {
+            contact.cache_key: [
+                _make_message("Ok  ci sentiamo", ts=5000),
+                _make_message("certo", ts=4000),
+            ]
+        }
+        # _seen_message_ids registra SOLO la forma (ts,text) PRE-echo.
+        app._seen_message_ids = {
+            (PROTOCOL_WHATSAPP, contact.cache_key, 5000, "Ok  ci sentiamo"),
+        }
+        app._seen_timestamps = {
+            (PROTOCOL_WHATSAPP, contact.cache_key, 5000),
+        }
+        fake_log = _FakeChatLog()
+        with patch.object(app, "query_one", return_value=fake_log):
+            app._refresh_chat()
+        texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
+        # Nessun doppione: il messaggio non viene rimontato due volte.
+        assert texts.count("Ok  ci sentiamo") <= 1
+
 
 
 
