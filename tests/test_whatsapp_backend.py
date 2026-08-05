@@ -953,7 +953,8 @@ class TestSeedCacheFromDB:
         # toccare la rete.  La ricezione è via webhook, quindi non c'è alcun
         # thread di polling/push da neutralizzare.
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_wait_session_ready", return_value=True):
+             patch.object(backend, "_wait_session_ready", return_value=True), \
+             patch.object(backend, "_configure_webhook"):
             backend.connect_sync()
 
         msgs = backend.cache.get(cid, [])
@@ -981,7 +982,8 @@ class TestSeedCacheFromDB:
 
         backend = _make_backend("http://api.test")
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_wait_session_ready", return_value=True):
+             patch.object(backend, "_wait_session_ready", return_value=True), \
+             patch.object(backend, "_configure_webhook"):
             backend.connect_sync()
 
         # Simula fetch_history che riscarica lo stesso messaggio remoto.
@@ -1027,7 +1029,8 @@ class TestSeedCacheFromDB:
 
         backend = _make_backend("http://api.test")
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_wait_session_ready", return_value=True):
+             patch.object(backend, "_wait_session_ready", return_value=True), \
+             patch.object(backend, "_configure_webhook"):
             backend.connect_sync()
 
         # La cache seminata dal DB deve contenere ENTRAMBI i messaggi (con id).
@@ -1070,7 +1073,8 @@ class TestSeedCacheFromDB:
         cid = "391234567890@s.whatsapp.net"
         backend = _make_backend("http://api.test")
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_wait_session_ready", return_value=True):
+             patch.object(backend, "_wait_session_ready", return_value=True), \
+             patch.object(backend, "_configure_webhook"):
             backend.connect_sync()
 
         # 1) Invio ottimistico dalla TUI: id sconosciuto (None), ts client.
@@ -1222,3 +1226,85 @@ class TestSeedCacheFromDB:
         with patch.object(backend._rest, "list_contacts", new=mock):
             backend._load_contacts()
         assert backend.contacts == []
+
+
+# ─── Webhook self-registration (PUT session config) ───────────────────────────
+
+class TestWhatsAppWebhookRegistration:
+    """Il backend registra il webhook push sulla sessione WAHA (PUT config).
+
+    Il solo ``WAHA_WEBHOOK_URL`` (env) non fa emettere gli eventi a WAHA: bisogna
+    registrare la ``config.webhooks`` sulla sessione via ``PUT /api/sessions/{name}``.
+    ``_configure_webhook`` lo fa all'avvio, senza fare restart se gia' presente.
+    """
+
+    def test_update_session_config_puts_config(self):
+        client = WhatsAppRESTClient("http://api.test")
+        seen = []
+
+        def fake_urlopen(req, timeout=30):
+            seen.append((req.method, req.full_url, json.loads(req.data or b"{}")))
+            resp = MagicMock()
+            resp.read.return_value = b"{}"
+            resp.status = 200
+            ctx = MagicMock()
+            ctx.__enter__.return_value = resp
+            return ctx
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client.update_session_config({
+                "config": {"webhooks": [{"url": "http://x/webhook", "events": ["message"]}]}
+            })
+
+        assert len(seen) == 1
+        method, url, payload = seen[0]
+        assert method == "PUT"
+        assert url == "http://api.test/api/sessions/default"
+        assert payload["config"]["webhooks"][0]["url"] == "http://x/webhook"
+        assert payload["config"]["webhooks"][0]["events"] == ["message"]
+
+    def test_configure_webhook_registers_when_missing(self):
+        import backends.whatsapp as wa_mod
+        backend = _make_backend()
+        webhook = "http://host.docker.internal:8090/webhook"
+        # La sessione non ha ancora il webhook -> va eseguito il PUT.
+        with patch.object(backend._rest, "get_session_status", return_value={"config": {}}),              patch.object(backend._rest, "update_session_config") as mock_put,              patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook):
+            backend._configure_webhook()
+        mock_put.assert_called_once()
+        call_config = mock_put.call_args[0][0]
+        assert call_config["config"]["webhooks"][0]["url"] == webhook
+        assert call_config["config"]["webhooks"][0]["events"] == ["message"]
+
+    def test_configure_webhook_skips_when_already_registered(self):
+        import backends.whatsapp as wa_mod
+        backend = _make_backend()
+        webhook = "http://host.docker.internal:8088/webhook"
+        with patch.object(backend._rest, "get_session_status", return_value={
+            "config": {"webhooks": [{"url": webhook, "events": ["message"]}]}
+        }),              patch.object(backend._rest, "update_session_config") as mock_put,              patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook):
+            backend._configure_webhook()
+        # Gia' configurato -> nessun PUT (evita restart inutile della sessione).
+        mock_put.assert_not_called()
+
+    def test_configure_webhook_never_raises_on_error(self):
+        import backends.whatsapp as wa_mod
+        backend = _make_backend()
+        with patch.object(backend._rest, "get_session_status", side_effect=RuntimeError("boom")),              patch.object(backend._rest, "update_session_config") as mock_put,              patch.object(wa_mod, "get_whatsapp_webhook_url", return_value="http://x/webhook"):
+            backend._configure_webhook()  # non deve sollevare
+        mock_put.assert_not_called()
+
+    def test_configure_webhook_noop_without_rest(self):
+        import backends.whatsapp as wa_mod
+        backend = _make_backend()
+        backend._rest = None
+        with patch.object(wa_mod, "get_whatsapp_webhook_url", return_value="http://x/webhook"):
+            backend._configure_webhook()  # nessuna eccezione
+
+    def test_init_registers_webhook_from_connect_sync(self):
+        """connect_sync delega la registrazione a _configure_webhook."""
+        backend = _make_backend("http://api.test")
+        with patch.object(backend, "_load_contacts"), \
+             patch.object(backend, "_wait_session_ready", return_value=True), \
+             patch.object(backend, "_configure_webhook") as mock_cfg:
+            backend.connect_sync()
+        mock_cfg.assert_called_once()

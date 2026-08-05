@@ -155,3 +155,31 @@ def whatsapp_enabled() -> bool:
     if get_whatsapp_api_url():
         return True
     return _local_waha_reachable()
+
+
+def get_whatsapp_webhook_port() -> int:
+    """Return the client webhook listen port (default ``8088``).
+
+    Read from the ``CLIENT_WEBHOOK_PORT`` environment variable (default 8088),
+    the same value used by ``backend.WEBHOOK_PORT`` and the WAHA webhook URL
+    declared in ``docker-compose.yml``.
+    """
+    raw = os.environ.get("CLIENT_WEBHOOK_PORT", "8088") or "8088"
+    try:
+        return int(raw)
+    except ValueError:
+        return 8088
+
+
+def get_whatsapp_webhook_url() -> str:
+    """Return the URL WAHA must POST to for this client's webhook.
+
+    Respects an explicitly configured ``WAHA_WEBHOOK_URL`` (consistent with
+    docker-compose); otherwise builds the default using ``host.docker.internal``
+    (the host gateway from inside the WAHA container) plus the configured
+    ``CLIENT_WEBHOOK_PORT``: ``http://host.docker.internal:{port}/webhook``.
+    """
+    explicit = os.environ.get("WAHA_WEBHOOK_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    return f"http://host.docker.internal:{get_whatsapp_webhook_port()}/webhook"

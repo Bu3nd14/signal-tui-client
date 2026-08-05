@@ -36,6 +36,7 @@ from .config import (
     get_whatsapp_session_name,
     get_whatsapp_media_dir,
     get_whatsapp_api_key,
+    get_whatsapp_webhook_url,
 )
 
 
@@ -127,6 +128,19 @@ class WhatsAppRESTClient:
     def get_session_status(self) -> dict | None:
         """Return the current session status dict, or ``None`` on error."""
         return self._request("GET", f"/api/sessions/{self.session_name}")
+
+    def update_session_config(self, config: dict) -> dict | None:
+        """Update the config of an existing session via PUT /api/sessions/{name}.
+
+        Used to register the WAHA push webhook(s) on the session itself (the
+        WAHA_WEBHOOK_URL env var alone does not make WAHA emit events).  The
+        config payload maps to SessionUpdateRequest, e.g.
+        {webhooks: [{url: ..., events: [message]}]}.  Returns the updated
+        session dict, or None on error (callers treat it as best-effort).
+        """
+        return self._request(
+            "PUT", f"/api/sessions/{self.session_name}", config
+        )
 
     def start_session(self) -> dict | None:
         """Create (if needed) and start the session via WAHA ``/api/sessions/start``."""
@@ -669,6 +683,11 @@ class WhatsAppBackend(ChatBackend):
         # chat viste come vuote / "No message history".  Best-effort: se scade
         # il timeout, procede comunque (non blocca l'avvio all'infinito).
         self._wait_session_ready(timeout=40.0)
+        # Registra (o ri-registra) il webhook push per-sessione ora che la
+        # sessione e` pronta: il solo WAHA_WEBHOOK_URL (env) non basta a far
+        # emettere gli eventi a WAHA, serve la config webhooks sulla sessione.
+        # Best-effort: se il server non risponde, parte comunque.
+        self._configure_webhook()
         self._connected = True
 
     def _wait_session_ready(self, timeout: float = 40.0) -> bool:
@@ -696,6 +715,41 @@ class WhatsAppBackend(ChatBackend):
                 pass
             time.sleep(0.5)
         return False
+
+    def _configure_webhook(self) -> None:
+        """Registra il webhook push per-sessione su WAHA (best-effort).
+
+        Il solo ``WAHA_WEBHOOK_URL`` (env in docker-compose) non fa emettere
+        gli eventi ``message`` a WAHA: serve registrare la config ``webhooks``
+        sulla sessione via ``PUT /api/sessions/{name}``.  Questo metodo la
+        (ri)applica a ogni avvio cosi' la ricezione in tempo reale non dipende
+        da uno stato applicato a mano, e salta il PUT se gia' e' configurato
+        (evitando un restart inutile della sessione).  Non solleva mai
+        eccezioni: se il server non risponde, il backend resta operativo.
+        """
+        if not self._rest:
+            return
+        try:
+            webhook = get_whatsapp_webhook_url()
+            current = self._rest.get_session_status() or {}
+            configured = (current.get("config") or {})
+            urls = [
+                (w or {}).get("url")
+                for w in (configured.get("webhooks") or [])
+            ]
+            if webhook in urls:
+                return  # gia' registrato: niente restart
+            self._rest.update_session_config({
+                "config": {
+                    "webhooks": [{
+                        "url": webhook,
+                        "events": ["message"],
+                    }]
+                }
+            })
+        except Exception:
+            # best-effort: non bloccare mai l'avvio
+            pass
 
 
     async def disconnect(self) -> None:
