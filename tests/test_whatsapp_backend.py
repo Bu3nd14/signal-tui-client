@@ -1139,7 +1139,8 @@ class TestSeedCacheFromDB:
         # connect_sync tenta _load_contacts (REST) e _start_receiver (thread):
         # li neutralizziamo per non toccare la rete.
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_start_receiver"):
+             patch.object(backend, "_start_receiver"), \
+             patch.object(backend, "_wait_session_ready", return_value=True):
             backend.connect_sync()
 
         msgs = backend.cache.get(cid, [])
@@ -1167,7 +1168,8 @@ class TestSeedCacheFromDB:
 
         backend = _make_backend("http://api.test")
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_start_receiver"):
+             patch.object(backend, "_start_receiver"), \
+             patch.object(backend, "_wait_session_ready", return_value=True):
             backend.connect_sync()
 
         # Simula fetch_history che riscarica lo stesso messaggio remoto.
@@ -1213,7 +1215,8 @@ class TestSeedCacheFromDB:
 
         backend = _make_backend("http://api.test")
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_start_receiver"):
+             patch.object(backend, "_start_receiver"), \
+             patch.object(backend, "_wait_session_ready", return_value=True):
             backend.connect_sync()
 
         # La cache seminata dal DB deve contenere ENTRAMBI i messaggi (con id).
@@ -1256,7 +1259,8 @@ class TestSeedCacheFromDB:
         cid = "391234567890@s.whatsapp.net"
         backend = _make_backend("http://api.test")
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_start_receiver"):
+             patch.object(backend, "_start_receiver"), \
+             patch.object(backend, "_wait_session_ready", return_value=True):
             backend.connect_sync()
 
         # 1) Invio ottimistico dalla TUI: id sconosciuto (None), ts client.
@@ -1377,6 +1381,22 @@ class TestSeedCacheFromDB:
         assert "wa-echo-nested" in backend._seen_msg_ids
 
 
-
-
-
+    def test_load_contacts_retries_when_first_empty(self):
+        """Fix run 4-6: se list_contacts() restituisce vuoto al primo tentativo
+        (GET /chats può fallire/timeout all'avvio), _load_contacts riprova prima
+        di rinunciare."""
+        backend = _make_backend()
+        mock = MagicMock(side_effect=[[], [{"id": "wa:1@s.whatsapp.net", "name": "Mario"}]])
+        with patch.object(backend._rest, "list_contacts", new=mock):
+            backend._load_contacts()
+        assert len(backend.contacts) == 1
+        assert backend.contacts[0].id == "wa:1@s.whatsapp.net"
+        assert mock.call_count == 2
+    def test_load_contacts_stays_empty_after_retries(self):
+        """Se list_contacts resta vuoto anche dopo i retry, nessuna eccezione e
+        0 contatti (best-effort, il backend resta "attivo" senza crashare)."""
+        backend = _make_backend()
+        mock = MagicMock(return_value=[])
+        with patch.object(backend._rest, "list_contacts", new=mock):
+            backend._load_contacts()
+        assert backend.contacts == []

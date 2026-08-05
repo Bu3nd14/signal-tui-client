@@ -664,7 +664,40 @@ class WhatsAppBackend(ChatBackend):
         except Exception:
             pass
         self._start_receiver()
+        # Fix C: attende che la sessione WAHA sia pronta (status WORKING) prima
+        # di marcare il backend come connesso.  Senza questa attesa, i fetch di
+        # apertura (/api/messages) eseguiti nei primi ~10-30s interrogano una
+        # sessione ancora in connessione e WAHA risponde con una lista VUOTA ->
+        # chat viste come vuote / "No message history".  Best-effort: se scade
+        # il timeout, procede comunque (non blocca l'avvio all'infinito).
+        self._wait_session_ready(timeout=40.0)
         self._connected = True
+
+    def _wait_session_ready(self, timeout: float = 40.0) -> bool:
+        """Poll get_session_status finché la sessione WAHA è pronta (WORKING).
+
+        Ritorna True se la sessione è pronta, False se è scaduto il timeout.
+        Non solleva eccezioni: se la sessione non risponde (None) ripete.
+        """
+        if not self._rest:
+            return False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                status = self._rest.get_session_status() or {}
+                s = str(status.get("status") or "").lower()
+                # Pronto: stato WORKING o qualsiasi stato "stabile" non di
+                # connessione/pairing (coerente con needs_pairing).
+                if s == "working" or s and s not in (
+                    "pending", "connecting", "unauthorized",
+                    "not_authenticated", "unpaired", "scan_qr", "scan_qr_code",
+                    "starting", "loading", "syncing",
+                ):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return False
 
 
     async def disconnect(self) -> None:
@@ -863,6 +896,20 @@ class WhatsAppBackend(ChatBackend):
             event.contact_id = cid
             if mid:
                 self._seen_msg_ids.add(mid)
+            # -- DIAGNOSI temporanea --
+            try:
+                with open("/tmp/signal-tui-debug.log", "a") as _df:
+                    import time as _t
+                    _payload = event.payload
+                    _line = ("%s [backend] ENQUEUE chat=%s text=%r ts=%s is_mine=%s" % (
+                        _t.strftime("%H:%M:%S.%f")[:-3], cid,
+                        _payload.get("text", ""), _payload.get("timestamp"),
+                        _payload.get("is_mine")))
+                    _df.write(_line + "\n")
+            except Exception:
+                pass
+            # -- /DIAGNOSI --
+
             self._enqueue_event(event)
 
 
@@ -937,7 +984,23 @@ class WhatsAppBackend(ChatBackend):
         """Fetch contacts from the API into ``self.contacts``."""
         if not self._rest:
             return
+        # Retry best-effort: il GET /chatsWAHA (grande, ~1.3MB) può andare in
+        # timeout/fallire nei primi istanti -> restituirebbe 0 contatti pur con
+        # session WORKING (sintomo "backend attivo ma zero contatti" osservato
+        # nei run 4-6).  Riproviamo un paio di volte prima di rinunciare.
         raw_contacts = self._rest.list_contacts()
+        attempt = 0
+        while not raw_contacts and attempt < 3:
+            attempt += 1
+            time.sleep(1.0)
+            raw_contacts = self._rest.list_contacts()
+        if not raw_contacts:
+            try:
+                with open("/tmp/signal-tui-debug.log", "a") as _df:
+                    import time as _t
+                    _df.write(_t.strftime("%H:%M:%S.%f")[:-3] + " [backend] WARN _load_contacts vuoto" + chr(10))
+            except Exception:
+                pass
         contacts: list[ChatContact] = []
         for c in raw_contacts:
             jid = c.get("id") or c.get("jid") or c.get("remoteJid")

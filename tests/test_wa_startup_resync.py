@@ -219,3 +219,35 @@ def test_purge_is_failsafe_when_whatsapp_offline(purge_mod, monkeypatch, tmp_pat
     finally:
         conn.close()
     assert n == 1
+
+
+# ─── _wait_session_ready (Fix C) ───────────────────────────────────────────────
+
+class TestWaitSessionReady:
+    def test_returns_true_when_working(self):
+        """Appena lo stato è WORKING, l'attesa termina subito (True)."""
+        backend = _make_backend()
+        backend._rest.get_session_status.return_value = {"status": "WORKING",
+                                                          "engine": {"state": "CONNECTED"}}
+        assert backend._wait_session_ready(timeout=5) is True
+
+    def test_retries_until_working(self):
+        """Se inizialmente è connecting, riterara finché non diventa lavorativo."""
+        import time as _t
+        backend = _make_backend()
+        states = iter([{"status": "CONNECTING"}, {"status": "PENDING"}, {"status": "WORKING"}])
+        backend._rest.get_session_status.side_effect = lambda: next(states)
+        backend._wait_session_ready(timeout=5)
+        assert backend._rest.get_session_status.call_count == 3
+
+    def test_times_out_returns_false(self):
+        """Se resta non-pronto oltre il timeout, ritorna False (best-effort)."""
+        backend = _make_backend()
+        backend._rest.get_session_status.return_value = {"status": "CONNECTING"}
+        assert backend._wait_session_ready(timeout=0.2) is False
+
+    def test_none_status_keeps_polling_to_timeout(self):
+        """Sessione che non risponde (None) porta al timeout (False)."""
+        backend = _make_backend()
+        backend._rest.get_session_status.return_value = None
+        assert backend._wait_session_ready(timeout=0.2) is False

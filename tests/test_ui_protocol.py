@@ -804,11 +804,108 @@ class TestContactListFlush:
         assert " *1" in label, f"badge atteso nella label, avuto: {label!r}"
 
 
+class TestWhatsAppLoadRetry:
+    """Retry sul fetch vuoto: se il primo fetch di una chat WhatsApp torna vuoto
+    (WAHA non pronto all'avvio), il worker riprova prima di mostrare "No history"."""
+
+    def _make_app(self):
+        from unittest.mock import MagicMock, patch
+        from signal_tui import SignalTUI
+        from models import ChatContact, PROTOCOL_WHATSAPP
+        app = SignalTUI()
+        c = ChatContact(id="16660245291231@lid", display_name="Pix",
+                        protocol=PROTOCOL_WHATSAPP)
+        app.contacts = [c]
+        app.selected_contact = c
+        app._chat_reload_token = 1
+        app._cache = {}
+        app._seen_timestamps = set()
+        app._seen_message_ids = set()
+        app._shown_in_log = set()
+        app._loaded_all = False
+        return app
+
+    def test_worker_retries_when_fetch_returns_empty_first(self):
+        from unittest.mock import MagicMock, patch
+        app = self._make_app()
+        c = app.selected_contact
+
+        backend = MagicMock()
+        # la prima fetch lascia la cache vuota; la seconda la riempie
+        calls = {"n": 0}
+        def fake_fetch(cid, limit=50):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                backend.cache = {}
+                return []
+            backend.cache = {c.id: [{"text": "ciao", "is_mine": False,
+                                     "read": False, "timestamp": 1}]}
+            return backend.cache[c.id]
+        backend.fetch_history = MagicMock(side_effect=fake_fetch)
+        app.manager = MagicMock()
+        app.manager.get.return_value = backend
+        app._add_message = MagicMock()
+        app._add_load_more_widget = MagicMock()
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+        app.query_one = MagicMock()
+
+        with patch("time.sleep"):  # evita il ritardo reale nel test
+            app._load_messages_worker()
+
+        # il fetch è stato ritentato (almeno 2 chiamate)
+        assert calls["n"] >= 2
+        # la cache UI è stata popolata
+        assert len(app._cache.get(c.cache_key, [])) == 1
+        # ha mostrato il messaggio
+        assert app._add_message.call_count >= 1
 
 
+class TestWhatsAppMountOrdering:
+    """Fix B: il worker rimonta la finestra ordinata in un unico blocco, senza
+    duplicati e senza che l'ultimo messaggio compaia fuori posto."""
 
+    def test_worker_mounts_in_cronological_order_no_duplicates(self):
+        from unittest.mock import MagicMock, patch
+        from signal_tui import SignalTUI
+        from models import ChatContact, PROTOCOL_WHATSAPP
+        app = SignalTUI()
+        c = ChatContact(id="15771304468671@lid", display_name="Giovanni",
+                        protocol=PROTOCOL_WHATSAPP)
+        app.contacts = [c]
+        app.selected_contact = c
+        app._chat_reload_token = 1
+        app._cache = {}
+        app._seen_timestamps = set()
+        app._seen_message_ids = set()
+        app._shown_in_log = set()
+        app._loaded_all = False
 
+        backend = MagicMock()
+        # cache NON ordinata di proposito: ultimo per ts (ok sentiamo, ts alto)
+        # NON è l'ultimo elemento dell'array.
+        backend.cache = {
+            c.id: [
+                {"text": "Ok  ci sentiamo", "is_mine": False, "read": False, "timestamp": 3000},
+                {"text": "vecchio", "is_mine": False, "read": False, "timestamp": 1000},
+                {"text": "medio", "is_mine": False, "read": False, "timestamp": 2000},
+            ]
+        }
+        backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
+        app.manager = MagicMock()
+        app.manager.get.return_value = backend
+        app._add_load_more_widget = MagicMock()
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+        app.query_one = MagicMock()  # per _clear_chat
 
+        # registra l'ordine dei mounting per testo
+        mounted = []
+        def fake_add(text, *a, **k):
+            mounted.append(text)
+        app._add_message = MagicMock(side_effect=fake_add)
 
+        app._load_messages_worker()
 
-
+        # tutti i messaggi montati, in ordine cronologico per timestamp
+        assert mounted == ["vecchio", "medio", "Ok  ci sentiamo"]
+        # nessun duplicato
+        assert len(mounted) == len(set(mounted))
