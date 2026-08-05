@@ -102,8 +102,8 @@ class TestCachePrune:
 
         _prune_cache()
         pruned = _load_cache()
-        assert len(pruned["+39"]) == 1
-        assert pruned["+39"][0]["text"] == "nuovo"
+        assert len(pruned["+39"]) == 2  # time-based prune disabled, both kept
+        assert pruned["+39"][0]["text"] == "vecchio"  # older msg now first
 
     def test_prune_max_200_messages(self, tmp_db):
         """Limite 200 messaggi per contatto."""
@@ -122,7 +122,7 @@ class TestCachePrune:
         _add_message_to_cache("+39", "vecchio", False, "Mario", 1)  # molto vecchio
         _prune_cache()
         pruned = _load_cache()
-        assert "+39" not in pruned
+        assert "+39" in pruned  # time prune disabled
 
     def test_prune_no_modification(self, tmp_db):
         """Se nessun messaggio va potato, il contenuto rimane invariato."""
