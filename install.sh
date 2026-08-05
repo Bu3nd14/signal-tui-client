@@ -47,6 +47,7 @@ DO_VENV=1
 DO_SIGNAL_CLI=1
 DO_UPDATE=0
 DO_WHATSAPP=0
+DO_CHECK_WHATSAPP=0
 SPECIFIC_VERSION=""
 
 # ─── Parsing argomenti ────────────────────────────────────────────────────────
@@ -63,12 +64,14 @@ Opzioni:
   --skip-signal-cli    Non scaricare signal-cli (se già presente in ./bin/)
   --update             Aggiorna signal-cli all'ultima versione disponibile
   --whatsapp           Avvia il WhatsApp HTTP API (WAHA) via Docker Compose
+  --check-whatsapp     Verifica i prerequisiti WhatsApp (Docker, porte, firewall)
   --help               Mostra questo aiuto
 
 Esempi:
   ./install.sh                          # installazione completa
   ./install.sh --no-venv                # senza virtualenv
   ./install.sh --update                 # aggiorna signal-cli
+  ./install.sh --check-whatsapp         # controlla solo prerequisiti WhatsApp
   ./install.sh --whatsapp               # avvia WAHA (WhatsApp HTTP API)
 EOF
 }
@@ -79,6 +82,7 @@ while [ $# -gt 0 ]; do
         --skip-signal-cli)  DO_SIGNAL_CLI=0; shift ;;
         --update)           DO_UPDATE=1; shift ;;
         --whatsapp)         DO_WHATSAPP=1; shift ;;
+        --check-whatsapp)   DO_CHECK_WHATSAPP=1; shift ;;
         --version)
             [ $# -lt 2 ] && die "--version richiede un argomento (es. 0.14.7)"
             SPECIFIC_VERSION="$2"; shift 2 ;;
@@ -95,6 +99,96 @@ require_cmd() {
     if ! command -v "$cmd" >/dev/null 2>&1; then
         die "Comando '$cmd' non trovato. Installalo e riprova."
     fi
+}
+
+# ── WhatsApp helpers ───────────────────────────────────────────────────────────
+
+WA_PORT="${WHATSAPP_API_PORT:-3005}"
+WEBHOOK_PORT="${CLIENT_WEBHOOK_PORT:-8088}"
+
+check_port() {
+    local port="$1" label="$2"
+    info "Controllo porta ${label} (${port})..."
+    if ! ss -tlnp 2>/dev/null | grep -q ":${port}[[:space:]]"; then
+        ok "  Porta ${port} disponibile"
+        return 0
+    fi
+    local line pid pname
+    line="$(ss -tlnp 2>/dev/null | grep ":${port}[[:space:]]" | head -1)"
+    pid="$(echo "$line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
+    pname="$(echo "$line" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')"
+    if [ "$port" = "$WEBHOOK_PORT" ] && [ "$pname" = "python" ]; then
+        ok "  Porta ${port} gia in uso (pid ${pid}, webhook server) - OK"
+        return 0
+    fi
+    if [ -n "$pid" ]; then
+        warn "  Porta ${port} gia in uso da pid ${pid} (${pname:-sconosciuto})."
+    else
+        warn "  Porta ${port} gia in uso (Docker o demone)."
+    fi
+    warn "  Cambia porta o ferma il processo se necessario."
+    return 1
+}
+
+check_firewall() {
+    local port="$1" label="$2"
+    info "Controllo firewall per ${label} (${port})..."
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+        if ufw status 2>/dev/null | grep -q "^${port}[[:space:]].*ALLOW"; then
+            ok "  ufw: porta ${port} consentita"
+        else
+            warn "  ufw attivo: apri la porta ${port} (ufw allow ${port})"
+        fi
+        return
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+        if iptables -L INPUT -n 2>/dev/null | grep -q "dpt:${port}"; then
+            ok "  iptables: porta ${port} consentita"
+            return
+        fi
+        if iptables -L INPUT -n 2>/dev/null | grep -q '^DROP'; then
+            warn "  iptables policy DROP: apri la porta ${port}"
+            return
+        fi
+    fi
+    ok "  Nessun firewall restrittivo rilevato"
+}
+
+setup_whatsapp() {
+    local should_start="${1:-0}"
+    echo
+    echo "${C_BLUE}${C_BOLD}-- WhatsApp (WAHA) ------------------------------------------------------------${C_RESET}"
+    echo
+    if ! command -v docker >/dev/null 2>&1; then
+        err "Docker non trovato. Installa Docker per usare WhatsApp."
+        return 1
+    fi
+    ok "Docker trovato: $(docker --version 2>/dev/null)"
+    if ! docker compose version >/dev/null 2>&1; then
+        err "Docker Compose non trovato."
+        return 1
+    fi
+    ok "Docker Compose trovato"
+    check_port "$WA_PORT" "WAHA API" || true
+    check_port "$WEBHOOK_PORT" "webhook" || true
+    check_firewall "$WA_PORT" "WAHA API"
+    check_firewall "$WEBHOOK_PORT" "webhook"
+    if [ "$should_start" -eq 1 ]; then
+        echo
+        info "Avvio WAHA via Docker Compose..."
+        docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d
+        ok "WAHA avviato. API: http://127.0.0.1:${WA_PORT}"
+        echo
+        info "In attesa che WAHA sia pronto..."
+        for i in $(seq 1 30); do
+            if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${WA_PORT}/api/sessions" 2>/dev/null | grep -q '^[23]'; then
+                ok "WAHA pronto! (dopo ${i}s)"
+                break
+            fi
+            sleep 1
+        done
+    fi
+    echo
 }
 
 # Ottiene l'ultima versione di signal-cli dalla GitHub API
@@ -295,22 +389,11 @@ fi
 # 5. Installazione dipendenze Python
 install_python_deps
 
-# 5.5 Avvio WhatsApp HTTP API (WAHA) se richiesto (--whatsapp)
-if [ "$DO_WHATSAPP" -eq 1 ]; then
-    echo
-    info "Avvio del WhatsApp HTTP API (WAHA) via Docker Compose ..."
-    if command -v docker >/dev/null 2>&1; then
-        if docker compose version >/dev/null 2>&1; then
-            docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d
-            WA_PORT="${WHATSAPP_API_PORT:-3005}"
-            ok "WAHA avviato. URL: http://127.0.0.1:${WA_PORT}"
-        else
-            err "Docker Compose non trovato. Installalo oppure usa 'scripts/start_whatsapp.sh'."
-        fi
-    else
-        err "Docker non trovato. Per usare WhatsApp installa Docker (vedi README) oppure lancia l'API manualmente (nessuna Node.js nel tuo server? segui il README sezione WhatsApp)."
-    fi
-    echo
+# 5.5 WhatsApp — check prerequisiti o avvio
+if [ "$DO_CHECK_WHATSAPP" -eq 1 ]; then
+    setup_whatsapp 0
+elif [ "$DO_WHATSAPP" -eq 1 ]; then
+    setup_whatsapp 1
 fi
 
 # 6. Riepilogo finale
@@ -330,14 +413,12 @@ else
     echo "       python3 link_account.py"
 fi
 if [ "$DO_WHATSAPP" -eq 1 ]; then
-    echo "  3. Avvia il WhatsApp HTTP API (WAHA) e collega WhatsApp (QR):"
-    echo "       docker compose up -d                 # avvia WAHA su porta 3005"
-    echo "       export WHATSAPP_API_URL=\"http://127.0.0.1:3005\""
+    echo "  3. Collega WhatsApp (QR code):"
     if [ "$DO_VENV" -eq 1 ]; then
         echo "       source .venv/bin/activate"
         echo "       python3 link_whatsapp.py"
     else
-        echo "       python3 link_whatsapp.py   # oppure: ./scripts/start_whatsapp.sh"
+        echo "       python3 link_whatsapp.py"
     fi
     echo "  4. Avvia il client:"
 else
@@ -348,3 +429,11 @@ if [ "$DO_VENV" -eq 1 ]; then
 fi
 echo "       python3 signal_tui.py"
 echo
+if [ "$DO_WHATSAPP" -eq 0 ] && [ "$DO_CHECK_WHATSAPP" -eq 0 ]; then
+    if command -v docker >/dev/null 2>&1; then
+        echo "${C_YELLOW}Suggerimento:${C_RESET} Hai Docker installato."
+        echo "  Per usare anche WhatsApp esegui:  ${C_BOLD}./install.sh --whatsapp${C_RESET}"
+        echo "  Per solo verificare i prerequisiti: ${C_BOLD}./install.sh --check-whatsapp${C_RESET}"
+        echo
+    fi
+fi
