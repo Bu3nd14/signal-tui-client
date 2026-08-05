@@ -1070,6 +1070,8 @@ class WhatsAppBackend(ChatBackend):
         """Synchronous mark-read, for use from the TUI's sync callbacks."""
         if self._rest:
             self._rest.mark_read(contact_id)
+        from backend import _mark_as_read
+        _mark_as_read(contact_id, protocol=PROTOCOL_WHATSAPP)
 
     # ─── Attachments ──────────────────────────────────────────────────
 
