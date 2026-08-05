@@ -1202,10 +1202,9 @@ class WhatsAppBackend(ChatBackend):
         used as the primary identity (optimistic-send echo dedup).
         """
         for msg in self.cache.get(contact_id, []):
-            if contact_id == "189025889575055@lid": open("/tmp/wa_dedup.log", "a").write(f"LOOP is_mine={is_mine} cached_is_mine={msg.get("is_mine")} text_match={msg.get("text") == text}\n")
             if not msg.get("is_mine") == is_mine:
                 continue
-            if str(msg.get("text") or "") != str(text or ""):
+            if msg.get("text") != text:
                 continue
             if not is_mine:
                 # Text + fuzzy timestamp — the only stable identity
@@ -1222,7 +1221,6 @@ class WhatsAppBackend(ChatBackend):
                     return msg
             elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:
                 return msg
-        with open("/tmp/wa_mac_dump.log", "a") as _f: _f.write(f"MAC cid={contact_id} is_mine={is_mine} ts={ts} text={repr(text)[:50]} msg_id={msg_id} cache_size={len(self.cache.get(contact_id, []))}\n")
         return None
 
 
@@ -1287,7 +1285,6 @@ class WhatsAppBackend(ChatBackend):
             "read": is_mine,
             "status": "sent" if is_mine else "read",
         })
-        with open("/tmp/wa_ingest.log", "a") as _f: _f.write(f"INGEST cid={contact_id} is_mine={is_mine} ts={ts} msg_id={msg_id}\n")
         return True
 
 

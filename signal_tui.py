@@ -1844,7 +1844,6 @@ class SignalTUI(App):
         if contact_cache_key_value is not None:
             # Incrementale: solo il contatto indicato (O(M)).
             messages = self._cache.get(contact_cache_key_value, [])
-            if contact_cache_key_value and "189025889575055@lid" in contact_cache_key_value: open("/tmp/wa_unread.log", "a").write(f"RECOMPUTE_INCR msgs={len(messages)} unread={sum(1 for m in messages if not m.get("is_mine") and not m.get("read", True))}\n")
             unread = sum(
                 1 for m in messages
                 if not m.get("is_mine") and not m.get("read", True)
@@ -1857,7 +1856,6 @@ class SignalTUI(App):
             # Full: tutti i contatti (startup / ricalcolo globale).
             for contact in self.contacts:
                 messages = self._cache.get(contact.cache_key, [])
-                if contact.cache_key and "189025889575055@lid" in contact.cache_key: open("/tmp/wa_unread.log", "a").write(f"RECOMPUTE_FULL msgs={len(messages)} unread={sum(1 for m in messages if not m.get("is_mine") and not m.get("read", True))}\n")
                 unread = sum(
                     1 for m in messages
                     if not m.get("is_mine") and not m.get("read", True)
@@ -1865,7 +1863,6 @@ class SignalTUI(App):
                 old = self._unread_counts.get(contact.cache_key, 0)
                 if unread != old:
                     self._unread_counts[contact.cache_key] = unread
-                    if contact.protocol == "whatsapp" and unread > 0: open("/tmp/wa_badge.log", "a").write(f"BADGE cid={contact.id[:30]} cache_key={contact.cache_key} unread={unread} cache_msgs={len(self._cache.get(contact.cache_key, []))}\n")
                     changed = True
 
         return changed
