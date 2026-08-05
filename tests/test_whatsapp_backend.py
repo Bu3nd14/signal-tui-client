@@ -1041,13 +1041,13 @@ class TestSeedCacheFromDB:
     """
 
     def test_connect_sync_seeds_cache_from_db(self, tmp_path, monkeypatch):
-        import backend as backend_mod
+        import backend as backend_mod, time
 
         # Isola il DB su un file temporaneo.
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
 
         cid = "391234567890@s.whatsapp.net"
-        ts = 1700000000000
+        ts = int(time.time() * 1000)
         backend_mod._add_message_to_cache(
             cid, "Ok  ci sentiamo", False, "Giovanni", ts,
             protocol=PROTOCOL_WHATSAPP,
@@ -1079,12 +1079,12 @@ class TestSeedCacheFromDB:
         """Con la cache seminata dal DB, fetch_history non re-inserisce i
         messaggi già persistiti (il dedup di ingest_message ora funziona anche
         tra sessioni)."""
-        import backend as backend_mod
+        import backend as backend_mod, time
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
 
         cid = "391234567890@s.whatsapp.net"
-        ts = 1700000000000
+        ts = int(time.time() * 1000)
         backend_mod._add_message_to_cache(
             cid, "Ok  ci sentiamo", False, "Giovanni", ts,
             protocol=PROTOCOL_WHATSAPP,
@@ -1121,12 +1121,12 @@ class TestSeedCacheFromDB:
         stesso testo) veniva scartato -> la chat appariva "indietro" quando
         veniva aperta.
         """
-        import backend as backend_mod
+        import backend as backend_mod, time
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
 
         cid = "391234567890@s.whatsapp.net"
-        ts = 1700000000000
+        ts = int(time.time() * 1000)
         # Due messaggi distinti, stesso testo e stesso secondo, con id diversi.
         backend_mod._add_message_to_cache(
             cid, "ok", False, "Giovanni", ts,

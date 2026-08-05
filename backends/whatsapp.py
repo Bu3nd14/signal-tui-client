@@ -339,7 +339,6 @@ class WhatsAppRESTClient:
         return result.get("url") or (result.get("data") or {}).get("url")
 
 
-
 # ─── Incoming event normalization ────────────────────────────────────────────
 
 def _msg_type(raw: dict) -> str:
@@ -353,7 +352,6 @@ def _msg_type(raw: dict) -> str:
     if lower in ("video", "audio", "document", "file"):
         return "attachment"
     return "text"
-
 
 
 def _jid_string(value) -> str | None:
@@ -490,8 +488,6 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
     )
 
 
-
-
 def _event_from_receipt(raw: dict) -> ChatEvent | None:
     """Normalize a delivery/read receipt into a ``ChatEvent`` (type 'receipt')."""
     chat_jid = _jid_string(
@@ -613,8 +609,6 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent
         if "text" in content or "body" in content or content.get("message") or content.get("attachments"):
             return _event_from_message(content, contacts_by_jid)
     return None
-
-
 
 
 # ─── WhatsAppBackend ─────────────────────────────────────────────────────────
@@ -741,6 +735,8 @@ class WhatsAppBackend(ChatBackend):
         re-insert the same remote messages on every chat open, duplicating
         them in the DB.
         """
+        from backend import _prune_cache
+        _prune_cache()
         self.cache = self._load_protocol_cache()
         if not self._rest:
             self._connected = False
@@ -1190,7 +1186,6 @@ class WhatsAppBackend(ChatBackend):
             msgs.sort(key=self._msg_sort_key)
 
 
-
     def _message_already_cached(
         self, contact_id: str, ts: int, is_mine: bool, text: str, msg_id: str | None = None
     ) -> dict | None:
@@ -1224,8 +1219,6 @@ class WhatsAppBackend(ChatBackend):
             elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:
                 return msg
         return None
-
-
 
 
     def ingest_message(self, contact_id: str, data: dict, ts: int) -> bool:
@@ -1263,7 +1256,6 @@ class WhatsAppBackend(ChatBackend):
             return False
 
 
-
         _add_message_to_cache(
             contact_id,
             text,
@@ -1291,7 +1283,6 @@ class WhatsAppBackend(ChatBackend):
             "status": "sent" if is_mine else "read",
         })
         return True
-
 
 
     def process_receipt(self, envelope: dict) -> list[dict]:

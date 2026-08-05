@@ -73,7 +73,6 @@ class SignalBackend(ChatBackend):
         await asyncio.to_thread(self._connect_sync)
 
     def _connect_sync(self) -> None:
-        _prune_cache()
         self.cache = self._load_protocol_cache()
 
         if _is_daemon_running():
