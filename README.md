@@ -54,7 +54,7 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 
 ### Option A — Automatic installation (recommended)
 
-The easiest way is to use the provided `install.sh` script, which checks prerequisites, downloads the correct `signal-cli` build, creates a virtual environment and installs the Python dependencies:
+The easiest way is to use the provided `install.sh` script, which checks prerequisites, downloads the correct `signal-cli` build, optionally starts the WAHA Docker container for WhatsApp, creates a virtual environment and installs the Python dependencies:
 
 ```bash
 git clone https://github.com/Bu3nd14/signal-tui-client.git
@@ -69,6 +69,8 @@ The script supports several options:
 ./install.sh --version 0.14.7     # download a specific signal-cli version
 ./install.sh --skip-signal-cli    # skip downloading signal-cli (if already present)
 ./install.sh --update             # update signal-cli to the latest version
+./install.sh --whatsapp           # start the WAHA Docker container for WhatsApp
+./install.sh --check-whatsapp     # check WhatsApp prerequisites (Docker, ports, firewall)
 ./install.sh --help               # show usage
 ```
 
