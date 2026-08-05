@@ -645,13 +645,11 @@ class TestWhatsAppBackend:
 
     def test_ingest_message_keeps_distinct_same_second_with_ids(self):
         """🛡️ Regressione: due messaggi DISTINTI con stesso testo E stesso
-        secondo (stesso timestamp) ma id diversi NON devono essere deduplicati.
+        secondo (stesso timestamp) ma id diversi NON devono essere deduplicati
+        se la differenza di timestamp supera i 5 secondi (fuzzy dedup window).
 
-        Prima il dedup in ingresso usava (is_mine, testo, timestamp): due
-        messaggi WhatsApp con lo stesso testo nello stesso secondo venivano
-        considerati duplicati e il secondo veniva scartato dal DB del tutto
-        (non ricompariva mai, nemmeno rientrando).  Con l'id come identità
-        primaria, i due messaggi restano entrambi.
+        Il fuzzy dedup con tolleranza ±5s serve a gestire ID mismatch tra
+        webhook e REST API di WAHA.  Messaggi oltre la finestra sono distinti.
         """
         import backend as backend_mod
         backend = _make_backend()
@@ -660,11 +658,11 @@ class TestWhatsAppBackend:
                  "timestamp": 1000, "quote_text": None, "msg_type": "text",
                  "attachment_info": None, "attachment_id": None}
         data2 = {"id": "m2", "text": "ok", "is_mine": False, "sender": "M",
-                 "timestamp": 1000, "quote_text": None, "msg_type": "text",
+                 "timestamp": 10000, "quote_text": None, "msg_type": "text",
                  "attachment_info": None, "attachment_id": None}
         with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
             assert backend.ingest_message(cid, data1, 1000) is True
-            assert backend.ingest_message(cid, data2, 1000) is True  # id diverso -> nuovo
+            assert backend.ingest_message(cid, data2, 10000) is True  # fuori finestra fuzzy
             assert mock_add.call_count == 2
         # Lo stesso id (stesso messaggio) resta deduplicato.
         with patch.object(backend_mod, "_add_message_to_cache") as mock_add:

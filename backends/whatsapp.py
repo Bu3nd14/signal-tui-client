@@ -1217,11 +1217,13 @@ class WhatsAppBackend(ChatBackend):
             if msg_id:
                 cached_id = msg.get("id")
                 if cached_id:
-                    # Primary identity: the stable message id.  Same id -> dup.
                     if cached_id == msg_id:
                         return msg
-                    # Different id -> definitely a distinct message, never a dup.
-                    continue
+                    # Different id — could be a legacy re-sync where WAHA
+                    # returns a slightly different id for the same message
+                    # (webhook path vs REST API path).  Fall through to the
+                    # text+timestamp match below; if it matches we treat it
+                    # as the same message and upgrade the id.
                 # Cached message has NO id (e.g. an optimistic send made by the
                 # TUI before the real WhatsApp id was known).  Fall through to
                 # the ts/text identity so the echo of that send is still
@@ -1229,7 +1231,10 @@ class WhatsAppBackend(ChatBackend):
             if msg.get("text") != text:
                 continue
             if not is_mine:
-                if msg.get("timestamp") == ts:
+                # Fuzzy timestamp — WAHA may return slightly different ts
+                # via REST vs webhook (seconds*1000 vs exact ms).  5 s
+                # tolerance covers the unit conversion and clock drift.
+                if abs(msg.get("timestamp", 0) - ts) <= 5000:
                     return msg
             elif msg_id:
                 # Echo (ha un id reale) che corrisponde a un invio ottimistico
@@ -1282,6 +1287,11 @@ class WhatsAppBackend(ChatBackend):
                     protocol=PROTOCOL_WHATSAPP,
                 )
             return False
+
+        # TEMP DEBUG: trace what is being newly inserted (not deduped)
+        with open("/tmp/wa_ingest_debug.log", "a") as _f:
+            _f.write(f"INSERT contact={contact_id} is_mine={is_mine} msg_id={msg_id} ts={ts} text={str(text)[:40]}\n")
+        # END TEMP DEBUG
 
 
 
