@@ -1249,6 +1249,7 @@ class WhatsAppBackend(ChatBackend):
                     return msg
             elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:
                 return msg
+        with open("/tmp/wa_dedup_debug.log", "a") as _f: _f.write(f"DEDUP FAIL contact={contact_id} is_mine={is_mine} msg_id={msg_id} ts={ts} text={str(text)[:40]} cache_size={len(self.cache.get(contact_id, []))}\n")
         return None
 
 
