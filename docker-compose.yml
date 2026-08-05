@@ -18,6 +18,12 @@ services:
     image: devlikeapro/waha:latest
     container_name: signal-tui-whatsapp
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'      # Impedisce di usare tutta la CPU
+          memory: 2048M    # Massimo 2GB di RAM per tutto il container
+
     ports:
       # External port defaults to 3005 (configurable via WHATSAPP_API_PORT);
       # WAHA itself listens on 3000 inside the container.
@@ -27,6 +33,13 @@ services:
       WAHA_DATA_DIR: "/app/.sessions"
       # The default session name used by the Python backend/link tool.
       WAHA_DEFAULT_SESSION: "${WHATSAPP_SESSION_NAME:-default}"
+      # Event-driven (webhook) delivery: WAHA pushes incoming events to the
+      # Python client's /webhook endpoint instead of the client polling
+      # GET /api/messages per chat (which was saturating the server CPU/RAM).
+      # The client runs on the HOST, so WAHA reaches it via host.docker.internal
+      # (the bridge gateway) on the client's webhook port (default 8088).
+      WAHA_WEBHOOK_URL: "http://host.docker.internal:${CLIENT_WEBHOOK_PORT:-8088}/webhook"
+      WAHA_WEBHOOK_EVENTS: "message"
     env_file:
       # Credentials (WAHA_API_KEY, dashboard/swagger auth) persist here so they
       # are NOT regenerated on every container start.  See .env.example.

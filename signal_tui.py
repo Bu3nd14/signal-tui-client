@@ -105,6 +105,8 @@ from backend import (
     serve_text_as_file,
     USER_NUMBER,
     DAEMON_HTTP_PORT,
+    ensure_webhook_server,
+    WEBHOOK_PORT,
 )
 
 from ui_components import (
@@ -905,9 +907,17 @@ class SignalTUI(App):
             try:
                 self.whatsapp_backend.connect_sync()
                 n = len(self.whatsapp_backend.contacts)
+                # Avvio il server HTTP /webhook che riceve gli eventi PUSH da
+                # WAHA (WAHA_WEBHOOK_URL/WAHA_WEBHOOK_EVENTS in docker-compose).
+                # WAHA posta qui i nuovi messaggi; il backend li normalizza ed
+                # accoda per la TUI — niente più polling GET /api/messages.
+                try:
+                    ensure_webhook_server(self.whatsapp_backend)
+                except Exception:
+                    pass  # best-effort: senza webhook la ricezione live si ferma
                 self.call_from_thread(
                     self._add_message,
-                    f"💬 WhatsApp backend active ({n} contacts).",
+                    f"💬 WhatsApp backend active ({n} contacts, webhook on :{WEBHOOK_PORT}).",
                     is_info=True,
                 )
             except Exception as exc:
@@ -1003,27 +1013,6 @@ class SignalTUI(App):
         """Sort contacts: contacts with messages first (most recent first),
         then those without messages (alphabetical), unnamed ones last."""
         self.contacts.sort(key=self._contact_sort_key)
-        # Sincronizza l'ordine della lista (che l'utente vede) con la priorità
-        # di polling del backend WhatsApp: così i contatti in cima vengono
-        # SEMPRE interrogati dal giro veloce, anche se non rientrano nella
-        # piccola mappa "chat attive" di /chats.  Senza, badge e riordino non
-        # si aggiornavano per una chat non ancora aperta ma in cima alla lista.
-        self._notify_wa_poll_priorities()
-
-    def _notify_wa_poll_priorities(self) -> None:
-        """Informa il backend WhatsApp dell'ordine dei contatti, così il polling
-        interroga per primi quelli visibili in cima alla lista."""
-        try:
-            wa = self.manager.get(PROTOCOL_WHATSAPP)
-        except Exception:
-            wa = None
-        set_prio = getattr(wa, "set_poll_priorities", None) if wa else None
-        if set_prio is not None:
-            jids = [c.id for c in self.contacts if c.protocol == PROTOCOL_WHATSAPP]
-            try:
-                set_prio(jids)
-            except Exception:
-                pass  # best-effort: il polling ricade sulla mappa attiva
 
     def _reorder_contact_list(self):
         """Re-sort in-memory contacts and refresh the visible list.
@@ -1218,14 +1207,10 @@ class SignalTUI(App):
         self.selected_contact = contact
         self._seen_timestamps.clear()
         self._seen_message_ids.clear()
-        # Per WhatsApp: segnala al backend di tenere SEMPRE sotto osservazione
-        # la chat appena aperta, così i messaggi live (anche inviati da un altro
-        # client) arrivano in tempo reale anche se la chat non è tra le top-N.
-        if contact.protocol == WhatsAppBackend.protocol:
-            wa_backend = self.manager.get(contact.protocol)
-            observe = getattr(wa_backend, "observe_chat", None)
-            if observe is not None:
-                observe(contact.id)
+        # Per WhatsApp la ricezione è PUSH via webhook (handle_webhook): WAHA
+        # notifica direttamente ogni messaggio della chat aperta, quindi non
+        # serve più registrare la chat come "osservata" per un giro di polling.
+        # Per le chat non aperte basta lo storico all'apertura + il webhook.
         # Cancel any pending reply so we don't reply to the wrong contact
         self._cancel_reply()
         self._clear_chat()

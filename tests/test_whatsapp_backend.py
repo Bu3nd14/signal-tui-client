@@ -572,15 +572,14 @@ class TestWhatsAppBackend:
             mock_add.assert_called_once()
 
 
-class TestWhatsAppPollingReceiver:
+class TestWhatsAppWebhook:
 
-    """📤 Ricezione via polling a due velocità (niente WS/stream).
+    """📥 Ricezione PUSH via webhook di WAHA (niente più polling).
 
-    La build WAHA CORE/WEBJS non espone ``/api/{session}/server`` (404): gli
-    eventi in ingresso arrivano interrogando ``/api/messages`` sulle chat
-    attive.  Il discovery lento usa ``GET /chats`` (raro), il fetch veloce
-    interroga solo le chat calde.  Questi test coprono discovery, attribuzione
-    del contatto e dedup.
+    La ricezione live è interamente event-driven: WAHA Core fa POST a
+    ``/webhook`` con ``{"event": "message", "session": ..., "payload": {...}}``
+    e ``handle_webhook`` lo normalizza in un ``ChatEvent`` accodato alla TUI
+    (via ``poll_once``).  Nessun GET periodico ``/api/messages``.
     """
 
     def _backend(self) -> WhatsAppBackend:
@@ -588,178 +587,77 @@ class TestWhatsAppPollingReceiver:
         backend._rest = MagicMock()
         return backend
 
-    def test_refresh_active_chats_single_round(self):
-        """_refresh_active_chats usa UN solo GET /chats (niente /api/contacts)."""
-        backend = self._backend()
-        backend._rest._request.return_value = [
-            {"id": {"_serialized": "15771304468671@lid"}, "isGroup": False,
-             "unreadCount": 1, "timestamp": 1785840779},
-            {"id": {"_serialized": "393283012118-131@g.us"}, "isGroup": True,  # gruppi esclusi
-             "unreadCount": 11, "timestamp": 1785831727},
-        ]
-        ok = backend._refresh_active_chats()
-        assert ok is True
-        # un solo giro, verso /chats, senza /api/contacts
-        requests = backend._rest._request.call_args_list
-        assert len(requests) == 1
-        assert requests[0][0][0] == "GET"
-        assert "/api/default/chats" in requests[0][0][1]
-        assert "/api/contacts" not in requests[0][0][1]
-        assert "15771304468671@lid" in backend._active_chats
-        assert backend._active_chats["15771304468671@lid"][0] == 1  # unread
-
-    def test_refresh_active_chats_throttled(self):
-        """Dentro l'intervallo di refresh, /chats non viene ri-richiamato."""
-        backend = self._backend()
-        backend._rest._request.return_value = []
-        backend._chats_last_refresh = 0.0
-        backend._CHATS_REFRESH_INTERVAL = 15.0
-        import time
-        backend._chats_last_refresh = time.time()  # appena aggiornato
-        ok = backend._refresh_active_chats()
-        assert ok is False
-        backend._rest._request.assert_not_called()
-
-    def test_fetch_fast_recent_attributes_event_to_chat_jid(self):
-        """Il fetch veloce attribuisce l'evento alla CHAT (@lid), non al from."""
+    def test_handle_webhook_enqueues_message_event(self):
+        """Un envelope message webhook viene normalizzato e accodato."""
         import time
         now = int(time.time())
         backend = self._backend()
-        backend._active_chats = {"15771304468671@lid": (1, now)}
-        backend._rest.list_messages.return_value = [
-            {"id": "m1", "from": "393400716440@c.us", "fromMe": False,
-             "body": "Grazie", "timestamp": now},
-        ]
-        backend._fetch_fast_recent()
-        ev = backend.poll_once()
-        assert len(ev) == 1
-        assert ev[0].contact_id == "15771304468671@lid"  # chat, non from
-        assert ev[0].payload["text"] == "Grazie"
-
-    def test_fetch_fast_recent_deduplicates(self):
-        """Lo stesso id non viene accodato due volte tra giri diversi."""
-        import time
-        now = int(time.time())
-        backend = self._backend()
-        backend._active_chats = {"X@lid": (0, now)}
-        msg = {"id": "mX", "from": "1@c.us", "fromMe": False,
-               "body": "ok", "timestamp": now}
-        backend._rest.list_messages.return_value = [msg]
-        backend._fetch_fast_recent()
-        n1 = len(backend.poll_once())
-        backend._fetch_fast_recent()
-        n2 = len(backend.poll_once())
-        assert n1 == 1
-        assert n2 == 0  # già visto
-
-    def test_fetch_fast_recent_enqueues_my_message_sent_from_other_client(self):
-        """Un mio messaggio inviato da UN ALTRO client (non in cache) va mostrato."""
-        import time
-        now = int(time.time())
-        backend = self._backend()
-        backend.cache = {}  # nessun messaggio noto
-        backend._active_chats = {"15771304468671@lid": (0, now)}
-        backend._rest.list_messages.return_value = [
-            {"id": "m_web", "from": "19645297868955@lid", "fromMe": True,
-             "body": "inviato dal telefono", "timestamp": now},
-        ]
-        backend._fetch_fast_recent()
-        ev = backend.poll_once()
-        assert len(ev) == 1
-        assert ev[0].payload["is_mine"] is True
-        assert ev[0].contact_id == "15771304468671@lid"  # attribuito alla chat
-        assert ev[0].payload["text"] == "inviato dal telefono"
-
-    def test_fetch_fast_recent_skips_my_message_already_cached(self):
-        """Un mio messaggio GIÀ in cache (echo inviato dalla TUI) non va duplicato."""
-        import time
-        now_ms = int(time.time() * 1000)
-        now_s = now_ms // 1000
-        cid = "15771304468671@lid"
-        backend = self._backend()
-        backend.cache = {
-            cid: [
-                {"text": "già inviato", "is_mine": True, "timestamp": now_ms,
-                 "read": True, "status": "sent"},
-            ]
+        envelope = {
+            "session": "default",
+            "event": "message",
+            "payload": {
+                "id": "m1",
+                "from": "393400716440@c.us",
+                "fromMe": False,
+                "body": "Ciao via webhook",
+                "timestamp": now,
+            },
         }
-        backend._active_chats = {cid: (0, now_s)}
-        backend._rest.list_messages.return_value = [
-            {"id": "m_echo", "from": "19645297868955@lid", "fromMe": True,
-             "body": "già inviato", "timestamp": now_s},
-        ]
-        backend._fetch_fast_recent()
-        assert backend.poll_once() == []  # nessun doppione
+        ok = backend.handle_webhook(envelope)
+        assert ok is True
+        events = backend.poll_once()
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.type == "message"
+        assert ev.payload["text"] == "Ciao via webhook"
+        assert ev.payload["is_mine"] is False
+        assert ev.contact_id == "393400716440@c.us"
 
-
-    def test_fetch_fast_recent_skips_groups_not_in_map(self):
-        """I gruppi non entrano in _active_chats (vengono esclusi a monte)."""
+    def test_handle_webhook_deduplicates_retried_id(self):
+        """Un retry di WAHA (stesso id) non viene accodato due volte."""
         import time
         now = int(time.time())
         backend = self._backend()
-        backend._active_chats = {}  # nessuna chat -> nessuna chiamata
-        backend._fetch_fast_recent()
-        backend._rest.list_messages.assert_not_called()
+        envelope = {
+            "session": "default",
+            "event": "message",
+            "payload": {
+                "id": "dup1", "from": "1@c.us", "fromMe": False,
+                "body": "stesso msg", "timestamp": now,
+            },
+        }
+        assert backend.handle_webhook(envelope) is True
+        assert backend.handle_webhook(envelope) is True  # retry
+        events = backend.poll_once()
+        assert len(events) == 1  # dedup per id
+
+    def test_handle_webhook_ignores_non_message_events(self):
+        """Eventi non-message (es. presence/typing fuori dalla registrazione)
+        non generano errori; quelli message con envelope valido sì."""
+        backend = self._backend()
+        assert backend.handle_webhook({"session": "default", "event": "message.ack"}) is False
+        assert backend.handle_webhook("not-a-dict") is False
+        assert backend.handle_webhook({}) is False
         assert backend.poll_once() == []
 
-    def test_active_chat_ids_prefers_observed(self):
-        """La chat osservata va SEMPRE in testa, anche se non tra le più attive."""
+    def test_handle_webhook_normalizes_from_message_nested_key(self):
+        """L'id può essere annidato sotto key.id (come /api/messages)."""
         import time
         now = int(time.time())
         backend = self._backend()
-        backend._active_chats = {
-            "hot1@lid": (3, now),       # la più attiva (unread alto)
-            "last@lid": (0, now - 999), # meno attiva
+        env = {
+            "event": "message",
+            "payload": {
+                "key": {"id": "KEY123", "remoteJid": "15771304468671@lid"},
+                "from": "1@c.us", "fromMe": True,
+                "body": "hello", "timestamp": now,
+            },
         }
-        backend.observe_chat("last@lid")
-        ids = backend._active_chat_ids()
-        # "last@lid" (osservata) viene prima di "hot1@lid"
-        assert ids[0] == "last@lid"
-        assert "last@lid" in ids and "hot1@lid" in ids
-
-    def test_observe_chat_none_clears(self):
-        backend = self._backend()
-        backend.observe_chat("X@lid")
-        backend.observe_chat(None)
-        assert backend._observed_jids == []
-
-    def test_fetch_fast_recent_polls_observed_even_when_active_empty(self):
-        """Anche con _active_chats vuoto, la chat osservata viene interrogata."""
-        import time
-        now = int(time.time())
-        backend = self._backend()
-        backend._active_chats = {}
-        backend.observe_chat("obs@lid")
-        backend._rest.list_messages.return_value = [
-            {"id": "m_obs", "from": "1@c.us", "fromMe": False,
-             "body": "guardami", "timestamp": now},
-        ]
-        backend._fetch_fast_recent()
-        ev = backend.poll_once()
-        assert len(ev) == 1
-        assert ev[0].contact_id == "obs@lid"  # attribuito alla chat osservata
-
-    def test_set_poll_priorities_polls_top_contacts_even_outside_active(self):
-        """Un contatto in cima alla lista TUI (set_poll_priorities) deve essere
-        interrogato anche se NON è nella mappa ``_active_chats`` di /chats
-        (era il buco: badge/riordino non si aggiornavano per una chat non
-        aperta ma in cima alla lista)."""
-        import time
-        now = int(time.time())
-        backend = self._backend()
-        backend._active_chats = {"hot@lid": (1, now)}  # solo una chat "attiva"
-        backend.set_poll_priorities(["second@lid", "first@lid", "hot@lid"])
-        # side_effect callable: risponde a ogni chat (l'ordine di completamento
-        # dei GET paralleli non è deterministico, ma devono comparire tutte).
-        def fake_list(cid, limit=1):
-            return [{"id": f"m_{cid}", "from": "1@c.us", "fromMe": False,
-                     "body": "per il " + cid, "timestamp": now}]
-        backend._rest.list_messages.side_effect = fake_list
-        backend._fetch_fast_recent()
-        # la priorità (lista TUI) determina i candidati, anche se fuori /chats
-        ev = backend.poll_once()
-        assert len(ev) == 3
-        assert {e.contact_id for e in ev} == {"second@lid", "first@lid", "hot@lid"}
+        assert backend.handle_webhook(env) is True
+        events = backend.poll_once()
+        assert len(events) == 1
+        assert events[0].payload["id"] == "KEY123"
+        assert events[0].payload["is_mine"] is True
 
     def test_list_messages_uses_short_poll_timeout(self):
         """list_messages usa un timeout BREVE (per il giro veloce ~1s)."""
@@ -779,49 +677,6 @@ class TestWhatsAppPollingReceiver:
             client.list_messages("X@lid", limit=1)
         # un GET di poll non deve mai poter affamare per decine di secondi
         assert seen_timeout and seen_timeout[0] == 3
-
-    def test_fetch_fast_recent_polls_all_top_chats_in_parallel(self):
-        """Il giro veloce interroga TUTTE le top chat (oggi le prime _POLL_TOP),
-        e gli eventi vengono accodati nell'ordine di priorità della mappa."""
-        import time
-        now = int(time.time())
-        backend = self._backend()
-        backend._POLL_TOP = 4
-        ids = [f"c{i}@lid" for i in range(4)]
-        backend._active_chats = {cid: (1, now) for cid in ids}
-
-        def fake_list(cid, limit=1):
-            return [{"id": f"m_{cid}", "from": f"{cid}", "fromMe": False,
-                     "body": "ciao", "timestamp": now}]
-
-        backend._rest.list_messages.side_effect = fake_list
-        backend._fetch_fast_recent()
-        ev = backend.poll_once()
-        # tutte e 4 le chat sono state interrogate e hanno prodotto un evento
-        assert len(ev) == 4
-        assert {e.contact_id for e in ev} == set(ids)
-
-    def test_fetch_fast_recent_slow_get_does_not_block_others(self):
-        """Un GET lento (oltre il timeout di giro) non deve impedire alle altre
-        chat di essere processate nello stesso giro (era il collo di bottiglia)."""
-        import time
-        now = int(time.time())
-        backend = self._backend()
-        backend._POLL_TOP = 3
-        ids = [f"c{i}@lid" for i in range(3)]
-
-        def fake_list(cid, limit=1):
-            if cid == ids[0]:  # la prima chat è lenta
-                raise TimeoutError("giro scaduto")  # simula GET appeso oltre il giro
-            return [{"id": f"m_{cid}", "from": f"{cid}", "fromMe": False,
-                     "body": "ciao", "timestamp": now}]
-
-        backend._rest.list_messages.side_effect = fake_list
-        backend._active_chats = {cid: (1, now) for cid in ids}
-        backend._fetch_fast_recent()
-        ev = backend.poll_once()
-        # le altre chat vengono comunque accodate; quella lenta è rimandata al giro dopo
-        assert {e.contact_id for e in ev} == set(ids[1:])
 
 
     def test_list_messages_rest(self):
@@ -950,10 +805,27 @@ class TestWhatsAppConfigGating:
 class TestWAHAContract:
     """📨 Mapping degli endpoint reali di WAHA (devlikeapro/waha)."""
 
-    def test_ws_url_uses_api_server(self):
+    def test_webhook_path_is_delivery_contract(self):
+        """WAHA consegna gli eventi via POST a ``/webhook`` (nessun WS)."""
+        # Il backend accetta un envelope WAHA {event:message, payload} via
+        # handle_webhook (chiamato dall'HTTP server avviato da ensure_webhook_server).
         backend = _make_backend("http://api.test")
-        url = backend._ws_url()
-        assert url == "ws://api.test/api/default/server"
+        backend._contacts_by_jid = {}
+        frame = {
+            "event": "message",
+            "session": "default",
+            "payload": {
+                "id": "w0",
+                "from": "39123@s.whatsapp.net",
+                "body": "push delivery",
+                "fromMe": False,
+                "timestamp": 1700000000,
+            },
+        }
+        assert backend.handle_webhook(frame) is True
+        ev = backend.poll_once()[0]
+        assert ev.type == "message"
+        assert ev.contact_id == "39123@s.whatsapp.net"
 
     def test_rest_paths_are_api_prefixed(self):
         """I path REST usano il prefisso /api come da contratto WAHA."""
@@ -1043,65 +915,6 @@ class TestWAHAContract:
         assert ev.contact_id == "39125@s.whatsapp.net"
         assert ev.payload["is_mine"] is True
 
-    def test_ws_loop_connects_with_api_key_header(self):
-        """Il WebSocket deve inviare X-Api-Key; senza, una WAHA autenticata
-        rifiuta lo stream (e la ricezione non parte mai mentre l'invio
-        REST funziona)."""
-        backend = _make_backend("http://api.test")
-        backend._rest.api_key = "secret-key-123"
-        backend._rest.get_session_status = lambda: {"status": "WORKING"}
-
-        calls = []
-        fake_ws = MagicMock()
-
-        def fake_create_connection(url, timeout=5, header=None):
-            calls.append((url, timeout, header))
-            if len(calls) == 1:
-                frame = json.dumps({
-                    "event": "message", "session": "default",
-                    "payload": {"id": "w4", "from": "39126@s.whatsapp.net",
-                                 "body": "arrivato", "fromMe": False,
-                                 "timestamp": 1700000003},
-                }).encode("utf-8")
-                # Un frame di testo, poi una chiusura (raw None) per uscire
-                # dal ciclo interno; poi la connessione successiva ferma tutto.
-                fake_ws.recv_data.side_effect = [(1, frame), (None, None)]
-                return fake_ws
-            # Seconda connessione: segna lo stop e solleva per uscire.
-            backend._ws_stop.set()
-            raise ConnectionError("stop intenzionale")
-
-        import websocket as ws_mod
-        with patch.object(ws_mod, "create_connection", fake_create_connection),              patch.object(backend, "_enqueue_event") as enq:
-            backend._ws_loop()
-
-        assert len(calls) >= 1
-        url, _timeout, header = calls[0]
-        assert url == "ws://api.test/api/default/server"
-        assert header == {"X-Api-Key": "secret-key-123"}
-        # Il frame deve essere stato normalizzato e accodato.
-        assert enq.call_count >= 1
-        ev = enq.call_args.args[0]
-        assert ev.type == "message"
-        assert ev.payload["text"] == "arrivato"
-
-    def test_ws_loop_no_header_when_no_api_key(self):
-        """Senza API key, header resta None (WAHA senza auth)."""
-        backend = _make_backend("http://api.test")
-        backend._rest.api_key = None
-        calls = []
-
-        def fake_create_connection(url, timeout=5, header=None):
-            calls.append(header)
-            if len(calls) >= 2:
-                backend._ws_stop.set()  # ferma il retry loop
-            raise ConnectionError("stop")
-
-        import websocket as ws_mod
-        with patch.object(ws_mod, "create_connection", fake_create_connection):
-            backend._ws_loop()
-        assert len(calls) >= 1
-        assert calls[0] is None
 
 
 # ─── Regression: seed cache from DB at startup ───────────────────────────────
@@ -1136,10 +949,10 @@ class TestSeedCacheFromDB:
         )
 
         backend = _make_backend("http://api.test")
-        # connect_sync tenta _load_contacts (REST) e _start_receiver (thread):
-        # li neutralizziamo per non toccare la rete.
+        # connect_sync tenta _load_contacts (REST): lo neutralizziamo per non
+        # toccare la rete.  La ricezione è via webhook, quindi non c'è alcun
+        # thread di polling/push da neutralizzare.
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_start_receiver"), \
              patch.object(backend, "_wait_session_ready", return_value=True):
             backend.connect_sync()
 
@@ -1168,7 +981,6 @@ class TestSeedCacheFromDB:
 
         backend = _make_backend("http://api.test")
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_start_receiver"), \
              patch.object(backend, "_wait_session_ready", return_value=True):
             backend.connect_sync()
 
@@ -1215,7 +1027,6 @@ class TestSeedCacheFromDB:
 
         backend = _make_backend("http://api.test")
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_start_receiver"), \
              patch.object(backend, "_wait_session_ready", return_value=True):
             backend.connect_sync()
 
@@ -1259,7 +1070,6 @@ class TestSeedCacheFromDB:
         cid = "391234567890@s.whatsapp.net"
         backend = _make_backend("http://api.test")
         with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_start_receiver"), \
              patch.object(backend, "_wait_session_ready", return_value=True):
             backend.connect_sync()
 
@@ -1335,50 +1145,62 @@ class TestSeedCacheFromDB:
 
     def test_echo_with_nested_key_id_deduped_and_upgrades(self):
         """🛡️ Regressione "messaggi duplicati": un echo il cui id è annidato
-        sotto ``key.id`` (WAHA) deve essere riconosciuto come duplicato (non
-        aggiunto di nuovo) e deve aggiornare l'entry ottimistica senza id.
+        sotto ``key.id`` (WAHA) arriva via webhook e viene riconosciuto come
+        duplicato (non aggiunto di nuovo) e aggiorna l'entry ottimistica senza id.
 
-        Prima ``_process_recent_messages`` leggeva solo ``m.get("id")``: con
+        Prima il polling ``GET /api/messages`` leggeva solo ``m.get("id")``: con
         l'id annidato sotto ``key.id`` l'echo veniva deduplicato col solo
         fallback timestamp (finestra 5s) e, se il ts server distava più di 5s
-        dal ts client, veniva aggiunto di nuovo -> doppione.
+        dal ts client, veniva aggiunto di nuovo -> doppione.  Ora la ricezione
+        è via webhook: ``_event_from_message`` estrae il nested ``key.id`` e
+        ``handle_webhook`` lo registra in ``_seen_msg_ids``.
         """
         import time
         import backend as backend_mod
         backend = _make_backend()
         cid = "391234567890@s.whatsapp.net"
-        # Timestamp recenti (entro la finestra di 30 giorni di _process_recent_messages).
-        ts_opt = int(time.time() * 1000)
-        # Invio ottimistico senza id.
+        ts_echo = int(time.time() * 1000)  # timestamp recenti
+        raw = {
+            "event": "message",
+            "session": "default",
+            "payload": {
+                "chatId": cid,
+                "fromMe": True,
+                "key": {"id": "wa-echo-nested"},
+                "body": "ciao",
+                "timestamp": ts_echo // 1000,
+            },
+        }
+        ok = backend.handle_webhook(raw)
+        assert ok is True
+        # L'echo è accodato (un evento message) e l'id annidato è stato estratto.
+        events = backend.poll_once()
+        assert len(events) == 1
+        assert events[0].payload["id"] == "wa-echo-nested"
+        assert events[0].payload["is_mine"] is True
+        # L'id è registrato in _seen_msg_ids (non ri-processato su retry).
+        assert "wa-echo-nested" in backend._seen_msg_ids
+        # Prima: entry ottimistica senza id, poi ingest dello stesso echo:
+        # il dedup per id in ingest_message NON deve creare un duplicato.
         backend.cache[cid] = [{
             "id": None, "text": "ciao", "is_mine": True, "sender": "You",
-            "timestamp": ts_opt, "quote_text": None, "msg_type": "text",
+            "timestamp": ts_echo, "quote_text": None, "msg_type": "text",
             "attachment_info": None, "attachment_id": None,
         }]
-        # Echo con id annidato sotto key.id e ts distante (> 5s).
-        ts_echo = ts_opt + 60000
-        raw = {
-            "chatId": cid,
-            "fromMe": True,
-            "key": {"id": "wa-echo-nested"},
-            "body": "ciao",
-            "timestamp": ts_echo // 1000,
-        }
-
         with patch.object(backend_mod, "_update_message_id") as mock_upd:
-            backend._process_recent_messages(cid, [raw])
-        # L'echo non deve essere accodato come nuovo evento.
-        assert backend.poll_once() == []
+            added = backend.ingest_message(
+                cid,
+                {"id": "wa-echo-nested", "text": "ciao", "is_mine": True,
+                 "sender": "You", "quote_text": None, "msg_type": "text",
+                 "attachment_info": None, "attachment_id": None},
+                ts_echo + 60000,
+            )
+        assert added is False  # duplicato (echo) -> non aggiunto
         # L'entry ottimistica è stata aggiornata con l'id reale.
         assert len(backend.cache[cid]) == 1
         assert backend.cache[cid][0]["id"] == "wa-echo-nested"
-        # Il timestamp è stato aggiornato a quello dell'echo (granularità al
-        # secondo: il ts server di WAHA è in secondi, quindi può differire di
-        # qualche ms dal ts client).
-        assert backend.cache[cid][0]["timestamp"] >= ts_opt
+        assert backend.cache[cid][0]["timestamp"] >= ts_echo
         mock_upd.assert_called_once()
-        # L'id è registrato in _seen_msg_ids (non ri-scaricato ad ogni giro).
-        assert "wa-echo-nested" in backend._seen_msg_ids
 
 
     def test_load_contacts_retries_when_first_empty(self):

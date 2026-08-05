@@ -87,7 +87,7 @@ class TestResyncHistory:
         now = 1_700_000_000
         backend._active_chats = {"unread@lid": (3, now), "read@lid": (0, now)}
 
-        # _refresh_active_chats: no throttling -> GET /chats
+        # un solo GET /chats (nessun throttling/polling) -> /chats
         backend._rest._request.return_value = [
             {"id": "unread@lid", "isGroup": False, "unreadCount": 3, "timestamp": now},
         ]

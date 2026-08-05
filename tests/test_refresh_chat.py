@@ -481,7 +481,7 @@ class TestRenderDedupSameSecond:
         app = self._make_wa_app()
         contact = app.selected_contact
         # Messaggio mostrato con ts client (5000), poi l'echo cambia ts a 6000
-        # e assegna l'id reale (come fa ingest_message/_process_recent_messages).
+        # e assegna l'id reale (come fa ingest_message).
         app._cache = {
             contact.cache_key: [
                 _make_message("Ok  ci sentiamo", ts=5000),

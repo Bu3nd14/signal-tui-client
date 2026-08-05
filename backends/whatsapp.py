@@ -18,11 +18,9 @@ from __future__ import annotations
 
 import json
 import queue
-import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Iterator
 
@@ -291,8 +289,10 @@ class WhatsAppRESTClient:
         the JID, ``fromMe`` a bool, ``timestamp`` in seconds).  Returns ``[]`` on
         any error so callers can treat a slow/unreachable API as non-fatal.
 
-        Uses a short timeout on purpose: this is called every poll cycle and a
-        hung request must not freeze the whole fast poll (see ``_fetch_fast_recent``).
+        Usato SOLO per il caricamento dello storico di una chat all'apertura
+        (``fetch_history``) — NON più per un polling periodico: la ricezione live
+        arriva via webhook (Push).  Mantiene comunque un timeout breve (3s) così
+        una richiesta lenta non blocca la UI.
         """
         result = self._request(
             "GET",
@@ -548,11 +548,17 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent
 class WhatsAppBackend(ChatBackend):
     """WhatsApp backend adapted to the ``ChatBackend`` interface.
 
-    The backend talks to a generic Baileys HTTP API over REST and consumes
-    incoming events from a WebSocket stream in a dedicated worker thread.  It
-    mirrors the Signal backend's patterns (``contacts``/``cache`` attributes,
-    ``poll_once``/``receive``, and ``*_sync`` helpers for the TUI's sync worker
-    threads) so the UI stays protocol-agnostic.
+    The backend talks to a generic Baileys HTTP API over REST and receives
+    incoming messages as PUSH events (webhooks) instead of polling
+    ``GET /api/messages``.  WAHA Core delivers a ``message`` webhook to the
+    client's ``/webhook`` HTTP endpoint whenever a new message arrives; the
+    endpoint normalizes the payload into a ``ChatEvent`` and pushes it onto a
+    queue that the TUI's poll worker drains via ``poll_once()``.  This removes
+    the aggressive per-chat GET polling that saturated the server's CPU.
+
+    The backend still mirrors the Signal backend's patterns (``contacts``/
+    ``cache`` attributes, ``poll_once``/``receive``, and ``*_sync`` helpers for
+    the TUI's sync worker threads) so the UI stays protocol-agnostic.
     """
 
     protocol = PROTOCOL_WHATSAPP
@@ -570,51 +576,40 @@ class WhatsAppBackend(ChatBackend):
         self._polling_active = False
         self._connected = False
         self._events: queue.Queue[ChatEvent | None] = queue.Queue()
-        self._ws_thread: threading.Thread | None = None
-        self._ws_stop = threading.Event()
-        # Ricezione via polling su GET /api/messages (la build WAHA CORE/WEBJS
-        # non espone lo stream WS ``/api/{session}/server`` -> 404).  Un thread
-        # dedicato interroga periodicamente le chat attive ed accoda gli eventi.
+        #: Dedup guard per i webhook: WAHA può ritrasmettere lo stesso evento in
+        #: caso di retry, quindi teniamo gli id già visti per non accodare in
+        #: doppio un messaggio (il dedup definitivo avviene in ``ingest_message``).
         self._seen_msg_ids: set[str] = set()
-        self._bootstrapped = False
-        self._poll_thread: threading.Thread | None = None
-        self._poll_stop = threading.Event()
-        #: Pool di thread per eseguire in PARALLELO i GET del giro veloce di
-        #: polling.  Una richiesta lenta non deve congelare le altre chat (era
-        #: il collo di bottiglia che ritardava anche contatti in cima alla lista).
-        self._poll_pool: ThreadPoolExecutor | None = None
-        #: Intervallo (s) tra un giro di polling "veloce" (chat calde, ~1s).
-        self._POLL_INTERVAL = 1.0
-        #: Numero massimo di chat attive interrogate ad ogni giro veloce.
-        self._POLL_TOP = 6
-        #: Intervallo (s) tra gli aggiornamenti "lenti" della mappa chat attive
-        #: (GET /chats, ~1.3MB).  Raro per non saturare banda/CPU della UI.
-        self._CHATS_REFRESH_INTERVAL = 15.0
-        #: Timestamp (epoch) dell'ultimo refresh della mappa chat attive.
-        self._chats_last_refresh = 0.0
-        #: Chat attive note: {chat_id: (unread, timestamp)}.
-        self._active_chats: dict[str, tuple[int, int]] = {}
-        #: Jid di chat osservate (es. contatto aperto nella TUI) che vanno
-        #: SEMPRE interrogate ad ogni giro veloce, anche se fuori dalle top-6.
-        self._observed_jids: list[str] = []
-        #: Priorità di polling derivate dall'ORDINE della lista contatti della
-        #: TUI (set_poll_priorities).  Collega la ricezione alla lista che
-        #: l'utente vede: i contatti in cima (ultimo messaggio più recente)
-        #: vengono sempre interrogati, anche se non rientrano nella piccola
-        #: mappa ``_active_chats`` (/chats ogni 15s).  Senza questo, un contatto
-        #: 2° in lista (per storico recente) poteva restare mai pollato e badge/
-        #: riordino non aggiornarsi finché non veniva aperto.
-        self._poll_priorities: list[str] = []
 
-    def set_poll_priorities(self, jids: list[str]) -> None:
-        """Registra l'ordine per-priorità dei jid WhatsApp come mostrato nella
-        lista contatti della TUI (prima = contatto più in alto).
+    def handle_webhook(self, raw: dict) -> bool:
+        """Elabora un payload webhook WAHA (modalità Push/event-driven).
 
-        Chiamato dalla TUI dopo ogni riordinamento della lista.  Il giro veloce
-        userà questi per costruire i candidati, così i messaggi live arrivano
-        per chi l'utente vede in cima anche se fuori dalle top-``_POLL_TOP``.
+        ``WAHA_WEBHOOK_EVENTS: message`` fa sì che WAHA invii un POST a
+        ``/webhook`` con l'envelope ``{"event": "message", "session": "...",
+        "payload": {...}}`` ad ogni nuovo messaggio.  L'envelope viene
+        normalizzato in un ``ChatEvent`` (riusando ``_event_from_raw``, che
+        incapsula ``_event_from_message`` e legge ``from``/``body``/``fromMe``/
+        ``timestamp``) e accodato a ``self._events``, consumato poi dalla TUI
+        tramite ``poll_once()``.
+
+        Ritorna ``True`` se il pacchetto è stato gestito, ``False`` se non era
+        un evento riconosciuto (es. un ``message.ack`` fuori dai ``message``
+        registrati).  L'HTTP handler risponde comunque ``200`` per confermare a
+        WAHA la ricezione, come da contratto webhook.
         """
-        self._poll_priorities = [j for j in jids if j]
+        if not isinstance(raw, dict):
+            return False
+        event = _event_from_raw(raw, self._contacts_by_jid)
+        if event is None:
+            return False
+        if event.type == "message":
+            mid = event.payload.get("id")
+            if mid and mid in self._seen_msg_ids:
+                return True  # retry già processato: niente doppioni in coda
+            if mid:
+                self._seen_msg_ids.add(mid)
+        self._enqueue_event(event)
+        return True
 
     @property
     def needs_pairing(self) -> bool:
@@ -663,7 +658,10 @@ class WhatsAppBackend(ChatBackend):
             self._load_contacts()
         except Exception:
             pass
-        self._start_receiver()
+        # La ricezione è basata sui webhook (Push) di WAHA Core, gestiti dall'HTTP
+        # handler ``/webhook`` avviato dalla TUI (``ensure_webhook_server``) che
+        # chiama ``handle_webhook`` su questo backend.  Qui non si avvia alcun
+        # thread di polling: il client NON interroga più ``GET /api/messages``.
         # Fix C: attende che la sessione WAHA sia pronta (status WORKING) prima
         # di marcare il backend come connesso.  Senza questa attesa, i fetch di
         # apertura (/api/messages) eseguiti nei primi ~10-30s interrogano una
@@ -707,78 +705,27 @@ class WhatsAppBackend(ChatBackend):
     def disconnect_sync(self) -> None:
         """Synchronous disconnect; stops the receiver threads."""
         self._polling_active = False
-        self._ws_stop.set()
-        self._poll_stop.set()
-        if self._poll_pool is not None:
-            self._poll_pool.shutdown(wait=False, cancel_futures=True)
-            self._poll_pool = None
-        if self._ws_thread is not None and self._ws_thread.is_alive():
-            self._ws_thread.join(timeout=1.0)
-        self._ws_thread = None
-        if self._poll_thread is not None and self._poll_thread.is_alive():
-            self._poll_thread.join(timeout=1.0)
-        self._poll_thread = None
         self._connected = False
 
-    # ─── Event receiver (polling) ─────────────────────────────────────
-    # La build WAHA CORE/WEBJS non espone lo stream WS ``/api/{session}/``
-    # server (404) e non consente di registrare webhook a runtime su una
-    # sessione esistente.  La ricezione è quindi basata su polling di
-    # ``GET /api/messages`` sulle chat attive — robusto e senza modifiche
-    # al container.
+    # ─── Contacts / active chats (one-shot discovery, no polling) ────
+    # La ricezione degli eventi è tutta PUSH via webhook (handle_webhook).  I
+    # metodi qui sotto servono solo per la scoperta iniziale dei contatti e
+    # delle chat non lette all'avvio/resync — un GET /chats occasionale, NON un
+    # polling periodico.
 
-    def _start_receiver(self) -> None:
-        """Start the polling thread (and attempt the WS as a graceful extra)."""
-        self._poll_stop.clear()
-        self._start_ws_consumer()  # tentativo: su WAHA CORE fallisce (404)
-        if self._poll_thread is not None and self._poll_thread.is_alive():
-            return
-        # Pool riusabile per i GET paralleli del giro veloce (mai ricreato ad
-        # ogni giro: il thread pool minimizza overhead thread per ~1s di giro).
-        if self._poll_pool is None:
-            self._poll_pool = ThreadPoolExecutor(
-                max_workers=min(self._POLL_TOP, 8) or 1,
-                thread_name_prefix="wa-poll",
-            )
-        self._poll_thread = threading.Thread(
-            target=self._poll_loop, daemon=True, name="whatsapp-poll"
-        )
-        self._poll_thread.start()
+    def _discover_active_chats(self) -> list[tuple[str, int, int]]:
+        """(Una tantum) Legge le chat dal REST ``/api/{session}/chats``.
 
-    def _poll_loop(self) -> None:
-        """Two-speed polling: a slow /chats refresh (discover active chats)
-        interleaved with a fast ~1s poll of the hot chats' latest message."""
-        while not self._poll_stop.is_set():
-            try:
-                # Refresh lento e raro (interno: esegue la GET solo se scaduto).
-                # Va a ogni ciclo ma ritorna subito se non è il momento.  È
-                # importante NON subordinare il giro veloce al lento, altrimenti
-                # la ricezione avverrebbe ogni ~15s invece che ~1s (bug).
-                self._refresh_active_chats()
-                # Giro veloce SEMPRE (~1s) sulle chat calde + contatto osservato.
-                self._fetch_fast_recent()
-            except Exception:
-                pass
-            if self._poll_stop.wait(timeout=self._POLL_INTERVAL):
-                break
-
-    def _refresh_active_chats(self) -> bool:
-        """(Raro) Aggiorna ``self._active_chats`` con un solo GET /chats.
-
-        Ritorna ``True`` se la mappa è stata aggiornata in questo giro, ``False``
-        se non è ancora il momento (usato dal giro veloce per sapere se conviene
-        ri-ordinare i candidati).  Non usa ``list_contacts`` (che farebbe il
-        doppio /api/contacts->500 + /chats): va dritto a ``/chats``.
+        Ritorna una lista ``[(cid, unread, timestamp)]`` per le chat non di
+        gruppo, oppure ``[]`` se l'API non risponde.  Invocato all'avvio e da
+        ``resync_history`` una singola volta (mai in un loop di polling).
         """
         if not self._rest:
-            return False
-        now = time.time()
-        if now - self._chats_last_refresh < self._CHATS_REFRESH_INTERVAL:
-            return False
+            return []
         raw = self._rest._request("GET", f"/api/{self.session_name}/chats")
         if not isinstance(raw, list):
-            return False
-        m = {}
+            return []
+        out: list[tuple[str, int, int]] = []
         for c in raw:
             cid = c.get("id")
             if isinstance(cid, dict):
@@ -787,182 +734,8 @@ class WhatsAppBackend(ChatBackend):
                 continue
             unread = int(c.get("unreadCount") or 0)
             ts = int(c.get("timestamp") or 0)
-            m[cid] = (unread, ts)
-        self._active_chats = m
-        self._chats_last_refresh = now
-        return True
-
-    def observe_chat(self, jid: str | None) -> None:
-        """Registra (o rimuove, se ``None``) una chat da osservare sempre.
-
-        Usato dalla TUI quando un contatto WhatsApp viene aperto: la chat resta
-        interrogata ad ogni giro veloce anche se non tra le prime ``_POLL_TOP``,
-        così i messaggi live (anche inviati da un altro client) arrivano in
-        tempo reale.
-        """
-        if not jid:
-            self._observed_jids = []
-            return
-        if jid not in self._observed_jids:
-            self._observed_jids.append(jid)
-
-    def _active_chat_ids(self) -> list[str]:
-        """Ordina le chat note per priorità (non lette prima, poi attività) e
-        antepone SEMPRE le chat osservate (contatti aperti)."""
-        now = int(time.time())
-        scored = []
-        for cid, (unread, ts) in self._active_chats.items():
-            recency = max(now - ts, 0) if ts else 2**31
-            scored.append((unread, -recency if ts else 0, cid))
-        scored.sort(key=lambda x: (x[0] == 0, x[0], x[1]))
-        ordered = [cid for _u, _r, cid in scored]
-        # Le chat osservate vanno in testa (mantenendo l'ordine con cui
-        # sono state aggiunte), senza duplicarle.
-        observed = [j for j in self._observed_jids]
-        return list(dict.fromkeys(observed + ordered))
-
-    def _process_recent_messages(self, cid: str, msgs) -> None:
-        """Dedup/accoda gli ultimi messaggi di una chat (nel poll thread).
-
-        Messo fuori dai worker del pool perché ``_seen_msg_ids`` e la coda
-        eventi vanno toccati solo dal thread di polling (nessuna contesa).
-        """
-        if not msgs:
-            return
-        cutoff_s = int(time.time()) - 30 * 24 * 3600  # 30 giorni (ms più sotto)
-        for m in msgs:
-            if not isinstance(m, dict):
-                continue
-            # Estrai l'id con la stessa logica di ``_event_from_message``
-            # (WAHA può annidarlo sotto ``key.id``): se usassimo solo
-            # ``m.get("id")`` un echo con id annidato verrebbe deduplicato
-            # col solo fallback timestamp (finestra 5s) e, se il ts server
-            # dista più di 5s dal ts client, finirebbe per essere aggiunto
-            # di nuovo -> doppione.
-            mid = m.get("id") or (m.get("key") or {}).get("id") or ""
-            if mid and mid in self._seen_msg_ids:
-                continue
-            event = _event_from_message(m, self._contacts_by_jid)
-            if event is None:
-                continue
-            is_mine = event.payload.get("is_mine", False)
-            ts = event.payload.get("timestamp") or 0
-
-            if ts and ts < cutoff_s * 1000:
-                continue  # ignora cronologia troppo vecchia
-            # Per i messaggi miei: accodali SOLO se non già noti.  Se il
-            # messaggio (timestamp+testo) è già in cache è un echo di un
-            # invio fatto dalla TUI -> skip (no doppioni).  Se non è in
-            # cache è un invio fatto da un ALTRO client (WhatsApp Web/
-            # telefono) che la TUI non ha ancora visto -> andiamo a mostrarlo.
-            # Passiamo l'id: due messaggi miei distinti con stesso testo e
-            # stesso secondo non devono essere confusi con un echo.
-            if is_mine:
-                existing = self._message_already_cached(
-                    cid, ts, True, event.payload.get("text", ""), mid or None
-                )
-                if existing is not None:
-                    # Echo di un invio già noto: non lo mostriamo di nuovo, ma
-                    # registriamo comunque il suo id reale in ``_seen_msg_ids``
-                    # così non viene ri-scaricato ad ogni giro di polling.
-                    if mid:
-                        self._seen_msg_ids.add(mid)
-                        # Se l'entry in cache era un invio ottimistico senza id
-                        # (fatto dalla TUI), aggiornala subito con l'id reale
-                        # dell'echo: così il dedup per id vale da ora e non
-                        # resta un'entry "senza id" che potrebbe confondersi
-                        # con un messaggio mio nuovo con lo stesso testo.
-                        if not existing.get("id"):
-                            existing["id"] = mid
-                            existing["timestamp"] = ts
-                            # L'upgrade cambia ts/id: riordina la chat così i
-                            # ```[-N:]``` del render restano corretti.
-                            self._sort_contact_cache(cid)
-                            from backend import _update_message_id
-                            _update_message_id(
-                                cid,
-                                event.payload.get("text", ""),
-                                True,
-                                ts,
-                                mid,
-                                protocol=PROTOCOL_WHATSAPP,
-                            )
-                    continue
-
-
-            # Attribuisci l'evento alla chat interrogata (jid della chat,
-            # es. ``@lid``) invece del ``from`` (che può essere ``@c.us``):
-            # così `_identify_contact` ritrova il contatto nella lista.
-            event.contact_id = cid
-            if mid:
-                self._seen_msg_ids.add(mid)
-            self._enqueue_event(event)
-
-
-    def _fetch_fast_recent(self) -> None:
-        """Giro veloce: per le ``_POLL_TOP`` chat più calde interroga l'ultimo
-        messaggio (limit=1) e accoda i nuovi eventi (dedup per id).
-
-        I GET ``/api/messages`` sono lanciati in PARALLELO (ThreadPoolExecutor):
-        una richiesta lenta non deve più congelare l'intero giro e affamare le
-        altre chat (incluso il 4° contatto in lista).  Il solo GET avviene nei
-        worker; dedup/eventi restano nel poll thread, in ordine di priorità.
-        """
-        if not self._rest:
-            return
-        if (not self._active_chats and not self._observed_jids
-                and not self._poll_priorities):
-            return
-        # Candidati = chat osservate (aperte, sempre) + primi ``_POLL_TOP``
-        # della lista TUI (priorità) + chat "attive" da /chats a riempimento
-        # dei rimanenti slot del budget.  Così un contatto in cima alla lista
-        # viene SEMPRE interrogato anche se non è tra le top-_POLL_TOP della
-        # mappa attiva (era il buco: badge/riordino non si aggiornavano finché
-        # non aprivi il contatto), senza perdere la scoperta di chat nuove.
-        observed = [j for j in self._observed_jids]
-        priorities = observed + list(self._poll_priorities[: self._POLL_TOP])
-        if priorities:
-            active = self._active_chat_ids()
-            seen = set(priorities)
-            candidates = priorities + [
-                cid for cid in active if cid not in seen
-            ][: self._POLL_TOP]
-        else:
-            candidates = self._active_chat_ids()[: self._POLL_TOP]
-        if not candidates:
-            return
-        limit = 1 if not self._bootstrapped else 1
-        # 1) GET paralleli e read-only nei worker del pool.
-        results: dict[str, list[dict]] = {}
-        if self._poll_pool is None:
-            self._poll_pool = ThreadPoolExecutor(
-                max_workers=min(self._POLL_TOP, 8) or 1,
-                thread_name_prefix="wa-poll",
-            )
-        future_to_cid = {
-            self._poll_pool.submit(self._rest.list_messages, cid, limit): cid
-            for cid in candidates
-        }
-        # Raccogli i risultati dei GET finiti entro il timeout del giro.  Se
-        # il timeout scade davanti a future ancora in corso, processiamo ciò che
-        # è già pronto: le chat rimaste vengono riprese al giro successivo.
-        try:
-            done_iter = as_completed(future_to_cid, timeout=3.5)
-            for future in done_iter:
-                cid = future_to_cid[future]
-                try:
-                    results[cid] = future.result()
-                except Exception:
-                    results[cid] = []
-        except TimeoutError:
-            pass
-        # 2) Processing nel poll thread, in ordine di priorità dei candidati.
-        for cid in candidates:
-            self._process_recent_messages(cid, results.get(cid) or [])
-        for future in future_to_cid:
-            if not future.done():
-                future.cancel()
-        self._bootstrapped = True
+            out.append((cid, unread, ts))
+        return out
 
     # ─── Contact loading ──────────────────────────────────────────────
 
@@ -1070,7 +843,7 @@ class WhatsAppBackend(ChatBackend):
           — così un DB compromesso dai vecchi bug di dedup viene riparato anche
           se non apri la chat, e i messaggi arrivati da un altro client
           compaiono fin da subito;
-        - le chat NON LETTE dichiarate da WAHA (``_active_chats`` con
+        - le chat NON LETTE dichiarate da WAHA (``_discover_active_chats()`` con
           ``unread > 0`` via ``GET /chats``) — copre i nuovi arrivi mai visti
           dalla TUI.
 
@@ -1085,11 +858,12 @@ class WhatsAppBackend(ChatBackend):
             return 0
         targets: set[str] = set(self.cache.keys())
         try:
-            # Al primo avvio ``_chats_last_refresh`` è 0.0 quindi il throttling
-            # (15s) passa e la mappa viene popolata adesso dagli unread reali.
-            self._refresh_active_chats()
+            # Un solo GET /chats (non un polling periodico): serve a scoprire le
+            # chat non lette da ri-sincronizzare all'avvio.  La ricezione live è
+            # comunque tutta su webhook (handle_webhook).
+            chats = self._discover_active_chats()
             targets.update(
-                jid for jid, (unread, _ts) in self._active_chats.items() if unread > 0
+                jid for jid, unread, _ts in chats if unread > 0
             )
         except Exception:
             pass  # se /chats fallisce restiamo sulle sole chat-DB
@@ -1178,103 +952,11 @@ class WhatsAppBackend(ChatBackend):
         return None
 
 
-    # ─── Incoming event stream (WebSocket) ────────────────────────────
-
-    def _ws_url(self) -> str | None:
-        """Build the WebSocket URL for WAHA, or ``None``.
-
-        WAHA exposes its event stream at the session-scoped ``/api/{session}/``
-        server endpoint.  Authentication is done via the ``X-Api-Key`` header
-        when a key is configured (see ``_ws_loop``), so a key-less socket is
-        rejected by an authenticated WAHA.
-        """
-        if not self.api_url:
-            return None
-        scheme = "wss" if self.api_url.startswith("https://") else "ws"
-        netloc = self.api_url.split("://", 1)[-1]
-        return f"{scheme}://{netloc}/api/{self.session_name}/server"
-
-    def _start_ws_consumer(self) -> None:
-        """Start the dedicated thread that consumes the WebSocket stream."""
-        if self._ws_thread is not None and self._ws_thread.is_alive():
-            return
-        self._ws_stop.clear()
-        self._ws_thread = threading.Thread(
-            target=self._ws_loop, daemon=True, name="whatsapp-ws"
-        )
-        self._ws_thread.start()
-
-    def _ws_loop(self) -> None:
-        """Consume the WebSocket, pushing normalized ``ChatEvent`` onto a queue.
-
-        The thread is daemon and stops promptly when ``_ws_stop`` is set or the
-        socket closes.  Events are normalized into ``ChatEvent``.
-        """
-        try:
-            import websocket  # websocket-client
-        except ImportError:
-            return
-
-        url = self._ws_url()
-        if not url:
-            return
-
-        # Autenticazione: WAHA con API key richiede X-Api-Key anche sul WS;
-        # senza, un stream autenticato viene rifiutato e i messaggi in ingresso
-        # non arriverebbero mai (mentre l'invio REST funzionerebbe).
-        headers: dict[str, str] | None = None
-        if self._rest is not None and self._rest.api_key:
-            headers = {"X-Api-Key": self._rest.api_key}
-
-        # Su WAHA CORE/WEBJS lo stream /api/{session}/server non esiste (404);
-        # dopo pochi tentativi falliti rinunciamo al WS (il polling è il
-        # ricevitore effettivo) per non spammare log all'infinito.
-        consecutive_failures = 0
-        MAX_WS_RETRIES = 3
-
-        while not self._ws_stop.is_set():
-            try:
-                ws = websocket.create_connection(url, timeout=5, header=headers)
-                consecutive_failures = 0  # connessione ok: azzera il contatore
-                while not self._ws_stop.is_set():
-                    opcode, raw = ws.recv_data(control_frame=True)
-                    if raw is None:
-                        break
-                    if opcode == websocket.ABNF.OPCODE_TEXT:
-                        try:
-                            payload = json.loads(raw.decode("utf-8", errors="replace"))
-                        except json.JSONDecodeError:
-                            continue
-                        # A WS frame may be a single object or an array.
-                        items = payload if isinstance(payload, list) else [payload]
-                        for item in items:
-                            if not isinstance(item, dict):
-                                continue
-                            event = _event_from_raw(item, self._contacts_by_jid)
-                            if event is not None:
-                                self._enqueue_event(event)
-
-                try:
-                    ws.close()
-                except Exception:
-                    pass
-            except Exception as exc:
-                consecutive_failures += 1
-                if consecutive_failures >= MAX_WS_RETRIES:
-                    break  # WS non disponibile: il polling gestisce la ricezione
-                import sys as _sys
-                try:
-                    print(f"[whatsapp-ws] WS error (retry in 2s): {exc}", file=_sys.stderr)
-                except Exception:
-                    pass
-                try:
-                    with open("/tmp/signal-ws-error.log", "a") as f:
-                        f.write(f"{time.time()}: {exc}\n")
-                except Exception:
-                    pass
-                if self._ws_stop.wait(timeout=2.0):
-                    break
-                continue
+    # ─── Incoming event ingestion ─────────────────────────────────────
+    # La ricezione è interamente PUSH via webhook di WAHA Core:
+    # ``WAHA_WEBHOOK_URL`` + ``WAHA_WEBHOOK_EVENTS: message`` fanno sì che WAHA
+    # faccia POST a ``/webhook`` ad ogni nuovo messaggio; ``handle_webhook``
+    # normalizza l'envelope e lo accoda.  Nessun thread WS/polling.
 
     def _enqueue_event(self, event: ChatEvent) -> None:
         """Push an event onto the internal queue (thread-safe)."""
@@ -1355,7 +1037,7 @@ class WhatsAppBackend(ChatBackend):
         """Ordina la cache in-memory di una chat per timestamp (stabile).
 
         STRUTTURALE: la cache di una chat viene popolata da più fonti con
-        ordini diversi (``fetch_history``, polling live ``_process_recent_``,
+        ordini diversi (``fetch_history``, webhook ``handle_webhook``,
         ``ingest_message``, ``_load_cache`` dal DB) e l'upgrade in-place
         dell'echo può cambiare ``timestamp``/``id`` senza riordinare.  Senza un
         ordinamento deterministico, il render UI che prende gli ``[-N:]`` non
