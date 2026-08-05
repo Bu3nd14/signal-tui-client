@@ -1196,60 +1196,33 @@ class WhatsAppBackend(ChatBackend):
     ) -> dict | None:
         """Return the cached message matching the same identity, or ``None``.
 
-        Mirrors Signal's dedup: for outgoing messages within a short window the
-        echo of an optimistic send is not stored twice; for incoming, the
-        timestamp is part of the identity.
+        For **incoming** messages (``is_mine=False``) the WhatsApp id is *not*
+        reliable — WAHA generates different ids for the same message via
+        webhook vs REST API.  We dedup purely on (text, fuzzy timestamp ±5s).
 
-        When a stable message ``id`` is available (WhatsApp messages carry one),
-        it is used as the PRIMARY identity: two distinct messages that happen to
-        share the same text AND the same second (timestamp) must NOT be merged —
-        the timestamp alone (second granularity) is not a unique identity and
-        would drop the second message from the DB entirely (it never reappeared,
-        not even on re-entry).
-
-        Returns the matched cached message dict (not just a bool) so the caller
-        can upgrade an optimistic send (``id=None``) with the real WhatsApp id
-        when its echo arrives, instead of leaving a duplicate behind.
+        For **outgoing** messages (``is_mine=True``) the id is stable and
+        used as the primary identity (optimistic-send echo dedup).
         """
         for msg in self.cache.get(contact_id, []):
             if not msg.get("is_mine") == is_mine:
                 continue
-            if msg_id:
+            if msg.get("text") != text:
+                continue
+            if not is_mine:
+                # Text + fuzzy timestamp — the only stable identity
+                # across WAHA's webhook and REST API paths.
+                if abs(msg.get("timestamp", 0) - ts) <= 5000:
+                    return msg
+            elif msg_id:
+                # Outgoing: id-based dedup first (echo), then text + window.
                 cached_id = msg.get("id")
                 if cached_id:
                     if cached_id == msg_id:
                         return msg
-                    # Different id — could be a legacy re-sync where WAHA
-                    # returns a slightly different id for the same message
-                    # (webhook path vs REST API path).  Fall through to the
-                    # text+timestamp match below; if it matches we treat it
-                    # as the same message and upgrade the id.
-                # Cached message has NO id (e.g. an optimistic send made by the
-                # TUI before the real WhatsApp id was known).  Fall through to
-                # the ts/text identity so the echo of that send is still
-                # recognized as a duplicate and not shown twice.
-            if msg.get("text") != text:
-                continue
-            if not is_mine:
-                # Fuzzy timestamp — WAHA may return slightly different ts
-                # via REST vs webhook (seconds*1000 vs exact ms).  5 s
-                # tolerance covers the unit conversion and clock drift.
-                if abs(msg.get("timestamp", 0) - ts) <= 5000:
-                    return msg
-            elif msg_id:
-                # Echo (ha un id reale) che corrisponde a un invio ottimistico
-                # (entry senza id): il timestamp dell'echo può distare molto dal
-                # ts client (WAHA usa il proprio), quindi si abbina per testo.
-                # MA solo se l'entry senza id è RECENTE: un'entry legacy (pre-fix,
-                # id=None) molto vecchia NON deve "inghiottire" un messaggio mio
-                # genuinamente nuovo (es. inviato da un altro client) che ha lo
-                # stesso testo.  La finestra copre il normale ritardo dell'echo
-                # senza confondere messaggi distinti.
                 if abs(msg.get("timestamp", 0) - ts) <= _ECHO_MATCH_WINDOW_MS:
                     return msg
             elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:
                 return msg
-        with open("/tmp/wa_dedup_debug.log", "a") as _f: _f.write(f"DEDUP FAIL contact={contact_id} is_mine={is_mine} msg_id={msg_id} ts={ts} text={str(text)[:40]} cache_size={len(self.cache.get(contact_id, []))}\n")
         return None
 
 
@@ -1288,12 +1261,6 @@ class WhatsAppBackend(ChatBackend):
                     protocol=PROTOCOL_WHATSAPP,
                 )
             return False
-
-        # TEMP DEBUG: trace what is being newly inserted (not deduped)
-        with open("/tmp/wa_ingest_debug.log", "a") as _f:
-            _f.write(f"INSERT contact={contact_id} is_mine={is_mine} msg_id={msg_id} ts={ts} text={str(text)[:40]}\n")
-        # END TEMP DEBUG
-
 
 
 
