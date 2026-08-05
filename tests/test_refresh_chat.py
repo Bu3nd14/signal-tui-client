@@ -502,7 +502,39 @@ class TestRenderDedupSameSecond:
         # Nessun doppione: il messaggio non viene rimontato due volte.
         assert texts.count("Ok  ci sentiamo") <= 1
 
+    def test_load_more_banner_survives_clear_chat(self):
+        """Regressione: con >20 messaggi il banner "load more" DEVE comparire.
 
+        Fix B (mounting atomico) rimonta il log con uno ``_clear_chat()`` che
+        rimuove TUTTI i figli del log.  Se il banner veniva montato PRIMA dello
+        ``_clear_chat`` (commit fe3d5f1), veniva rimosso e non compariva mai il
+        bottone "load previous messages" all'apertura di una chat con +20 msg.
+        Ora viene rimontato alla FINE di ``_mount_window``, quindi deve essere
+        presente tra i children del log dopo il load.
+        """
+        app = self._make_wa_app()
+        contact = app.selected_contact
+        app._cache = {
+            contact.cache_key: [
+                _make_message(f"msg-{i}", ts=i) for i in range(1, 26)
+            ]
+        }
+        app._chat_reload_token = 1
+        app._seen_timestamps = set()
+        app._seen_message_ids = set()
+        app._loaded_all = False
+        app._shown_in_log = set()
 
+        fake_log = _FakeChatLog()
+        # _add_message è patcheato per non montare widget reali, ma il banner
+        # usa il VERO _add_load_more_widget (monta un Button in fake_log).
+        with patch.object(app, "query_one", return_value=fake_log), \
+             patch.object(app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
+             patch.object(app, "_add_message", return_value=None):
+            app._load_messages_worker()
 
+        # Il banner deve essere sopravvissuto allo _clear_chat: almeno un
+        # widget con id "load-more-msg" presente nel log.
+        load_more = [w for w in fake_log.children if getattr(w, "id", None) == "load-more-msg"]
+        assert load_more, "Il banner 'load previous messages' non compare nel log"
 

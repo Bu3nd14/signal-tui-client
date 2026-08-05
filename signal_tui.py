@@ -1373,8 +1373,6 @@ class SignalTUI(App):
         if cached:
             if total > 20:
                 messages_to_show = cached[-20:]
-                if not _is_stale():
-                    self.call_from_thread(self._add_load_more_widget, total - 20)
             else:
                 messages_to_show = cached
                 self._loaded_all = True
@@ -1438,6 +1436,17 @@ class SignalTUI(App):
                         )
                     except Exception:
                         pass
+                # Banner "load more" rimontato DOPO lo _clear_chat di Fix B:
+                # lo _clear_chat rimuove TUTTI i figli del log (incluso il
+                # banner montato prima), quindi lo rimontiamo in cima qui,
+                # altrimenti il bottone per caricare i messaggi precedenti
+                # non comparirebbe mai quando la chat ha +20 messaggi.
+                if total > 20 and not _is_stale():
+                    try:
+                        self._add_load_more_widget(total - 20)
+                    except Exception:
+                        pass
+
             try:
                 self.call_from_thread(_mount_window)
             except Exception:
