@@ -935,15 +935,6 @@ class SignalTUI(App):
         # ``connect_sync``, e la mappa unread è appena stata rinfrescata.
         self._resync_wa_history()
 
-        # Messages fetched by the resync may be inserted with read=False
-        # when the dedup fails at runtime (known issue with WAHA timestamps).
-        # Mark them as read now so they don't inflate the unread badge.
-        if self.whatsapp_backend is not None:
-            for msgs in self.whatsapp_backend.cache.values():
-                for msg in msgs:
-                    if not msg.get("is_mine"):
-                        msg["read"] = True
-
         # Pull the merged, protocol-aware contact list from the manager.
         contacts = self.manager.list_contacts()
         self.contacts = contacts
@@ -952,7 +943,7 @@ class SignalTUI(App):
         self._cache = {}
         for backend in self.manager.all():
             for cid, msgs in backend.cache.items():
-                self._cache[contact_cache_key(backend.protocol, cid)] = msgs
+                self._cache[contact_cache_key(backend.protocol, cid)] = list(msgs)  # copy, don't share ref
         # Recover per-contact last-message timestamps from the local cache so
         # the contact list is sorted "most recent first" right from startup.
         self._sync_last_ts()
@@ -1853,7 +1844,7 @@ class SignalTUI(App):
         if contact_cache_key_value is not None:
             # Incrementale: solo il contatto indicato (O(M)).
             messages = self._cache.get(contact_cache_key_value, [])
-            if contact_cache_key_value and "189025889575055@lid" in contact_cache_key_value: open("/tmp/wa_unread.log", "a").write(f"RECOMPUTE_INCR msgs={len(messages)}\n")
+            if contact_cache_key_value and "189025889575055@lid" in contact_cache_key_value: open("/tmp/wa_unread.log", "a").write(f"RECOMPUTE_INCR msgs={len(messages)} unread={sum(1 for m in messages if not m.get("is_mine") and not m.get("read", True))}\n")
             unread = sum(
                 1 for m in messages
                 if not m.get("is_mine") and not m.get("read", True)
@@ -1866,7 +1857,7 @@ class SignalTUI(App):
             # Full: tutti i contatti (startup / ricalcolo globale).
             for contact in self.contacts:
                 messages = self._cache.get(contact.cache_key, [])
-                if contact.cache_key and "189025889575055@lid" in contact.cache_key: open("/tmp/wa_unread.log", "a").write(f"RECOMPUTE_FULL msgs={len(messages)}\n")
+                if contact.cache_key and "189025889575055@lid" in contact.cache_key: open("/tmp/wa_unread.log", "a").write(f"RECOMPUTE_FULL msgs={len(messages)} unread={sum(1 for m in messages if not m.get("is_mine") and not m.get("read", True))}\n")
                 unread = sum(
                     1 for m in messages
                     if not m.get("is_mine") and not m.get("read", True)
