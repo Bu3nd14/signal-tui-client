@@ -1261,15 +1261,15 @@ class WhatsAppBackend(ChatBackend):
 
         existing = self._message_already_cached(contact_id, ts, is_mine, text, msg_id)
         if existing is not None:
-            # The echo of an optimistic send (cached with id=None) has arrived
-            # with its real WhatsApp id.  Upgrade the cached entry so the
-            # id-based dedup works from now on and no duplicate is left behind.
-            # Only applies to SENT messages: a received message with id=None is
-            # just a legacy DB entry (pre-fix), not an optimistic send awaiting
-            # its echo, so it must NOT be re-inserted.
-            if is_mine and msg_id and not existing.get("id"):
+            # Upgrade an existing entry that lacks an id (legacy / optimistic send).
+            # This applies to both outgoing (optimistic send echo) and incoming
+            # (legacy DB entries from before the msg_id column existed) so the
+            # id-based dedup works on the next fetch and the message is never
+            # re-inserted with read=False.
+            if msg_id and not existing.get("id"):
                 existing["id"] = msg_id
-                existing["timestamp"] = ts
+                if is_mine:
+                    existing["timestamp"] = ts
                 # L'upgrade cambia timestamp/id senza riordinare: rimettiamo in
                 # ordine la chat così ```[-N:]``` del render resta corretto.
                 self._sort_contact_cache(contact_id)
@@ -1277,7 +1277,7 @@ class WhatsAppBackend(ChatBackend):
                     contact_id,
                     text,
                     is_mine,
-                    ts,
+                    ts if is_mine else existing["timestamp"],
                     msg_id,
                     protocol=PROTOCOL_WHATSAPP,
                 )
