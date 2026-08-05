@@ -69,18 +69,6 @@ def _global_exception_handler(exc_type, exc_value, exc_traceback):
 sys.excepthook = _global_exception_handler
 
 
-# ─── Log diagnostico temporaneo (per indagine "l'ULTIMO messaggio spariva") ─
-_DEBUG_LOG = "/tmp/signal-tui-debug.log"
-
-
-def _debug_log(msg: str) -> None:
-    """Append una riga con timestamp al log diagnostico (best-effort)."""
-    try:
-        with open(_DEBUG_LOG, "a") as f:
-            f.write(time.strftime("%H:%M:%S.%f")[:-3] + " " + msg + chr(10))
-    except Exception:
-        pass
-
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -562,14 +550,6 @@ class SignalTUI(App):
                 sender_color=sender_color,
             )
 
-        # DIAGNOSI: log dell'ordine di mounting dei messaggi (per indagine ordering)
-        if not is_info:
-            try:
-                _debug_log(
-                    "[mounted] ts=" + str(timestamp) + " text=" + repr(text)[:40] + " proto=" + str(protocol)
-                )
-            except Exception:
-                pass
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
 
@@ -713,9 +693,6 @@ class SignalTUI(App):
                 event.payload.get("text", ""),
             )
             if ts and identity not in self._seen_message_ids:
-                _debug_log(
-                    f"[live] MOSTRA chat={cache_key} text={event.payload.get('text','')!r} ts={ts} is_mine={is_mine}"
-                )
                 self._seen_timestamps.add((event.protocol, cache_key, ts))
                 self._seen_message_ids.add(identity)
                 self.call_from_thread(
@@ -730,18 +707,9 @@ class SignalTUI(App):
                     sender=event.payload.get("sender", ""),
                     status="sent" if is_mine else "read",
                 )
-            else:
-                _debug_log(
-                    f"[live] SKIP chat={cache_key} text={event.payload.get('text','')!r} ts={ts} "
-                    f"ts_falsy={not bool(ts)} gia_visto={(identity in self._seen_message_ids)}"
-                )
-
         else:
             # Message for another contact: mark the list dirty; the unread
             # badge / reorder is refreshed ONCE per poll batch (not per event).
-            _debug_log(
-                f"[live] ALTRO_CONTATTO chat={cache_key} text={event.payload.get('text','')!r} ts={ts}"
-            )
             self._contact_list_dirty = True
             self._dirty_contact_keys.add(cache_key)
 
@@ -909,13 +877,6 @@ class SignalTUI(App):
 
     def _startup(self):
         """Connect all backends, load contacts, and start the poll workers."""
-        # Marcatore di inizio avvio TUI: separa i vari run nel log diagnostico
-        # (nessuna collisione di timestamps tra sessioni consecutive).
-        try:
-            import os as _os
-            _debug_log("[BOOT] TUI avviata pid=" + str(_os.getpid()))
-        except Exception:
-            pass
         self.call_from_thread(
             self._add_message, "⏳ Starting signal-cli daemon...", is_info=True
         )
@@ -1400,19 +1361,6 @@ class SignalTUI(App):
                         _retry += 1
                         time.sleep(0.8)
 
-                    # ── DIAGNOSI ──
-                    try:
-                        _last = _bm[-1] if _bm else None
-                        _last = _bm[-1] if _bm else None
-                        _debug_log(
-                            f"[load] chat={contact.id} fetch_ok backend_cache={len(_bm)} "
-                            f"ultimo={(_last.get('text') if _last else None)!r} "
-                            f"ts={(_last.get('timestamp') if _last else None)}"
-                        )
-                    except Exception:
-                        pass
-                    # ── /DIAGNOSI ──
-
                     # fetch_history alimenta il cache del backend; lo specchiamo
                     # nel cache protocol-aware dell'UI per renderizzarlo.
                     backend_msgs = getattr(backend, "cache", {}).get(contact.id, [])
@@ -1421,10 +1369,6 @@ class SignalTUI(App):
                     if contact.cache_key in self._cache:
                         cached = self._cache[contact.cache_key]
                         total = len(cached)
-                    _debug_log(
-                        f"[load] chat={contact.id} UI_cache={len(self._cache.get(contact.cache_key, []))} "
-                        f"total_after={total}"
-                    )
                     # Li sto visualizzando: i messaggi appena scaricati non
                     # devono gonfiare i badge unread (già azzerati da _select_contact).
                     for msg in self._cache.get(contact.cache_key, []):
@@ -1838,18 +1782,6 @@ class SignalTUI(App):
         max_seen = max(
             (t for (_p, _k, t) in self._seen_timestamps), default=0
         )
-        # ── DIAGNOSI ──
-        try:
-            _dbg_last = cached[-1] if cached else None
-            _debug_log(
-                f"[refresh] chat={contact.id} cache={len(cached)} "
-                f"max_seen={max_seen} ultimo={(_dbg_last.get('text') if _dbg_last else None)!r} "
-                f"ts_ultimo={(_dbg_last.get('timestamp') if _dbg_last else None)}"
-            )
-        except Exception:
-            pass
-        # ── /DIAGNOSI ──
-
         for msg in cached:
             ts = msg.get("timestamp", 0)
             text = msg.get("text", "")
@@ -1870,14 +1802,6 @@ class SignalTUI(App):
                 mid = msg.get("id")
                 if mid and (contact.protocol, contact.cache_key, mid) in self._seen_message_ids:
                     is_new = False
-            # ── DIAGNOSI (solo per l'ultimo messaggio, se non viene mostrato) ──
-            if not is_new and msg is cached[-1] and cached:
-                _debug_log(
-                    f"[refresh] SKIP ultimo chat={contact.id} text={text!r} ts={ts} "
-                    f"in_seen_id={(identity in self._seen_message_ids)} "
-                    f"ts>max_seen={(ts > max_seen)} max_seen={max_seen}"
-                )
-            # ── /DIAGNOSI ──
             if is_new:
                 self._seen_timestamps.add((contact.protocol, contact.cache_key, int(ts)))
                 self._seen_message_ids.add(identity)

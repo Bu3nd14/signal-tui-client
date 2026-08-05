@@ -896,20 +896,6 @@ class WhatsAppBackend(ChatBackend):
             event.contact_id = cid
             if mid:
                 self._seen_msg_ids.add(mid)
-            # -- DIAGNOSI temporanea --
-            try:
-                with open("/tmp/signal-tui-debug.log", "a") as _df:
-                    import time as _t
-                    _payload = event.payload
-                    _line = ("%s [backend] ENQUEUE chat=%s text=%r ts=%s is_mine=%s" % (
-                        _t.strftime("%H:%M:%S.%f")[:-3], cid,
-                        _payload.get("text", ""), _payload.get("timestamp"),
-                        _payload.get("is_mine")))
-                    _df.write(_line + "\n")
-            except Exception:
-                pass
-            # -- /DIAGNOSI --
-
             self._enqueue_event(event)
 
 
@@ -994,13 +980,8 @@ class WhatsAppBackend(ChatBackend):
             attempt += 1
             time.sleep(1.0)
             raw_contacts = self._rest.list_contacts()
-        if not raw_contacts:
-            try:
-                with open("/tmp/signal-tui-debug.log", "a") as _df:
-                    import time as _t
-                    _df.write(_t.strftime("%H:%M:%S.%f")[:-3] + " [backend] WARN _load_contacts vuoto" + chr(10))
-            except Exception:
-                pass
+        # Se anche dopo il retry non ci sono contatti, lasciamo comunque
+        # list(this).contacts vuoto (best-effort, senza crash).
         contacts: list[ChatContact] = []
         for c in raw_contacts:
             jid = c.get("id") or c.get("jid") or c.get("remoteJid")
