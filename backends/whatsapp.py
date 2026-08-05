@@ -735,8 +735,6 @@ class WhatsAppBackend(ChatBackend):
         re-insert the same remote messages on every chat open, duplicating
         them in the DB.
         """
-        from backend import _prune_cache
-        _prune_cache()
         self.cache = self._load_protocol_cache()
         if not self._rest:
             self._connected = False
@@ -1007,6 +1005,11 @@ class WhatsAppBackend(ChatBackend):
                 self.fetch_history(jid, limit=limit)
             except Exception:
                 pass  # best-effort: mai far fallire l'avvio per una singola chat
+        # Prune old messages AFTER the resync, so the next startup's cache
+        # still includes old messages (for dedup) and the resync can fill
+        # any gaps without re-inserting them as new.
+        from backend import _prune_cache
+        _prune_cache()
         return len(targets)
 
     # ─── Messaging ────────────────────────────────────────────────────
@@ -1198,6 +1201,7 @@ class WhatsAppBackend(ChatBackend):
         For **outgoing** messages (``is_mine=True``) the id is stable and
         used as the primary identity (optimistic-send echo dedup).
         """
+        if contact_id == "15771304468671@lid": open("/tmp/wa_debug.log", "a").write(f"DEDUP cid={contact_id} is_mine={is_mine} ts={ts} text={repr(text)[:50]} cache_msgs={len(self.cache.get(contact_id, []))}\n")
         for msg in self.cache.get(contact_id, []):
             if not msg.get("is_mine") == is_mine:
                 continue
