@@ -26,6 +26,7 @@ from backends.whatsapp import (
     WhatsAppRESTClient,
     _event_from_message,
     _event_from_receipt,
+    _event_from_ack,
     _event_from_typing,
     _event_from_raw,
 )
@@ -339,6 +340,117 @@ class TestWhatsAppEvents:
         assert ev.type == "receipt"
         assert ev.payload["message_ids"] == ["m1"]
         assert ev.payload["is_read"] is True
+
+    # ── message.ack (delivery / read receipts via WAHA push) ──────────
+
+    def test_ack_delivery_event(self):
+        """message.ack with status=3 → receipt with is_read=False."""
+        ev = _event_from_ack({
+            "event": "message.ack",
+            "payload": {
+                "id": "msg_abc",
+                "from": "me@lid",
+                "to": "39123@s.whatsapp.net",
+                "fromMe": True,
+                "status": 3,
+            },
+        })
+        assert ev is not None
+        assert ev.type == "receipt"
+        assert ev.protocol == PROTOCOL_WHATSAPP
+        assert ev.contact_id == "39123@s.whatsapp.net"  # recipient, not sender
+        assert ev.payload["message_ids"] == ["msg_abc"]
+        assert ev.payload["is_read"] is False
+
+    def test_ack_read_event(self):
+        """message.ack with status=4 → receipt with is_read=True."""
+        ev = _event_from_ack({
+            "event": "message.ack",
+            "payload": {
+                "id": "msg_xyz",
+                "from": "me@lid",
+                "to": "39123@s.whatsapp.net",
+                "fromMe": True,
+                "status": 4,
+            },
+        })
+        assert ev is not None
+        assert ev.type == "receipt"
+        assert ev.payload["is_read"] is True
+        assert ev.contact_id == "39123@s.whatsapp.net"
+
+    def test_ack_server_ack_ignored(self):
+        """message.ack with status=2 (SERVER_ACK) is ignored."""
+        ev = _event_from_ack({
+            "event": "message.ack",
+            "payload": {
+                "id": "msg_abc",
+                "from": "me@lid",
+                "to": "39123@s.whatsapp.net",
+                "fromMe": True,
+                "status": 2,
+            },
+        })
+        assert ev is None
+
+    def test_ack_not_mine_ignored(self):
+        """message.ack from someone else (fromMe=False) is ignored."""
+        ev = _event_from_ack({
+            "event": "message.ack",
+            "payload": {
+                "id": "msg_abc",
+                "from": "39123@s.whatsapp.net",
+                "fromMe": False,
+                "status": 4,
+            },
+        })
+        assert ev is None
+
+    def test_ack_no_chat_id_returns_none(self):
+        """message.ack without chatId/from returns None."""
+        assert _event_from_ack({"id": "m1", "fromMe": True, "status": 3}) is None
+
+    def test_ack_no_msg_id_returns_none(self):
+        """message.ack without id returns None."""
+        assert _event_from_ack({
+            "chatId": "39123@s.whatsapp.net",
+            "fromMe": True,
+            "status": 4,
+        }) is None
+
+    def test_ack_dispatch_via_event_from_raw(self):
+        """_event_from_raw dispatches 'message.ack' to _event_from_ack."""
+        ev = _event_from_raw({
+            "event": "message.ack",
+            "payload": {
+                "id": "msg_1",
+                "from": "me@lid",
+                "to": "39123@s.whatsapp.net",
+                "fromMe": True,
+                "status": 4,
+            },
+        })
+        assert ev is not None
+        assert ev.type == "receipt"
+        assert ev.payload["is_read"] is True
+        assert ev.contact_id == "39123@s.whatsapp.net"
+
+    def test_ack_slash_variant_dispatch(self):
+        """_event_from_raw dispatches 'message/ack' variant too."""
+        ev = _event_from_raw({
+            "event": "message/ack",
+            "payload": {
+                "id": "msg_1",
+                "from": "me@lid",
+                "to": "39123@s.whatsapp.net",
+                "fromMe": True,
+                "status": 3,
+            },
+        })
+        assert ev is not None
+        assert ev.type == "receipt"
+        assert ev.payload["is_read"] is False
+        assert ev.contact_id == "39123@s.whatsapp.net"
 
     def test_dispatch_by_event_type(self):
         raw = {"event": "messages.upsert", "from": "wa:1@s.whatsapp.net", "text": "hi", "timestamp": 1}
@@ -1273,9 +1385,22 @@ class TestWhatsAppWebhookRegistration:
         mock_put.assert_called_once()
         call_config = mock_put.call_args[0][0]
         assert call_config["config"]["webhooks"][0]["url"] == webhook
-        assert call_config["config"]["webhooks"][0]["events"] == ["message"]
+        assert call_config["config"]["webhooks"][0]["events"] == ["message", "message.ack"]
 
     def test_configure_webhook_skips_when_already_registered(self):
+        import backends.whatsapp as wa_mod
+        backend = _make_backend()
+        webhook = "http://host.docker.internal:8088/webhook"
+        # Config già aggiornata con entrambi gli eventi → nessun PUT.
+        with patch.object(backend._rest, "get_session_status", return_value={
+            "config": {"webhooks": [{"url": webhook, "events": ["message", "message.ack"]}]}
+        }),              patch.object(backend._rest, "update_session_config") as mock_put,              patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook):
+            backend._configure_webhook()
+        # Gia' configurato con tutti gli eventi → nessun PUT.
+        mock_put.assert_not_called()
+
+    def test_configure_webhook_updates_when_events_outdated(self):
+        """Se l'URL c'è ma manca message.ack, esegue comunque il PUT."""
         import backends.whatsapp as wa_mod
         backend = _make_backend()
         webhook = "http://host.docker.internal:8088/webhook"
@@ -1283,8 +1408,10 @@ class TestWhatsAppWebhookRegistration:
             "config": {"webhooks": [{"url": webhook, "events": ["message"]}]}
         }),              patch.object(backend._rest, "update_session_config") as mock_put,              patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook):
             backend._configure_webhook()
-        # Gia' configurato -> nessun PUT (evita restart inutile della sessione).
-        mock_put.assert_not_called()
+        # Config vecchia (solo message) → PUT con entrambi gli eventi.
+        mock_put.assert_called_once()
+        call_config = mock_put.call_args[0][0]
+        assert call_config["config"]["webhooks"][0]["events"] == ["message", "message.ack"]
 
     def test_configure_webhook_never_raises_on_error(self):
         import backends.whatsapp as wa_mod

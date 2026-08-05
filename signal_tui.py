@@ -776,9 +776,10 @@ class SignalTUI(App):
         for msg in updated_messages:
             ts = msg.get("timestamp", 0)
             new_status = msg.get("status", "sent")
-            # Find the corresponding widget by timestamp
+            # Fuzzy match — WAHA timestamps (seconds) converted to ms may
+            # differ by a few ms from the optimistic-send timestamp.
             for child in chat_log.children:
-                if isinstance(child, MessageWidget) and child._msg_timestamp == ts:
+                if isinstance(child, MessageWidget) and abs(child._msg_timestamp - ts) <= 2000:
                     child.set_status(new_status)
                     break
 

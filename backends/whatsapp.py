@@ -17,6 +17,7 @@ TUI stays fully protocol-agnostic.
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import time
 import urllib.error
@@ -38,6 +39,8 @@ from .config import (
     get_whatsapp_api_key,
     get_whatsapp_webhook_url,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ─── REST client (generic Baileys HTTP API) ───────────────────────────────────
@@ -135,7 +138,7 @@ class WhatsAppRESTClient:
         Used to register the WAHA push webhook(s) on the session itself (the
         WAHA_WEBHOOK_URL env var alone does not make WAHA emit events).  The
         config payload maps to SessionUpdateRequest, e.g.
-        {webhooks: [{url: ..., events: [message]}]}.  Returns the updated
+        {webhooks: [{url: ..., events: [message, message.ack]}]}.  Returns the updated
         session dict, or None on error (callers treat it as best-effort).
         """
         return self._request(
@@ -512,6 +515,61 @@ def _event_from_receipt(raw: dict) -> ChatEvent | None:
     )
 
 
+def _event_from_ack(raw: dict) -> ChatEvent | None:
+    """Normalize a ``message.ack`` (delivery/read receipt) from WAHA into a
+    ``ChatEvent`` (type 'receipt').
+
+    WAHA emits ``message.ack`` for outgoing messages as they progress through
+    the WhatsApp delivery pipeline.  The ``status`` field follows the Baileys
+    ``WAMessageAck`` enum:
+
+    - 2 = SERVER_ACK  (received by WhatsApp server)   → ignored (not a receipt)
+    - 3 = DELIVERY_ACK (delivered to recipient device) → ``is_read=False``
+    - 4 = READ         (read by recipient)             → ``is_read=True``
+
+    Only messages sent **by us** (``fromMe: true``) with status ≥ 3 are kept;
+    everything else is dropped silently.
+    """
+    # The payload may be nested under ``raw.payload`` (WAHA Core webhook
+    # envelope) or be the raw dict itself (direct normalisation).
+    content = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
+    is_mine = content.get("fromMe", False)
+    # When the message is ours, the contact is the *recipient* (``to``),
+    # not the sender (``from``).  The WAHA ``message.ack`` payload carries
+    # ``from`` = our own JID and ``to`` = the chat partner's JID.
+    if is_mine:
+        chat_jid = _jid_string(
+            content.get("to")
+            or content.get("chatId")
+            or content.get("remoteJid")
+        )
+    else:
+        chat_jid = _jid_string(
+            content.get("chatId")
+            or content.get("from")
+            or content.get("remoteJid")
+        )
+    msg_id = content.get("id") or content.get("msgId") or content.get("messageId")
+    if not chat_jid or not msg_id:
+        return None
+    if not content.get("fromMe", False):
+        return None
+    status = content.get("status") or content.get("ack") or 0
+    try:
+        status = int(status)
+    except (ValueError, TypeError):
+        return None
+    if status < 3:
+        return None  # PENDING, SERVER_ACK — not a receipt yet
+    is_read = status >= 4
+    return ChatEvent(
+        type="receipt",
+        protocol=PROTOCOL_WHATSAPP,
+        contact_id=chat_jid,
+        payload={"message_ids": [msg_id], "is_read": is_read},
+    )
+
+
 def _event_from_typing(raw: dict) -> ChatEvent | None:
     """Normalize a typing/presence indicator into a ``ChatEvent`` (type 'typing')."""
     chat_jid = _jid_string(
@@ -548,6 +606,8 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent
         return _event_from_typing(content)
     if evt in ("receipt", "receipts.update", "receipt/update", "message.receipt"):
         return _event_from_receipt(content)
+    if evt in ("message.ack", "message/ack"):
+        return _event_from_ack(content)
     # Some APIs emit the message object directly without an 'event' field.
     if content.get("remoteJid") or content.get("from") or content.get("chatId"):
         if "text" in content or "body" in content or content.get("message") or content.get("attachments"):
@@ -607,15 +667,32 @@ class WhatsAppBackend(ChatBackend):
         tramite ``poll_once()``.
 
         Ritorna ``True`` se il pacchetto è stato gestito, ``False`` se non era
-        un evento riconosciuto (es. un ``message.ack`` fuori dai ``message``
-        registrati).  L'HTTP handler risponde comunque ``200`` per confermare a
-        WAHA la ricezione, come da contratto webhook.
+        un evento riconosciuto.  L'HTTP handler risponde comunque ``200`` per
+        confermare a WAHA la ricezione, come da contratto webhook.
         """
         if not isinstance(raw, dict):
             return False
         event = _event_from_raw(raw, self._contacts_by_jid)
         if event is None:
             return False
+        # WAHA sends message.ack INSTEAD of a separate message event for
+        # outgoing echoes.  Ingest the payload as a message FIRST so the
+        # optimistic-send entry (id=None) gets upgraded to its real id.
+        evt_name = raw.get("event", "")
+        if "ack" in str(evt_name).lower():
+            content = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
+            if content.get("fromMe") and content.get("id"):
+                ack_contact = _jid_string(
+                    content.get("to") or content.get("chatId") or content.get("remoteJid")
+                )
+                if ack_contact:
+                    ack_ts = int(content.get("timestamp") or 0) * 1000  # WAHA uses seconds, we use ms
+                    self.ingest_message(ack_contact, {
+                        "id": content.get("id"),
+                        "text": content.get("body") or content.get("text") or "",
+                        "is_mine": True,
+                        "sender": "You",
+                    }, ack_ts)
         if event.type == "message":
             mid = event.payload.get("id")
             if mid and mid in self._seen_msg_ids:
@@ -737,13 +814,21 @@ class WhatsAppBackend(ChatBackend):
                 (w or {}).get("url")
                 for w in (configured.get("webhooks") or [])
             ]
+            desired_events = ["message", "message.ack"]
             if webhook in urls:
-                return  # gia' registrato: niente restart
+                # URL già registrato — controlla se anche gli eventi sono
+                # aggiornati (es. dopo un upgrade che ha aggiunto message.ack).
+                for w in (configured.get("webhooks") or []):
+                    if (w or {}).get("url") == webhook:
+                        current_events = (w or {}).get("events") or []
+                        if set(current_events) >= set(desired_events):
+                            return  # già aggiornato: niente restart
+                        break
             self._rest.update_session_config({
                 "config": {
                     "webhooks": [{
                         "url": webhook,
-                        "events": ["message"],
+                        "events": desired_events,
                     }]
                 }
             })
@@ -1250,6 +1335,11 @@ class WhatsAppBackend(ChatBackend):
                     if old != target and rank.get(target, 0) > rank.get(old, 0):
                         msg["status"] = target
                         updated.append(msg)
+        # Persist status changes to SQLite so they survive restarts.
+        if updated:
+            from backend import _update_message_status
+            for msg in updated:
+                _update_message_status(msg["timestamp"], msg["status"])
         return updated
 
 
