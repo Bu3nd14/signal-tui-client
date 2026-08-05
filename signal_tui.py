@@ -1863,6 +1863,7 @@ class SignalTUI(App):
                 old = self._unread_counts.get(contact.cache_key, 0)
                 if unread != old:
                     self._unread_counts[contact.cache_key] = unread
+                    if contact.protocol == "whatsapp" and unread > 0: open("/tmp/wa_badge.log", "a").write(f"BADGE cid={contact.id[:30]} cache_key={contact.cache_key} unread={unread} cache_msgs={len(self._cache.get(contact.cache_key, []))}\n")
                     changed = True
 
         return changed

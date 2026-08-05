@@ -356,8 +356,11 @@ def _prune_cache():
         try:
             now_ms = int(time.time() * 1000)
             cutoff = now_ms - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
-            # Delete old messages
-            conn.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
+            # Keep only the 200 most recent messages per contact; no time-based
+            # pruning — WhatsApp re-downloads history from WAHA anyway, and
+            # time-based deletion breaks the dedup cycle (old messages are
+            # deleted from DB, then re-inserted as "new" with read=False).
+            # conn.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
             # Limit to 200 per contact: delete messages beyond the 200 most recent
             conn.execute("""
                 DELETE FROM messages WHERE id NOT IN (

@@ -1202,6 +1202,7 @@ class WhatsAppBackend(ChatBackend):
         used as the primary identity (optimistic-send echo dedup).
         """
         for msg in self.cache.get(contact_id, []):
+            if contact_id == "15771304468671@lid": open("/tmp/wa_dedup.log", "a").write(f"DEDUP is_mine={is_mine} ts={ts} text={repr(text)[:20]} cache={len(self.cache.get(contact_id, []))}\n")
             if not msg.get("is_mine") == is_mine:
                 continue
             if msg.get("text") != text:
