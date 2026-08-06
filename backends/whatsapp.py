@@ -499,6 +499,24 @@ def _resolve_sender_name(sender: str, contacts_by_jid: dict | None) -> str:
     return sender
 
 
+
+
+def _log_webhook(source: str, fmt: str, *args) -> None:
+    """Write a diagnostic line to /tmp/whatsapp-webhook.log.
+
+    The terminal is occupied by the TUI so we must never write to stdout/
+    stderr from background threads.  Best-effort — never raises.
+    """
+    try:
+        with open("/tmp/whatsapp-webhook.log", "a") as f:
+            import time
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+            msg = fmt % args if args else fmt
+            f.write(f"{ts} [{source}] {msg}\n")
+    except Exception:
+        pass
+
+
 def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent | None:
     """Normalize a raw incoming message dict into a ``ChatEvent``."""
 
@@ -532,6 +550,12 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
             or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
         )
     if not chat_jid:
+        _log_webhook(
+            "_event_from_message",
+            "chat_jid=None is_mine=%s chatId=%s from=%s remoteJid=%s key.remoteJid=%s to=%s",
+            is_mine, raw.get("chatId"), raw.get("from"), raw.get("remoteJid"),
+            (raw.get("key") or {}).get("remoteJid"), raw.get("to"),
+        )
         return None
 
     text = raw.get("text") or raw.get("body") or (raw.get("message") or {}).get("conversation") or ""
@@ -740,11 +764,14 @@ def _event_from_ack(raw: dict) -> ChatEvent | None:
     # When the message is ours, the contact is the *recipient* (``to``),
     # not the sender (``from``).  The WAHA ``message.ack`` payload carries
     # ``from`` = our own JID and ``to`` = the chat partner's JID.
+    # WAHA may nest remoteJid inside "key" for group messages.
+    _ack_key = content.get("key") or {}
     if is_mine:
         chat_jid = _jid_string(
             content.get("to")
             or content.get("chatId")
             or content.get("remoteJid")
+            or _ack_key.get("remoteJid")
         )
     else:
         chat_jid = _jid_string(
@@ -893,8 +920,22 @@ class WhatsAppBackend(ChatBackend):
         if "ack" in str(evt_name).lower():
             content = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
             if content.get("fromMe") and content.get("id"):
+                # WAHA may nest remoteJid inside "key" (same envelope as
+                # /api/messages).  Without it group outgoing messages fail.
                 ack_contact = _jid_string(
-                    content.get("to") or content.get("chatId") or content.get("remoteJid")
+                    content.get("to")
+                    or content.get("chatId")
+                    or content.get("remoteJid")
+                    or (content.get("key") or {}).get("remoteJid")
+                )
+                _log_webhook(
+                    "handle_webhook",
+                    "ack fromMe=True id=%s ack_contact=%s to=%s chatId=%s remoteJid=%s key.remoteJid=%s",
+                    content.get("id"), ack_contact,
+                    content.get("to") is not None,
+                    content.get("chatId") is not None,
+                    content.get("remoteJid") is not None,
+                    (content.get("key") or {}).get("remoteJid") is not None,
                 )
                 if ack_contact:
                     ack_ts = int(content.get("timestamp") or 0) * 1000  # WAHA uses seconds, we use ms
