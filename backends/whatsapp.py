@@ -1086,7 +1086,12 @@ class WhatsAppBackend(ChatBackend):
                 (w or {}).get("url")
                 for w in (configured.get("webhooks") or [])
             ]
-            desired_events = ["message", "message.ack"]
+            desired_events = [
+                "message", "message.any", "message.new",
+                "messages.upsert", "messages/upsert",
+                "message.ack", "message/ack",
+                "message.receipt",
+            ]
             if webhook in urls:
                 # URL già registrato — controlla se anche gli eventi sono
                 # aggiornati (es. dopo un upgrade che ha aggiunto message.ack).
