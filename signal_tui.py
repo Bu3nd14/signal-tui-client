@@ -411,6 +411,9 @@ class SignalTUI(App):
         self._TYPING_TIMEOUT = 10.0  # seconds before a typing indicator auto-expires
         self._TYPING_MUMBLING_DURATION = 60.0  # seconds a contact stays with 💭 after stopping typing
 
+        # cache_key → ListItem: O(1) lookup for _update_typing_label
+        self._contact_widgets: dict[str, ListItem] = {}
+
 
 
 
@@ -891,26 +894,21 @@ class SignalTUI(App):
         """
         if not self.contacts:
             return
-        try:
-            contact_list = self.query_one("#contact-list", ListView)
-        except Exception:
-            return
         # Trova il contatto in memoria per calcolare il nuovo label (che legge
         # _typing_contacts/_typing_mumbling, già aggiornati dall'evento).
         contact = next((c for c in self.contacts if c.cache_key == cache_key), None)
         if contact is None:
             return
         new_text = self._contact_label(contact)
-        for item in contact_list.children:
-            if getattr(item, "_contact_id", None) != cache_key:
-                continue
-            label = item.children[0] if item.children else None
-            if label is None:
-                return
-            if getattr(item, "_label_text", None) != new_text:
-                label.update(new_text)
-                item._label_text = new_text
+        item = self._contact_widgets.get(cache_key)
+        if item is None:
             return
+        label = item.children[0] if item.children else None
+        if label is None:
+            return
+        if getattr(item, "_label_text", None) != new_text:
+            label.update(new_text)
+            item._label_text = new_text
 
     def _contact_label(self, contact: ChatContact) -> str:
 
@@ -1195,6 +1193,7 @@ class SignalTUI(App):
             # Composizione/insieme cambiato (filtro nuovo/stato iniziale) ->
             # rebuild completo.
             contact_list.clear()
+            self._contact_widgets.clear()
             for c in filtered:
                 text = self._contact_label(c)
                 item = ListItem(Label(text))
@@ -1202,6 +1201,7 @@ class SignalTUI(App):
                 item._label_text = text
                 item.add_class(self._protocol_class(c))
                 contact_list.append(item)
+                self._contact_widgets[c.cache_key] = item
 
         if self.selected_contact and self.selected_contact in filtered:
             contact_list.index = filtered.index(self.selected_contact)

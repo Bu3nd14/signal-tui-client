@@ -1039,6 +1039,7 @@ class WhatsAppBackend(ChatBackend):
             ]
             desired_events = [
                 "message", "message.any", "message.ack", "message.ack.group",
+                "presence.update", "presence",
             ]
             if webhook in urls:
                 # URL già registrato — controlla se anche gli eventi sono

@@ -408,7 +408,9 @@ class TestUpdateTypingLabel:
                 self.children = []
 
         lst = List()
-        lst.children = [Item(cache_key)]
+        item = Item(cache_key)
+        lst.children = [item]
+        app._contact_widgets = {cache_key: item}
         app.query_one = lambda *a, **k: lst
         # la lista contatti NON deve essere riordinata né ridisegnata.
         app._sort_contacts = MagicMock()
