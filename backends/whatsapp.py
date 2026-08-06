@@ -815,7 +815,7 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent
         return _event_from_typing(content)
     if evt in ("receipt", "receipts.update", "receipt/update", "message.receipt"):
         return _event_from_receipt(content)
-    if evt in ("message.ack", "message/ack"):
+    if evt in ("message.ack", "message/ack", "message.ack.group"):
         return _event_from_ack(content)
     # Some APIs emit the message object directly without an 'event' field.
     if content.get("remoteJid") or content.get("from") or content.get("chatId"):
@@ -1087,10 +1087,7 @@ class WhatsAppBackend(ChatBackend):
                 for w in (configured.get("webhooks") or [])
             ]
             desired_events = [
-                "message", "message.any", "message.new",
-                "messages.upsert", "messages/upsert",
-                "message.ack", "message/ack",
-                "message.receipt",
+                "message", "message.any", "message.ack", "message.ack.group",
             ]
             if webhook in urls:
                 # URL già registrato — controlla se anche gli eventi sono
