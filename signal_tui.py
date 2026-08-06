@@ -69,6 +69,18 @@ def _global_exception_handler(exc_type, exc_value, exc_traceback):
 sys.excepthook = _global_exception_handler
 
 
+# Diagnostic helper: writes to a file (never terminal — TUI owns the terminal).
+def _log_tui_debug(source: str, fmt: str, *args) -> None:
+    """Append a line to /tmp/signal-tui-debug.log.  Best-effort, never raises."""
+    try:
+        with open("/tmp/signal-tui-debug.log", "a") as f:
+            ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+            msg = fmt % args if args else fmt
+            f.write(f"{ts} [{source}] {msg}\n")
+    except Exception:
+        pass
+
+
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -637,21 +649,42 @@ class SignalTUI(App):
             return False
 
         contact = event.payload.get("contact")
+        identified_via = "payload"
         if contact is None:
             # Resolve via the backend's contact table, or fall back to a
             # placeholder built from the event's contact id.
             identify = getattr(backend, "_identify_contact", None)
             if identify is not None:
                 contact = identify(event.contact_id)
+                identified_via = "identify" if contact is not None else "identify→None"
             if contact is None:
                 contact = ChatContact(
                     id=event.contact_id,
                     display_name=event.contact_id,
                     protocol=event.protocol,
                 )
+                identified_via = "placeholder"
         cache_key = contact.cache_key
         ts = event.payload.get("timestamp", 0)
         is_mine = event.payload.get("is_mine", False)
+
+        # ── diagnostic: trace group message routing (file only, never terminal) ──
+        if self.selected_contact is not None:
+            _selected_ck = self.selected_contact.cache_key
+            _is_group = event.payload.get("is_group", False)
+            _match = (cache_key == _selected_ck)
+            if _is_group or not _match:
+                _log_tui_debug(
+                    "_handle_message_event",
+                    "contact_id=%s identified=%s cache_key=%s "
+                    "sel_key=%s match=%s is_group=%s is_mine=%s ts=%s text=%.40s "
+                    "seen=%s",
+                    event.contact_id, identified_via, cache_key,
+                    _selected_ck, _match, _is_group, is_mine, ts,
+                    event.payload.get("text", ""),
+                    (event.protocol, cache_key, int(ts),
+                     event.payload.get("text", "")) in self._seen_message_ids,
+                )
 
         # Aggiorna il timestamp dell'ultimo messaggio del contatto così la
         # lista contatti (ordinata per "ultimo messaggio") risente subito del

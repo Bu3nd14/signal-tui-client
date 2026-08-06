@@ -621,11 +621,6 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
     if not attachment_id and raw.get("hasMedia"):
         media = raw.get("media")
         if isinstance(media, dict):
-            logger.info(
-                "📎 [hasMedia] full media dict: %s",
-                {k: (str(v)[:80] if not isinstance(v, dict) else "dict(%d keys)" % len(v))
-                 for k, v in media.items()},
-            )
             mime = (media.get("mimetype") or "").lower()
             if mime.startswith("image/"):
                 msg_type = "image"
@@ -647,22 +642,6 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
                 or mime
                 or "Media"
             )
-
-    # Debug: for non-text messages, log raw structure so we see the real WAHA shape.
-    if msg_type != "text" or attachment_id:
-        logger.info(
-            "📎 [event_from_message] raw keys=%s msg keys=%s",
-            list(raw.keys())[:12],
-            list(raw.get("message", {}).keys())[:8] if isinstance(raw.get("message"), dict) else "no-msg",
-        )
-
-    logger.info(
-        "📎 [event_from_message] chat=%s type=%s msg_type=%s attachments=%s → id=%s info=%s | raw_keys=%s",
-        chat_jid, raw.get("type"), msg_type,
-        len(attachments) if isinstance(attachments, list) else type(attachments).__name__,
-        attachment_id, attachment_info,
-        list(raw.keys())[:15],
-    )
 
     # Rileva se la chat è un gruppo WhatsApp (JID termina con @g.us).
     is_group = chat_jid.endswith("@g.us")
