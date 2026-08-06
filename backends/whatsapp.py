@@ -900,6 +900,16 @@ class WhatsAppBackend(ChatBackend):
                         )
 
         event = _event_from_raw(raw, self._contacts_by_jid)
+
+        if evt_name.startswith("presence"):
+            # TEMP: log presence events to debug typing indicator
+            import json as _json
+            try:
+                with open("/tmp/wa-presence.log", "a") as f:
+                    f.write(f"event={'OK' if event else 'NONE'} raw={_json.dumps(raw, default=str)}\n")
+            except Exception:
+                pass
+
         if event is None:
             # Even when the raw event is not recognised as a receipt/typing
             # (e.g. message.ack with status < 3), a new outgoing message may
