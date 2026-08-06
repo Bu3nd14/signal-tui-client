@@ -691,7 +691,7 @@ class SignalTUI(App):
             self._typing_mumbling[cache_key] = time.time() + self._TYPING_MUMBLING_DURATION
 
         # If it's the current contact, show it immediately; else bump unread.
-        if self.selected_contact and self.selected_contact.cache_key == cache_key:
+        if self.selected_contact and self.selected_contact.cache_key == cache_key and added:
             # Gate di visualizzazione LIVE: usa l'identità (protocol, key, ts,
             # testo) come _refresh_chat, NON il solo timestamp.  Due messaggi
             # WhatsApp distinti nello stesso secondo (stesso ts) devono essere
