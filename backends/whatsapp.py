@@ -750,6 +750,8 @@ def _event_from_typing(raw: dict) -> ChatEvent | None:
         raw.get("chatId")
         or raw.get("from")
         or raw.get("remoteJid")
+        or raw.get("id")
+        or raw.get("participant")
         or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
     )
     if not chat_jid:
