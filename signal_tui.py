@@ -818,14 +818,26 @@ class SignalTUI(App):
             List of message dicts that had their status changed.
         """
         chat_log = self.query_one("#chat-log", Vertical)
+        # Build timestamp→widget index once (O(M)) instead of scanning
+        # children for every receipt (O(N×M)).
+        by_ts: dict[int, MessageWidget] = {}
+        for child in chat_log.children:
+            if isinstance(child, MessageWidget):
+                by_ts[child._msg_timestamp] = child
+
         for msg in updated_messages:
             ts = msg.get("timestamp", 0)
             new_status = msg.get("status", "sent")
-            # Fuzzy match — WAHA timestamps (seconds) converted to ms may
-            # differ by a few ms from the optimistic-send timestamp.
-            for child in chat_log.children:
-                if isinstance(child, MessageWidget) and abs(child._msg_timestamp - ts) <= 2000:
-                    child.set_status(new_status)
+            # Exact match O(1) — covers the common case.
+            widget = by_ts.get(ts)
+            if widget is not None:
+                widget.set_status(new_status)
+                continue
+            # Fuzzy fallback: WAHA timestamps may differ by a few ms from
+            # the optimistic-send timestamp.  Runs only on cache miss.
+            for candidate_ts, w in by_ts.items():
+                if abs(candidate_ts - ts) <= 2000:
+                    w.set_status(new_status)
                     break
 
     # ─── Typing indicators ──────────────────────────────────────────────────

@@ -2,11 +2,6 @@
 
 ## 🔴 CRITICAL — Blocks UI Thread
 
-### R2. `_update_message_widgets_status` O(N×M) scan per receipt
-**File:** `signal_tui.py:776-793`
-
-Nested loop: for each updated receipt, scans all chat_log children. With 200 visible messages, a 2-id receipt = 400 comparisons.
-
 ### R3. `on_input_changed` → `show_suggestions` → `_rebuild` on every keystroke
 **File:** `emoji_picker.py:588-601` + `signal_tui.py:1568-1587`
 
