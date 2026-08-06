@@ -1,9 +1,60 @@
 # Test Report — Signal TUI Client
 
-**Data:** 2026-08-03  
-**Git commit:** `feature/sqlite-cache`  
-**Python:** 3.12.3  
-**Stato:** ✅ 142/142 test superati
+**Data:** 2026-08-06
+**Git commit:** `6e66f45` (master, merge `whatsapp-image-support`)
+**Python:** 3.12.3
+**Stato:** ✅ 353/353 test superati
+
+---
+
+## Riepilogo
+
+| Modulo | File | Test | Esito |
+|--------|------|------|-------|
+| WhatsApp Backend | `test_whatsapp_backend.py` | 92 | ✅ |
+| UI Protocol | `test_ui_protocol.py` | 44 | ✅ |
+| Typing Indicator | `test_typing_indicator.py` | 29 | ✅ |
+| Backends (Manager) | `test_backends.py` | 25 | ✅ |
+| Docker Compose | `test_docker_compose_extra_hosts.py` | 2 | ✅ |
+| Cache (SQLite) | `test_backend_cache.py` | 18 | ✅ |
+| Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
+| Script installazione | `test_install_script.py` | 16 | ✅ |
+| Refresh Chat | `test_refresh_chat.py` | 15 | ✅ |
+| WA Startup/Resync | `test_wa_startup_resync.py` | 15 | ✅ |
+| UI Components | `test_ui_components.py` | 14 | ✅ |
+| Migrazione Protocollo | `test_migrate_protocol.py` | 11 | ✅ |
+| Cache Debounce | `test_cache_debounce.py` | 10 | ✅ |
+| Contact Picker | `test_contact_picker.py` | 9 | ✅ |
+| RPC / Daemon | `test_backend_rpc.py` | 8 | ✅ |
+| Invio messaggi | `test_backend_send.py` | 6 | ✅ |
+| Lock File | `test_signal_tui_lock.py` | 6 | ✅ |
+| Attachment | `test_backend_attachments.py` | 5 | ✅ |
+| QR ASCII | `test_qr_ascii.py` | 4 | ✅ |
+| Migrazione SQLite | `test_migrate_sqlite.py` | 4 | ✅ |
+| Contatti | `test_backend_contacts.py` | 4 | ✅ |
+| **Totale** | | **353** | **✅ 353/353** |
+
+---
+
+## Novità WhatsApp Image Support
+
+Aggiunti 14 test nel modulo `test_whatsapp_backend.py` per la nuova funzionalità:
+
+| Test | Descrizione |
+|------|-------------|
+| `test_hasMedia_image` | Estrazione immagine da `hasMedia`/`media` WAHA |
+| `test_hasMedia_video` | Estrazione video → `msg_type=attachment` |
+| `test_hasMedia_audio` | Estrazione audio → `msg_type=attachment` |
+| `test_hasMedia_no_media_dict` | `hasMedia=True` ma `media=None` → testo |
+| `test_download_media_direct_binary` | Download via endpoint WAHA binary |
+| `test_download_media_falls_back_to_legacy_url` | Fallback a URL legacy |
+| `test_download_media_returns_none_when_all_fail` | Tutti i path falliscono → None |
+| `test_download_media_direct_url` | Download da URL HTTP diretto |
+| `test_download_media_encodes_at_sign` | Encoding `@` → `%40` nell'URL |
+| `test_get_attachment_path` | Fast-path: file già in cache |
+| `test_get_attachment_path_missing_downloads` | Lazy download quando file assente |
+| `test_get_attachment_path_download_fails_returns_none` | Download fallito → None |
+| `test_get_attachment_path_no_rest_returns_none` | Nessun REST client → None |
 
 
 
