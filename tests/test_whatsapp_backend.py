@@ -1541,7 +1541,7 @@ class TestWhatsAppWebhookRegistration:
         mock_put.assert_called_once()
         call_config = mock_put.call_args[0][0]
         assert call_config["config"]["webhooks"][0]["url"] == webhook
-        assert call_config["config"]["webhooks"][0]["events"] == ["message", "message.any", "message.ack", "message.ack.group", "presence.update"]
+        assert call_config["config"]["webhooks"][0]["events"] == ["message", "message.any", "message.ack", "message.ack.group"]
 
     def test_configure_webhook_skips_when_already_registered(self):
         import backends.whatsapp as wa_mod
@@ -1549,7 +1549,7 @@ class TestWhatsAppWebhookRegistration:
         webhook = "http://host.docker.internal:8088/webhook"
         # Config già aggiornata con entrambi gli eventi → nessun PUT.
         with patch.object(backend._rest, "get_session_status", return_value={
-            "config": {"webhooks": [{"url": webhook, "events": ["message", "message.any", "message.ack", "message.ack.group", "presence.update"]}]}
+            "config": {"webhooks": [{"url": webhook, "events": ["message", "message.any", "message.ack", "message.ack.group"]}]}
         }),              patch.object(backend._rest, "update_session_config") as mock_put,              patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook):
             backend._configure_webhook()
         # Gia' configurato con tutti gli eventi → nessun PUT.
@@ -1567,7 +1567,7 @@ class TestWhatsAppWebhookRegistration:
         # Config vecchia (solo message) → PUT con entrambi gli eventi.
         mock_put.assert_called_once()
         call_config = mock_put.call_args[0][0]
-        assert call_config["config"]["webhooks"][0]["events"] == ["message", "message.any", "message.ack", "message.ack.group", "presence.update"]
+        assert call_config["config"]["webhooks"][0]["events"] == ["message", "message.any", "message.ack", "message.ack.group"]
 
     def test_configure_webhook_never_raises_on_error(self):
         import backends.whatsapp as wa_mod
