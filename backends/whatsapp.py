@@ -376,7 +376,7 @@ class WhatsAppRESTClient:
                 safe_url = parsed.scheme + "://" + host + safe_path
             except Exception:
                 safe_url = media_id_or_url
-            logger.info("⬇️ [download_media] fetching direct URL: %s", safe_url[:140])
+            logger.debug("⬇️ [download_media] fetching direct URL: %s", safe_url[:140])
             try:
                 headers = {"Accept": "*/*"}
                 if self.api_key:
@@ -387,30 +387,30 @@ class WhatsAppRESTClient:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     self.last_status = getattr(resp, "status", 200)
                     data = resp.read()
-                    logger.info("⬇️ [download_media] direct URL OK, %d bytes", len(data))
+                    logger.debug("⬇️ [download_media] direct URL OK, %d bytes", len(data))
                     return data
             except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
-                logger.info("⬇️ [download_media] direct URL failed: %s", exc)
+                logger.debug("⬇️ [download_media] direct URL failed: %s", exc)
                 return None
         # 1) WAHA Core: direct binary endpoint — percent-encode the id
         #    so @lid / @c.us / @g.us don't become userinfo in the URL.
         encoded = quote(media_id_or_url, safe="")
         direct_url = f"/api/{self.session_name}/{encoded}/download"
-        logger.info("⬇️ [download_media] id=%s trying direct binary: %s", media_id_or_url, direct_url)
+        logger.debug("⬇️ [download_media] id=%s trying direct binary: %s", media_id_or_url, direct_url)
         raw = self._request_raw(
             "GET",
             direct_url,
             timeout=timeout,
         )
         if raw:
-            logger.info("⬇️ [download_media] direct binary OK, %d bytes", len(raw))
+            logger.debug("⬇️ [download_media] direct binary OK, %d bytes", len(raw))
             return raw
-        logger.info("⬇️ [download_media] direct binary returned None (status=%s)",
+        logger.debug("⬇️ [download_media] direct binary returned None (status=%s)",
                     self.last_status)
         # 2) Legacy: JSON endpoint that returns a redirect URL.
         download_url = self.get_download_url(media_id_or_url)
         if download_url:
-            logger.info("⬇️ [download_media] falling back to legacy URL: %s", download_url)
+            logger.debug("⬇️ [download_media] falling back to legacy URL: %s", download_url)
             try:
                 headers = {"Accept": "*/*"}
                 req = urllib.request.Request(
@@ -419,21 +419,21 @@ class WhatsAppRESTClient:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     self.last_status = getattr(resp, "status", 200)
                     data = resp.read()
-                    logger.info("⬇️ [download_media] legacy URL OK, %d bytes", len(data))
+                    logger.debug("⬇️ [download_media] legacy URL OK, %d bytes", len(data))
                     return data
             except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
-                logger.info("⬇️ [download_media] legacy URL failed: %s", exc)
+                logger.debug("⬇️ [download_media] legacy URL failed: %s", exc)
                 return None
         # 2) WAHA Files API: /api/files/default/{id} — same endpoint used
         #    by media.url, but constructed from a bare message id.
         #    This rescues cached entries stored before media.url was captured
         #    and handles edge cases where media.url is absent.
-        logger.info("⬇️ [download_media] trying Files API fallback for id=%s", media_id_or_url)
+        logger.debug("⬇️ [download_media] trying Files API fallback for id=%s", media_id_or_url)
         raw = self._request_raw("GET", f"/api/files/default/{encoded}", timeout=timeout)
         if raw:
-            logger.info("⬇️ [download_media] Files API OK, %d bytes", len(raw))
+            logger.debug("⬇️ [download_media] Files API OK, %d bytes", len(raw))
             return raw
-        logger.info("⬇️ [download_media] all paths failed for id=%s", media_id_or_url)
+        logger.debug("⬇️ [download_media] all paths failed for id=%s", media_id_or_url)
         return None
 
 
@@ -879,8 +879,7 @@ class WhatsAppBackend(ChatBackend):
         """
         if not isinstance(raw, dict):
             return False
-        logger.info("📨 [handle_webhook] POST received event=%s keys=%s",
-                    raw.get("event"), list(raw.keys())[:10])
+        _log_webhook("handle_webhook", "POST received event=%s", raw.get("event"))
 
         # ── message.ack: extract & ingest BEFORE event normalisation ──────
         # Fix: WAHA sends message.ack INSTEAD of a separate message event for
@@ -939,6 +938,7 @@ class WhatsAppBackend(ChatBackend):
                                 "sender": "You",
                                 "timestamp": ack_ts,
                                 "id": content.get("id"),
+                                "is_group": ack_contact.endswith("@g.us") if ack_contact else False,
                             },
                         )
 
@@ -951,8 +951,7 @@ class WhatsAppBackend(ChatBackend):
             if ack_msg_event is not None:
                 self._enqueue_event(ack_msg_event)
                 return True
-            logger.info("📨 [handle_webhook] unrecognised event=%s keys=%s",
-                        raw.get("event"), list(raw.keys())[:8])
+            _log_webhook("handle_webhook", "unrecognised event=%s", raw.get("event"))
             return False
 
         # When a message.ack resulted in a new message being ingested AND also
@@ -1378,7 +1377,7 @@ class WhatsAppBackend(ChatBackend):
         auto-downloads attachments, but with explicit lazy-fetch for WAHA.
         """
         if not attachment_id or not self._rest:
-            logger.info("🖼️ [get_attachment_path] early exit: id=%s rest=%s",
+            logger.debug("🖼️ [get_attachment_path] early exit: id=%s rest=%s",
                         attachment_id, self._rest is not None)
             return None
 
@@ -1388,20 +1387,20 @@ class WhatsAppBackend(ChatBackend):
 
         # Fast path: already on disk.
         if candidate.is_file():
-            logger.info("🖼️ [get_attachment_path] fast-path HIT: %s", candidate)
+            logger.debug("🖼️ [get_attachment_path] fast-path HIT: %s", candidate)
             return candidate
 
-        logger.info("🖼️ [get_attachment_path] local miss, downloading id=%s → %s",
+        logger.debug("🖼️ [get_attachment_path] local miss, downloading id=%s → %s",
                     attachment_id, candidate)
         # Lazy download from WAHA.
         raw = self._rest.download_media(attachment_id)
         if not raw:
-            logger.info("🖼️ [get_attachment_path] download returned None")
+            logger.debug("🖼️ [get_attachment_path] download returned None")
             return None
 
         try:
             candidate.write_bytes(raw)
-            logger.info("🖼️ [get_attachment_path] saved %d bytes → %s", len(raw), candidate)
+            logger.debug("🖼️ [get_attachment_path] saved %d bytes → %s", len(raw), candidate)
         except OSError:
             return None
 

@@ -591,11 +591,11 @@ class SignalTUI(App):
         att_path: Path | None = None
         if attachment_id:
             resolved_protocol = protocol or PROTOCOL_SIGNAL
-            logger.info("🖼️ [_render_image_in_chat] protocol=%s resolved=%s id=%s",
+            logger.debug("🖼️ [_render_image_in_chat] protocol=%s resolved=%s id=%s",
                         protocol, resolved_protocol, attachment_id)
             att_path = self.manager.get_attachment_path(resolved_protocol, attachment_id)
 
-        logger.info("🖼️ [_render_image_in_chat] resolved att_path=%s", att_path)
+        logger.debug("🖼️ [_render_image_in_chat] resolved att_path=%s", att_path)
 
         if att_path is None:
             fallback = f"[🖼️ Image: {attachment_info}]"
@@ -668,23 +668,21 @@ class SignalTUI(App):
         ts = event.payload.get("timestamp", 0)
         is_mine = event.payload.get("is_mine", False)
 
-        # ── diagnostic: trace group message routing (file only, never terminal) ──
+        # ── diagnostic: trace message routing (file only, never terminal) ──
         if self.selected_contact is not None:
             _selected_ck = self.selected_contact.cache_key
-            _is_group = event.payload.get("is_group", False)
             _match = (cache_key == _selected_ck)
-            if _is_group or not _match:
-                _log_tui_debug(
-                    "_handle_message_event",
-                    "contact_id=%s identified=%s cache_key=%s "
-                    "sel_key=%s match=%s is_group=%s is_mine=%s ts=%s text=%.40s "
-                    "seen=%s",
-                    event.contact_id, identified_via, cache_key,
-                    _selected_ck, _match, _is_group, is_mine, ts,
-                    event.payload.get("text", ""),
-                    (event.protocol, cache_key, int(ts),
-                     event.payload.get("text", "")) in self._seen_message_ids,
-                )
+            _is_group = event.payload.get("is_group", False)
+            _log_tui_debug(
+                "_handle_message_event",
+                "contact_id=%s ident=%s ck=%s sel=%s match=%s grp=%s mine=%s ts=%s "
+                "seen=%s text=%.40s",
+                event.contact_id, identified_via, cache_key,
+                _selected_ck, _match, _is_group, is_mine, ts,
+                (event.protocol, cache_key, int(ts),
+                 event.payload.get("text", "")) in self._seen_message_ids,
+                event.payload.get("text", ""),
+            )
 
         # Aggiorna il timestamp dell'ultimo messaggio del contatto così la
         # lista contatti (ordinata per "ultimo messaggio") risente subito del
