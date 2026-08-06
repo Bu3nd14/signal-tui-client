@@ -686,11 +686,8 @@ class SignalRPCClient:
                         if "data" in current_event:
                             try:
                                 data = json.loads(current_event["data"])
-                                # data is a list of JSON strings; extract envelopes
-                                for item_str in data:
-                                    item = json.loads(item_str)
-                                    if "envelope" in item:
-                                        yield item
+                                if isinstance(data, dict) and "envelope" in data:
+                                    yield data
                             except json.JSONDecodeError:
                                 pass
                         current_event = {}

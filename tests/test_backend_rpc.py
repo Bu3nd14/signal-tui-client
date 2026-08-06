@@ -88,10 +88,10 @@ class TestSignalSSE:
     def test_listen_events_yields_envelope(self):
         """An SSE stream with one event → yields the parsed envelope."""
         client = SignalRPCClient(SSE_URL)
-        # Simulated SSE stream: event line, data line, blank terminator, keep-alive
+        # Simulated SSE stream: event line, data line (single JSON object), blank terminator, keep-alive
         sse_body = (
             b'event:receive\n'
-            b'data:["{\\"envelope\\":{\\"source\\":\\"+39\\"}}"]\n'
+            b'data:{"envelope":{"source":"+39"}}\n'
             b'\n'
             b':keep-alive\n'
         )
@@ -112,7 +112,7 @@ class TestSignalSSE:
             b':\n'                     # keep-alive
             b':\n'                     # keep-alive
             b'event:receive\n'
-            b'data:["{\\"envelope\\":{\\"source\\":\\"+39\\"}}"]\n'
+            b'data:{"envelope":{"source":"+39"}}\n'
             b'\n'
         )
 
@@ -141,7 +141,7 @@ class TestSignalSSE:
             b'data:not-valid-json\n'
             b'\n'
             b'event:receive\n'
-            b'data:["{\\"envelope\\":{\\"source\\":\\"+39\\"}}"]\n'
+            b'data:{"envelope":{"source":"+39"}}\n'
             b'\n'
         )
 
