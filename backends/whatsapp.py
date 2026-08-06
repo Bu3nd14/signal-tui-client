@@ -501,22 +501,6 @@ def _resolve_sender_name(sender: str, contacts_by_jid: dict | None) -> str:
 
 
 
-def _log_webhook(source: str, fmt: str, *args) -> None:
-    """Write a diagnostic line to /tmp/whatsapp-webhook.log.
-
-    The terminal is occupied by the TUI so we must never write to stdout/
-    stderr from background threads.  Best-effort — never raises.
-    """
-    try:
-        with open("/tmp/whatsapp-webhook.log", "a") as f:
-            import time
-            ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-            msg = fmt % args if args else fmt
-            f.write(f"{ts} [{source}] {msg}\n")
-    except Exception:
-        pass
-
-
 def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent | None:
     """Normalize a raw incoming message dict into a ``ChatEvent``."""
 
@@ -550,12 +534,6 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
             or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
         )
     if not chat_jid:
-        _log_webhook(
-            "_event_from_message",
-            "chat_jid=None is_mine=%s chatId=%s from=%s remoteJid=%s key.remoteJid=%s to=%s",
-            is_mine, raw.get("chatId"), raw.get("from"), raw.get("remoteJid"),
-            (raw.get("key") or {}).get("remoteJid"), raw.get("to"),
-        )
         return None
 
     text = raw.get("text") or raw.get("body") or (raw.get("message") or {}).get("conversation") or ""
@@ -879,11 +857,6 @@ class WhatsAppBackend(ChatBackend):
         """
         if not isinstance(raw, dict):
             return False
-        _log_webhook("handle_webhook",
-            "POST event=%s payload_keys=%s",
-            raw.get("event"),
-            list(raw.get("payload", raw).keys())[:15] if isinstance(raw.get("payload", raw), dict) else "no-payload",
-        )
 
         # ── message.ack: extract & ingest BEFORE event normalisation ──────
         # Fix: WAHA sends message.ack INSTEAD of a separate message event for
@@ -909,15 +882,6 @@ class WhatsAppBackend(ChatBackend):
                     or content.get("chatId")
                     or content.get("remoteJid")
                     or (content.get("key") or {}).get("remoteJid")
-                )
-                _log_webhook(
-                    "handle_webhook",
-                    "ack fromMe=True id=%s ack_contact=%s to=%s chatId=%s remoteJid=%s key.remoteJid=%s",
-                    content.get("id"), ack_contact,
-                    content.get("to") is not None,
-                    content.get("chatId") is not None,
-                    content.get("remoteJid") is not None,
-                    (content.get("key") or {}).get("remoteJid") is not None,
                 )
                 if ack_contact:
                     ack_ts = int(content.get("timestamp") or 0) * 1000  # WAHA uses seconds, we use ms
@@ -955,7 +919,7 @@ class WhatsAppBackend(ChatBackend):
             if ack_msg_event is not None:
                 self._enqueue_event(ack_msg_event)
                 return True
-            _log_webhook("handle_webhook", "unrecognised event=%s", raw.get("event"))
+
             return False
 
         # When a message.ack resulted in a new message being ingested AND also
