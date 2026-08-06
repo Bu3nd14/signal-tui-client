@@ -502,12 +502,35 @@ def _resolve_sender_name(sender: str, contacts_by_jid: dict | None) -> str:
 def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent | None:
     """Normalize a raw incoming message dict into a ``ChatEvent``."""
 
-    chat_jid = _jid_string(
-        raw.get("chatId")
-        or raw.get("from")
-        or raw.get("remoteJid")
-        or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
-    )
+    is_mine = bool(raw.get("fromMe") or raw.get("isMe") or raw.get("outgoing"))
+
+    # Fix: for outgoing messages (fromMe=True) the ``from`` field holds the
+    # USER'S own JID, NOT the chat partner / group.  We must use ``remoteJid``
+    # (or ``to``, or ``chatId``) instead, mirroring _event_from_ack's logic.
+    # Otherwise the ChatEvent is attributed to the wrong contact_id, the
+    # TUI's cache_key comparison fails, and the message is never displayed
+    # in real-time (only appears after re-entering the chat via fetch_history).
+    # WAHA may nest remoteJid inside ``key`` (e.g. /api/messages envelope).
+    # ``from`` is kept as ABSOLUTE last resort for outgoing messages (when the
+    # REST response lacks remoteJid entirely, e.g. fetch_history context).
+    _nested_remote = (raw.get("key") or {}).get("remoteJid")
+    if is_mine:
+        chat_jid = _jid_string(
+            raw.get("chatId")
+            or raw.get("remoteJid")
+            or _nested_remote
+            or raw.get("to")
+            or raw.get("from")  # last resort: user's own JID (fallback)
+            or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
+        )
+    else:
+        chat_jid = _jid_string(
+            raw.get("chatId")
+            or raw.get("from")
+            or raw.get("remoteJid")
+            or _nested_remote
+            or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
+        )
     if not chat_jid:
         return None
 
@@ -519,7 +542,6 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
     elif isinstance(ts, str) and ts.isdigit():
         t = int(ts)
         ts_ms = t * 1000 if t < 10**12 else t
-    is_mine = bool(raw.get("fromMe") or raw.get("isMe") or raw.get("outgoing"))
     msg_id = raw.get("id") or (raw.get("key") or {}).get("id") or str(ts_ms)
     msg_type = _msg_type(raw)
     caption = raw.get("caption") or ""
