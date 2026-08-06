@@ -18,17 +18,6 @@ from emoji_picker import EmojiCompletionWidget
 
 logger = logging.getLogger(__name__)
 
-# Debug log per dimensioni immagine nella modale
-_DEBUG_LOG = Path("./debug_image.log")
-
-def _log_debug(msg: str) -> None:
-    """Append a line to the debug log file."""
-    try:
-        with _DEBUG_LOG.open("a") as f:
-            f.write(msg + "\n")
-    except Exception:
-        pass
-
 
 class ContactListView(ListView):
     """ListView per la lista contatti.
@@ -392,12 +381,6 @@ class ImageModalScreen(ModalScreen):
         available_cols = max(40, img.region.width - 2)
         catimg_pixels = available_cols * 2
 
-        _log_debug(
-            f"[_start_image_render] RichLog region={img.region} "
-            f"available_cols={available_cols} "
-            f"catimg_pixels={catimg_pixels}"
-        )
-
         self._catimg_pixels = catimg_pixels
         self.run_worker(self._render_image(), exclusive=False)
 
@@ -429,24 +412,13 @@ class ImageModalScreen(ModalScreen):
 
             ansi_output = stdout.decode("utf-8", errors="replace")
 
-            # Log catimg output stats
-            lines = ansi_output.splitlines()
-            max_line_len = max((len(l) for l in lines), default=0)
-            _log_debug(
-                f"[_render_image] catimg -w {self._catimg_pixels} → "
-                f"{len(lines)} lines, max width {max_line_len} chars"
-            )
-
         except (FileNotFoundError, ProcessLookupError):
-            logger.debug("catimg not found — cannot render image in modal")
             img.write("⚠️ catimg is not installed on this system.")
             return
         except asyncio.TimeoutError:
-            logger.debug("catimg timed out")
             img.write("⚠️ Image rendering timed out.")
             return
         except Exception as exc:
-            logger.debug("modal image rendering failed: %s", exc)
             img.write(f"⚠️ Could not render image: {exc}")
             return
 

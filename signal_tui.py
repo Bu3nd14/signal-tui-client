@@ -580,11 +580,7 @@ class SignalTUI(App):
         att_path: Path | None = None
         if attachment_id:
             resolved_protocol = protocol or PROTOCOL_SIGNAL
-            logger.debug("🖼️ [_render_image_in_chat] protocol=%s resolved=%s id=%s",
-                        protocol, resolved_protocol, attachment_id)
             att_path = self.manager.get_attachment_path(resolved_protocol, attachment_id)
-
-        logger.debug("🖼️ [_render_image_in_chat] resolved att_path=%s", att_path)
 
         if att_path is None:
             fallback = f"[🖼️ Image: {attachment_info}]"
@@ -1771,12 +1767,8 @@ class SignalTUI(App):
                     if not self._polling_active:
                         return
                     time.sleep(0.1)
-            except Exception as exc:
-                try:
-                    with open("/tmp/signal-poll-error.log", "a") as f:
-                        f.write(f"{time.time()}: {exc}\n")
-                except Exception:
-                    pass
+            except Exception:
+                pass
             # Re-check before the next poll so an empty round still exits.
             if not self._polling_active:
                 return
