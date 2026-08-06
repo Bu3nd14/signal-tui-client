@@ -855,30 +855,15 @@ def _clean_download_dir(keep: str | None = None) -> None:
             pass
 
 
-def serve_attachment_for_download(attachment_id: str) -> str:
-    """Serve an attachment file via the persistent HTTP server.
+def _serve_file_path(att_path: Path) -> str:
+    """Serve a local file via the persistent HTTP server.
 
     The file is symlinked (or copied) into the temp download directory
-    under its original name, so the URL preserves the filename and
-    extension (e.g. ``http://ip:10042/photo.jpg``).
+    under its original name, so the URL preserves the filename.
 
-    Parameters
-    ----------
-    attachment_id:
-        The signal-cli attachment UUID.
-
-    Returns
-    -------
-    str
-        The full download URL, or an error message prefixed with ``ERROR:``.
+    Returns the full download URL string.
     """
-    att_path = get_attachment_path(attachment_id)
-    if att_path is None:
-        return f"ERROR: Attachment file not found on server (id={attachment_id})"
-
     url_base = _ensure_download_server()
-
-    # Remove previous files, then place the new one with its original name
     dl_dir = _get_temp_download_dir()
     _clean_download_dir()
 
@@ -886,11 +871,25 @@ def serve_attachment_for_download(attachment_id: str) -> str:
     try:
         link_path.symlink_to(att_path)
     except OSError:
-        # Symlink may fail; copy instead
         import shutil
         shutil.copy2(att_path, link_path)
 
     return f"{url_base}/{att_path.name}"
+
+
+def serve_attachment_for_download(attachment_id: str) -> str:
+    """Serve a Signal attachment file via the persistent HTTP server.
+
+    Resolves *attachment_id* to a local file via Signal's attachment store,
+    then symlinks/copies it into the temp download directory.
+
+    Returns the full download URL, or an error message prefixed with ``ERROR:``.
+    """
+    att_path = get_attachment_path(attachment_id)
+    if att_path is None:
+        return f"ERROR: Attachment file not found on server (id={attachment_id})"
+
+    return _serve_file_path(att_path)
 
 
 def serve_text_as_file(text: str, filename: str = "message.txt") -> str:

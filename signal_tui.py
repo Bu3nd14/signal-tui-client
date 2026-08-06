@@ -101,7 +101,6 @@ from backends import (
 from backends.config import whatsapp_enabled
 
 from backend import (
-    serve_attachment_for_download,
     serve_text_as_file,
     USER_NUMBER,
     DAEMON_HTTP_PORT,
@@ -2050,18 +2049,25 @@ class SignalTUI(App):
         text: str,
         attachment_id: str | None = None,
         timestamp: int = 0,
+        protocol: str | None = None,
     ) -> None:
         """Start a temporary HTTP server to serve the message content.
 
-        If ``attachment_id`` is provided, the original attachment file is
-        served.  Otherwise the message text is written to a .txt file and
-        served.
+        If ``attachment_id`` is provided and the protocol backend resolves
+        a local file, that file is served.  Otherwise the message text is
+        written to a .txt file and served.
 
         A clickable ``DownloadLinkWidget`` is mounted in the chat log.
         """
+        from backend import _serve_file_path
         if attachment_id:
-            # Serve the original attachment file
-            url = serve_attachment_for_download(attachment_id)
+            resolved = self.manager.get_attachment_path(
+                protocol or PROTOCOL_SIGNAL, attachment_id
+            )
+            if resolved is not None and resolved.is_file():
+                url = _serve_file_path(resolved)
+            else:
+                url = f"ERROR: Attachment file not found (id={attachment_id[:80]})"
         else:
             # Serve the message text as a .txt file
             # Use timestamp to create a unique filename
@@ -2105,9 +2111,11 @@ class SignalTUI(App):
         if self._download_mode:
             # In download mode: serve the file via HTTP
             text = event.attachment_path.name if event.attachment_path else "attachment"
+            protocol = self.selected_contact.protocol if self.selected_contact else None
             self._start_download(
                 text=text,
                 attachment_id=event.attachment_id,
+                protocol=protocol,
             )
             return
         if event.attachment_path:
