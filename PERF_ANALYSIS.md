@@ -2,13 +2,6 @@
 
 ## 🔴 CRITICAL — Blocks UI Thread
 
-### R1. `_mount_window` mounts 20 messages one at a time → 20 layout passes
-**File:** `signal_tui.py:1439-1476`
-
-Each `_add_message` → `mount()` triggers a Textual layout pass. 20 sequential mounts = 20 layout passes.
-
-**Fix:** Use `mount_all` or mount on a detached container then attach in one shot.
-
 ### R2. `_update_message_widgets_status` O(N×M) scan per receipt
 **File:** `signal_tui.py:776-793`
 
