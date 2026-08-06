@@ -11,7 +11,9 @@ TUI is gathered here so the UI only deals with normalized ``ChatContact`` /
 from __future__ import annotations
 
 import asyncio
+import queue
 import subprocess
+import threading
 import time
 
 from models import (
@@ -65,6 +67,10 @@ class SignalBackend(ChatBackend):
         self.daemon_proc: subprocess.Popen | None = None
         self._polling_active = False
 
+        # SSE real-time delivery
+        self._event_queue: queue.Queue[ChatEvent] = queue.Queue()
+        self._sse_thread: threading.Thread | None = None
+
         # Normalized contact list
         self.contacts: list[ChatContact] = []
         self._contacts_by_key: dict[str, ChatContact] = {}
@@ -84,41 +90,52 @@ class SignalBackend(ChatBackend):
         if _is_daemon_running():
             self._use_daemon = True
             self._load_contacts_rpc()
-            return
-
-        self.daemon_proc = subprocess.Popen(
-            [
-                str(SIGNAL_CLI_PATH),
-                "-u", self.user_number,
-                "daemon",
-                "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",
-                "--receive-mode", "on-connection",
-                "--no-receive-stdout",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        for _ in range(15):
-            try:
-                test = self._rpc._call("listContacts")
-                if "result" in test:
-                    self._use_daemon = True
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
         else:
-            # Daemon not available in time → use subprocess fallback.
-            self._use_daemon = False
-            self._load_contacts_subprocess()
+            self.daemon_proc = subprocess.Popen(
+                [
+                    str(SIGNAL_CLI_PATH),
+                    "-u", self.user_number,
+                    "daemon",
+                    "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",
+                    "--receive-mode", "on-start",
+                    "--no-receive-stdout",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
+            for _ in range(15):
+                try:
+                    test = self._rpc._call("listContacts")
+                    if "result" in test:
+                        self._use_daemon = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+            else:
+                # Daemon not available in time → use subprocess fallback.
+                self._use_daemon = False
+                self._load_contacts_subprocess()
+
+            if self._use_daemon:
+                self._load_contacts_rpc()
+
+        # Start real-time SSE listener if daemon is available
         if self._use_daemon:
-            self._load_contacts_rpc()
+            self._start_sse_listener()
 
     async def disconnect(self) -> None:
-        """Stop polling.  The daemon itself is left running by design."""
+        """Stop the SSE listener and polling.  The daemon itself is left running by design."""
         self._polling_active = False
+        # Signal the SSE thread to stop and wait for it
+        sse_thread = self._sse_thread
+        self._sse_thread = None
+        if sse_thread is not None and sse_thread.is_alive():
+            # Wake up the blocking urlopen by closing is not possible,
+            # but the thread checks _polling_active; the timeout (30 s)
+            # ensures it wakes up and exits within that window.
+            sse_thread.join(timeout=35)
 
     # ─── Contact loading ──────────────────────────────────────────────
 
@@ -547,56 +564,73 @@ class SignalBackend(ChatBackend):
             _update_message_status(msg["timestamp"], msg["status"])
         return updated
 
-    # ─── Receive loop ─────────────────────────────────────────────────
+    # ─── Receive loop (SSE real-time) ───────────────────────────────────
+
+    def _start_sse_listener(self) -> None:
+        """Start the SSE listener in a dedicated daemon thread."""
+        if self._sse_thread is not None and self._sse_thread.is_alive():
+            return
+        self._polling_active = True
+        self._sse_thread = threading.Thread(
+            target=self._sse_listener, name="signal-sse", daemon=True,
+        )
+        self._sse_thread.start()
+
+    def _sse_listener(self) -> None:
+        """Dedicated thread: connect to signal-cli SSE endpoint, push events
+        into ``_event_queue``.  Reconnects automatically on connection loss.
+
+        The ``urlopen`` call uses a 30-second socket timeout; if signal-cli
+        stops sending keep-alive comments (every 15 s), the socket will time
+        out and the generator returns, triggering a reconnect after a brief
+        pause.
+        """
+        while self._polling_active and self._sse_thread is not None:
+            try:
+                for envelope in self._rpc.listen_events(self.user_number):
+                    if not self._polling_active:
+                        return
+                    event = self.envelope_to_event(
+                        envelope.get("envelope", {})
+                    )
+                    if event is not None:
+                        self._event_queue.put(event)
+            except Exception:
+                pass
+            # Brief pause before reconnect
+            for _ in range(10):
+                if not self._polling_active:
+                    return
+                time.sleep(0.5)
 
     async def receive(self):
-        """Poll signal-cli and yield normalized ``ChatEvent`` objects."""
+        """Yield normalized ``ChatEvent`` objects from the SSE queue.
+
+        Implements the ``ChatBackend`` interface contract.  Events are
+        drained from the internal ``_event_queue``, which is populated in
+        real time by the SSE listener thread.
+        """
         self._polling_active = True
         while self._polling_active:
             try:
-                if self._use_daemon and self._rpc:
-                    messages = self._rpc.receive()
-                    for msg in messages:
-                        envelope = msg.get("envelope", {})
-                        event = self.envelope_to_event(envelope)
-                        if event is not None:
-                            yield event
+                yield self._event_queue.get(timeout=0.5)
+            except queue.Empty:
+                await asyncio.sleep(0)
             except Exception:
-                # Polling errors are non-fatal; logged by the caller.
                 pass
-            await asyncio.sleep(1)
 
     def poll_once(self) -> list[ChatEvent]:
-        """Perform one polling round and return the normalized events.
+        """Drain all pending events from the SSE queue without blocking.
 
-        A single blocking call to ``receive()`` that converts any envelopes
-        into ``ChatEvent`` objects.  It never sleeps and never loops internally,
-        so the caller (a worker thread) controls the cadence and can stop
-        promptly on shutdown.  Returns an empty list when there is nothing new.
+        Called by the ``_poll_worker`` thread in ``signal_tui.py``.
+        Replaces the old HTTP-polling approach with a non-blocking queue
+        drain.
         """
         events: list[ChatEvent] = []
-        try:
-            if self._use_daemon and self._rpc:
-                messages = self._rpc.receive()
-                for msg in messages:
-                    envelope = msg.get("envelope", {})
-                    event = self.envelope_to_event(envelope)
-                    if event is not None:
-                        events.append(event)
-        except Exception:
-            # Polling errors are non-fatal; logged by the caller.
-            pass
+        while True:
+            try:
+                events.append(self._event_queue.get_nowait())
+            except queue.Empty:
+                break
         return events
-
-    def receive_events_sync(self):
-        """Blocking-poll signal-cli and yield normalized ``ChatEvent`` objects.
-
-        NOTE: this generator only yields when messages arrive; when idle it
-        busy-polls and never relinquishes control, which defeats prompt
-        shutdown.  Prefer ``poll_once()`` driven by a worker loop that sleeps.
-        """
-        self._polling_active = True
-        while self._polling_active:
-            for event in self.poll_once():
-                yield event
 

@@ -51,6 +51,7 @@ def _get_user_number() -> str:
 USER_NUMBER = _get_user_number()
 DAEMON_HTTP_PORT = 8080
 DAEMON_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/rpc"
+SSE_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/events"
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 CACHE_FILE = CACHE_DIR / "messages.json"
 DB_FILE = CACHE_DIR / "messages.db"
@@ -646,11 +647,69 @@ class SignalRPCClient:
         return self._call("send", params)
 
     def receive(self) -> list[dict]:
-        """Receive messages."""
+        """Receive messages (legacy polling method, prefer listen_events for real-time)."""
         result = self._call("receive")
         if "error" in result:
             return []
         return result.get("result", [])
+
+    def listen_events(self, user_number: str):
+        """Connect to the signal-cli SSE endpoint and yield incoming envelopes.
+
+        Opens a long-lived HTTP GET connection to ``/api/v1/events``
+        (Server-Sent Events).  The daemon pushes new messages as they
+        arrive; keep-alive ``:\\n`` comments are sent every 15 s.
+
+        Each yielded value is a dict containing an ``envelope`` key,
+        matching the same structure previously returned by ``receive()``.
+
+        The connection is established with a 30-second socket timeout.
+        If no data (keep-alive or event) is received within that window,
+        the socket times out and the generator returns, allowing the
+        caller to reconnect.
+
+        Parameters
+        ----------
+        user_number:
+            The signal-cli account phone number, used as the ``account``
+            query parameter.
+        """
+        sse_url = SSE_URL + f"?account={user_number}"
+        try:
+            req = urllib.request.Request(sse_url, method="GET")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                current_event: dict[str, str] = {}
+                for line_bytes in resp:
+                    line = line_bytes.decode("utf-8").rstrip("\n").rstrip("\r")
+                    if not line:
+                        # Blank line → end of event
+                        if "data" in current_event:
+                            try:
+                                data = json.loads(current_event["data"])
+                                # data is a list of JSON strings; extract envelopes
+                                for item_str in data:
+                                    item = json.loads(item_str)
+                                    if "envelope" in item:
+                                        yield item
+                            except json.JSONDecodeError:
+                                pass
+                        current_event = {}
+                        continue
+                    if line.startswith(":"):
+                        # SSE comment / keep-alive — skip
+                        continue
+                    if ":" in line:
+                        field, _, value = line.partition(":")
+                        # Trim a single leading space per spec
+                        if value.startswith(" "):
+                            value = value[1:]
+                        if field not in current_event:
+                            current_event[field] = value
+                        else:
+                            current_event[field] += "\n" + value
+        except Exception:
+            # Connection closed, timeout, or error → caller will reconnect
+            return
 
 
 # ─── Data model ──────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@ from unittest.mock import patch, MagicMock
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend import SignalRPCClient, _is_daemon_running
+from backend import SignalRPCClient, _is_daemon_running, SSE_URL
 
 
 class TestSignalRPCClient:
@@ -80,6 +80,79 @@ class TestSignalRPCClient:
             mock_call.return_value = {"error": "timeout"}
             messages = client.receive()
         assert messages == []
+
+
+class TestSignalSSE:
+    """📡 Server-Sent Events listener (real-time Signal delivery)."""
+
+    def test_listen_events_yields_envelope(self):
+        """An SSE stream with one event → yields the parsed envelope."""
+        client = SignalRPCClient(SSE_URL)
+        # Simulated SSE stream: event line, data line, blank terminator, keep-alive
+        sse_body = (
+            b'event:receive\n'
+            b'data:["{\\"envelope\\":{\\"source\\":\\"+39\\"}}"]\n'
+            b'\n'
+            b':keep-alive\n'
+        )
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.__iter__.return_value = iter(sse_body.splitlines(keepends=True))
+            mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+            results = list(client.listen_events("+391234567890"))
+        assert len(results) == 1
+        assert results[0]["envelope"]["source"] == "+39"
+
+    def test_listen_events_skips_keepalive(self):
+        """SSE comments (keep-alive) are ignored."""
+        client = SignalRPCClient(SSE_URL)
+        sse_body = (
+            b':\n'                     # keep-alive
+            b':\n'                     # keep-alive
+            b'event:receive\n'
+            b'data:["{\\"envelope\\":{\\"source\\":\\"+39\\"}}"]\n'
+            b'\n'
+        )
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.__iter__.return_value = iter(sse_body.splitlines(keepends=True))
+            mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+            results = list(client.listen_events("+391234567890"))
+        assert len(results) == 1
+
+    def test_listen_events_connection_error(self):
+        """Connection error → generator returns empty (caller reconnects)."""
+        client = SignalRPCClient(SSE_URL)
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = OSError("Connection refused")
+            results = list(client.listen_events("+391234567890"))
+        assert results == []
+
+    def test_listen_events_bad_json(self):
+        """Malformed SSE data → event is skipped gracefully."""
+        client = SignalRPCClient(SSE_URL)
+        sse_body = (
+            b'event:receive\n'
+            b'data:not-valid-json\n'
+            b'\n'
+            b'event:receive\n'
+            b'data:["{\\"envelope\\":{\\"source\\":\\"+39\\"}}"]\n'
+            b'\n'
+        )
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.__iter__.return_value = iter(sse_body.splitlines(keepends=True))
+            mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+            results = list(client.listen_events("+391234567890"))
+        assert len(results) == 1
+        assert results[0]["envelope"]["source"] == "+39"
 
 
 class TestIsDaemonRunning:
