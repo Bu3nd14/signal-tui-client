@@ -853,14 +853,20 @@ class WhatsAppBackend(ChatBackend):
             return False
         logger.info("📨 [handle_webhook] POST received event=%s keys=%s",
                     raw.get("event"), list(raw.keys())[:10])
-        event = _event_from_raw(raw, self._contacts_by_jid)
-        if event is None:
-            logger.info("📨 [handle_webhook] unrecognised event=%s keys=%s",
-                        raw.get("event"), list(raw.keys())[:8])
-            return False
-        # WAHA sends message.ack INSTEAD of a separate message event for
-        # outgoing echoes.  Ingest the payload as a message FIRST so the
-        # optimistic-send entry (id=None) gets upgraded to its real id.
+
+        # ── message.ack: extract & ingest BEFORE event normalisation ──────
+        # Fix: WAHA sends message.ack INSTEAD of a separate message event for
+        # outgoing echoes (including messages synced from another linked device).
+        # The ack may have status < 3 (SERVER_ACK) which causes _event_from_ack
+        # to return None, so we must process the ack content *before* the
+        # event-is-None early-return.  Additionally, even when the ack yields a
+        # receipt event (status >= 3), the TUI's _handle_receipt_event only
+        # updates statuses of existing messages — it NEVER mounts new messages.
+        # We therefore build a synthetic message ChatEvent when a new outgoing
+        # message is ingested and enqueue it ahead of the receipt so the TUI
+        # displays the message in real-time.
+        added_from_ack = False
+        ack_msg_event = None
         evt_name = raw.get("event", "")
         if "ack" in str(evt_name).lower():
             content = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
@@ -870,12 +876,50 @@ class WhatsAppBackend(ChatBackend):
                 )
                 if ack_contact:
                     ack_ts = int(content.get("timestamp") or 0) * 1000  # WAHA uses seconds, we use ms
-                    self.ingest_message(ack_contact, {
+                    ack_text = content.get("body") or content.get("text") or ""
+                    added_from_ack = self.ingest_message(ack_contact, {
                         "id": content.get("id"),
-                        "text": content.get("body") or content.get("text") or "",
+                        "text": ack_text,
                         "is_mine": True,
                         "sender": "You",
                     }, ack_ts)
+                    if added_from_ack:
+                        # Synthetic message event: lets _handle_message_event
+                        # mirror the message into the UI cache and call
+                        # _add_message so it appears in real-time.
+                        ack_msg_event = ChatEvent(
+                            type="message",
+                            protocol=PROTOCOL_WHATSAPP,
+                            contact_id=ack_contact,
+                            payload={
+                                "text": ack_text,
+                                "is_mine": True,
+                                "sender": "You",
+                                "timestamp": ack_ts,
+                                "id": content.get("id"),
+                            },
+                        )
+
+        event = _event_from_raw(raw, self._contacts_by_jid)
+        if event is None:
+            # Even when the raw event is not recognised as a receipt/typing
+            # (e.g. message.ack with status < 3), a new outgoing message may
+            # have been ingested above.  Enqueue the synthetic message event
+            # so the TUI displays it immediately.
+            if ack_msg_event is not None:
+                self._enqueue_event(ack_msg_event)
+                return True
+            logger.info("📨 [handle_webhook] unrecognised event=%s keys=%s",
+                        raw.get("event"), list(raw.keys())[:8])
+            return False
+
+        # When a message.ack resulted in a new message being ingested AND also
+        # produced a receipt event, enqueue the synthetic message event first
+        # so the TUI mounts the message BEFORE the receipt tries to update its
+        # status.  The receipt is still enqueued afterwards.
+        if ack_msg_event is not None:
+            self._enqueue_event(ack_msg_event)
+
         if event.type == "message":
             mid = event.payload.get("id")
             if mid and mid in self._seen_msg_ids:
