@@ -107,6 +107,7 @@ from backend import (
     DAEMON_HTTP_PORT,
     ensure_webhook_server,
     WEBHOOK_PORT,
+    _dedup_messages,
 )
 
 from ui_components import (
@@ -934,6 +935,24 @@ class SignalTUI(App):
         # aprire ogni chat.  Qui il DB del backend è già stato seminato da
         # ``connect_sync``, e la mappa unread è appena stata rinfrescata.
         self._resync_wa_history()
+
+        # Purge duplicate messages that may have accumulated in the DB
+        # (e.g. from signal-cli re-delivering the same envelope with slightly
+        # different timestamps).  Must run before we rebuild the UI cache so
+        # the loaded data is clean.
+        removed = _dedup_messages()
+        if removed > 0:
+            self.call_from_thread(
+                self._add_message,
+                f"🧹 Cleaned up {removed} duplicate message(s) from cache.",
+                is_info=True,
+            )
+            # Reload backend caches from the cleaned DB so the UI cache built
+            # below doesn't contain stale duplicates.
+            for backend in self.manager.all():
+                reload = getattr(backend, "_load_protocol_cache", None)
+                if reload is not None:
+                    backend.cache = reload()
 
         # Pull the merged, protocol-aware contact list from the manager.
         contacts = self.manager.list_contacts()
@@ -1839,15 +1858,27 @@ class SignalTUI(App):
         if not self.contacts:
             return False
 
+        def _count_unread(messages: list[dict]) -> int:
+            """Conta i messaggi non letti, con dedup per (timestamp, text)."""
+            seen: set[tuple[int, str]] = set()
+            count = 0
+            for m in messages:
+                if m.get("is_mine"):
+                    continue
+                if m.get("read", True):
+                    continue
+                identity = (int(m.get("timestamp") or 0), m.get("text", ""))
+                if identity not in seen:
+                    seen.add(identity)
+                    count += 1
+            return count
+
         changed = False
 
         if contact_cache_key_value is not None:
             # Incrementale: solo il contatto indicato (O(M)).
             messages = self._cache.get(contact_cache_key_value, [])
-            unread = sum(
-                1 for m in messages
-                if not m.get("is_mine") and not m.get("read", True)
-            )
+            unread = _count_unread(messages)
             old = self._unread_counts.get(contact_cache_key_value, 0)
             if unread != old:
                 self._unread_counts[contact_cache_key_value] = unread
@@ -1856,10 +1887,7 @@ class SignalTUI(App):
             # Full: tutti i contatti (startup / ricalcolo globale).
             for contact in self.contacts:
                 messages = self._cache.get(contact.cache_key, [])
-                unread = sum(
-                    1 for m in messages
-                    if not m.get("is_mine") and not m.get("read", True)
-                )
+                unread = _count_unread(messages)
                 old = self._unread_counts.get(contact.cache_key, 0)
                 if unread != old:
                     self._unread_counts[contact.cache_key] = unread

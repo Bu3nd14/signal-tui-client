@@ -392,6 +392,31 @@ def _mark_as_read(contact_number: str, protocol: str = "signal"):
             conn.close()
 
 
+def _dedup_messages() -> int:
+    """Remove duplicate messages from the database.
+
+    A duplicate is defined as the same (protocol, contact_number, timestamp,
+    text, is_mine) tuple.  Only the first occurrence (lowest rowid) is kept.
+    Returns the number of rows removed.
+    """
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            before = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            conn.execute("""
+                DELETE FROM messages WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM messages
+                    GROUP BY protocol, contact_number, timestamp, text, is_mine
+                )
+            """)
+            conn.commit()
+            after = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            return before - after
+        finally:
+            conn.close()
+
+
 def _update_message_status(timestamp: int, status: str):
     """Update the status of a message in SQLite by timestamp."""
     _init_db()

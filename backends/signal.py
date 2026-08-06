@@ -46,6 +46,12 @@ from backend import (
 # logical message as the optimistic send, for de-duplication purposes.
 _SEND_DEDUP_WINDOW_MS = 5000
 
+# Window (ms) within which an incoming message with the same (text, contact)
+# is considered a duplicate even if the timestamp differs slightly.
+# Prevents double-counting when signal-cli re-delivers the same envelope
+# (e.g. sync from another device) with a slightly different timestamp.
+_INCOMING_DEDUP_WINDOW_MS = 2000
+
 
 class SignalBackend(ChatBackend):
     """signal-cli backend adapted to the ``ChatBackend`` interface."""
@@ -473,9 +479,9 @@ class SignalBackend(ChatBackend):
         with identical text, an outgoing echo is only deduplicated if it falls
         within a short window of the existing outgoing message.
 
-        For incoming messages the timestamp is part of the identity, so a
-        genuine re-delivery (same text at the same instant) is caught without
-        merging distinct received messages that happen to share text.
+        For incoming messages a window is also used (instead of exact timestamp
+        match) so that signal-cli re-deliveries (e.g. sync from another device)
+        with a slightly different timestamp are still recognised as duplicates.
         """
         for msg in self.cache.get(contact_id, []):
             if not msg.get("is_mine") == is_mine:
@@ -483,7 +489,7 @@ class SignalBackend(ChatBackend):
             if msg.get("text") != text:
                 continue
             if not is_mine:
-                if msg.get("timestamp") == ts:
+                if abs(msg.get("timestamp", 0) - ts) <= _INCOMING_DEDUP_WINDOW_MS:
                     return True
             elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:
                 return True
