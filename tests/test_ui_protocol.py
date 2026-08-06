@@ -471,7 +471,7 @@ class TestWhatsAppHistoryLoad:
         app.manager.get.return_value = backend
 
         # evita operazioni su widget reali; call_from_thread esegue sincronico
-        app._add_message = MagicMock()
+        app._make_message_widget = MagicMock()
         app._add_load_more_widget = MagicMock()
         app.call_from_thread = MagicMock(
             side_effect=lambda fn, *a, **k: fn(*a, **k)
@@ -485,8 +485,8 @@ class TestWhatsAppHistoryLoad:
 
         # il cache UI è stato popolato dallo specchio del backend
         assert len(app._cache[c.cache_key]) == 2
-        # mostra i messaggi (per ogni msg chiama _add_message)
-        assert app._add_message.call_count >= 2
+        # mostra i messaggi (per ogni msg chiama _make_message_widget)
+        assert app._make_message_widget.call_count >= 2
 
     def test_load_messages_worker_fetches_history_even_when_cache_nonempty(self):
         """Con cache già popolato, lo storico remoto viene comunque riscaricato
@@ -844,7 +844,7 @@ class TestWhatsAppLoadRetry:
         backend.fetch_history = MagicMock(side_effect=fake_fetch)
         app.manager = MagicMock()
         app.manager.get.return_value = backend
-        app._add_message = MagicMock()
+        app._make_message_widget = MagicMock()
         app._add_load_more_widget = MagicMock()
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
         app.query_one = MagicMock()
@@ -857,7 +857,7 @@ class TestWhatsAppLoadRetry:
         # la cache UI è stata popolata
         assert len(app._cache.get(c.cache_key, [])) == 1
         # ha mostrato il messaggio
-        assert app._add_message.call_count >= 1
+        assert app._make_message_widget.call_count >= 1
 
 
 class TestWhatsAppMountOrdering:
@@ -899,9 +899,10 @@ class TestWhatsAppMountOrdering:
 
         # registra l'ordine dei mounting per testo
         mounted = []
-        def fake_add(text, *a, **k):
+        def fake_make_widget(text, *a, **k):
             mounted.append(text)
-        app._add_message = MagicMock(side_effect=fake_add)
+            return MagicMock()
+        app._make_message_widget = MagicMock(side_effect=fake_make_widget)
 
         app._load_messages_worker()
 

@@ -557,6 +557,42 @@ class SignalTUI(App):
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
 
+    @staticmethod
+    def _make_message_widget(
+        text: str,
+        is_mine: bool = False,
+        is_info: bool = False,
+        timestamp: int = 0,
+        sender: str = "",
+        status: str = "sent",
+        protocol: str = "",
+        is_group: bool = False,
+    ) -> Static:
+        """Build a message widget without mounting it.
+
+        Returns a ``Static`` (info messages) or ``MessageWidget`` ready to be
+        mounted.  Does NOT touch the DOM — callers are responsible for
+        ``mount()`` and ``scroll_end()``.
+        """
+        display_text = text
+        if is_info:
+            return Static(display_text, classes="msg-info")
+
+        sender_color = None
+        if not is_mine and sender and is_group:
+            sender_color = "#DAA520"
+
+        return MessageWidget(
+            text=display_text,
+            timestamp=timestamp,
+            sender=sender,
+            is_mine=is_mine,
+            classes="msg-right" if is_mine else "msg-left",
+            status=status,
+            protocol=protocol,
+            sender_color=sender_color,
+        )
+
     def _render_image_in_chat(
         self,
         attachment_id: str | None,
@@ -1437,10 +1473,8 @@ class SignalTUI(App):
                               attachment_id, ts, sender, status))
 
             def _mount_window():
-                # Sul thread UI: svuota il log e rimonta la finestra ordinata
-                # (non stale) così il live non resta infilato in mezzo.
-                # _clear_chat è best-effort (in alcuni contesti il widget non è
-                # disponibile): se fallisce, montiamo comunque i messaggi.
+                # Sul thread UI: svuota il log e rimonta la finestra ordinata in
+                # UN SOLO mount così Textual fa un solo layout pass invece di 20+.
                 if not _is_stale():
                     try:
                         self._clear_chat()
@@ -1448,27 +1482,58 @@ class SignalTUI(App):
                         pass
                 if _is_stale():
                     return
+
+                is_group = (
+                    self.selected_contact is not None
+                    and self.selected_contact.id.endswith("@g.us")
+                )
+                protocol = contact.protocol
+                widgets: list = []
+
                 for (text, is_mine, quote_text, msg_type, attachment_info,
                      attachment_id, ts, sender, status) in batch:
                     try:
-                        self._add_message(
-                            text,
-                            is_mine=is_mine,
-                            quote_text=quote_text,
-                            msg_type=msg_type,
-                            attachment_info=attachment_info,
-                            attachment_id=attachment_id,
-                            timestamp=ts,
-                            sender=sender,
-                            status=status,
-                        )
+                        if ts:
+                            self._shown_in_log.add(
+                                (protocol, contact.cache_key, ts, text)
+                            )
+
+                        if quote_text:
+                            quote_class = "msg-quote-right" if is_mine else "msg-quote"
+                            widgets.append(Static(f"▎ {quote_text}", classes=quote_class))
+
+                        if msg_type == "image":
+                            # Image placeholder — async rendering is separate
+                            from ui_components import ImageWidget
+                            display = attachment_info or text or "Image"
+                            widgets.append(ImageWidget(
+                                attachment_id=attachment_id or "",
+                                fallback_text=f"[🖼️ {display}]",
+                            ))
+                        else:
+                            display_text = text
+                            if msg_type == "sticker":
+                                display_text = f"🎨 {text}" if text and text != "Media" else "🎨 [Sticker]"
+                            elif msg_type == "attachment":
+                                display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
+                            widgets.append(self._make_message_widget(
+                                text=display_text,
+                                is_mine=is_mine,
+                                timestamp=ts,
+                                sender=sender,
+                                status=status,
+                                protocol=protocol,
+                                is_group=is_group,
+                            ))
                     except Exception:
                         pass
-                # Banner "load more" rimontato DOPO lo _clear_chat di Fix B:
-                # lo _clear_chat rimuove TUTTI i figli del log (incluso il
-                # banner montato prima), quindi lo rimontiamo in cima qui,
-                # altrimenti il bottone per caricare i messaggi precedenti
-                # non comparirebbe mai quando la chat ha +20 messaggi.
+
+                if widgets:
+                    chat_log = self.query_one("#chat-log", Vertical)
+                    chat_log.mount(*widgets)
+                    chat_log.scroll_end(animate=False)
+
+                # Banner "load more" rimontato DOPO lo _clear_chat
                 if total > 20 and not _is_stale():
                     try:
                         self._add_load_more_widget(total - 20)

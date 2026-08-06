@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -52,8 +52,9 @@ class _FakeChatLog:
     def scroll_end(self, animate: bool = False) -> None:
         self.scrolled = True
 
-    def mount(self, widget, before=None):
-        self.children.append(widget)
+    def mount(self, *widgets, before=None, after=None):
+        for w in widgets:
+            self.children.append(w)
 
     def remove_children(self):
         self.children = []
@@ -202,18 +203,24 @@ class TestLoadWorkerStaleness:
     def test_current_load_mounts_each_message_once(self):
         """Un load non-stale monta ogni messaggio una sola volta (no doppio)."""
         app = self._make_app(n_messages=3)
-        added: list[str] = []
+        mounted: list[str] = []
 
-        def fake_add(text, *a, **k):
-            added.append(text)
+        def fake_make_widget(text, *a, **k):
+            mounted.append(text)
+            return MagicMock()
 
-        with patch.object(app, "_add_message", side_effect=fake_add), \
+        fake_chat_log = MagicMock()
+        with patch.object(app, "_make_message_widget", side_effect=fake_make_widget), \
+             patch.object(app, "query_one", return_value=fake_chat_log), \
              patch.object(app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)):
             app._load_messages_worker()
         from collections import Counter
-        counts = Counter(added)
+        counts = Counter(mounted)
         for m in ["msg-1", "msg-2", "msg-3"]:
             assert counts[m] == 1, f"{m} mounted {counts[m]} times"
+        # Single mount call with all widgets
+        assert fake_chat_log.mount.called
+        assert fake_chat_log.scroll_end.called
 
     def test_stale_load_worker_aborts_on_newer_selection(self):
         """Un worker con token scaduto non monta dopo una ri-selezione (anti-race).
@@ -225,10 +232,13 @@ class TestLoadWorkerStaleness:
         """
         import threading
         app = self._make_app(n_messages=20)  # >20 to force a workable batch
-        added: list[str] = []
+        mounted: list[str] = []
 
-        def fake_add(text, *a, **k):
-            added.append(text)
+        def fake_make_widget(text, *a, **k):
+            mounted.append(text)
+            return MagicMock()
+
+        fake_chat_log = MagicMock()
 
         # The cache holds 20 msgs; we simulate a slow mount by sleeping a tiny
         # bit in call_from_thread so a race is observable.
@@ -236,7 +246,8 @@ class TestLoadWorkerStaleness:
             import time
             fn(*a, **k)
 
-        with patch.object(app, "_add_message", side_effect=fake_add), \
+        with patch.object(app, "_make_message_widget", side_effect=fake_make_widget), \
+             patch.object(app, "query_one", return_value=fake_chat_log), \
              patch.object(app, "call_from_thread", side_effect=slow_call):
             # Selection #1: capture the reload token.
             app._chat_reload_token += 1
@@ -264,7 +275,7 @@ class TestLoadWorkerStaleness:
         # The important regression invariant: mounting after the newer selection
         # is prevented. We assert it never mounted more than once per msg.
         from collections import Counter
-        counts = Counter(added)
+        counts = Counter(mounted)
         for m in counts:
             assert counts[m] <= 1, f"{m} mounted {counts[m]} times"
 
@@ -460,20 +471,21 @@ class TestRenderDedupSameSecond:
         app._seen_message_ids = set()
         app._loaded_all = False
 
-        added: list[str] = []
+        mounted: list[str] = []
         fake_log = _FakeChatLog()
 
-        def fake_add(text, *args, **kwargs):
-            added.append(text)
+        def fake_make_widget(text, *args, **kwargs):
+            mounted.append(text)
+            return MagicMock()
 
         with patch.object(app, "query_one", return_value=fake_log), \
              patch.object(app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
-             patch.object(app, "_add_message", side_effect=fake_add), \
+             patch.object(app, "_make_message_widget", side_effect=fake_make_widget), \
              patch.object(app, "_add_load_more_widget"):
             app._load_messages_worker()
 
         # L'ultimo messaggio per timestamp deve essere mostrato.
-        assert "Ok  ci sentiamo" in added
+        assert "Ok  ci sentiamo" in mounted
 
     def test_refresh_chat_keeps_newest_after_echo_ts_change(self):
         """Dopo che l'echo aggiorna ts di un messaggio (in-place), l'ULTIMO
@@ -526,11 +538,11 @@ class TestRenderDedupSameSecond:
         app._shown_in_log = set()
 
         fake_log = _FakeChatLog()
-        # _add_message è patcheato per non montare widget reali, ma il banner
+        # _make_message_widget è patcheato per non montare widget reali, ma il banner
         # usa il VERO _add_load_more_widget (monta un Button in fake_log).
         with patch.object(app, "query_one", return_value=fake_log), \
              patch.object(app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
-             patch.object(app, "_add_message", return_value=None):
+             patch.object(app, "_make_message_widget", return_value=MagicMock()):
             app._load_messages_worker()
 
         # Il banner deve essere sopravvissuto allo _clear_chat: almeno un
