@@ -338,6 +338,104 @@ class WhatsAppRESTClient:
             return None
         return result.get("url") or (result.get("data") or {}).get("url")
 
+    def download_media(self, media_id_or_url: str, timeout: int = 60) -> bytes | None:
+        """Download a media file as raw bytes from WAHA.
+
+        *media_id_or_url* can be either a plain message/media id or a full URL
+        (WAHA's ``media.url`` field is often a direct HTTP link to the file).
+
+        WhatsApp message IDs contain ``@`` (e.g. ``false_12345@lid_ABC``)
+        which would be misinterpreted as URL userinfo.  Paths are always
+        percent-encoded so ``@`` → ``%40``.
+
+        Resolution order:
+        1. If *media_id_or_url* looks like a URL (starts with ``http``) →
+           rewrite container-internal ``localhost:3000`` to the real host port
+           and fetch with API key auth.
+        2. Try WAHA Core binary endpoint ``/api/{session}/{id}/download``.
+        3. Fall back to legacy JSON endpoint → redirect URL → fetch.
+
+        Returns the raw bytes on success, ``None`` on any error.
+        """
+        from urllib.parse import quote, urlparse
+
+        # 0) Direct URL (WAHA media.url is often a full HTTP link).
+        if media_id_or_url.startswith("http://") or media_id_or_url.startswith("https://"):
+            try:
+                parsed = urlparse(media_id_or_url)
+                # Rewrite container-internal port 3000 → real host port.
+                # docker-compose maps 127.0.0.1:3005→3000, so localhost:3000
+                # is unreachable from the host — must use the real base URL.
+                host = parsed.netloc
+                if "localhost:3000" in host or "127.0.0.1:3000" in host:
+                    base_parsed = urlparse(self.base_url)
+                    host = base_parsed.netloc  # e.g. localhost:3005
+                safe_path = quote(parsed.path, safe="/")
+                if parsed.query:
+                    safe_path += "?" + parsed.query
+                safe_url = parsed.scheme + "://" + host + safe_path
+            except Exception:
+                safe_url = media_id_or_url
+            logger.info("⬇️ [download_media] fetching direct URL: %s", safe_url[:140])
+            try:
+                headers = {"Accept": "*/*"}
+                if self.api_key:
+                    headers["X-Api-Key"] = self.api_key
+                req = urllib.request.Request(
+                    safe_url, headers=headers, method="GET"
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    self.last_status = getattr(resp, "status", 200)
+                    data = resp.read()
+                    logger.info("⬇️ [download_media] direct URL OK, %d bytes", len(data))
+                    return data
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+                logger.info("⬇️ [download_media] direct URL failed: %s", exc)
+                return None
+        # 1) WAHA Core: direct binary endpoint — percent-encode the id
+        #    so @lid / @c.us / @g.us don't become userinfo in the URL.
+        encoded = quote(media_id_or_url, safe="")
+        direct_url = f"/api/{self.session_name}/{encoded}/download"
+        logger.info("⬇️ [download_media] id=%s trying direct binary: %s", media_id_or_url, direct_url)
+        raw = self._request_raw(
+            "GET",
+            direct_url,
+            timeout=timeout,
+        )
+        if raw:
+            logger.info("⬇️ [download_media] direct binary OK, %d bytes", len(raw))
+            return raw
+        logger.info("⬇️ [download_media] direct binary returned None (status=%s)",
+                    self.last_status)
+        # 2) Legacy: JSON endpoint that returns a redirect URL.
+        download_url = self.get_download_url(media_id_or_url)
+        if download_url:
+            logger.info("⬇️ [download_media] falling back to legacy URL: %s", download_url)
+            try:
+                headers = {"Accept": "*/*"}
+                req = urllib.request.Request(
+                    download_url, headers=headers, method="GET"
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    self.last_status = getattr(resp, "status", 200)
+                    data = resp.read()
+                    logger.info("⬇️ [download_media] legacy URL OK, %d bytes", len(data))
+                    return data
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+                logger.info("⬇️ [download_media] legacy URL failed: %s", exc)
+                return None
+        # 2) WAHA Files API: /api/files/default/{id} — same endpoint used
+        #    by media.url, but constructed from a bare message id.
+        #    This rescues cached entries stored before media.url was captured
+        #    and handles edge cases where media.url is absent.
+        logger.info("⬇️ [download_media] trying Files API fallback for id=%s", media_id_or_url)
+        raw = self._request_raw("GET", f"/api/files/default/{encoded}", timeout=timeout)
+        if raw:
+            logger.info("⬇️ [download_media] Files API OK, %d bytes", len(raw))
+            return raw
+        logger.info("⬇️ [download_media] all paths failed for id=%s", media_id_or_url)
+        return None
+
 
 # ─── Incoming event normalization ────────────────────────────────────────────
 
@@ -425,13 +523,100 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
     msg_id = raw.get("id") or (raw.get("key") or {}).get("id") or str(ts_ms)
     msg_type = _msg_type(raw)
     caption = raw.get("caption") or ""
-    attachments = raw.get("attachments") or []
+
+    # ── Attachment extraction ──────────────────────────────────────────
+    # WAHA can deliver media in two shapes:
+    # 1. Flat:  top-level "attachments" array  (legacy / v1 API)
+    # 2. Nested: raw["message"]["imageMessage"] / ["videoMessage"] / …
+    #    (WAHA Core / current versions)
     attachment_id = None
     attachment_info = None
+
+    # Try top-level attachments first (legacy format).
+    attachments = raw.get("attachments") or []
     if isinstance(attachments, list) and attachments:
         attachment = attachments[0]
         attachment_id = attachment.get("id") or attachment.get("url") or str(ts_ms)
         attachment_info = caption or attachment.get("filename") or attachment.get("mimetype") or "Media"
+
+    # If still no media, look inside the nested "message" object (WAHA Core).
+    if not attachment_id:
+        nested = raw.get("message")
+        if isinstance(nested, dict):
+            media_keys = [
+                ("imageMessage", "image"),
+                ("videoMessage", "attachment"),
+                ("audioMessage", "attachment"),
+                ("documentMessage", "attachment"),
+                ("stickerMessage", "sticker"),
+            ]
+            for media_key, fallback_type in media_keys:
+                media = nested.get(media_key)
+                if isinstance(media, dict):
+                    # Override msg_type from the nested media presence.
+                    if msg_type == "text":
+                        msg_type = fallback_type
+                    attachment_id = (
+                        media.get("id")
+                        or media.get("url")
+                        or nested.get("id")
+                        or msg_id
+                    )
+                    attachment_info = (
+                        caption
+                        or media.get("caption")
+                        or media.get("filename")
+                        or media.get("mimetype")
+                        or f"{media_key} ({msg_id[:16]}...)" if len(str(msg_id)) > 16 else f"{media_key}"
+                    )
+                    break
+
+    # If still no media, look at WAHA's flat hasMedia / media fields (current WAHA Core).
+    if not attachment_id and raw.get("hasMedia"):
+        media = raw.get("media")
+        if isinstance(media, dict):
+            logger.info(
+                "📎 [hasMedia] full media dict: %s",
+                {k: (str(v)[:80] if not isinstance(v, dict) else "dict(%d keys)" % len(v))
+                 for k, v in media.items()},
+            )
+            mime = (media.get("mimetype") or "").lower()
+            if mime.startswith("image/"):
+                msg_type = "image"
+            elif mime.startswith("video/"):
+                msg_type = "attachment"
+            elif mime.startswith("audio/"):
+                msg_type = "attachment"
+            elif mime.startswith("application/"):
+                msg_type = "attachment"
+            elif raw.get("stickerMessage") is not None:
+                msg_type = "sticker"
+            # Use media.url — rewritten from container-internal localhost:3000
+            # to the real host port + API key by download_media().
+            attachment_id = media.get("url") or msg_id
+            attachment_info = (
+                caption
+                or media.get("caption")
+                or media.get("filename")
+                or mime
+                or "Media"
+            )
+
+    # Debug: for non-text messages, log raw structure so we see the real WAHA shape.
+    if msg_type != "text" or attachment_id:
+        logger.info(
+            "📎 [event_from_message] raw keys=%s msg keys=%s",
+            list(raw.keys())[:12],
+            list(raw.get("message", {}).keys())[:8] if isinstance(raw.get("message"), dict) else "no-msg",
+        )
+
+    logger.info(
+        "📎 [event_from_message] chat=%s type=%s msg_type=%s attachments=%s → id=%s info=%s | raw_keys=%s",
+        chat_jid, raw.get("type"), msg_type,
+        len(attachments) if isinstance(attachments, list) else type(attachments).__name__,
+        attachment_id, attachment_info,
+        list(raw.keys())[:15],
+    )
 
     # Rileva se la chat è un gruppo WhatsApp (JID termina con @g.us).
     is_group = chat_jid.endswith("@g.us")
@@ -666,8 +851,12 @@ class WhatsAppBackend(ChatBackend):
         """
         if not isinstance(raw, dict):
             return False
+        logger.info("📨 [handle_webhook] POST received event=%s keys=%s",
+                    raw.get("event"), list(raw.keys())[:10])
         event = _event_from_raw(raw, self._contacts_by_jid)
         if event is None:
+            logger.info("📨 [handle_webhook] unrecognised event=%s keys=%s",
+                        raw.get("event"), list(raw.keys())[:8])
             return False
         # WAHA sends message.ack INSTEAD of a separate message event for
         # outgoing echoes.  Ingest the payload as a message FIRST so the
@@ -1074,22 +1263,63 @@ class WhatsAppBackend(ChatBackend):
 
     # ─── Attachments ──────────────────────────────────────────────────
 
-    def get_attachment_path(self, attachment_id: str) -> Path | None:
-        """Map a media id to a local file path.
+    def _ensure_media_dir(self) -> Path:
+        """Return (and create if needed) the local media cache directory.
 
-        The external API stores downloaded media in a local/volume directory
-        (``WHATSAPP_MEDIA_DIR``).  If a media id corresponds to a file there
-        we return its ``Path``; otherwise ``None``.
+        Uses the configured ``WHATSAPP_MEDIA_DIR`` when available; otherwise
+        falls back to ``~/.local/share/signal-tui-client/whatsapp-media/``
+        so that lazy downloads always have a writeable destination.
         """
-        if not attachment_id or not self.media_dir:
+        if self.media_dir:
+            base = Path(self.media_dir)
+        else:
+            from backend import CACHE_DIR
+            base = CACHE_DIR / "whatsapp-media"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+
+    def get_attachment_path(self, attachment_id: str) -> Path | None:
+        """Map a media id to a local file path, downloading on-demand.
+
+        1. If the file already exists in the media directory, return its
+           ``Path`` immediately (fast path).
+        2. Otherwise, attempt a lazy download from the WAHA REST API, save
+           the bytes, and return the resulting ``Path``.
+        3. If the download or save fails, return ``None`` — the UI shows a
+           fallback placeholder and the user can retry by clicking again.
+
+        This mirrors the Signal backend's behaviour where signal-cli
+        auto-downloads attachments, but with explicit lazy-fetch for WAHA.
+        """
+        if not attachment_id or not self._rest:
+            logger.info("🖼️ [get_attachment_path] early exit: id=%s rest=%s",
+                        attachment_id, self._rest is not None)
             return None
-        base = Path(self.media_dir)
-        if not base.is_dir():
-            return None
-        candidate = base / Path(attachment_id).name
+
+        base = self._ensure_media_dir()
+        safe_name = Path(attachment_id).name or attachment_id
+        candidate = base / safe_name
+
+        # Fast path: already on disk.
         if candidate.is_file():
+            logger.info("🖼️ [get_attachment_path] fast-path HIT: %s", candidate)
             return candidate
-        return None
+
+        logger.info("🖼️ [get_attachment_path] local miss, downloading id=%s → %s",
+                    attachment_id, candidate)
+        # Lazy download from WAHA.
+        raw = self._rest.download_media(attachment_id)
+        if not raw:
+            logger.info("🖼️ [get_attachment_path] download returned None")
+            return None
+
+        try:
+            candidate.write_bytes(raw)
+            logger.info("🖼️ [get_attachment_path] saved %d bytes → %s", len(raw), candidate)
+        except OSError:
+            return None
+
+        return candidate
 
 
     # ─── Incoming event ingestion ─────────────────────────────────────

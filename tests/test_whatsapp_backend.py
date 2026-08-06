@@ -573,6 +573,79 @@ class TestWhatsAppEvents:
         assert ev.payload["is_group"] is False
         assert ev.payload["sender"] == "Mario"
 
+    def test_hasMedia_image(self):
+        """WAHA image message via hasMedia/media fields."""
+        ev = _event_from_message({
+            "id": "img1",
+            "from": "3912345678@c.us",
+            "timestamp": 1700000000,
+            "text": "",
+            "fromMe": False,
+            "pushName": "Mario",
+            "hasMedia": True,
+            "media": {
+                "mimetype": "image/jpeg",
+                "url": "https://wa.to/img/abc123.jpg",
+                "filename": "photo.jpg",
+                "caption": "Guarda!",
+            },
+        })
+        assert ev is not None
+        assert ev.payload["msg_type"] == "image"
+        assert ev.payload["attachment_id"] == "https://wa.to/img/abc123.jpg"
+        assert ev.payload["attachment_info"] == "Guarda!"  # caption
+
+    def test_hasMedia_video(self):
+        """WAHA video message via hasMedia/media fields."""
+        ev = _event_from_message({
+            "id": "vid1",
+            "from": "3912345678@c.us",
+            "timestamp": 1700000000,
+            "text": "",
+            "fromMe": False,
+            "pushName": "Mario",
+            "hasMedia": True,
+            "media": {
+                "mimetype": "video/mp4",
+                "url": "https://wa.to/vid/vid.mp4",
+            },
+        })
+        assert ev is not None
+        assert ev.payload["msg_type"] == "attachment"
+        assert ev.payload["attachment_id"] == "https://wa.to/vid/vid.mp4"
+        assert ev.payload["attachment_info"] == "video/mp4"
+
+    def test_hasMedia_audio(self):
+        """WAHA audio message via hasMedia/media fields."""
+        ev = _event_from_message({
+            "id": "aud1",
+            "from": "3912345678@c.us",
+            "timestamp": 1700000000,
+            "fromMe": False,
+            "hasMedia": True,
+            "media": {
+                "mimetype": "audio/ogg",
+                "url": "https://wa.to/aud/audio.ogg",
+            },
+        })
+        assert ev is not None
+        assert ev.payload["msg_type"] == "attachment"
+
+    def test_hasMedia_no_media_dict(self):
+        """hasMedia=true but media is not a dict → still text, no attachment."""
+        ev = _event_from_message({
+            "id": "bad1",
+            "from": "3912345678@c.us",
+            "timestamp": 1700000000,
+            "text": "hello",
+            "fromMe": False,
+            "hasMedia": True,
+            "media": None,
+        })
+        assert ev is not None
+        assert ev.payload["msg_type"] == "text"
+        assert ev.payload["attachment_id"] is None
+
 
 
 
@@ -614,13 +687,98 @@ class TestWhatsAppBackend:
             assert backend.needs_pairing is False
 
     def test_get_attachment_path(self, tmp_path):
+        """Fast path: file already on disk returns it immediately."""
         media = tmp_path / "media"
         media.mkdir()
         (media / "att-1.jpg").write_bytes(b"data")
         backend = _make_backend(media_dir=str(media))
         p = backend.get_attachment_path("att-1.jpg")
         assert p is not None and p.exists()
-        assert backend.get_attachment_path("missing.jpg") is None
+
+    def test_get_attachment_path_missing_downloads(self, tmp_path):
+        """Missing file triggers a lazy download from WAHA REST."""
+        media = tmp_path / "media"
+        media.mkdir()
+        backend = _make_backend(media_dir=str(media))
+        with patch.object(backend._rest, "download_media", return_value=b"downloaded") as mock_dl:
+            p = backend.get_attachment_path("remote-media-1.jpg")
+        mock_dl.assert_called_once_with("remote-media-1.jpg")
+        assert p is not None and p.exists()
+        assert p.read_bytes() == b"downloaded"
+
+    def test_get_attachment_path_download_fails_returns_none(self, tmp_path):
+        """When WAHA returns None (404 / error), the method returns None."""
+        media = tmp_path / "media"
+        media.mkdir()
+        backend = _make_backend(media_dir=str(media))
+        with patch.object(backend._rest, "download_media", return_value=None):
+            p = backend.get_attachment_path("missing-media.jpg")
+        assert p is None
+
+    def test_get_attachment_path_no_rest_returns_none(self):
+        """Without a REST client (no api_url), return None immediately."""
+        backend = WhatsAppBackend(api_url="", media_dir="/tmp")
+        assert backend.get_attachment_path("anything") is None
+
+    def test_download_media_direct_binary(self):
+        """WAHA Core direct binary endpoint returns bytes."""
+        client = WhatsAppRESTClient("http://api.test")
+        fake_bytes = b"\x89PNG\r\n\x1a\n"
+        with patch.object(client, "_request_raw", return_value=fake_bytes) as mock_raw:
+            result = client.download_media("msg-abc")
+        mock_raw.assert_called_once_with(
+            "GET", "/api/default/msg-abc/download", timeout=60
+        )
+        assert result == fake_bytes
+
+    def test_download_media_falls_back_to_legacy_url(self):
+        """When direct binary fails, fall back to get_download_url + fetch."""
+        client = WhatsAppRESTClient("http://api.test")
+        fake_bytes = b"media-data"
+        with patch.object(client, "_request_raw", return_value=None):
+            with patch.object(client, "get_download_url", return_value="https://s3.example.com/file"):
+                with patch("urllib.request.urlopen") as mock_urlopen:
+                    mock_resp = MagicMock()
+                    mock_resp.read.return_value = fake_bytes
+                    mock_resp.status = 200
+                    mock_urlopen.return_value.__enter__.return_value = mock_resp
+                    result = client.download_media("msg-abc")
+        assert result == fake_bytes
+
+    def test_download_media_returns_none_when_all_fail(self):
+        """Both direct binary and legacy URL fail → None."""
+        client = WhatsAppRESTClient("http://api.test")
+        with patch.object(client, "_request_raw", return_value=None):
+            with patch.object(client, "get_download_url", return_value=None):
+                assert client.download_media("msg-abc") is None
+
+    def test_download_media_direct_url(self):
+        """When media_id looks like a URL, fetch it directly."""
+        client = WhatsAppRESTClient("http://api.test")
+        fake_bytes = b"image-data"
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = fake_bytes
+            mock_resp.status = 200
+            mock_urlopen.return_value.__enter__.return_value = mock_resp
+            result = client.download_media("https://wa.to/media/img.jpg")
+        assert result == fake_bytes
+        mock_urlopen.assert_called_once()
+        call_url = mock_urlopen.call_args[0][0].full_url
+        assert call_url == "https://wa.to/media/img.jpg"
+
+    def test_download_media_encodes_at_sign(self):
+        """Message IDs with @lid are percent-encoded in the URL path."""
+        client = WhatsAppRESTClient("http://api.test")
+        fake_bytes = b"binary-data"
+        with patch.object(client, "_request_raw", return_value=fake_bytes) as mock_raw:
+            result = client.download_media("false_12345@lid_ABC")
+        mock_raw.assert_called_once()
+        call_path = mock_raw.call_args[0][1]
+        # The @ must become %40 in the path.
+        assert "@" not in call_path
+        assert "%40" in call_path
+        assert result == fake_bytes
 
     def test_poll_once_drains_queue(self):
         backend = _make_backend()

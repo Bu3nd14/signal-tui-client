@@ -517,6 +517,7 @@ class SignalTUI(App):
                 attachment_info=attachment_info or text,
                 is_mine=is_mine,
                 chat_log=chat_log,
+                protocol=protocol,
             )
             return
 
@@ -562,17 +563,28 @@ class SignalTUI(App):
         attachment_info: str,
         is_mine: bool,
         chat_log: Vertical,
+        protocol: str | None = None,
     ):
         """Resolve the attachment path and mount a clickable placeholder
         ``ImageWidget``.
 
+        Uses the ``BackendManager`` to route the attachment-id resolution to
+        the correct protocol backend (Signal, WhatsApp, ...).  Falls back to
+        the legacy Signal backend when *protocol* is ``None`` (safety net
+        for callers compiled before the multi-protocol routing was added).
+
         The actual image rendering happens on-demand when the user presses
         Enter or clicks the widget, which opens a fullscreen modal.
         """
-        # Resolve the file path via the active backend (Signal).
+        # Resolve the file path via the protocol-appropriate backend.
         att_path: Path | None = None
         if attachment_id:
-            att_path = self.signal_backend.get_attachment_path(attachment_id)
+            resolved_protocol = protocol or PROTOCOL_SIGNAL
+            logger.info("🖼️ [_render_image_in_chat] protocol=%s resolved=%s id=%s",
+                        protocol, resolved_protocol, attachment_id)
+            att_path = self.manager.get_attachment_path(resolved_protocol, attachment_id)
+
+        logger.info("🖼️ [_render_image_in_chat] resolved att_path=%s", att_path)
 
         if att_path is None:
             fallback = f"[🖼️ Image: {attachment_info}]"
@@ -2256,6 +2268,12 @@ class SignalTUI(App):
 
 
 if __name__ == "__main__":
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        handlers=[logging.FileHandler("/tmp/signal-tui.log", mode="w")],
+    )
     import signal as signal_module
 
     if not _acquire_lock():
