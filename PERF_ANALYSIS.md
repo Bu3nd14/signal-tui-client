@@ -1,12 +1,5 @@
 # Performance Analysis — UI Reactivity
 
-## 🔴 CRITICAL — Blocks UI Thread
-
-### R3. `on_input_changed` → `show_suggestions` → `_rebuild` on every keystroke
-**File:** `emoji_picker.py:588-601` + `signal_tui.py:1568-1587`
-
-Each keystroke while typing emoji alias triggers `remove_children()` + up to 10 `mount()`. 10 layout passes per keystroke.
-
 ## 🟡 MEDIUM — Degrades Gradually
 
 ### R4. `_refresh_chat` sorts and iterates on every picker close

@@ -586,7 +586,7 @@ class EmojiCompletionWidget(Vertical):
         return None
 
     def _rebuild(self) -> None:
-        """Rebuild the suggestion children."""
+        """Rebuild the suggestion children from scratch."""
         self.remove_children()
         for i, (char, alias) in enumerate(self._suggestions):
             marker = _normalize_emoji_width("▸") if i == self._selected_index else " "
@@ -599,11 +599,36 @@ class EmojiCompletionWidget(Vertical):
             w.completion_widget = self
             self.mount(w)
 
+    def _refresh_selection(self) -> None:
+        """Update only the selection marker and CSS classes in-place.
+
+        Called when only the selected index changes (Tab/Shift+Tab),
+        avoiding a full ``remove_children`` + ``mount`` cycle."""
+        for i, child in enumerate(self.children):
+            if not isinstance(child, _SuggestionWidget):
+                continue
+            char, alias = self._suggestions[i]
+            marker = "▸" if i == self._selected_index else " "
+            child.update(
+                f"{_normalize_emoji_width(marker)} {_normalize_emoji_width(char)}  :{alias}:"
+            )
+            if i == self._selected_index:
+                child.add_class("emoji-suggestion-selected")
+            else:
+                child.remove_class("emoji-suggestion-selected")
+
     def show_suggestions(self, prefix: str) -> None:
         """Query emoji suggestions matching *prefix* and show the widget."""
         suggestions = get_emoji_suggestions(prefix, max_results=10)
         if not suggestions:
             self.hide_suggestions()
+            return
+        # Skip rebuild when suggestions haven't changed (e.g. narrowing
+        # prefix from :smi to :smil still yields the same list).
+        if suggestions == self._suggestions:
+            self._selected_index = 0
+            self._refresh_selection()
+            self.add_class("-visible")
             return
         self._suggestions = suggestions
         self._selected_index = 0
@@ -621,13 +646,13 @@ class EmojiCompletionWidget(Vertical):
         """Move selection down."""
         if self._suggestions:
             self._selected_index = (self._selected_index + 1) % len(self._suggestions)
-            self._rebuild()
+            self._refresh_selection()
 
     def select_prev(self) -> None:
         """Move selection up."""
         if self._suggestions:
             self._selected_index = (self._selected_index - 1) % len(self._suggestions)
-            self._rebuild()
+            self._refresh_selection()
 
     def _select_and_insert(self, emoji_char: str) -> None:
         """Insert an emoji into the message input and hide suggestions.
