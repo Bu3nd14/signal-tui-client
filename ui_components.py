@@ -438,15 +438,15 @@ class ImageModalScreen(ModalScreen):
             )
 
         except (FileNotFoundError, ProcessLookupError):
-            logger.warning("catimg not found — cannot render image in modal")
+            logger.debug("catimg not found — cannot render image in modal")
             img.write("⚠️ catimg is not installed on this system.")
             return
         except asyncio.TimeoutError:
-            logger.warning("catimg timed out")
+            logger.debug("catimg timed out")
             img.write("⚠️ Image rendering timed out.")
             return
         except Exception as exc:
-            logger.warning("modal image rendering failed: %s", exc)
+            logger.debug("modal image rendering failed: %s", exc)
             img.write(f"⚠️ Could not render image: {exc}")
             return
 

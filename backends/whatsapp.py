@@ -879,7 +879,11 @@ class WhatsAppBackend(ChatBackend):
         """
         if not isinstance(raw, dict):
             return False
-        _log_webhook("handle_webhook", "POST received event=%s", raw.get("event"))
+        _log_webhook("handle_webhook",
+            "POST event=%s payload_keys=%s",
+            raw.get("event"),
+            list(raw.get("payload", raw).keys())[:15] if isinstance(raw.get("payload", raw), dict) else "no-payload",
+        )
 
         # ── message.ack: extract & ingest BEFORE event normalisation ──────
         # Fix: WAHA sends message.ack INSTEAD of a separate message event for
