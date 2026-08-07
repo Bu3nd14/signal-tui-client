@@ -1299,7 +1299,7 @@ class SignalTUI(App):
         self.selected_contact = contact
         # Update the chat banner with the selected contact's name.
         chat_title = self.query_one("#ChatTitle", Label)
-        chat_title.update(f"💬 Chat - {contact.display_name}")
+        chat_title.update(f"{protocol_emoji(contact.protocol)} Chat - {contact.display_name}")
         self._seen_timestamps.clear()
         self._seen_message_ids.clear()
         # Per WhatsApp la ricezione è PUSH via webhook (handle_webhook): WAHA
