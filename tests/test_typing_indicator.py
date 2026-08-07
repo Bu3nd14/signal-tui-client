@@ -111,9 +111,9 @@ class TestSignalTUITyping:
         return app
 
     def _dispatch(self, app, envelope: dict) -> None:
-        """Convert an envelope to a ChatEvent and route it through _handle_event."""
-        event = app.signal_backend.envelope_to_event(envelope)
-        if event is not None:
+        """Convert an envelope to ChatEvents and route them through _handle_event."""
+        events = app.signal_backend.envelope_to_event(envelope)
+        for event in events:
             with patch.object(app, "call_from_thread"):
                 app._handle_event(event)
 

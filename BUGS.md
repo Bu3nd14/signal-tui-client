@@ -27,14 +27,22 @@ il ramo `if msg_type == "image"` in `_mount_window` non era mai percorso dai tes
 
 ---
 
-### #1 — `_classify_attachments` processa solo il primo attachment (`backends/signal.py`, righe 350-369)
+### #1 — `_classify_attachments` processa solo il primo attachment (`backends/signal.py`, righe 350-369) ✅ RISOLTO
 
 Il `for att in attachments` itera ma fa `return` al primo elemento che matcha.
 Se ci sono più attachment (es. un'immagine + un video), solo il primo viene processato.
 Inoltre il `return ("attachment", "📎 File", None)` finale (riga 369) è **dead code**
 perché il loop ritorna sempre al primo giro. Confermato da ruff (B007).
 
-**Impatto:** Media allegati persi — l'utente non vede attachment multipli.
+**Fix:** `_classify_attachments` ora accumula tutti gli attachment in una lista.
+`_extract_message_data` restituisce `list[dict]` (un dict per attachment). Il testo
+del messaggio va solo nel primo dict. `envelope_to_event` itera sulla lista e
+produce N `ChatEvent`.  Il chiamante (`_sse_listener`) accoda tutti gli eventi.
+Aggiunti 7 test (`test_backends.py`) per: singolo, multipli image, misti
+(image+video+audio), testo+attachment, solo testo, sentMessage multipli, envelope
+vuoto. 377/377 ✅.
+
+**Impatto prima del fix:** Media allegati persi — l'utente non vede attachment multipli.
 
 ---
 

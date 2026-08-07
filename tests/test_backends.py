@@ -171,8 +171,9 @@ class TestSignalBackend:
             "timestamp": 2000,
             "dataMessage": {"message": "Ciao!", "timestamp": 2000},
         }
-        event = backend.envelope_to_event(envelope)
-        assert event is not None
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        event = events[0]
         assert event.type == "message"
         assert event.protocol == PROTOCOL_SIGNAL
         assert event.contact_id == "+391234567890"
@@ -180,16 +181,16 @@ class TestSignalBackend:
         assert event.payload["timestamp"] == 2000
 
     def test_envelope_to_event_unknown_contact(self):
-        """Un envelope che non identifica un contatto → None."""
+        """Un envelope che non identifica un contatto → lista vuota."""
         backend = SignalBackend()  # no contacts
         envelope = {
             "sourceNumber": "+39",
             "dataMessage": {"message": "x"},
         }
-        assert backend.envelope_to_event(envelope) is None
+        assert backend.envelope_to_event(envelope) == []
 
     def test_envelope_to_event_sent_unknown_dest_returns_none(self):
-        """Un envelope sentMessage con destinatario sconosciuto → None.
+        """Un envelope sentMessage con destinatario sconosciuto → lista vuota.
 
         NON deve cadere nella ricerca per source perché il source di un
         sentMessage è l'utente locale, non un contatto reale.
@@ -213,7 +214,7 @@ class TestSignalBackend:
                 }
             },
         }
-        assert backend.envelope_to_event(envelope) is None
+        assert backend.envelope_to_event(envelope) == []
 
     def test_envelope_to_event_typing(self):
         """Un envelope di typing produce un ChatEvent type='typing'."""
@@ -223,8 +224,9 @@ class TestSignalBackend:
             "timestamp": 1000,
             "typingMessage": {"action": "STARTED", "timestamp": 1000},
         }
-        event = backend.envelope_to_event(envelope)
-        assert event is not None
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        event = events[0]
         assert event.type == "typing"
         assert event.payload["action"] == "STARTED"
 
@@ -235,10 +237,187 @@ class TestSignalBackend:
             "sourceNumber": "+391234567890",
             "receiptMessage": {"isRead": True, "timestamps": [111]},
         }
-        event = backend.envelope_to_event(envelope)
-        assert event is not None
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        event = events[0]
         assert event.type == "receipt"
         assert event.payload["receipt"]["timestamps"] == [111]
+
+    # ─── Multiple attachments (bug #1) ───────────────────────────────────
+
+    def test_single_image_attachment_backward_compat(self):
+        """Un envelope con una foto → 1 evento (backward compat)."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 2000,
+            "dataMessage": {
+                "message": "guarda!",
+                "timestamp": 2000,
+                "attachments": [{
+                    "contentType": "image/jpeg",
+                    "filename": "photo.jpg",
+                    "id": "att-001",
+                }],
+            },
+        }
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.type == "message"
+        assert ev.payload["msg_type"] == "image"
+        assert ev.payload["attachment_id"] == "att-001"
+        assert ev.payload["text"] == "guarda!"
+
+    def test_multiple_image_attachments(self):
+        """3 foto → 3 ChatEvent, ognuno msg_type='image'."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 3000,
+            "dataMessage": {
+                "timestamp": 3000,
+                "attachments": [
+                    {"contentType": "image/jpeg", "id": "img-1"},
+                    {"contentType": "image/png", "id": "img-2"},
+                    {"contentType": "image/webp", "id": "img-3"},
+                ],
+            },
+        }
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 3
+        ids = [ev.payload["attachment_id"] for ev in events]
+        assert ids == ["img-1", "img-2", "img-3"]
+        for ev in events:
+            assert ev.payload["msg_type"] == "image"
+
+    def test_mixed_attachments(self):
+        """1 image + 1 video + 1 audio → 3 eventi con tipi corretti."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "timestamp": 4000,
+            "dataMessage": {
+                "timestamp": 4000,
+                "attachments": [
+                    {"contentType": "image/jpeg", "id": "img"},
+                    {"contentType": "video/mp4", "id": "vid"},
+                    {"contentType": "audio/aac", "id": "aud"},
+                ],
+            },
+        }
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 3
+        assert events[0].payload["msg_type"] == "image"
+        assert events[1].payload["msg_type"] == "attachment"
+        assert events[2].payload["msg_type"] == "attachment"
+        assert events[1].payload["attachment_id"] == "vid"
+        assert events[2].payload["attachment_id"] == "aud"
+
+    def test_text_with_multiple_attachments_only_first_has_text(self):
+        """Testo + 2 foto → primo evento ha il testo, secondo no."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "timestamp": 5000,
+            "dataMessage": {
+                "message": "Guarda queste!",
+                "timestamp": 5000,
+                "attachments": [
+                    {"contentType": "image/jpeg", "id": "img-1"},
+                    {"contentType": "image/png", "id": "img-2"},
+                ],
+            },
+        }
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 2
+        assert events[0].payload["text"] == "Guarda queste!"
+        # Second attachment gets attachment_info as text
+        assert events[1].payload["text"] != "Guarda queste!"
+
+    def test_no_attachments_pure_text(self):
+        """Solo testo, nessun attachment → 1 evento."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "timestamp": 6000,
+            "dataMessage": {"message": "Ciao!", "timestamp": 6000},
+        }
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        assert events[0].payload["msg_type"] == "text"
+        assert events[0].payload["attachment_id"] is None
+
+    def test_sent_multiple_attachments(self):
+        """syncMessage.sentMessage con 2 foto → 2 eventi is_mine=True."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "timestamp": 7000,
+            "syncMessage": {
+                "sentMessage": {
+                    "destination": "+391234567890",
+                    "timestamp": 7000,
+                    "attachments": [
+                        {"contentType": "image/jpeg", "id": "sent-1"},
+                        {"contentType": "image/png", "id": "sent-2"},
+                    ],
+                }
+            },
+        }
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 2
+        for ev in events:
+            assert ev.payload["is_mine"] is True
+            assert ev.payload["msg_type"] == "image"
+        assert events[0].payload["attachment_id"] == "sent-1"
+        assert events[1].payload["attachment_id"] == "sent-2"
+
+    def test_envelope_empty_data_returns_empty_list(self):
+        """Envelope senza dataMessage né syncMessage → lista vuota."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "timestamp": 8000,
+        }
+        assert backend.envelope_to_event(envelope) == []
 
 # ─── BackendManager ──────────────────────────────────────────────────────────
 

@@ -355,14 +355,21 @@ class SignalBackend(ChatBackend):
 
         return None
 
-    def _extract_message_data(self, envelope: dict) -> dict | None:
-        """Extract normalized message data from a Signal envelope."""
+    def _extract_message_data(self, envelope: dict) -> list[dict]:
+        """Extract normalized message data from a Signal envelope.
+
+        Returns a **list** of message dicts.  When *envelope* carries N
+        attachments, N dicts are returned (one per attachment).  The
+        message body is attached to the first dict only to avoid
+        duplication.  A pure text message produces a single-element list.
+        """
         source_name = envelope.get("sourceName", "")
         source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
 
-        def _classify_attachments(attachments: list) -> tuple[str, str, str | None]:
-            if not attachments:
-                return ("text", None, None)
+        def _classify_attachments(attachments: list) -> list[tuple[str, str, str | None]]:
+            """Classify every attachment in *attachments*, returning one
+            ``(msg_type, info, att_id)`` tuple for each element."""
+            result: list[tuple[str, str, str | None]] = []
             for att in attachments:
                 content_type = att.get("contentType", "") or ""
                 fname = att.get("filename", "") or ""
@@ -370,16 +377,17 @@ class SignalBackend(ChatBackend):
                 att_id = att.get("id") or att.get("attachmentId") or None
                 if content_type.startswith("image/"):
                     info = caption or (f"Image: {fname}" if fname else "🖼️ Image")
-                    return ("image", info, att_id)
-                if content_type.startswith("video/"):
+                    result.append(("image", info, att_id))
+                elif content_type.startswith("video/"):
                     info = caption or (f"Video: {fname}" if fname else "🎬 Video")
-                    return ("attachment", info, att_id)
-                if content_type.startswith("audio/"):
+                    result.append(("attachment", info, att_id))
+                elif content_type.startswith("audio/"):
                     info = caption or (f"Audio: {fname}" if fname else "🎵 Audio")
-                    return ("attachment", info, att_id)
-                info = caption or fname or content_type or "📎 File"
-                return ("attachment", info, att_id)
-            return ("attachment", "📎 File", None)
+                    result.append(("attachment", info, att_id))
+                else:
+                    info = caption or fname or content_type or "📎 File"
+                    result.append(("attachment", info, att_id))
+            return result
 
         def _extract_sticker(sticker: dict | None) -> tuple[str, str] | None:
             if not sticker:
@@ -389,6 +397,29 @@ class SignalBackend(ChatBackend):
             if pack_id:
                 return ("sticker", f"Sticker #{sticker_id} (pack:{pack_id[:8]}…)")
             return ("sticker", f"Sticker #{sticker_id}")
+
+        def _build_msg_dicts(sender: str, text: str, is_mine: bool,
+                             quote_text: str | None, attachments: list) -> list[dict]:
+            """Build one dict per classified attachment, or a single text dict."""
+            classified = _classify_attachments(attachments)
+            if classified:
+                msgs: list[dict] = []
+                for i, (msg_type, att_info, att_id) in enumerate(classified):
+                    msg_text = text if i == 0 else ""
+                    if not msg_text:
+                        msg_text = att_info or "Media"
+                    msgs.append({
+                        "sender": sender, "text": msg_text, "is_mine": is_mine,
+                        "quote_text": quote_text, "msg_type": msg_type,
+                        "attachment_info": att_info, "attachment_id": att_id,
+                    })
+                return msgs
+            # No attachments: pure text message.
+            return [{
+                "sender": sender, "text": text, "is_mine": is_mine,
+                "quote_text": quote_text, "msg_type": "text",
+                "attachment_info": None, "attachment_id": None,
+            }]
 
         data_msg = envelope.get("dataMessage", {})
         if data_msg:
@@ -402,26 +433,23 @@ class SignalBackend(ChatBackend):
                 msg_type, att_info = sticker_data
                 if not text:
                     text = att_info or "🎨 Sticker"
-                return {
+                return [{
                     "sender": sender, "text": text, "is_mine": False,
                     "quote_text": quote_text, "msg_type": msg_type,
                     "attachment_info": att_info,
-                }
+                }]
 
-            attachments = data_msg.get("attachments", [])
-            msg_type, att_info, att_id = _classify_attachments(attachments)
-            if not text and attachments:
-                text = att_info or "Media"
-            return {
-                "sender": sender, "text": text, "is_mine": False,
-                "quote_text": quote_text, "msg_type": msg_type,
-                "attachment_info": att_info, "attachment_id": att_id,
-            }
+            return _build_msg_dicts(
+                sender, text, is_mine=False,
+                quote_text=quote_text,
+                attachments=data_msg.get("attachments", []),
+            )
 
         sync = envelope.get("syncMessage", {})
         sent = sync.get("sentMessage", {})
         if sent:
             text = sent.get("message", "") or ""
+            sender = "You"
             quote = sent.get("quote", {})
             quote_text = quote.get("text", "") if quote else None
 
@@ -430,23 +458,19 @@ class SignalBackend(ChatBackend):
                 msg_type, att_info = sticker_data
                 if not text:
                     text = att_info or "🎨 Sticker"
-                return {
-                    "sender": "You", "text": text, "is_mine": True,
+                return [{
+                    "sender": sender, "text": text, "is_mine": True,
                     "quote_text": quote_text, "msg_type": msg_type,
                     "attachment_info": att_info,
-                }
+                }]
 
-            attachments = sent.get("attachments", [])
-            msg_type, att_info, att_id = _classify_attachments(attachments)
-            if not text and attachments:
-                text = att_info or "Media"
-            return {
-                "sender": "You", "text": text, "is_mine": True,
-                "quote_text": quote_text, "msg_type": msg_type,
-                "attachment_info": att_info, "attachment_id": att_id,
-            }
+            return _build_msg_dicts(
+                sender, text, is_mine=True,
+                quote_text=quote_text,
+                attachments=sent.get("attachments", []),
+            )
 
-        return None
+        return []
 
     def _get_message_timestamp(self, envelope: dict) -> int:
         ts = envelope.get("timestamp", 0)
@@ -458,43 +482,48 @@ class SignalBackend(ChatBackend):
             ts = (sync.get("sentMessage", {}) or {}).get("timestamp", 0)
         return ts
 
-    def envelope_to_event(self, envelope: dict) -> ChatEvent | None:
-        """Classify a Signal envelope into a normalized ``ChatEvent``.
+    def envelope_to_event(self, envelope: dict) -> list[ChatEvent]:
+        """Classify a Signal envelope into zero or more ``ChatEvent`` objects.
 
-        Returns ``None`` for envelopes that carry no user-visible data.
+        Returns an empty list for envelopes that carry no user-visible data
+        (e.g. unknown contact, empty message).  An envelope with N
+        attachments produces N events (one per attachment).
         """
         # Typing indicator
         typing = _process_typing(envelope)
         if typing is not None:
             source, action = typing
-            return ChatEvent(
+            return [ChatEvent(
                 type="typing", protocol=self.protocol,
                 contact_id=source, payload={"action": action},
-            )
+            )]
 
         # Receipt message
         if "receiptMessage" in envelope:
             receipt = envelope.get("receiptMessage", {})
             source = envelope.get("sourceNumber", "") or envelope.get("source", "")
-            return ChatEvent(
+            return [ChatEvent(
                 type="receipt", protocol=self.protocol,
                 contact_id=source,
                 payload={"receipt": receipt},
-            )
+            )]
 
         # Real message
         contact = self._identify_contact_for_envelope(envelope)
         if contact is None:
-            return None
-        data = self._extract_message_data(envelope)
-        if data is None:
-            return None
+            return []
+        data_list = self._extract_message_data(envelope)
+        if not data_list:
+            return []
         ts = self._get_message_timestamp(envelope)
-        return ChatEvent(
-            type="message", protocol=self.protocol,
-            contact_id=contact.id,
-            payload={**data, "timestamp": ts, "contact": contact},
-        )
+        events: list[ChatEvent] = []
+        for data in data_list:
+            events.append(ChatEvent(
+                type="message", protocol=self.protocol,
+                contact_id=contact.id,
+                payload={**data, "timestamp": ts, "contact": contact},
+            ))
+        return events
 
     # ─── Incoming message ingestion ───────────────────────────────────
 
@@ -603,11 +632,12 @@ class SignalBackend(ChatBackend):
                 for envelope in self._rpc.listen_events(self.user_number):
                     if not self._polling_active:
                         return
-                    event = self.envelope_to_event(
+                    events = self.envelope_to_event(
                         envelope.get("envelope", {})
                     )
-                    if event is not None:
-                        self._event_queue.put(event)
+                    for event in events:
+                        if event is not None:
+                            self._event_queue.put(event)
             except Exception:
                 pass
             # Brief pause before reconnect
