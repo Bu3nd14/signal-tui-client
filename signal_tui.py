@@ -966,6 +966,14 @@ class SignalTUI(App):
         # startup).  This runs in the mount worker thread.
         self.signal_backend._connect_sync()
 
+        # ── Build cache early so contacts selected before WhatsApp connects
+        #     already see their message history in the chat area.
+        self._cache = {}
+        for backend in self.manager.all():
+            for cid, msgs in backend.cache.items():
+                self._cache[contact_cache_key(backend.protocol, cid)] = list(msgs)
+        self._sync_last_ts()
+
         # ── Early first paint: show Signal contacts immediately ─────────
         contacts = self.manager.list_contacts()
         self.contacts = contacts
@@ -1229,6 +1237,12 @@ class SignalTUI(App):
             self._render_timer = self.set_timer(0.05, self._render_next_chunk)
         else:
             self._render_timer = None
+            # All chunks rendered — restore selection highlight if a contact
+            # was already selected before this progressive render started.
+            if self.selected_contact is not None:
+                item = self._contact_widgets.get(self.selected_contact.cache_key)
+                if item is not None:
+                    contact_list.index = contact_list.children.index(item)
 
     def _render_contact_list(self, filtered: list[ChatContact]) -> None:
         """Renderizza la lista contatti, aggiornandola *in-place* quando la
@@ -1373,9 +1387,11 @@ class SignalTUI(App):
         # Start the progressive render
         self._render_next_chunk()
 
-        self._add_message(f"✅ Loaded {len(self.contacts)} contacts.", is_info=True)
-
-        self._add_message("💡 Select a contact to view chat", is_info=True)
+        # Only emit "loaded" hints on the very first paint; subsequent calls
+        # (e.g. after WhatsApp connects) must not overwrite an open chat.
+        if self.selected_contact is None:
+            self._add_message(f"✅ Loaded {len(self.contacts)} contacts.", is_info=True)
+            self._add_message("💡 Select a contact to view chat", is_info=True)
 
         self._update_unread_badges()
 
