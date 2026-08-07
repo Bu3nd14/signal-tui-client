@@ -915,7 +915,9 @@ Con 500 contatti Telegram aggiuntivi (oltre a Signal e WhatsApp), il totale può
 | Cache in memoria | 200 msg × 650 contatti = 130.000 msg | ~65 MB RAM | **Alto** |
 | Telethon event loop | Thread separato, solo `.put()` | 0 nel thread TUI | **Nessuno** |
 
-### 6.2 Soluzione 1: Cache ridotto per Telegram
+### 6.2 Soluzione 1: Cache ridotto per Telegram — ✅ IMPLEMENTATO
+
+Il cache attuale mantiene **200 messaggi per contatto** per ogni protocollo.
 
 Il cache attuale mantiene **200 messaggi per contatto** per ogni protocollo. Con 500 contatti Telegram, questo significa 100.000 messaggi solo per Telegram (~50 MB). Un contatto Telegram con 50 messaggi è più che sufficiente per lo scroll-back immediato.
 
@@ -928,7 +930,7 @@ _MAX_CACHE_PER_CONTACT = 50  # invece del default 200 usato da Signal/WhatsApp
 
 La funzione `ingest_message()` tronca automaticamente a questo limite.
 
-### 6.3 Soluzione 2: Lazy loading contatti all'avvio
+### 6.3 Soluzione 2: Lazy loading contatti all'avvio — ✅ IMPLEMENTATO
 
 Invece di caricare tutti i 500 dialoghi con `get_dialogs()` e bloccare il thread TUI, carichiamo solo i primi 50 più recenti e rimandiamo il resto in background:
 
@@ -953,24 +955,21 @@ def _load_contacts(self) -> None:
     self._contacts_by_id = {c.id: c for c in self.contacts}
 ```
 
-**Estensione futura**: Dopo il render iniziale, caricare i restanti 450 dialoghi in un batch separato e aggiornare `self.contacts` con `call_from_thread(self._update_contacts_ui, ...)`.
+**Implementato**: Il render progressivo usa `_start_progressive_render()` che carica 50 contatti per frame via `set_timer`. Il merge path aggiunge nuovi contatti senza `clear()`. Vedi commit `20255e8` e `6c081ba` in `signal_tui.py`.
 
-### 6.4 Soluzione 3: Nessuna modifica al poll_once()
+### 6.4 Soluzione 3: Nessuna modifica al poll_once() — ✅ CONFERMATO
 
 `poll_once()` consuma solo gli eventi nella coda — non scala col numero di contatti. Il `_poll_worker` fa già batching: un solo re-sort/re-render per batch di eventi, non per evento. Nessuna modifica necessaria.
 
-### 6.5 Verifica con il reorder path
+### 6.5 Verifica con il reorder path — ✅ CONFERMATO
 
-Il percorso più frequente (nuovo messaggio che cambia l'ordine) è già ottimizzato con `_reorder_contact_list()` che usa `move_child()`:
+Il percorso più frequente (nuovo messaggio che cambia l'ordine) è ottimizzato con `move_child()`. Il merge path (superset — 4° percorso) aggiunge nuovi ListItem senza `clear()`, preservando i widget esistenti. La visibilità toggle su Ctrl+W evita qualsiasi rebuild.
 
-```python
-# signal_tui.py, _render_contact_list — reorder path
-for i, contact in enumerate(filtered):
-    widget = existing[contact.cache_key]
-    list_view.move_child(widget, before=list_view.children[i])
-```
-
-Questo **non ricrea** widget — li riposiziona soltanto. Con 650 contatti, anche nel caso peggiore (tutti da riordinare), sono 650 chiamate `move_child()` a <1ms l'una = <1 secondo totale, ma questo avviene raramente (solo quando arriva un messaggio che cambia l'ordinamento di molti contatti).
+**Architettura finale di `_render_contact_list` (4 percorsi):**
+- stesso ordine → fast path (update label)
+- stesso set, ordine diverso → reorder path (move_child)
+- superset (nuovi contatti) → merge path (append + move_child, zero clear)
+- set diverso → `_start_progressive_render()` (clear + chunked 50/frame)
 
 ---
 
@@ -1019,4 +1018,4 @@ Questo **non ricrea** widget — li riposiziona soltanto. Con 650 contatti, anch
 - **Supporto sticker inline**: I widget `ImageWidget` potrebbero renderizzare sticker WebP scaricati da Telethon.
 - **Gruppi e canali**: La mappatura `ChatContact` supporta già gruppi/canali (ID negativo). La TUI potrebbe beneficiare di un'icona specifica (📢 per canali, 👥 per gruppi) da aggiungere negli `extras`.
 - **Storico messaggi**: `client.get_messages()` permette di caricare lo storico di una chat. Potremmo esporlo come `resync_history()` simile a WhatsApp.
-- **Lazy loading contatti completi**: Dopo il primo render con `get_dialogs(limit=50)`, caricare i restanti dialoghi in background e aggiornare `self.contacts` senza bloccare la UI (vedi sezione 6.3).
+- ~~Lazy loading contatti~~ — ✅ Implementato (progressive render + merge path + visibility toggle)

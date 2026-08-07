@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
 **Data:** 2026-08-07
-**Git commit:** `e114269` (master)
+**Git commit:** `2ba5e05` (master)
 **Python:** 3.12.3
-**Stato:** ✅ 378/378 test superati
+**Stato:** ✅ 378/378 test superati (+72 Telegram test in `Telegram/`)
 
 ---
 
@@ -13,8 +13,10 @@
 |--------|------|------|-------|
 | WhatsApp Backend | `test_whatsapp_backend.py` | 101 | ✅ |
 | UI Protocol | `test_ui_protocol.py` | 44 | ✅ |
-| Typing Indicator | `test_typing_indicator.py` | 29 | ✅ |
+| Telegram Regression | `Telegram/test_regression.py` | 39 | ⏳ (backend non ancora creato) |
 | Backends (Manager) | `test_backends.py` | 36 | ✅ |
+| Telegram Backend | `Telegram/test_telegram_backend.py` | 33 | ⏳ (backend non ancora creato) |
+| Typing Indicator | `test_typing_indicator.py` | 29 | ✅ |
 | Cache (SQLite) | `test_backend_cache.py` | 18 | ✅ |
 | Script installazione | `test_install_script.py` | 17 | ✅ |
 | Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
@@ -37,6 +39,14 @@
 ---
 
 ## Novità — Ultimi aggiornamenti
+
+### Lazy Contact Render (10 commit, `87f52c5..2ba5e05`)
+- **Progressive render**: contatti caricati 50 per frame via `set_timer`, UI mai bloccata
+- **Visibility toggle (Ctrl+W)**: il filtro protocollo imposta `display=True/False` senza distruggere widget
+- **Merge path**: quando nuovi contatti arrivano (WhatsApp dopo Signal), solo i nuovi ListItem vengono creati — zero `clear()`, zero flash
+- **Early paint**: `_update_contacts_ui` chiamata subito dopo Signal, poi dopo WhatsApp — contatti visibili entro ~200ms
+- **System messages auto-dismiss**: i messaggi `is_info` si auto-cancellano dopo 3 secondi
+- **Test Telegram**: 72 test scritti (33 backend + 39 regressione) in `Telegram/`, in attesa del backend
 
 ### WhatsApp Image Support
 Aggiunti 14 test nel modulo `test_whatsapp_backend.py` per download e rendering immagini WhatsApp.
