@@ -21,7 +21,7 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 - Full contact list with unread badges — unified across Signal and WhatsApp
 - Real-time message receiving and sending on both protocols
 - Native terminal image rendering (via `catimg`) with fullscreen modal viewer
-- Message history with local SQLite cache (last 200 messages per contact, configurable retention)
+- Message history with local SQLite cache (last 200 messages per contact retained)
 - Device linking via QR code — both Signal and WhatsApp
 - Daemon mode for fast JSON-RPC communication (Signal)
 - WhatsApp event-driven mode — webhook-based, no polling (WAHA + Docker)
@@ -325,8 +325,8 @@ A persistent HTTP server starts on port **10042** (first download only) and stay
 ### Tips
 
 - The app starts the `signal-cli` daemon automatically on first launch (for Signal) and a webhook HTTP server for WhatsApp push events
-- Messages are persisted locally in a SQLite database (`~/.local/share/signal-tui-client/messages.db`)
-- Only the last 20 messages are shown when opening a chat; click "Load more" to see all cached messages
+- Messages are persisted locally in a SQLite database (`~/.local/share/signal-tui-client/messages.db`) with up to 200 messages retained per contact
+- The last 20 messages are shown when opening a chat; click "Load more" to see older cached messages
 - Unread messages are shown with a `*N` badge next to the contact name
 - Sent messages show their delivery status: *sent* (italic), **delivered** (bold), read (normal)
 - A `✍️` icon next to a contact name means they are typing; a `💭` icon shows briefly after they send the message or stop typing
@@ -360,27 +360,45 @@ Vedi [profiling/README.md](profiling/README.md) per istruzioni dettagliate, inte
 ```
 signal-tui-client/
 ├── signal_tui.py            # Main TUI application (Textual App) — multi-protocol
-├── backend.py               # Shared backend: cache, SQLite persistence, receipts
-├── models.py                # Shared data models (ChatContact, ChatEvent, …)
+├── backend.py               # Shared backend: SQLite persistence, signal-cli RPC/subprocess, webhook/HTTP server, receipts
+├── models.py                # Shared data models (ChatContact, ChatMessage, ChatEvent)
 ├── backends/                # Per-protocol backend implementations
+│   ├── __init__.py          #   Package init — exports ChatBackend, BackendManager, SignalBackend, WhatsAppBackend
 │   ├── base.py              #   Abstract ChatBackend interface
 │   ├── manager.py           #   Multi-backend registry and routing
-│   ├── signal.py            #   Signal backend (signal-cli daemon / subprocess)
+│   ├── signal.py            #   Signal backend (signal-cli daemon / subprocess, envelope parsing)
 │   ├── whatsapp.py          #   WhatsApp backend (WAHA REST + webhook push)
 │   └── config.py            #   WhatsApp configuration helpers
-├── ui_components.py         # Custom Textual widgets (MessageWidget, ImageWidget, …)
-├── emoji_picker.py          # Emoji picker modal screen and auto-completion widget
+├── ui_components.py         # Custom Textual widgets (MessageWidget, ImageWidget, ImageModalScreen, …)
+├── emoji_picker.py          # Emoji picker modal screen and auto-completion widget (Ctrl+E)
 ├── emoji_data.py            # Emoji database (categories, aliases, search index)
 ├── contact_picker.py        # Contact search picker modal screen (Ctrl+S)
 ├── link_account.py          # Signal device linking script (QR code)
 ├── link_whatsapp.py         # WhatsApp device linking script (QR code)
-├── docker-compose.yml       # WAHA (WhatsApp HTTP API) container
-├── scripts/                 # Helper scripts (start_whatsapp.sh, …)
+├── migrate_cache_sqlite.py  # One-shot migration: JSON cache → SQLite
+├── migrate_cache_protocol.py# One-shot migration: add protocol field to cache
+├── migrate_cache_status.py  # One-shot migration: add status field to cache
+├── purge_whatsapp_cache.py  # Utility: purge WhatsApp messages from cache
+├── tests/                   # Test suite (pytest, 366 tests)
+│   ├── conftest.py
+│   ├── test_whatsapp_backend.py (101 tests)
+│   ├── test_ui_protocol.py      (44 tests)
+│   ├── test_typing_indicator.py (29 tests)
+│   └── ... (20 test files total)
+│   └── run_regression_tests.sh
+├── profiling/               # Performance profiling tools (CPU, RAM, I/O)
+├── scripts/                 # Helper scripts (start_whatsapp.sh)
+├── docker-compose.yml       # WAHA (WhatsApp HTTP API) Docker container
+├── .env.example             # Template for WAHA credentials
+├── .dockerignore            # Docker build exclusions
 ├── install.sh               # Automatic installation script
 ├── requirements.txt         # Python dependencies
+├── requirements-dev.txt     # Development dependencies (ruff)
 ├── config.json              # Local configuration (not committed)
+├── README.md                # This file
+├── TEST_REPORT.md           # Test report (last run: 366/366 ✅)
+├── PERF_ANALYSIS.md         # Performance analysis (UI reactivity hotspots)
 ├── BUGS.md                  # Known bugs and limitations
-├── profiling/               # Performance profiling tools (CPU, RAM, I/O)
 ├── bin/                     # signal-cli binaries (not committed)
 └── LICENSE                  # GPLv3
 ```

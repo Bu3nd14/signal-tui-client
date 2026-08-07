@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
-**Data:** 2026-08-06
-**Git commit:** `6e66f45` (master, merge `whatsapp-image-support`)
+**Data:** 2026-08-07
+**Git commit:** `78b2b21` (master)
 **Python:** 3.12.3
-**Stato:** ✅ 353/353 test superati
+**Stato:** ✅ 366/366 test superati
 
 ---
 
@@ -11,89 +11,48 @@
 
 | Modulo | File | Test | Esito |
 |--------|------|------|-------|
-| WhatsApp Backend | `test_whatsapp_backend.py` | 92 | ✅ |
+| WhatsApp Backend | `test_whatsapp_backend.py` | 101 | ✅ |
 | UI Protocol | `test_ui_protocol.py` | 44 | ✅ |
 | Typing Indicator | `test_typing_indicator.py` | 29 | ✅ |
 | Backends (Manager) | `test_backends.py` | 25 | ✅ |
-| Docker Compose | `test_docker_compose_extra_hosts.py` | 2 | ✅ |
 | Cache (SQLite) | `test_backend_cache.py` | 18 | ✅ |
+| Script installazione | `test_install_script.py` | 17 | ✅ |
 | Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
-| Script installazione | `test_install_script.py` | 16 | ✅ |
 | Refresh Chat | `test_refresh_chat.py` | 15 | ✅ |
 | WA Startup/Resync | `test_wa_startup_resync.py` | 15 | ✅ |
 | UI Components | `test_ui_components.py` | 14 | ✅ |
+| RPC / Daemon | `test_backend_rpc.py` | 12 | ✅ |
 | Migrazione Protocollo | `test_migrate_protocol.py` | 11 | ✅ |
 | Cache Debounce | `test_cache_debounce.py` | 10 | ✅ |
 | Contact Picker | `test_contact_picker.py` | 9 | ✅ |
-| RPC / Daemon | `test_backend_rpc.py` | 8 | ✅ |
 | Invio messaggi | `test_backend_send.py` | 6 | ✅ |
 | Lock File | `test_signal_tui_lock.py` | 6 | ✅ |
 | Attachment | `test_backend_attachments.py` | 5 | ✅ |
 | QR ASCII | `test_qr_ascii.py` | 4 | ✅ |
 | Migrazione SQLite | `test_migrate_sqlite.py` | 4 | ✅ |
 | Contatti | `test_backend_contacts.py` | 4 | ✅ |
-| **Totale** | | **353** | **✅ 353/353** |
+| Docker Compose | `test_docker_compose_extra_hosts.py` | 2 | ✅ |
+| **Totale** | | **366** | **✅ 366/366** |
 
 ---
 
-## Novità WhatsApp Image Support
+## Novità — Ultimi aggiornamenti
 
-Aggiunti 14 test nel modulo `test_whatsapp_backend.py` per la nuova funzionalità:
+### WhatsApp Image Support
+Aggiunti 14 test nel modulo `test_whatsapp_backend.py` per download e rendering immagini WhatsApp.
 
-| Test | Descrizione |
-|------|-------------|
-| `test_hasMedia_image` | Estrazione immagine da `hasMedia`/`media` WAHA |
-| `test_hasMedia_video` | Estrazione video → `msg_type=attachment` |
-| `test_hasMedia_audio` | Estrazione audio → `msg_type=attachment` |
-| `test_hasMedia_no_media_dict` | `hasMedia=True` ma `media=None` → testo |
-| `test_download_media_direct_binary` | Download via endpoint WAHA binary |
-| `test_download_media_falls_back_to_legacy_url` | Fallback a URL legacy |
-| `test_download_media_returns_none_when_all_fail` | Tutti i path falliscono → None |
-| `test_download_media_direct_url` | Download da URL HTTP diretto |
-| `test_download_media_encodes_at_sign` | Encoding `@` → `%40` nell'URL |
-| `test_get_attachment_path` | Fast-path: file già in cache |
-| `test_get_attachment_path_missing_downloads` | Lazy download quando file assente |
-| `test_get_attachment_path_download_fails_returns_none` | Download fallito → None |
-| `test_get_attachment_path_no_rest_returns_none` | Nessun REST client → None |
+### Backend Manager + Seed Cache + Webhook Registration
+Aggiunti 9 test aggiuntivi in `test_whatsapp_backend.py` portando il totale a 101:
+- **SeedCacheFromDB** (7 test): seeding cache da SQLite, dedup messaggi, echo invio ottimistico
+- **WhatsAppWebhookRegistration** (7 test): registrazione webhook WAHA
+- **WAHAContract** (8 test): percorsi REST, frame WS, estrazione immagini
 
+### Nuovi test RPC (da 8 → 12)
+Aggiunti 4 test in `test_backend_rpc.py` per timeout HTTP e retry.
 
-
-
-
-
-
-
-
----
-
-## Riepilogo
-
-| Modulo | File | Test | Esito |
-|--------|------|------|-------|
-| Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
-| Contact Picker | `test_contact_picker.py` | 9 | ✅ |
-| Cache (SQLite) | `test_backend_cache.py` | 18 | ✅ |
-| Contatti | `test_backend_contacts.py` | 4 | ✅ |
-| Attachment | `test_backend_attachments.py` | 5 | ✅ |
-| RPC / Daemon | `test_backend_rpc.py` | 8 | ✅ |
-| Invio messaggi | `test_backend_send.py` | 6 | ✅ |
-| UI Components | `test_ui_components.py` | 11 | ✅ |
-| Lock file | `test_signal_tui_lock.py` | 6 | ✅ |
-| Script installazione | `test_install_script.py` | 16 | ✅ |
-| Cache SQLite (ex debounce) | `test_cache_debounce.py` | 12 | ✅ |
-| Migrazione SQLite | `test_migrate_sqlite.py` | 4 | ✅ |
-| Refresh chat | `test_refresh_chat.py` | 4 | ✅ |
-| Indicatori di typing | `test_typing_indicator.py` | 25 | ✅ |
-| **Totale** | | **142** | **✅ 142/142** |
-
-
-
-
-
-
-
-
----
+### Altro
+- `test_install_script.py`: +1 test (verifica Java 25)
+- Refactoring multi-backend: envelope parsing spostato da `signal_tui.py` a `backends/signal.py`
 
 ## Dettaglio test
 
@@ -179,7 +138,7 @@ Test della cache messaggi migrata da JSON a **SQLite**. Le scritture sono increm
 | `test_attachment_none_id` | ID None → None |
 | `test_attachment_is_directory` | ID è una directory → None |
 
-### 🔌 RPC / Daemon (`test_backend_rpc.py`) — 8 test
+### 🔌 RPC / Daemon (`test_backend_rpc.py`) — 12 test
 
 | Test | Descrizione |
 |------|-------------|
@@ -189,6 +148,10 @@ Test della cache messaggi migrata da JSON a **SQLite**. Le scritture sono increm
 | `test_list_contacts_error` | list_contacts con errore → lista vuota |
 | `test_receive_success` | receive con successo |
 | `test_receive_error` | receive con errore → lista vuota |
+| `test_listen_events_yields_envelope` | SSE listener → envelope JSON valido |
+| `test_listen_events_skips_keepalive` | SSE listener → ignora keepalive (riga vuota) |
+| `test_listen_events_connection_error` | SSE listener → errore di connessione gestito |
+| `test_listen_events_bad_json` | SSE listener → JSON malformato non crasha |
 | `test_daemon_running` | Demone attivo → True |
 | `test_daemon_not_running` | Demone non attivo → False |
 
