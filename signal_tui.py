@@ -1382,6 +1382,7 @@ class SignalTUI(App):
 
         contact_list = self.query_one("#contact-list", ListView)
         contact_list.clear()
+        contact_list.index = None  # prevent spurious auto-select on re-append
         self._contact_widgets.clear()
 
         # Start the progressive render
@@ -1462,8 +1463,9 @@ class SignalTUI(App):
         try:
             idx = visible.index(contact)
             contact_list.index = idx
-            item = contact_list.children[idx]
-            item.children[0].update(self._contact_label(self.selected_contact))
+            if idx < len(contact_list.children):
+                item = contact_list.children[idx]
+                item.children[0].update(self._contact_label(self.selected_contact))
         except ValueError:
             # Contact is filtered out of the visible list; still select it but
             # don't try to highlight a row that isn't rendered.
