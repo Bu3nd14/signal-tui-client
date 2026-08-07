@@ -288,7 +288,7 @@ class ImageWidget(Static):
     class ImageClicked(Message):
         """Posted when the user activates this image widget."""
 
-        def __init__(self, attachment_path: Path, attachment_id: str = "") -> None:
+        def __init__(self, attachment_path: Path | None, attachment_id: str = "") -> None:
             super().__init__()
             self.attachment_path = attachment_path
             self.attachment_id = attachment_id
@@ -319,7 +319,7 @@ class ImageWidget(Static):
 
     def on_click(self) -> None:
         """Mouse click → emit ``ImageClicked``."""
-        if self.attachment_path:
+        if self.attachment_path or self.attachment_id:
             self.post_message(self.ImageClicked(self.attachment_path, self.attachment_id))
 
     def on_focus(self) -> None:
@@ -332,7 +332,7 @@ class ImageWidget(Static):
 
     def key_enter(self) -> None:
         """Enter key → emit ``ImageClicked``."""
-        if self.attachment_path:
+        if self.attachment_path or self.attachment_id:
             self.post_message(self.ImageClicked(self.attachment_path, self.attachment_id))
 
 

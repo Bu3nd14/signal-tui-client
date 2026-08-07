@@ -2194,13 +2194,22 @@ class SignalTUI(App):
     def on_image_widget_image_clicked(self, event: ImageWidget.ImageClicked):
         """Handle ``ImageClicked`` from an ``ImageWidget``.
 
-        If download mode is active, serve the image for download instead
-        of opening the modal.  Otherwise opens a fullscreen
-        ``ImageModalScreen`` that renders the image via ``viu``.
+        If the path is not yet resolved, does a lazy lookup via the
+        ``BackendManager`` (works for both Signal and WhatsApp).  In download
+        mode the file is served via HTTP; otherwise a fullscreen
+        ``ImageModalScreen`` renders it via ``catimg``.
         """
+        att_path = event.attachment_path
+        # Lazy resolution: when loaded from cache the path is not yet known,
+        # but the attachment_id is.  Use the selected contact's protocol to
+        # route the lookup through the correct backend.
+        if att_path is None and event.attachment_id:
+            protocol = self.selected_contact.protocol if self.selected_contact else None
+            if protocol:
+                att_path = self.manager.get_attachment_path(protocol, event.attachment_id)
+
         if self._download_mode:
-            # In download mode: serve the file via HTTP
-            text = event.attachment_path.name if event.attachment_path else "attachment"
+            text = att_path.name if att_path else "attachment"
             protocol = self.selected_contact.protocol if self.selected_contact else None
             self._start_download(
                 text=text,
@@ -2208,8 +2217,8 @@ class SignalTUI(App):
                 protocol=protocol,
             )
             return
-        if event.attachment_path:
-            self.push_screen(ImageModalScreen(event.attachment_path))
+        if att_path:
+            self.push_screen(ImageModalScreen(att_path))
         else:
             self._add_message("❌ Image file not found on server", is_info=True)
 
