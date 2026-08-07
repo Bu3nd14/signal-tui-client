@@ -148,6 +148,10 @@ class SignalTUI(App):
         width: 100%;
     }
 
+    #ChatTitle {
+        text-align: center;
+    }
+
     #contact-list {
         height: 100%;
         border: solid $accent;
@@ -1293,6 +1297,9 @@ class SignalTUI(App):
             return
 
         self.selected_contact = contact
+        # Update the chat banner with the selected contact's name.
+        chat_title = self.query_one("#ChatTitle", Label)
+        chat_title.update(f"💬 Chat - {contact.display_name}")
         self._seen_timestamps.clear()
         self._seen_message_ids.clear()
         # Per WhatsApp la ricezione è PUSH via webhook (handle_webhook): WAHA
