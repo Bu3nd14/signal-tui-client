@@ -488,8 +488,14 @@ def _resolve_sender_name(sender: str, contacts_by_jid: dict | None) -> str:
 
 
 
-def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent | None:
-    """Normalize a raw incoming message dict into a ``ChatEvent``."""
+def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[ChatEvent]:
+    """Normalize a raw incoming message dict into zero or more ``ChatEvent`` objects.
+
+    When *raw* carries an ``attachments`` array with N elements, N events are
+    returned (one per attachment).  The message body is attached to the first
+    event only.  All other paths (nested media, hasMedia, pure text) produce a
+    single-element list (or an empty list when the payload is invalid).
+    """
 
     is_mine = bool(raw.get("fromMe") or raw.get("isMe") or raw.get("outgoing"))
 
@@ -536,22 +542,30 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
     caption = raw.get("caption") or ""
 
     # ── Attachment extraction ──────────────────────────────────────────
-    # WAHA can deliver media in two shapes:
-    # 1. Flat:  top-level "attachments" array  (legacy / v1 API)
-    # 2. Nested: raw["message"]["imageMessage"] / ["videoMessage"] / …
-    #    (WAHA Core / current versions)
-    attachment_id = None
-    attachment_info = None
+    # WAHA can deliver media in three shapes:
+    # 1. Flat:  top-level "attachments" array  (legacy / v1 API) — may carry multiple
+    # 2. Nested: raw["message"]["imageMessage"] / ["videoMessage"] / …  (WAHA Core)
+    # 3. Flat hasMedia / media fields  (current WAHA Core)
+    media_items: list[tuple[str | None, str | None, str]] = []
+    # (attachment_id, attachment_info, msg_type_override)
 
-    # Try top-level attachments first (legacy format).
+    # Try top-level attachments first (legacy format — supports multiples).
     attachments = raw.get("attachments") or []
     if isinstance(attachments, list) and attachments:
-        attachment = attachments[0]
-        attachment_id = attachment.get("id") or attachment.get("url") or str(ts_ms)
-        attachment_info = caption or attachment.get("filename") or attachment.get("mimetype") or "Media"
+        for att in attachments:
+            att_id = att.get("id") or att.get("url") or str(ts_ms)
+            mime = att.get("mimetype") or ""
+            if mime.startswith("image/"):
+                att_type = "image"
+            elif mime.startswith(("video/", "audio/", "application/")):
+                att_type = "attachment"
+            else:
+                att_type = msg_type if msg_type != "text" else "attachment"
+            att_info = caption or att.get("caption") or att.get("filename") or mime or "Media"
+            media_items.append((att_id, att_info, att_type))
 
     # If still no media, look inside the nested "message" object (WAHA Core).
-    if not attachment_id:
+    if not media_items:
         nested = raw.get("message")
         if isinstance(nested, dict):
             media_keys = [
@@ -564,49 +578,49 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
             for media_key, fallback_type in media_keys:
                 media = nested.get(media_key)
                 if isinstance(media, dict):
-                    # Override msg_type from the nested media presence.
-                    if msg_type == "text":
-                        msg_type = fallback_type
-                    attachment_id = (
+                    att_type = fallback_type if msg_type == "text" else msg_type
+                    att_id = (
                         media.get("id")
                         or media.get("url")
                         or nested.get("id")
                         or msg_id
                     )
-                    attachment_info = (
+                    att_info = (
                         caption
                         or media.get("caption")
                         or media.get("filename")
                         or media.get("mimetype")
                         or (f"{media_key} ({msg_id[:16]}...)" if len(str(msg_id)) > 16 else f"{media_key}")
                     )
+                    media_items.append((att_id, att_info, att_type))
                     break
 
     # If still no media, look at WAHA's flat hasMedia / media fields (current WAHA Core).
-    if not attachment_id and raw.get("hasMedia"):
+    if not media_items and raw.get("hasMedia"):
         media = raw.get("media")
         if isinstance(media, dict):
             mime = (media.get("mimetype") or "").lower()
             if mime.startswith("image/"):
-                msg_type = "image"
+                att_type = "image"
             elif mime.startswith("video/"):
-                msg_type = "attachment"
+                att_type = "attachment"
             elif mime.startswith("audio/"):
-                msg_type = "attachment"
+                att_type = "attachment"
             elif mime.startswith("application/"):
-                msg_type = "attachment"
+                att_type = "attachment"
             elif raw.get("stickerMessage") is not None:
-                msg_type = "sticker"
-            # Use media.url — rewritten from container-internal localhost:3000
-            # to the real host port + API key by download_media().
-            attachment_id = media.get("url") or msg_id
-            attachment_info = (
+                att_type = "sticker"
+            else:
+                att_type = "attachment"
+            att_id = media.get("url") or msg_id
+            att_info = (
                 caption
                 or media.get("caption")
                 or media.get("filename")
                 or mime
                 or "Media"
             )
+            media_items.append((att_id, att_info, att_type))
 
     # Rileva se la chat è un gruppo WhatsApp (JID termina con @g.us).
     is_group = chat_jid.endswith("@g.us")
@@ -642,8 +656,45 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
     # al nome del contatto tramite la rubrica caricata dal backend.
     sender = _resolve_sender_name(sender, contacts_by_jid)
 
-    return ChatEvent(
+    quote = raw.get("quote") or raw.get("quotedMessage")
+    quote_text = None
+    if isinstance(quote, dict):
+        quote_text = quote.get("text") or quote.get("body") or quote.get("conversation") or None
 
+    # ── Build events ───────────────────────────────────────────────────
+    if media_items:
+        events: list[ChatEvent] = []
+        multiple = len(media_items) > 1
+        for i, (att_id, att_info, att_type) in enumerate(media_items):
+            msg_text = text if i == 0 else ""
+            if not msg_text:
+                label = att_info or "Media"
+                if multiple and att_id:
+                    msg_text = f"{label}: {str(att_id)}"
+                else:
+                    msg_text = label
+            events.append(ChatEvent(
+                type="message",
+                protocol=PROTOCOL_WHATSAPP,
+                contact_id=chat_jid,
+                payload={
+                    "id": msg_id,
+                    "text": msg_text,
+                    "is_mine": is_mine,
+                    "sender": sender,
+                    "is_group": is_group,
+                    "timestamp": ts_ms,
+                    "quote_text": quote_text,
+                    "msg_type": att_type,
+                    "attachment_info": att_info,
+                    "attachment_id": att_id,
+                    "contact": None,
+                },
+            ))
+        return events
+
+    # No media: pure text message (or sticker from msg_type).
+    return [ChatEvent(
         type="message",
         protocol=PROTOCOL_WHATSAPP,
         contact_id=chat_jid,
@@ -654,13 +705,13 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
             "sender": sender,
             "is_group": is_group,
             "timestamp": ts_ms,
-            "quote_text": None,
+            "quote_text": quote_text,
             "msg_type": msg_type,
-            "attachment_info": attachment_info,
-            "attachment_id": attachment_id,
-            "contact": None,  # resolved by identify_contact() later
+            "attachment_info": None,
+            "attachment_id": None,
+            "contact": None,
         },
-    )
+    )]
 
 
 def _event_from_receipt(raw: dict) -> ChatEvent | None:
@@ -766,11 +817,14 @@ def _event_from_typing(raw: dict) -> ChatEvent | None:
     )
 
 
-def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent | None:
+def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> list[ChatEvent]:
     """Dispatch a raw WebSocket message to the right normalization function.
 
     WAHA frames look like ``{"event": "...", "session": "...", "payload": {...}}``;
     the ``payload`` (if present) is used for the actual message content.
+
+    Returns a **list** of ``ChatEvent`` objects (typically one, but may be
+    multiple when the message carries several attachments).
     """
     evt = (raw.get("event") or raw.get("type") or "").lower()
     payload = raw.get("payload")
@@ -779,18 +833,21 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent
     if evt in ("message", "message.any", "message.new", "messages.upsert", "messages/upsert"):
         return _event_from_message(content, contacts_by_jid)
     if evt in ("typing", "presence.update", "presence/update", "presence", "presence.update"):
-        return _event_from_typing(content)
+        event = _event_from_typing(content)
+        return [event] if event is not None else []
     if evt in ("receipt", "receipts.update", "receipt/update", "message.receipt"):
-        return _event_from_receipt(content)
+        event = _event_from_receipt(content)
+        return [event] if event is not None else []
     if evt in ("message.ack", "message/ack", "message.ack.group"):
-        return _event_from_ack(content)
+        event = _event_from_ack(content)
+        return [event] if event is not None else []
     # Some APIs emit the message object directly without an 'event' field.
     if content.get("remoteJid") or content.get("from") or content.get("chatId"):
         if ("text" in content or "body" in content or content.get("message")
                 or content.get("attachments") or content.get("hasMedia")
                 or content.get("media")):
             return _event_from_message(content, contacts_by_jid)
-    return None
+    return []
 
 
 # ─── WhatsAppBackend ─────────────────────────────────────────────────────────
@@ -933,8 +990,8 @@ class WhatsAppBackend(ChatBackend):
                             },
                         )
 
-        event = _event_from_raw(raw, self._contacts_by_jid)
-        if event is None:
+        events = _event_from_raw(raw, self._contacts_by_jid)
+        if not events:
             # Even when the raw event is not recognised as a receipt/typing
             # (e.g. message.ack with status < 3), a new outgoing message may
             # have been ingested above.  Enqueue the synthetic message event
@@ -952,13 +1009,17 @@ class WhatsAppBackend(ChatBackend):
         if ack_msg_event is not None:
             self._enqueue_event(ack_msg_event)
 
-        if event.type == "message":
-            mid = event.payload.get("id")
-            if mid and mid in self._seen_msg_ids:
-                return True  # retry già processato: niente doppioni in coda
-            if mid:
-                self._seen_msg_ids.add(mid)
-        self._enqueue_event(event)
+        # Dedup guard: WAHA can retry the same event.
+        # For message events we use the per-message id; for others we use the
+        # raw event key to avoid repeats.
+        for event in events:
+            if event.type == "message":
+                mid = event.payload.get("id")
+                if mid and mid in self._seen_msg_ids:
+                    continue  # retry già processato
+                if mid:
+                    self._seen_msg_ids.add(mid)
+            self._enqueue_event(event)
         return True
 
     @property
@@ -1200,29 +1261,28 @@ class WhatsAppBackend(ChatBackend):
         msgs = [m for m in raw if isinstance(m, dict)]
         msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
         for m in msgs:
-            event = _event_from_message(m, self._contacts_by_jid)
-            if event is None:
-                continue
-            payload = event.payload
+            events = _event_from_message(m, self._contacts_by_jid)
+            for event in events:
+                payload = event.payload
 
-            is_mine = payload.get("is_mine", False)
-            # ingest_message fa dedup interno (stesso (contact, ts, text) non
-            # viene ri-salvato) e aggiorna il cache locale + SQLite.  Includiamo
-            # sia i ricevuti sia i miei inviati così lo storico è completo.
-            self.ingest_message(
-                contact_id,
-                {
-                    "id": payload.get("id"),
-                    "text": payload.get("text", ""),
-                    "is_mine": is_mine,
-                    "sender": payload.get("sender", "You" if is_mine else ""),
-                    "quote_text": payload.get("quote_text"),
-                    "msg_type": payload.get("msg_type", "text"),
-                    "attachment_info": payload.get("attachment_info"),
-                    "attachment_id": payload.get("attachment_id"),
-                },
-                payload.get("timestamp", 0),
-            )
+                is_mine = payload.get("is_mine", False)
+                # ingest_message fa dedup interno (stesso (contact, ts, text) non
+                # viene ri-salvato) e aggiorna il cache locale + SQLite.  Includiamo
+                # sia i ricevuti sia i miei inviati così lo storico è completo.
+                self.ingest_message(
+                    contact_id,
+                    {
+                        "id": payload.get("id"),
+                        "text": payload.get("text", ""),
+                        "is_mine": is_mine,
+                        "sender": payload.get("sender", "You" if is_mine else ""),
+                        "quote_text": payload.get("quote_text"),
+                        "msg_type": payload.get("msg_type", "text"),
+                        "attachment_info": payload.get("attachment_info"),
+                        "attachment_id": payload.get("attachment_id"),
+                    },
+                    payload.get("timestamp", 0),
+                )
 
         # Ordina la cache della chat per timestamp (idempotente — ingest ha già
         # riordinato a ogni aggiunta, ma riordinare qui è gratuito e garantisce

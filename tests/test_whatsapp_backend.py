@@ -32,6 +32,18 @@ from backends.whatsapp import (
 )
 
 
+def _msg(raw, contacts=None):
+    """Wrapper: returns first event from _event_from_message (now returns list)."""
+    events = _event_from_message(raw, contacts)
+    return events[0] if events else None
+
+
+def _raw(raw, contacts=None):
+    """Wrapper: returns first event from _event_from_raw (now returns list)."""
+    events = _event_from_raw(raw, contacts)
+    return events[0] if events else None
+
+
 def _json_response(payload):
     """Return a mock urlopen context manager that yields a JSON body."""
     data = json.dumps(payload).encode("utf-8")
@@ -313,7 +325,7 @@ class TestWhatsAppEvents:
     """📨 Normalizzazione dei WebSocket frame in ChatEvent."""
 
     def test_message_event(self):
-        ev = _event_from_message({
+        ev = _msg({
             "id": "m1", "from": "wa:39123@s.whatsapp.net", "timestamp": 1700000000,
             "text": "ciao", "pushName": "Mario", "fromMe": False,
         })
@@ -418,9 +430,9 @@ class TestWhatsAppEvents:
             "status": 4,
         }) is None
 
-    def test_ack_dispatch_via_event_from_raw(self):
+    def test_ack_dispatch_via_raw(self):
         """_event_from_raw dispatches 'message.ack' to _event_from_ack."""
-        ev = _event_from_raw({
+        ev = _raw({
             "event": "message.ack",
             "payload": {
                 "id": "msg_1",
@@ -437,7 +449,7 @@ class TestWhatsAppEvents:
 
     def test_ack_slash_variant_dispatch(self):
         """_event_from_raw dispatches 'message/ack' variant too."""
-        ev = _event_from_raw({
+        ev = _raw({
             "event": "message/ack",
             "payload": {
                 "id": "msg_1",
@@ -454,12 +466,12 @@ class TestWhatsAppEvents:
 
     def test_dispatch_by_event_type(self):
         raw = {"event": "messages.upsert", "from": "wa:1@s.whatsapp.net", "text": "hi", "timestamp": 1}
-        ev = _event_from_raw(raw)
+        ev = _raw(raw)
         assert ev is not None and ev.type == "message"
 
     def test_group_message_extracts_sender_from_participant(self):
         """Un messaggio di gruppo (@g.us) estrae il mittente dal campo participant."""
-        ev = _event_from_message({
+        ev = _msg({
             "id": "g1",
             "from": "123456789@g.us",
             "timestamp": 1700000000,
@@ -475,7 +487,7 @@ class TestWhatsAppEvents:
 
     def test_group_message_sender_falls_back_to_jid(self):
         """Senza pushName, il mittente del gruppo cade sul JID del participant."""
-        ev = _event_from_message({
+        ev = _msg({
             "id": "g2",
             "from": "123456789@g.us",
             "timestamp": 1700000000,
@@ -489,7 +501,7 @@ class TestWhatsAppEvents:
 
     def test_group_message_sender_from_sender_field(self):
         """Il mittente del gruppo può essere nel campo 'sender'."""
-        ev = _event_from_message({
+        ev = _msg({
             "id": "g3",
             "from": "123456789@g.us",
             "timestamp": 1700000000,
@@ -512,7 +524,7 @@ class TestWhatsAppEvents:
                 protocol=PROTOCOL_WHATSAPP,
             ),
         }
-        ev = _event_from_message({
+        ev = _msg({
             "id": "g4",
             "from": "123456789@g.us",
             "timestamp": 1700000000,
@@ -535,7 +547,7 @@ class TestWhatsAppEvents:
                 protocol=PROTOCOL_WHATSAPP,
             ),
         }
-        ev = _event_from_message({
+        ev = _msg({
             "id": "g5",
             "from": "123456789@g.us",
             "timestamp": 1700000000,
@@ -548,7 +560,7 @@ class TestWhatsAppEvents:
 
     def test_group_message_jid_not_in_contacts_keeps_jid(self):
         """Se il JID non è in rubrica, resta il JID come fallback."""
-        ev = _event_from_message({
+        ev = _msg({
             "id": "g6",
             "from": "123456789@g.us",
             "timestamp": 1700000000,
@@ -561,7 +573,7 @@ class TestWhatsAppEvents:
 
     def test_direct_message_not_group(self):
         """Un messaggio diretto (@c.us) non è un gruppo."""
-        ev = _event_from_message({
+        ev = _msg({
             "id": "d1",
             "from": "3912345678@c.us",
             "timestamp": 1700000000,
@@ -575,7 +587,7 @@ class TestWhatsAppEvents:
 
     def test_hasMedia_image(self):
         """WAHA image message via hasMedia/media fields."""
-        ev = _event_from_message({
+        ev = _msg({
             "id": "img1",
             "from": "3912345678@c.us",
             "timestamp": 1700000000,
@@ -597,7 +609,7 @@ class TestWhatsAppEvents:
 
     def test_hasMedia_video(self):
         """WAHA video message via hasMedia/media fields."""
-        ev = _event_from_message({
+        ev = _msg({
             "id": "vid1",
             "from": "3912345678@c.us",
             "timestamp": 1700000000,
@@ -617,7 +629,7 @@ class TestWhatsAppEvents:
 
     def test_hasMedia_audio(self):
         """WAHA audio message via hasMedia/media fields."""
-        ev = _event_from_message({
+        ev = _msg({
             "id": "aud1",
             "from": "3912345678@c.us",
             "timestamp": 1700000000,
@@ -633,7 +645,7 @@ class TestWhatsAppEvents:
 
     def test_hasMedia_no_media_dict(self):
         """hasMedia=true but media is not a dict → still text, no attachment."""
-        ev = _event_from_message({
+        ev = _msg({
             "id": "bad1",
             "from": "3912345678@c.us",
             "timestamp": 1700000000,
@@ -646,14 +658,14 @@ class TestWhatsAppEvents:
         assert ev.payload["msg_type"] == "text"
         assert ev.payload["attachment_id"] is None
 
-    def test_hasMedia_no_text_key_still_recognized_by_event_from_message(self):
+    def test_hasMedia_no_text_key_still_recognized_by_msg(self):
         """Immagine con hasMedia SENZA la chiave 'text' deve essere riconosciuta.
 
         Se WAHA non include la chiave 'text' per messaggi immagine (payload
         flat hasMedia/media), _event_from_message deve comunque estrarre
         msg_type=image e attachment_id.
         """
-        ev = _event_from_message({
+        ev = _msg({
             "id": "img_no_text",
             "from": "3912345678@c.us",
             "timestamp": 1700000000,
@@ -674,7 +686,7 @@ class TestWhatsAppEvents:
         )
         assert ev.payload["attachment_id"] == "https://wa.to/img/no-text-photo.jpg"
         assert ev.payload["attachment_info"] == "Senza testo!"
-        assert ev.payload["text"] == ""  # fallback a stringa vuota
+        assert ev.payload["text"] == "Senza testo!"  # caption becomes text
 
     def test_event_from_raw_fallback_recognizes_hasMedia_without_text_key(self):
         """_event_from_raw fallback riconosce hasMedia anche senza key 'text'.
@@ -684,7 +696,7 @@ class TestWhatsAppEvents:
         hasMedia/media PUO' non avere nessuna di queste chiavi.  Il fallback
         deve riconoscere anche hasMedia/media.
         """
-        ev = _event_from_raw({
+        ev = _raw({
             # Simula un evento con nome non-standard (non 'message'):
             "event": "unknown_event_type",
             "payload": {
@@ -711,7 +723,7 @@ class TestWhatsAppEvents:
 
     def test_event_from_raw_fallback_accepts_hasMedia_video_too(self):
         """Fallback con hasMedia video (senza text key) deve funzionare."""
-        ev = _event_from_raw({
+        ev = _raw({
             "event": "strange_event",
             "payload": {
                 "id": "vid_fallback",
@@ -865,7 +877,7 @@ class TestWhatsAppBackend:
 
     def test_poll_once_drains_queue(self):
         backend = _make_backend()
-        ev = _event_from_message({"id": "m1", "from": "wa:1@s.whatsapp.net", "text": "hi", "timestamp": 1})
+        ev = _msg({"id": "m1", "from": "wa:1@s.whatsapp.net", "text": "hi", "timestamp": 1})
         backend._enqueue_event(ev)
         events = backend.poll_once()
         assert len(events) == 1
@@ -1287,7 +1299,7 @@ class TestWAHAContract:
                 "pushName": "Mario",
             },
         }
-        ev = _event_from_raw(frame)
+        ev = _raw(frame)
         assert ev is not None
         assert ev.type == "message"
         assert ev.contact_id == "39123@s.whatsapp.net"
@@ -1309,7 +1321,7 @@ class TestWAHAContract:
                 "chat": {"id": {"_serialized": "39124@s.whatsapp.net"}, "name": "Anna"},
             },
         }
-        ev = _event_from_raw(frame)
+        ev = _raw(frame)
         assert ev is not None
         assert ev.contact_id == "39124@s.whatsapp.net"
         assert isinstance(ev.contact_id, str)
@@ -1329,7 +1341,7 @@ class TestWAHAContract:
                 "timestamp": 1700000002,
             },
         }
-        ev = _event_from_raw(frame)
+        ev = _raw(frame)
         assert ev is not None
         assert ev.type == "message"
         assert ev.contact_id == "39125@s.whatsapp.net"
@@ -1403,7 +1415,7 @@ class TestWAHAContract:
         assert msg["msg_type"] == "image"
         assert msg["attachment_id"] == "https://wa.to/media/abc123.jpg"
         assert msg["attachment_info"] == "Guarda questa foto!"
-        assert msg["text"] == ""  # image messages have empty text
+        assert msg["text"] == "Guarda questa foto!"  # caption fills text
 
     def test_webhook_image_via_message_any_end_to_end(self):
         """Stessa catena ma con event=message.any (WAHA Core può usarlo)."""
