@@ -156,8 +156,11 @@ class SignalTUI(App):
     #StatusLabel {
         text-align: right;
         color: $text-muted;
-        height: 1;
         padding: 0 2;
+    }
+
+    #chat-title-row {
+        height: 1;
     }
 
     #contact-list {
