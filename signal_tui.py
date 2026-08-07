@@ -1039,6 +1039,9 @@ class SignalTUI(App):
         contacts = self.manager.list_contacts()
         self.contacts = contacts
         self.call_from_thread(self._update_contacts_ui, contacts)
+        self.call_from_thread(
+            self._add_message, "✅ Ready.", is_info=True,
+        )
 
         # Re-sync dello storico WhatsApp best-effort all'avvio (unread ∪ chat
         # con messaggi già nel DB locale) così le chat incomplete vengono
