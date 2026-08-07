@@ -1331,6 +1331,30 @@ class SignalTUI(App):
                 # La lista non risulta mai vuota in mezzo.
                 for i in range(1, len(reordered)):
                     contact_list.move_child(reordered[i], after=reordered[i - 1])
+        elif cur_ids and set(cur_ids) < set(want_ids):
+            # Superset: nuovi contatti (es. WhatsApp dopo Signal).
+            # Crea SOLO i ListItem mancanti, preserva quelli esistenti,
+            # poi riordina tutto con move_child — nessun clear, nessun flash.
+            by_id = {getattr(it, "_contact_id", None): it for it in existing}
+            for c in filtered:
+                text = self._contact_label(c)
+                if c.cache_key not in by_id:
+                    item = ListItem(Label(text))
+                    item._contact_id = c.cache_key
+                    item._label_text = text
+                    item.add_class(self._protocol_class(c))
+                    self._contact_widgets[c.cache_key] = item
+                    by_id[c.cache_key] = item
+                    contact_list.append(item)
+                else:
+                    _sync_item(by_id[c.cache_key], c)
+            reordered = [by_id[cid] for cid in want_ids if cid in by_id]
+            if len(reordered) > 1:
+                try:
+                    for i in range(1, len(reordered)):
+                        contact_list.move_child(reordered[i], after=reordered[i - 1])
+                except AttributeError:
+                    pass  # mock ListView in tests
         else:
             # Composizione/insieme cambiato (filtro nuovo / backend aggiunto /
             # stato iniziale) -> rebuild progressivo (chunked, non blocca la UI).
