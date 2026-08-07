@@ -151,19 +151,6 @@ class SignalTUI(App):
 
     #ChatTitle {
         text-align: left;
-        padding: 0;
-    }
-
-    #StatusLabel {
-        text-align: right;
-        color: $text-muted;
-        padding: 0 2;
-    }
-
-    #chat-title-row {
-        background: $accent;
-        padding: 0 1;
-        dock: top;
     }
 
     #contact-list {
@@ -244,12 +231,12 @@ class SignalTUI(App):
 
     /* Banner (titoli di sezione) sincroni col bordo della chat per filtro. */
     #ContactsTitle.chat-filter-signal,
-    #chat-title-row.chat-filter-signal {
+    #ChatTitle.chat-filter-signal {
         background: #39c5e0;
     }
 
     #ContactsTitle.chat-filter-whatsapp,
-    #chat-title-row.chat-filter-whatsapp {
+    #ChatTitle.chat-filter-whatsapp {
         background: #25d366;
     }
     .msg-quote {
@@ -481,18 +468,19 @@ class SignalTUI(App):
     # ─── Chat helper methods ────────────────────────────────────────────────
 
     def _show_status(self, text: str, duration: float = 3.0) -> None:
-        """Show a transient status message in the chat banner area.
+        """Show a transient status message in the chat banner (#ChatTitle).
 
-        The message appears in ``#StatusLabel`` (right side of the chat
-        header) and auto-clears after *duration* seconds.
+        The message briefly replaces the chat title and auto-clears after
+        *duration* seconds.  The next ``_select_contact`` or UI action that
+        updates ``#ChatTitle`` will naturally overwrite it.
         """
         try:
-            label = self.query_one("#StatusLabel", Label)
+            label = self.query_one("#ChatTitle", Label)
         except Exception:
             return
+        current = str(label.renderable)
         label.update(text)
-        label.display = True
-        self.set_timer(duration, lambda: label.update(""))
+        self.set_timer(duration, lambda: label.update(current))
 
     def _add_message(
         self,
@@ -1378,7 +1366,7 @@ class SignalTUI(App):
         cls_signal = "chat-filter-signal"
         cls_whats = "chat-filter-whatsapp"
         widgets = [self.chat_log]
-        for selector in ("#contact-list", "#ContactsTitle", "#chat-title-row"):
+        for selector in ("#contact-list", "#ContactsTitle", "#ChatTitle"):
             try:
                 widgets.append(self.query_one(selector))
             except Exception:

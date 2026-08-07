@@ -240,14 +240,14 @@ class TestProtocolFilter:
         app = _make_app()
         app.contacts = [_signal("+1"), _signal("+2"), _whatsapp()]
         title = MagicMock()
-        chat_title_row = MagicMock()
+        chat_title = MagicMock()
         chat_log = MagicMock()
         list_view = MagicMock()
         def fake_q(selector, *_a, **_k):
             if selector == "#ContactsTitle":
                 return title
-            if selector == "#chat-title-row":
-                return chat_title_row
+            if selector == "#ChatTitle":
+                return chat_title
             if selector == "#chat-log":
                 return chat_log
             return list_view
@@ -260,20 +260,20 @@ class TestProtocolFilter:
         ok = title.update.call_args
         assert ok and " - Signal" in ok.args[0]
         # Anche il banner 💬 Chat riceve la classe filtro (sincronizzazione colore).
-        chat_title_row.add_class.assert_called_with("chat-filter-signal")
+        chat_title.add_class.assert_called_with("chat-filter-signal")
 
     def test_apply_contact_filter_colors_chat_border(self):
         """Bordo chat + lista contatti + banner assumono la classe giusta."""
         app = _make_app()
         title = MagicMock()
-        chat_title_row = MagicMock()
+        chat_title = MagicMock()
         chat_log = MagicMock()
         contact_list = MagicMock()
         def fake_q(selector, *_a, **_k):
             if selector == "#ContactsTitle":
                 return title
-            if selector == "#chat-title-row":
-                return chat_title_row
+            if selector == "#ChatTitle":
+                return chat_title
             if selector == "#chat-log":
                 return chat_log
             if selector == "#contact-list":
@@ -287,7 +287,7 @@ class TestProtocolFilter:
         chat_log.remove_class.assert_called_with("chat-filter-signal", "chat-filter-whatsapp")
         chat_log.add_class.assert_called_with("chat-filter-whatsapp")
         contact_list.add_class.assert_called_with("chat-filter-whatsapp")
-        chat_title_row.add_class.assert_called_with("chat-filter-whatsapp")
+        chat_title.add_class.assert_called_with("chat-filter-whatsapp")
         title.add_class.assert_called_with("chat-filter-whatsapp")
 
 

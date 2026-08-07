@@ -66,11 +66,7 @@ class ChatAreaWidget(Vertical):
     """Right column: messages area + reply bar + input."""
 
     def compose(self):
-        yield Horizontal(
-            Label("💬 Chat", id="ChatTitle"),
-            Label("", id="StatusLabel"),
-            id="chat-title-row",
-        )
+        yield Label("💬 Chat", classes="section-title", id="ChatTitle")
         yield Vertical(id="chat-log")
         yield Horizontal(
             Static("", id="reply-text"),
