@@ -208,6 +208,9 @@ class SignalBackend(ChatBackend):
         self._set_contacts([self._to_chat_contact(c) for c in contacts])
 
     def _set_contacts(self, contacts: list[ChatContact]) -> None:
+        # Filtra contatti di sistema (es. "status@broadcast" per le Signal
+        # Stories) che non sono utenti reali.
+        contacts = [c for c in contacts if "@broadcast" not in c.id]
         # Recupera per ogni contatto il timestamp dell'ultimo messaggio dalla
         # cache SQLite locale (costo ~0, offline): così l'ordinamento "ultimi
         # messaggi in alto" funziona già all'avvio senza fetch di rete.

@@ -143,6 +143,19 @@ class TestSignalBackend:
         assert contacts[0].last_message_ts == 7777
         assert contacts[1].last_message_ts == 0
 
+    def test_set_contacts_filters_status_broadcast(self):
+        """_set_contacts filtra il contatto di sistema 'status@broadcast'."""
+        backend = SignalBackend()
+        contacts = [
+            ChatContact(id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL),
+            ChatContact(id="status@broadcast", display_name="status@broadcast", protocol=PROTOCOL_SIGNAL),
+            ChatContact(id="+391111111111", display_name="Luigi", protocol=PROTOCOL_SIGNAL),
+        ]
+        backend._set_contacts(contacts)
+        assert len(backend.contacts) == 2
+        assert backend.contacts[0].id == "+391234567890"
+        assert backend.contacts[1].id == "+391111111111"
+
     def test_envelope_to_event_message(self):
         """Un envelope di messaggio produce un ChatEvent type='message'."""
         backend = SignalBackend()
