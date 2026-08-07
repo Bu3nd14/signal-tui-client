@@ -977,6 +977,19 @@ class SignalTUI(App):
         # ── Early first paint: show Signal contacts immediately ─────────
         contacts = self.manager.list_contacts()
         self.contacts = contacts
+
+        # ── Emit loading hints once, before first progressive render ────
+        self.call_from_thread(
+            self._add_message,
+            f"✅ Loaded {len(contacts)} contacts.",
+            is_info=True,
+        )
+        self.call_from_thread(
+            self._add_message,
+            "💡 Select a contact to view chat",
+            is_info=True,
+        )
+
         self.call_from_thread(self._update_contacts_ui, contacts)
 
         # Report which transport is in use (mirrors the pre-refactor message).
@@ -1382,17 +1395,10 @@ class SignalTUI(App):
 
         contact_list = self.query_one("#contact-list", ListView)
         contact_list.clear()
-        contact_list.index = None  # prevent spurious auto-select on re-append
         self._contact_widgets.clear()
 
         # Start the progressive render
         self._render_next_chunk()
-
-        # Only emit "loaded" hints on the very first paint; subsequent calls
-        # (e.g. after WhatsApp connects) must not overwrite an open chat.
-        if self.selected_contact is None:
-            self._add_message(f"✅ Loaded {len(self.contacts)} contacts.", is_info=True)
-            self._add_message("💡 Select a contact to view chat", is_info=True)
 
         self._update_unread_badges()
 
