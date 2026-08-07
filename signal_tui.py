@@ -1052,7 +1052,7 @@ class SignalTUI(App):
         # different timestamps).  Must run before we rebuild the UI cache so
         # the loaded data is clean.
         removed = _dedup_messages()
-        if removed > 0:
+        if removed > 0 and self.selected_contact is None:
             self.call_from_thread(
                 self._add_message,
                 f"🧹 Cleaned up {removed} duplicate message(s) from cache.",
@@ -1106,7 +1106,7 @@ class SignalTUI(App):
             n = resync()
         except Exception:
             return 0
-        if n:
+        if n and self.selected_contact is None:
             try:
                 self.call_from_thread(
                     self._add_message,
