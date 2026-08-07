@@ -8,6 +8,25 @@
 
 ## 🔴 Critici (impatto diretto sull'esperienza utente)
 
+### #21 — `_mount_window` omette `attachment_path` obbligatorio → TypeError silenzioso (`signal_tui.py`, riga 1540) ✅ RISOLTO
+
+La chiamata `ImageWidget(attachment_id=..., fallback_text=...)` ometteva il parametro
+obbligatorio `attachment_path` (che non ha default).  Il `TypeError` veniva ingoiato
+da `except Exception: pass` (riga 1559), quindi il widget non veniva mai aggiunto
+alla chat.  **Nessun placeholder visibile per le immagini caricate da cache.**
+
+**Fix:** aggiunto `attachment_path=None` esplicito nella chiamata.  Aggiunto test
+`test_image_messages_mount_from_cache` in `test_refresh_chat.py` (370/370 ✅).
+
+**Impatto prima del fix:** Le immagini nei messaggi caricati da cache (riapertura
+chat, riavvio app) non mostravano alcun placeholder.  Solo i messaggi live (via
+`_render_image_in_chat`) funzionavano.  Scoperto durante l'analisi del bug #1.
+
+**Root cause del mancato rilevamento:** I test esistenti usavano solo `msg_type="text"`;
+il ramo `if msg_type == "image"` in `_mount_window` non era mai percorso dai test.
+
+---
+
 ### #1 — `_classify_attachments` processa solo il primo attachment (`backends/signal.py`, righe 350-369)
 
 Il `for att in attachments` itera ma fa `return` al primo elemento che matcha.

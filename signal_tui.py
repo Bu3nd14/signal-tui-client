@@ -1538,6 +1538,7 @@ class SignalTUI(App):
                             from ui_components import ImageWidget
                             display = attachment_info or text or "Image"
                             widgets.append(ImageWidget(
+                                attachment_path=None,
                                 attachment_id=attachment_id or "",
                                 fallback_text=f"[🖼️ {display}]",
                             ))

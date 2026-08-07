@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from signal_tui import SignalTUI
 from models import ChatContact, contact_cache_key, PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP
+from ui_components import ImageWidget
 
 
 def _make_message(text: str, ts: int, is_mine: bool = False) -> dict:
@@ -39,6 +40,23 @@ def _make_message(text: str, ts: int, is_mine: bool = False) -> dict:
         "attachment_id": None,
         "read": is_mine,
         "status": "sent" if is_mine else "read",
+    }
+
+
+def _make_image_message(text: str, ts: int, attachment_id: str = "img-001.jpg",
+                        attachment_info: str = "🖼️ Image") -> dict:
+    """Build a cached message dict with msg_type='image'."""
+    return {
+        "text": text,
+        "is_mine": False,
+        "sender": "Mario",
+        "timestamp": ts,
+        "quote_text": None,
+        "msg_type": "image",
+        "attachment_info": attachment_info,
+        "attachment_id": attachment_id,
+        "read": False,
+        "status": "read",
     }
 
 
@@ -549,4 +567,45 @@ class TestRenderDedupSameSecond:
         # widget con id "load-more-msg" presente nel log.
         load_more = [w for w in fake_log.children if getattr(w, "id", None) == "load-more-msg"]
         assert load_more, "Il banner 'load previous messages' non compare nel log"
+
+    def test_image_messages_mount_from_cache(self):
+        """Regressione: i messaggi con msg_type='image' devono essere montati
+        come ImageWidget, non causare TypeError silenzioso.
+
+        Il bug: _mount_window chiamava ImageWidget(...) senza l'argomento
+        obbligatorio ``attachment_path``, causando TypeError ingoiato da
+        ``except Exception: pass``.  Il widget non veniva mai aggiunto.
+        """
+        app = self._make_wa_app()
+        contact = app.selected_contact
+        app._cache = {
+            contact.cache_key: [
+                _make_message("msg-1", ts=1),
+                _make_image_message("🖼️ Image", ts=2, attachment_id="img-001.jpg"),
+                _make_message("msg-3", ts=3),
+            ]
+        }
+        app._chat_reload_token = 1
+        app._seen_timestamps = set()
+        app._seen_message_ids = set()
+        app._loaded_all = True  # meno di 20 messaggi
+        app._shown_in_log = set()
+
+        fake_log = _FakeChatLog()
+
+        with patch.object(app, "query_one", return_value=fake_log), \
+             patch.object(app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
+             patch.object(app, "_make_message_widget", return_value=MagicMock()), \
+             patch.object(app, "_add_load_more_widget"):
+            app._load_messages_worker()
+
+        # Estrae tutti gli ImageWidget montati nel fake_log
+        image_widgets = [w for w in fake_log.children if isinstance(w, ImageWidget)]
+        assert len(image_widgets) == 1, (
+            f"Expected 1 ImageWidget in chat log, found {len(image_widgets)}. "
+            f"Children: {[type(w).__name__ for w in fake_log.children]}"
+        )
+        # Il path non è risolto quando si carica da cache
+        assert image_widgets[0].attachment_path is None
+        assert image_widgets[0].attachment_id == "img-001.jpg"
 
