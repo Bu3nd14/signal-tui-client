@@ -646,6 +646,89 @@ class TestWhatsAppEvents:
         assert ev.payload["msg_type"] == "text"
         assert ev.payload["attachment_id"] is None
 
+    def test_hasMedia_no_text_key_still_recognized_by_event_from_message(self):
+        """Immagine con hasMedia SENZA la chiave 'text' deve essere riconosciuta.
+
+        Se WAHA non include la chiave 'text' per messaggi immagine (payload
+        flat hasMedia/media), _event_from_message deve comunque estrarre
+        msg_type=image e attachment_id.
+        """
+        ev = _event_from_message({
+            "id": "img_no_text",
+            "from": "3912345678@c.us",
+            "timestamp": 1700000000,
+            "fromMe": False,
+            "pushName": "Mario",
+            # NOTA: nessuna chiave 'text'!
+            "hasMedia": True,
+            "media": {
+                "mimetype": "image/jpeg",
+                "url": "https://wa.to/img/no-text-photo.jpg",
+                "caption": "Senza testo!",
+            },
+        })
+        assert ev is not None
+        assert ev.payload["msg_type"] == "image", (
+            "hasMedia image senza text key → msg_type deve essere 'image', got %r"
+            % ev.payload.get("msg_type")
+        )
+        assert ev.payload["attachment_id"] == "https://wa.to/img/no-text-photo.jpg"
+        assert ev.payload["attachment_info"] == "Senza testo!"
+        assert ev.payload["text"] == ""  # fallback a stringa vuota
+
+    def test_event_from_raw_fallback_recognizes_hasMedia_without_text_key(self):
+        """_event_from_raw fallback riconosce hasMedia anche senza key 'text'.
+
+        Il fallback (righe 788-790) controlla 'text' in content, 'body',
+        content.get('message'), content.get('attachments').  Un payload
+        hasMedia/media PUO' non avere nessuna di queste chiavi.  Il fallback
+        deve riconoscere anche hasMedia/media.
+        """
+        ev = _event_from_raw({
+            # Simula un evento con nome non-standard (non 'message'):
+            "event": "unknown_event_type",
+            "payload": {
+                "id": "img_fallback",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "image/jpeg",
+                    "url": "https://wa.to/img/fallback.jpg",
+                    "caption": "Fallback test",
+                },
+                # NOTA: nessuna chiave 'text', 'body', 'message', o 'attachments'
+            },
+        })
+        # Dovrebbe essere riconosciuto come messaggio immagine, non None.
+        assert ev is not None, (
+            "_event_from_raw returned None for hasMedia payload without text key"
+        )
+        assert ev.type == "message"
+        assert ev.payload["msg_type"] == "image"
+        assert ev.payload["attachment_id"] == "https://wa.to/img/fallback.jpg"
+
+    def test_event_from_raw_fallback_accepts_hasMedia_video_too(self):
+        """Fallback con hasMedia video (senza text key) deve funzionare."""
+        ev = _event_from_raw({
+            "event": "strange_event",
+            "payload": {
+                "id": "vid_fallback",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "video/mp4",
+                    "url": "https://wa.to/vid/fallback.mp4",
+                },
+            },
+        })
+        assert ev is not None
+        assert ev.payload["msg_type"] == "attachment"
+        assert ev.payload["attachment_id"] == "https://wa.to/vid/fallback.mp4"
+
 
 
 
@@ -927,6 +1010,75 @@ class TestWhatsAppWebhook:
         assert events[0].payload["id"] == "KEY123"
         assert events[0].payload["is_mine"] is True
 
+    def test_handle_webhook_image_message_ack_retains_image_fields(self):
+        """message.ack per un'immagine uscente deve preservare msg_type/image.
+
+        WAHA invia message.ack (non message) per gli echo di messaggi in
+        uscita.  Il synthetic event costruito da handle_webhook DEVE includere
+        msg_type, attachment_id e attachment_info estratti dai campi
+        hasMedia/media del payload, altrimenti l'immagine appare come testo
+        vuoto senza banner [🖼️].
+        """
+        import time
+        now = int(time.time())
+        backend = self._backend()
+        envelope = {
+            "session": "default",
+            "event": "message.ack",
+            "payload": {
+                "id": "IMG_ECHO_1",
+                "to": "3912345678@c.us",
+                "fromMe": True,
+                "timestamp": now,
+                "status": 2,  # SERVER_ACK (< 3 → _event_from_ack returns None)
+                "body": "",
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "image/jpeg",
+                    "url": "https://wa.to/img/echo-photo.jpg",
+                    "caption": "Guarda qua!",
+                },
+            },
+        }
+        ok = backend.handle_webhook(envelope)
+        assert ok is True
+        events = backend.poll_once()
+        assert len(events) == 1, (
+            "Expected 1 synthetic message event for image ack, got %d" % len(events)
+        )
+        ev = events[0]
+        assert ev.type == "message"
+        assert ev.payload["msg_type"] == "image", (
+            "Synthetic ack event msg_type should be 'image', got %r" % ev.payload.get("msg_type")
+        )
+        assert ev.payload["attachment_id"] == "https://wa.to/img/echo-photo.jpg"
+        assert ev.payload["attachment_info"] == "Guarda qua!"
+
+    def test_handle_webhook_image_message_ack_without_hasMedia_is_plain(self):
+        """message.ack senza hasMedia → synthetic event resta text (nessun crash)."""
+        import time
+        now = int(time.time())
+        backend = self._backend()
+        envelope = {
+            "session": "default",
+            "event": "message.ack",
+            "payload": {
+                "id": "TXT_ECHO_1",
+                "to": "3912345678@c.us",
+                "fromMe": True,
+                "timestamp": now,
+                "status": 2,
+                "body": "hello",
+            },
+        }
+        ok = backend.handle_webhook(envelope)
+        assert ok is True
+        events = backend.poll_once()
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.payload["msg_type"] == "text"  # default
+        assert ev.payload.get("attachment_id") is None
+
     def test_list_messages_uses_short_poll_timeout(self):
         """list_messages usa un timeout BREVE (per il giro veloce ~1s)."""
         client = WhatsAppRESTClient("http://api.test")
@@ -1182,6 +1334,232 @@ class TestWAHAContract:
         assert ev.type == "message"
         assert ev.contact_id == "39125@s.whatsapp.net"
         assert ev.payload["is_mine"] is True
+
+    # ── Image webhook integration tests ──────────────────────────────────
+
+    def test_webhook_image_via_hasMedia_end_to_end(self):
+        """Catena completa: webhook immagine → handle_webhook → poll_once →
+        ChatEvent → ingest_message → cache con metadati immagine.
+
+        Verifica che un'immagine ricevuta via webhook WAHA (formato
+        hasMedia/media) venga:
+        1. Normalizzata in un ChatEvent con msg_type=image
+        2. Accodata via poll_once
+        3. Salvata in cache con attachment_id e attachment_info
+        """
+        backend = _make_backend("http://api.test")
+        backend._contacts_by_jid = {
+            "3912345678@c.us": MagicMock(display_name="Mario", id="3912345678@c.us", protocol=PROTOCOL_WHATSAPP),
+        }
+
+        # Simula un webhook WAHA per un'immagine in arrivo.
+        envelope = {
+            "event": "message",
+            "session": "default",
+            "payload": {
+                "id": "IMG_WEBHOOK_1",
+                "from": "3912345678@c.us",
+                "fromMe": False,
+                "pushName": "Mario",
+                "timestamp": 1700000000,
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "image/jpeg",
+                    "url": "https://wa.to/media/abc123.jpg",
+                    "filename": "photo.jpg",
+                    "caption": "Guarda questa foto!",
+                },
+            },
+        }
+
+        # Step 1: handle_webhook processa l'envelope.
+        ok = backend.handle_webhook(envelope)
+        assert ok is True, "handle_webhook should return True for image message"
+
+        # Step 2: poll_once deve produrre un evento.
+        events = backend.poll_once()
+        assert len(events) == 1, f"Expected 1 event, got {len(events)}"
+        ev = events[0]
+        assert ev.type == "message"
+        assert ev.contact_id == "3912345678@c.us"
+        assert ev.payload["msg_type"] == "image", (
+            f"msg_type should be 'image', got {ev.payload.get('msg_type')!r}"
+        )
+        assert ev.payload["attachment_id"] == "https://wa.to/media/abc123.jpg"
+        assert ev.payload["attachment_info"] == "Guarda questa foto!"
+
+        # Step 3: ingest_message salva i metadati immagine nella cache.
+        added = backend.ingest_message(
+            "3912345678@c.us",
+            ev.payload,
+            ev.payload["timestamp"],
+        )
+        assert added is True, "ingest_message should return True for new image"
+
+        # Step 4: verifica che la cache contenga i metadati immagine.
+        cached = backend.cache.get("3912345678@c.us", [])
+        assert len(cached) == 1
+        msg = cached[0]
+        assert msg["msg_type"] == "image"
+        assert msg["attachment_id"] == "https://wa.to/media/abc123.jpg"
+        assert msg["attachment_info"] == "Guarda questa foto!"
+        assert msg["text"] == ""  # image messages have empty text
+
+    def test_webhook_image_via_message_any_end_to_end(self):
+        """Stessa catena ma con event=message.any (WAHA Core può usarlo)."""
+        backend = _make_backend("http://api.test")
+        backend._contacts_by_jid = {}
+
+        envelope = {
+            "event": "message.any",
+            "session": "default",
+            "payload": {
+                "id": "IMG_ANY_1",
+                "from": "3912345678@c.us",
+                "fromMe": False,
+                "timestamp": 1700000001,
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "image/png",
+                    "url": "https://wa.to/media/img.png",
+                    "caption": "Screenshot",
+                },
+            },
+        }
+
+        ok = backend.handle_webhook(envelope)
+        assert ok is True
+
+        events = backend.poll_once()
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.payload["msg_type"] == "image"
+        assert ev.payload["attachment_id"] == "https://wa.to/media/img.png"
+        assert ev.payload["attachment_info"] == "Screenshot"
+
+        # Verifica che ingest_message salvi correttamente.
+        added = backend.ingest_message(
+            "3912345678@c.us",
+            ev.payload,
+            ev.payload["timestamp"],
+        )
+        assert added is True
+        cached = backend.cache["3912345678@c.us"]
+        assert cached[0]["msg_type"] == "image"
+        assert cached[0]["attachment_id"] == "https://wa.to/media/img.png"
+
+    def test_webhook_image_via_nested_message_imageMessage(self):
+        """Immagine WAHA nel formato nested message.imageMessage (senza hasMedia).
+
+        Alcune versioni WAHA Core mandano l'immagine dentro
+        payload.message.imageMessage invece che nei campi flat hasMedia/media.
+        """
+        backend = _make_backend("http://api.test")
+        backend._contacts_by_jid = {}
+
+        envelope = {
+            "event": "message",
+            "session": "default",
+            "payload": {
+                "id": "IMG_NESTED_1",
+                "from": "3912345678@c.us",
+                "fromMe": False,
+                "pushName": "Mario",
+                "timestamp": 1700000003,
+                "message": {
+                    "imageMessage": {
+                        "url": "https://wa.to/media/nested.jpg",
+                        "mimetype": "image/jpeg",
+                        "caption": "Foto dal nested!",
+                    },
+                },
+            },
+        }
+
+        ok = backend.handle_webhook(envelope)
+        assert ok is True
+
+        events = backend.poll_once()
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.payload["msg_type"] == "image", (
+            f"Nested imageMessage → msg_type should be 'image', got {ev.payload.get('msg_type')!r}"
+        )
+        assert ev.payload["attachment_id"] == "https://wa.to/media/nested.jpg"
+        assert ev.payload["attachment_info"] == "Foto dal nested!"
+
+    def test_webhook_image_via_nested_message_imageMessage_no_text_key(self):
+        """Nested imageMessage SENZA chiave 'text' nel payload (caso reale WAHA)."""
+        backend = _make_backend("http://api.test")
+        backend._contacts_by_jid = {}
+
+        envelope = {
+            "event": "message",
+            "session": "default",
+            "payload": {
+                "id": "IMG_NESTED_NOTEXT_1",
+                "from": "3912345678@c.us",
+                "fromMe": False,
+                "timestamp": 1700000004,
+                # NOTA: nessuna chiave 'text' o 'body'!
+                "message": {
+                    "imageMessage": {
+                        "url": "https://wa.to/media/no-text.jpg",
+                        "mimetype": "image/jpeg",
+                    },
+                },
+            },
+        }
+
+        ok = backend.handle_webhook(envelope)
+        assert ok is True
+
+        events = backend.poll_once()
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.payload["msg_type"] == "image"
+        assert ev.payload["attachment_id"] == "https://wa.to/media/no-text.jpg"
+
+
+
+
+        envelope = {
+            "event": "message.any",
+            "session": "default",
+            "payload": {
+                "id": "IMG_ANY_1",
+                "from": "3912345678@c.us",
+                "fromMe": False,
+                "timestamp": 1700000001,
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "image/png",
+                    "url": "https://wa.to/media/img.png",
+                    "caption": "Screenshot",
+                },
+            },
+        }
+
+        ok = backend.handle_webhook(envelope)
+        assert ok is True
+
+        events = backend.poll_once()
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.payload["msg_type"] == "image"
+        assert ev.payload["attachment_id"] == "https://wa.to/media/img.png"
+        assert ev.payload["attachment_info"] == "Screenshot"
+
+        # Verifica che ingest_message salvi correttamente.
+        added = backend.ingest_message(
+            "3912345678@c.us",
+            ev.payload,
+            ev.payload["timestamp"],
+        )
+        assert added is True
+        cached = backend.cache["3912345678@c.us"]
+        assert cached[0]["msg_type"] == "image"
+        assert cached[0]["attachment_id"] == "https://wa.to/media/img.png"
 
 
 

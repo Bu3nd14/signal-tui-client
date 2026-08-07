@@ -578,7 +578,7 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> ChatE
                         or media.get("caption")
                         or media.get("filename")
                         or media.get("mimetype")
-                        or f"{media_key} ({msg_id[:16]}...)" if len(str(msg_id)) > 16 else f"{media_key}"
+                        or (f"{media_key} ({msg_id[:16]}...)" if len(str(msg_id)) > 16 else f"{media_key}")
                     )
                     break
 
@@ -786,7 +786,9 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> ChatEvent
         return _event_from_ack(content)
     # Some APIs emit the message object directly without an 'event' field.
     if content.get("remoteJid") or content.get("from") or content.get("chatId"):
-        if "text" in content or "body" in content or content.get("message") or content.get("attachments"):
+        if ("text" in content or "body" in content or content.get("message")
+                or content.get("attachments") or content.get("hasMedia")
+                or content.get("media")):
             return _event_from_message(content, contacts_by_jid)
     return None
 
@@ -875,11 +877,40 @@ class WhatsAppBackend(ChatBackend):
                 if ack_contact:
                     ack_ts = int(content.get("timestamp") or 0) * 1000  # WAHA uses seconds, we use ms
                     ack_text = content.get("body") or content.get("text") or ""
+
+                    # ── Extract image/attachment metadata from ack payload ──
+                    # WAHA message.ack payloads carry the same hasMedia/media
+                    # fields as normal message events.  Without extracting
+                    # them the synthetic event would lack msg_type/image and
+                    # the TUI would show an empty text bubble instead of [🖼️].
+                    ack_msg_type = "text"
+                    ack_attachment_id = None
+                    ack_attachment_info = None
+                    if content.get("hasMedia"):
+                        media = content.get("media")
+                        if isinstance(media, dict):
+                            mime = (media.get("mimetype") or "").lower()
+                            if mime.startswith("image/"):
+                                ack_msg_type = "image"
+                            elif any(mime.startswith(p) for p in ("video/", "audio/", "application/")):
+                                ack_msg_type = "attachment"
+                            ack_attachment_id = media.get("url") or content.get("id")
+                            ack_attachment_info = (
+                                content.get("caption")
+                                or media.get("caption")
+                                or media.get("filename")
+                                or mime
+                                or "Media"
+                            )
+
                     added_from_ack = self.ingest_message(ack_contact, {
                         "id": content.get("id"),
                         "text": ack_text,
                         "is_mine": True,
                         "sender": "You",
+                        "msg_type": ack_msg_type,
+                        "attachment_id": ack_attachment_id,
+                        "attachment_info": ack_attachment_info,
                     }, ack_ts)
                     if added_from_ack:
                         # Synthetic message event: lets _handle_message_event
@@ -896,6 +927,9 @@ class WhatsAppBackend(ChatBackend):
                                 "timestamp": ack_ts,
                                 "id": content.get("id"),
                                 "is_group": ack_contact.endswith("@g.us") if ack_contact else False,
+                                "msg_type": ack_msg_type,
+                                "attachment_id": ack_attachment_id,
+                                "attachment_info": ack_attachment_info,
                             },
                         )
 
