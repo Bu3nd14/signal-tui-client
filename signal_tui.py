@@ -467,20 +467,6 @@ class SignalTUI(App):
 
     # ─── Chat helper methods ────────────────────────────────────────────────
 
-    def _show_status(self, text: str, duration: float = 3.0) -> None:
-        """Show a transient status message in the chat banner (#ChatTitle).
-
-        The message briefly replaces the chat title and auto-clears after
-        *duration* seconds by resetting to the default \"💬 Chat\".
-        The next ``_select_contact`` will overwrite with the contact name.
-        """
-        try:
-            label = self.query_one("#ChatTitle", Label)
-        except Exception:
-            return
-        label.update(text)
-        self.set_timer(duration, lambda: label.update("💬 Chat"))
-
     def _add_message(
         self,
         text: str,
@@ -569,7 +555,9 @@ class SignalTUI(App):
             display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
 
         if is_info:
-            self._show_status(display_text)
+            widget = Static(display_text, classes="msg-info")
+            self._chat_log.mount(widget)
+            self.set_timer(3.0, widget.remove)
             return
         else:
             # Use clickable MessageWidget for all non-info messages.
