@@ -1040,7 +1040,7 @@ class SignalTUI(App):
         self.contacts = contacts
         self.call_from_thread(self._update_contacts_ui, contacts)
         self.call_from_thread(
-            self._add_message, "✅ Ready.", is_info=True,
+            self._add_message, "✅ Ready", is_info=True,
         )
 
         # Re-sync dello storico WhatsApp best-effort all'avvio (unread ∪ chat
