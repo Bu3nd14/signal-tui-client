@@ -175,6 +175,33 @@ class TestSignalBackend:
         }
         assert backend.envelope_to_event(envelope) is None
 
+    def test_envelope_to_event_sent_unknown_dest_returns_none(self):
+        """Un envelope sentMessage con destinatario sconosciuto → None.
+
+        NON deve cadere nella ricerca per source perché il source di un
+        sentMessage è l'utente locale, non un contatto reale.
+        """
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario",
+            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+        )
+        backend._set_contacts([contact])
+        # Envelope con syncMessage.sentMessage dove NESSUN contatto matcha
+        # il destination, ma sourceNumber MATCHA un contatto (Mario).
+        # Non deve restituire Mario perché è il source, non il destinatario.
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "syncMessage": {
+                "sentMessage": {
+                    "destination": "+399999999999",    # sconosciuto
+                    "destinationNumber": "+399999999999",
+                }
+            },
+        }
+        assert backend.envelope_to_event(envelope) is None
+
     def test_envelope_to_event_typing(self):
         """Un envelope di typing produce un ChatEvent type='typing'."""
         backend = SignalBackend()

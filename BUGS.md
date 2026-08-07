@@ -32,15 +32,12 @@ o notifica all'utente.
 
 ## 🟡 Medi (funzionalità degradate)
 
-### #5 — `_identify_contact_for_envelope` logica duplicata per `sent` (`backends/signal.py`, righe 312-343)
+### #5 — `_identify_contact_for_envelope` logica duplicata per `sent` (`backends/signal.py`, righe 320-351) ✅ RISOLTO
 
-Controlla `sent` due volte:
-1. Righe 316-325: primo blocco che cerca `dest`, `dest_number`, `dest_uuid`
-2. Righe 337-341: secondo blocco che cerca solo `dest`
-
-Il secondo controllo è ridondante e potrebbe matchare un contatto diverso dal primo.
-
-**Impatto:** Messaggi assegnati al contatto sbagliato nella UI.
+**Fix:** rimosso il secondo blocco `sent` ridondante (cercava solo `dest` senza
+`dest_number`/`dest_uuid`). Aggiunto `return None` esplicito dopo il primo blocco
+per evitare che un envelope `sentMessage` senza match cada nella ricerca per `source`
+(che per un envelope `sent` è l'utente locale, non un contatto reale).
 
 ---
 

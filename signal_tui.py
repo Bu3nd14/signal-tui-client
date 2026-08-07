@@ -414,6 +414,17 @@ class SignalTUI(App):
         # cache_key → ListItem: O(1) lookup for _update_typing_label
         self._contact_widgets: dict[str, ListItem] = {}
 
+        # Cached reference to the #chat-log widget — avoids repeated
+        # O(N) CSS selector scans via query_one on every message mount.
+        self._chat_log: Vertical | None = None
+
+    @property
+    def chat_log(self) -> Vertical:
+        """The ``#chat-log`` widget, lazily cached on first access."""
+        if self._chat_log is None:
+            self._chat_log = self.query_one("#chat-log", Vertical)
+        return self._chat_log
+
 
 
 
@@ -429,6 +440,7 @@ class SignalTUI(App):
 
     def on_mount(self):
         """On startup, start the daemon and load contacts."""
+        self._chat_log = self.query_one("#chat-log", Vertical)
         self.run_worker(self._startup, exclusive=True, thread=True)
 
     def action_quit(self):
@@ -506,7 +518,7 @@ class SignalTUI(App):
                 )
 
 
-        chat_log = self.query_one("#chat-log", Vertical)
+        chat_log = self.chat_log
 
         if quote_text:
             quote_class = "msg-quote-right" if is_mine else "msg-quote"
@@ -641,7 +653,7 @@ class SignalTUI(App):
 
     def _clear_chat(self):
         """Clear the chat and reset the render-level de-dup set."""
-        chat_log = self.query_one("#chat-log", Vertical)
+        chat_log = self.chat_log
         chat_log.remove_children()
         self._shown_in_log.clear()
         self._seen_message_ids.clear()
@@ -820,7 +832,7 @@ class SignalTUI(App):
         updated_messages:
             List of message dicts that had their status changed.
         """
-        chat_log = self.query_one("#chat-log", Vertical)
+        chat_log = self.chat_log
         # Build timestamp→widget index once (O(M)) instead of scanning
         # children for every receipt (O(N×M)).
         by_ts: dict[int, MessageWidget] = {}
@@ -1229,18 +1241,18 @@ class SignalTUI(App):
         # and the two section banners (📇 Contacts / 💬 Chat).
         cls_signal = "chat-filter-signal"
         cls_whats = "chat-filter-whatsapp"
-        for selector in ("#chat-log", "#contact-list", "#ContactsTitle", "#ChatTitle"):
-            node = None
+        widgets = [self.chat_log]
+        for selector in ("#contact-list", "#ContactsTitle", "#ChatTitle"):
             try:
-                node = self.query_one(selector)
+                widgets.append(self.query_one(selector))
             except Exception:
-                node = None
-            if node is not None:
-                node.remove_class(cls_signal, cls_whats)
-                if self._protocol_filter == "signal":
-                    node.add_class(cls_signal)
-                elif self._protocol_filter == "whatsapp":
-                    node.add_class(cls_whats)
+                pass
+        for node in widgets:
+            node.remove_class(cls_signal, cls_whats)
+            if self._protocol_filter == "signal":
+                node.add_class(cls_signal)
+            elif self._protocol_filter == "whatsapp":
+                node.add_class(cls_whats)
                 # filtro "all": nessuna classe -> default (giallo).
 
     def action_cycle_protocol_filter(self):
@@ -1541,7 +1553,7 @@ class SignalTUI(App):
                         pass
 
                 if widgets:
-                    chat_log = self.query_one("#chat-log", Vertical)
+                    chat_log = self.chat_log
                     chat_log.mount(*widgets)
                     chat_log.scroll_end(animate=False)
 
@@ -1565,7 +1577,7 @@ class SignalTUI(App):
 
     def _add_load_more_widget(self, remaining: int):
         """Add a clickable widget to load older messages."""
-        chat_log = self.query_one("#chat-log", Vertical)
+        chat_log = self.chat_log
         widget = Button(
             f"📜 ↑ {remaining} older messages — click to load",
             classes="msg-load-more",
@@ -1925,7 +1937,7 @@ class SignalTUI(App):
                 new_count += 1
 
         if new_count > 0:
-            chat_log = self.query_one("#chat-log", Vertical)
+            chat_log = self.chat_log
             chat_log.scroll_end(animate=False)
 
 
@@ -2073,7 +2085,7 @@ class SignalTUI(App):
         }
 
         # Highlight the clicked widget (find it by timestamp in the chat log)
-        chat_log = self.query_one("#chat-log", Vertical)
+        chat_log = self.chat_log
         for child in chat_log.children:
             if isinstance(child, MessageWidget) and child._msg_timestamp == event.timestamp:
                 child.set_selected(True)
@@ -2148,7 +2160,7 @@ class SignalTUI(App):
             self._add_message(f"❌ {url}", is_info=True)
         else:
             # Mount a clickable download link widget
-            chat_log = self.query_one("#chat-log", Vertical)
+            chat_log = self.chat_log
             widget = DownloadLinkWidget(url)
             chat_log.mount(widget)
             chat_log.scroll_end(animate=False)

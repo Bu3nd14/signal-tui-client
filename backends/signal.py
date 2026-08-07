@@ -318,7 +318,14 @@ class SignalBackend(ChatBackend):
     # ─── Envelope parsing → normalized events ─────────────────────────
 
     def _identify_contact_for_envelope(self, envelope: dict) -> ChatContact | None:
-        """Identify which contact an envelope belongs to."""
+        """Identify which contact an envelope belongs to.
+
+        For outgoing (syncMessage.sentMessage) envelopes the target is the
+        *destination*, not the source.  If no contact matches the destination
+        fields we return ``None`` rather than falling through to the source
+        search — a sent envelope's ``source`` is the local user, not a real
+        contact.
+        """
         sync = envelope.get("syncMessage", {})
         sent = sync.get("sentMessage", {})
         if sent:
@@ -331,6 +338,7 @@ class SignalBackend(ChatBackend):
                 aci = contact.extras.get("aci")
                 if dest_uuid and aci and dest_uuid == aci:
                     return contact
+            return None
 
         source = envelope.get("source", "")
         source_number = envelope.get("sourceNumber", "")
@@ -341,12 +349,6 @@ class SignalBackend(ChatBackend):
             aci = contact.extras.get("aci")
             if source_uuid and aci and source_uuid == aci:
                 return contact
-
-        if sent:
-            dest = sent.get("destination", "")
-            for contact in self.contacts:
-                if dest == contact.id:
-                    return contact
 
         return None
 
