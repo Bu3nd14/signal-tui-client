@@ -67,7 +67,7 @@ class ChatAreaWidget(Vertical):
 
     def compose(self):
         yield Horizontal(
-            Label("💬 Chat", classes="section-title", id="ChatTitle"),
+            Label("💬 Chat", id="ChatTitle"),
             Label("", id="StatusLabel"),
             id="chat-title-row",
         )

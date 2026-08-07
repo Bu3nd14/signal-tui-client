@@ -151,6 +151,7 @@ class SignalTUI(App):
 
     #ChatTitle {
         text-align: left;
+        padding: 0;
     }
 
     #StatusLabel {
@@ -160,7 +161,9 @@ class SignalTUI(App):
     }
 
     #chat-title-row {
-        height: 1;
+        background: $accent;
+        padding: 0 1;
+        dock: top;
     }
 
     #contact-list {
@@ -241,12 +244,12 @@ class SignalTUI(App):
 
     /* Banner (titoli di sezione) sincroni col bordo della chat per filtro. */
     #ContactsTitle.chat-filter-signal,
-    #ChatTitle.chat-filter-signal {
+    #chat-title-row.chat-filter-signal {
         background: #39c5e0;
     }
 
     #ContactsTitle.chat-filter-whatsapp,
-    #ChatTitle.chat-filter-whatsapp {
+    #chat-title-row.chat-filter-whatsapp {
         background: #25d366;
     }
     .msg-quote {
@@ -1375,7 +1378,7 @@ class SignalTUI(App):
         cls_signal = "chat-filter-signal"
         cls_whats = "chat-filter-whatsapp"
         widgets = [self.chat_log]
-        for selector in ("#contact-list", "#ContactsTitle", "#ChatTitle"):
+        for selector in ("#contact-list", "#ContactsTitle", "#chat-title-row"):
             try:
                 widgets.append(self.query_one(selector))
             except Exception:
