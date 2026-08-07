@@ -73,6 +73,7 @@ sys.excepthook = _global_exception_handler
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.timer import Timer
 from textual.widgets import (
     Header,
     Footer,
@@ -417,6 +418,12 @@ class SignalTUI(App):
 
         # cache_key → ListItem: O(1) lookup for _update_typing_label
         self._contact_widgets: dict[str, ListItem] = {}
+
+        # Progressive render state (avoids UI freeze at startup / Ctrl+W).
+        self._pending_contacts: list[ChatContact] = []
+        self._render_chunk_index: int = 0
+        self._render_chunk_size: int = 50
+        self._render_timer: Timer | None = None
 
         # Cached reference to the #chat-log widget — avoids repeated
         # O(N) CSS selector scans via query_one on every message mount.
@@ -959,6 +966,11 @@ class SignalTUI(App):
         # startup).  This runs in the mount worker thread.
         self.signal_backend._connect_sync()
 
+        # ── Early first paint: show Signal contacts immediately ─────────
+        contacts = self.manager.list_contacts()
+        self.contacts = contacts
+        self.call_from_thread(self._update_contacts_ui, contacts)
+
         # Report which transport is in use (mirrors the pre-refactor message).
         if self.signal_backend._use_daemon:
             self.call_from_thread(
@@ -998,6 +1010,11 @@ class SignalTUI(App):
                     f"💬 WhatsApp backend unavailable: {exc}",
                     is_info=True,
                 )
+
+        # ── Early second paint: show merged Signal + WhatsApp contacts ───
+        contacts = self.manager.list_contacts()
+        self.contacts = contacts
+        self.call_from_thread(self._update_contacts_ui, contacts)
 
         # Re-sync dello storico WhatsApp best-effort all'avvio (unread ∪ chat
         # con messaggi già nel DB locale) così le chat incomplete vengono
@@ -1152,6 +1169,67 @@ class SignalTUI(App):
             return " - All"
         return ""
 
+
+    def _apply_contact_visibility(self) -> None:
+        """Toggle ``display`` on ListItems based on the active protocol filter.
+
+        Unlike ``_render_contact_list`` this *never* destroys widgets — it
+        only sets ``display=True`` / ``display=False`` on the children that
+        are already in the DOM.  Called on every Ctrl+W cycle instead of a
+        full rebuild, keeping the UI responsive even with 600+ contacts.
+        """
+        contact_list = self.query_one("#contact-list", ListView)
+
+        if self._protocol_filter == "all":
+            visible = {c.cache_key for c in self.contacts}
+        else:
+            visible = {
+                c.cache_key for c in self.contacts
+                if c.protocol == self._protocol_filter
+            }
+
+        first_visible: int | None = None
+        for i, child in enumerate(contact_list.children):
+            key: str | None = getattr(child, "_contact_id", None)
+            show = key in visible
+            child.display = show
+            if show and first_visible is None:
+                first_visible = i
+
+        if first_visible is not None:
+            contact_list.index = first_visible
+        elif self.selected_contact is not None:
+            # No contact visible under this filter — deselect.
+            self.selected_contact = None
+
+    def _render_next_chunk(self) -> None:
+        """Render the next *chunk_size* contacts (progressive startup).
+
+        Called initially from ``_update_contacts_ui`` and then
+        self-schedules via ``set_timer`` until all pending contacts are
+        rendered.  Each chunk yields control back to the Textual event
+        loop so the UI never freezes.
+        """
+        contact_list = self.query_one("#contact-list", ListView)
+        start = self._render_chunk_index
+        end = min(start + self._render_chunk_size, len(self._pending_contacts))
+        chunk = self._pending_contacts[start:end]
+
+        for c in chunk:
+            text = self._contact_label(c)
+            item = ListItem(Label(text))
+            item._contact_id = c.cache_key
+            item._label_text = text
+            item.add_class(self._protocol_class(c))
+            contact_list.append(item)
+            self._contact_widgets[c.cache_key] = item
+
+        self._render_chunk_index = end
+        if end < len(self._pending_contacts):
+            self._render_timer = self.set_timer(0.05, self._render_next_chunk)
+        else:
+            self._render_timer = None
+
     def _render_contact_list(self, filtered: list[ChatContact]) -> None:
         """Renderizza la lista contatti, aggiornandola *in-place* quando la
         composizione/ordine non cambia.
@@ -1227,13 +1305,12 @@ class SignalTUI(App):
     def _apply_contact_filter(self) -> None:
         """Re-apply the active protocol filter to the contact list view.
 
-        Filters the in-memory contact collection (no DB reload), updates the
-        contacts section title AND colors the chat border + the two section
-        banners (📇 Contacts / 💬 Chat) to match the active filter (Ctrl+W):
-        azure for Signal, green for WhatsApp, and the default (yellow) for ALL.
+        Uses ``_apply_contact_visibility`` (display toggle) instead of a
+        full ListItem rebuild — the DOM keeps all contacts, hidden ones
+        are ``display=False``.  Only the CSS border / banner classes are
+        synced here.
         """
-        filtered = self._filtered_contacts()
-        self._render_contact_list(filtered)
+        self._apply_contact_visibility()
         try:
             section_lbl = self.query_one("#ContactsTitle", Label)
         except Exception:
@@ -1270,11 +1347,31 @@ class SignalTUI(App):
         # la cronologia della conversazione in corso.
 
     def _update_contacts_ui(self, contacts: list[ChatContact]):
-        """Update the UI with the (merged) contact list."""
+        """Update the UI with the (merged) contact list -- progressive render.
+
+        Instead of building every ListItem in one blocking call, the first
+        chunk is rendered immediately and the remaining contacts are
+        scheduled via ``set_timer`` (50 per frame).  The contact list
+        grows incrementally without freezing the UI.
+
+        Cancels any in-progress progressive render from a previous call
+        (e.g. early render after Signal, then re-render after WhatsApp).
+        """
+        # Cancel any in-progress progressive render
+        if self._render_timer is not None:
+            self._render_timer.stop()
+            self._render_timer = None
+
         self._sort_contacts()
-        # _apply_contact_filter rebuilds the filtered list AND syncs the
-        # "Contacts" title + the banner/chat-border filter accent on startup.
-        self._apply_contact_filter()
+        self._pending_contacts = self._filtered_contacts()
+        self._render_chunk_index = 0
+
+        contact_list = self.query_one("#contact-list", ListView)
+        contact_list.clear()
+        self._contact_widgets.clear()
+
+        # Start the progressive render
+        self._render_next_chunk()
 
         self._add_message(f"✅ Loaded {len(self.contacts)} contacts.", is_info=True)
 
