@@ -153,6 +153,13 @@ class SignalTUI(App):
         text-align: left;
     }
 
+    #StatusLabel {
+        text-align: right;
+        color: $text-muted;
+        height: 1;
+        padding: 0 2;
+    }
+
     #contact-list {
         height: 100%;
         border: solid $accent;
@@ -467,6 +474,20 @@ class SignalTUI(App):
 
     # ─── Chat helper methods ────────────────────────────────────────────────
 
+    def _show_status(self, text: str, duration: float = 3.0) -> None:
+        """Show a transient status message in the chat banner area.
+
+        The message appears in ``#StatusLabel`` (right side of the chat
+        header) and auto-clears after *duration* seconds.
+        """
+        try:
+            label = self.query_one("#StatusLabel", Label)
+        except Exception:
+            return
+        label.update(text)
+        label.display = True
+        self.set_timer(duration, lambda: label.update(""))
+
     def _add_message(
         self,
         text: str,
@@ -555,7 +576,8 @@ class SignalTUI(App):
             display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
 
         if is_info:
-            widget = Static(display_text, classes="msg-info")
+            self._show_status(display_text)
+            return
         else:
             # Use clickable MessageWidget for all non-info messages.
             # Per i messaggi di gruppo WhatsApp (chat @g.us) non miei,
