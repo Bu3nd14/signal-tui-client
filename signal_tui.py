@@ -149,7 +149,7 @@ class SignalTUI(App):
     }
 
     #ChatTitle {
-        text-align: center;
+        text-align: left;
     }
 
     #contact-list {
