@@ -405,9 +405,19 @@ class SignalBackend(ChatBackend):
             if classified:
                 msgs: list[dict] = []
                 for i, (msg_type, att_info, att_id) in enumerate(classified):
-                    msg_text = text if i == 0 else ""
-                    if not msg_text:
-                        msg_text = att_info or "Media"
+                    if i == 0 and text:
+                        msg_text = text
+                    else:
+                        label = att_info or "Media"
+                        # Suffisso con attachment_id per garantire unicita'
+                        # del testo: senza, attachment multipli dello stesso
+                        # tipo condividerebbero lo stesso text e il dedup
+                        # di ingest_message li tratterebbe come duplicati.
+                        if att_id:
+                            fname = str(att_id)
+                            msg_text = f"{label}: {fname}"
+                        else:
+                            msg_text = label
                     msgs.append({
                         "sender": sender, "text": msg_text, "is_mine": is_mine,
                         "quote_text": quote_text, "msg_type": msg_type,

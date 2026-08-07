@@ -588,6 +588,110 @@ class TestIngestDedup:
         ) is False
         assert len(backend.cache["+391234567890"]) == 1
 
+    def test_full_pipeline_multi_attachment_to_cache_and_db(self, tmp_path):
+        """End-to-end: envelope con 6 foto → 6 eventi → ingest → cache + DB.
+
+        Questo test simula l'esatto flusso che avviene quando signal-cli
+        consegna un messaggio con N attachment.  Usa un DB temporaneo
+        (tmp_path) per non toccare il DB reale.
+        """
+        import backend as backend_mod
+        from unittest.mock import patch
+
+        TEST_CONTACT = "+399999999999"
+        db_file = tmp_path / "messages.db"
+
+        with patch.object(backend_mod, "DB_FILE", db_file), \
+             patch.object(backend_mod, "CACHE_DIR", tmp_path):
+            # Inizializza DB vergine
+            backend_mod._init_db()
+
+            backend = SignalBackend()
+            contact = ChatContact(
+                id=TEST_CONTACT, display_name="Test",
+                protocol=PROTOCOL_SIGNAL,
+            )
+            backend._set_contacts([contact])
+
+            # Envelope realistico: 6 foto (come il caso reale)
+            envelope = {
+                "source": TEST_CONTACT,
+                "sourceNumber": TEST_CONTACT,
+                "sourceName": "Test",
+                "timestamp": 9000000,
+                "dataMessage": {
+                    "timestamp": 9000000,
+                    "message": "Ecco le foto!",
+                    "attachments": [
+                        {"contentType": "image/jpeg", "id": "photo-1.jpg"},
+                        {"contentType": "image/jpeg", "id": "photo-2.jpg"},
+                        {"contentType": "image/png",  "id": "photo-3.png"},
+                        {"contentType": "image/webp", "id": "photo-4.webp"},
+                        {"contentType": "image/jpeg", "id": "photo-5.jpg"},
+                        {"contentType": "image/jpeg", "id": "photo-6.jpg"},
+                    ],
+                },
+            }
+
+            # Step 1: envelope → eventi
+            events = backend.envelope_to_event(envelope)
+            assert len(events) == 6, (
+                f"Expected 6 events, got {len(events)}"
+            )
+
+            # Step 2: ogni evento → ingest_message
+            for ev in events:
+                assert ev.type == "message"
+                added = backend.ingest_message(
+                    TEST_CONTACT, ev.payload,
+                    ev.payload["timestamp"],
+                )
+                assert added is True, (
+                    f"ingest_message returned False for {ev.payload.get('attachment_id')}"
+                )
+
+            # Step 3: verifica backend.cache
+            assert TEST_CONTACT in backend.cache
+            cached = backend.cache[TEST_CONTACT]
+            assert len(cached) == 6, (
+                f"Expected 6 in cache, got {len(cached)}: "
+                f"{[m.get('attachment_id') for m in cached]}"
+            )
+            cached_ids = {m["attachment_id"] for m in cached}
+            expected_ids = {
+                "photo-1.jpg", "photo-2.jpg", "photo-3.png",
+                "photo-4.webp", "photo-5.jpg", "photo-6.jpg",
+            }
+            assert cached_ids == expected_ids, (
+                f"Attachment ID mismatch: {cached_ids} != {expected_ids}"
+            )
+
+            # Step 4: verifica DB
+            loaded = backend_mod._load_cache()
+            assert TEST_CONTACT in loaded, (
+                f"Contact {TEST_CONTACT} not found in DB"
+            )
+            db_msgs = loaded[TEST_CONTACT]
+            assert len(db_msgs) == 6, (
+                f"Expected 6 in DB, got {len(db_msgs)}"
+            )
+            db_ids = {m["attachment_id"] for m in db_msgs}
+            assert db_ids == expected_ids, (
+                f"DB attachment IDs mismatch: {db_ids} != {expected_ids}"
+            )
+
+            # Step 5: verifica che il testo sia solo sul primo messaggio
+            texts = [m["text"] for m in cached]
+            assert texts[0] == "Ecco le foto!", (
+                f"First message should have the text, got {texts[0]!r}"
+            )
+            for i in range(1, 6):
+                assert "Ecco le foto!" not in texts[i], (
+                    f"Message {i} should NOT contain the original text"
+                )
+
+        # Il tmp_path viene pulito automaticamente da pytest
+
     def test_outgoing_same_text_far_apart_is_distinct(self):
         """Due invii con lo stesso testo molto distanti NON vengono fusi."""
         backend = SignalBackend()
