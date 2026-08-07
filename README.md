@@ -20,7 +20,7 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 
 - Full contact list with unread badges — unified across Signal and WhatsApp
 - Real-time message receiving and sending on both protocols
-- Native terminal image rendering (via `catimg`) with fullscreen modal viewer
+- **Multiple attachments** — a message with several photos shows each one separately (both Signal and WhatsApp).  Clickable image placeholders with fullscreen viewer (via catimg).
 - Message history with local SQLite cache (last 200 messages per contact retained)
 - Device linking via QR code — both Signal and WhatsApp
 - Daemon mode for fast JSON-RPC communication (Signal)
@@ -379,7 +379,7 @@ signal-tui-client/
 ├── migrate_cache_protocol.py# One-shot migration: add protocol field to cache
 ├── migrate_cache_status.py  # One-shot migration: add status field to cache
 ├── purge_whatsapp_cache.py  # Utility: purge WhatsApp messages from cache
-├── tests/                   # Test suite (pytest, 366 tests)
+├── tests/                   # Test suite (pytest, 378 tests)
 │   ├── conftest.py
 │   ├── test_whatsapp_backend.py (101 tests)
 │   ├── test_ui_protocol.py      (44 tests)
@@ -396,7 +396,7 @@ signal-tui-client/
 ├── requirements-dev.txt     # Development dependencies (ruff)
 ├── config.json              # Local configuration (not committed)
 ├── README.md                # This file
-├── TEST_REPORT.md           # Test report (last run: 366/366 ✅)
+├── TEST_REPORT.md           # Test report (last run: 378/378 ✅)
 ├── PERF_ANALYSIS.md         # Performance analysis (UI reactivity hotspots)
 ├── BUGS.md                  # Known bugs and limitations
 ├── bin/                     # signal-cli binaries (not committed)

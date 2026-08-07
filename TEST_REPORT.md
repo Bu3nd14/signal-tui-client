@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
 **Data:** 2026-08-07
-**Git commit:** `78b2b21` (master)
+**Git commit:** `e114269` (master)
 **Python:** 3.12.3
-**Stato:** ✅ 368/368 test superati
+**Stato:** ✅ 378/378 test superati
 
 ---
 
@@ -14,7 +14,7 @@
 | WhatsApp Backend | `test_whatsapp_backend.py` | 101 | ✅ |
 | UI Protocol | `test_ui_protocol.py` | 44 | ✅ |
 | Typing Indicator | `test_typing_indicator.py` | 29 | ✅ |
-| Backends (Manager) | `test_backends.py` | 27 | ✅ |
+| Backends (Manager) | `test_backends.py` | 36 | ✅ |
 | Cache (SQLite) | `test_backend_cache.py` | 18 | ✅ |
 | Script installazione | `test_install_script.py` | 17 | ✅ |
 | Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
@@ -32,7 +32,7 @@
 | Migrazione SQLite | `test_migrate_sqlite.py` | 4 | ✅ |
 | Contatti | `test_backend_contacts.py` | 4 | ✅ |
 | Docker Compose | `test_docker_compose_extra_hosts.py` | 2 | ✅ |
-| **Totale** | | **368** | **✅ 368/368** |
+| **Totale** | | **378** | **✅ 378/378** |
 
 ---
 

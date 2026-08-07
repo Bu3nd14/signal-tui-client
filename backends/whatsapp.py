@@ -1219,7 +1219,7 @@ class WhatsAppBackend(ChatBackend):
         contacts: list[ChatContact] = []
         for c in raw_contacts:
             jid = c.get("id") or c.get("jid") or c.get("remoteJid")
-            if not jid:
+            if not jid or "@broadcast" in jid:
                 continue
             name = c.get("name") or c.get("pushName") or c.get("notifyName") or ""
             last_ts = int(c.get("last_ts") or 0)
