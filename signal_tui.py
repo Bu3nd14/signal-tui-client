@@ -471,16 +471,15 @@ class SignalTUI(App):
         """Show a transient status message in the chat banner (#ChatTitle).
 
         The message briefly replaces the chat title and auto-clears after
-        *duration* seconds.  The next ``_select_contact`` or UI action that
-        updates ``#ChatTitle`` will naturally overwrite it.
+        *duration* seconds by resetting to the default \"💬 Chat\".
+        The next ``_select_contact`` will overwrite with the contact name.
         """
         try:
             label = self.query_one("#ChatTitle", Label)
         except Exception:
             return
-        current = str(label.renderable)
         label.update(text)
-        self.set_timer(duration, lambda: label.update(current))
+        self.set_timer(duration, lambda: label.update("💬 Chat"))
 
     def _add_message(
         self,
