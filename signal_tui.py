@@ -1226,6 +1226,24 @@ class SignalTUI(App):
             # No contact visible under this filter — deselect.
             self.selected_contact = None
 
+    def _start_progressive_render(self, contacts: list[ChatContact]) -> None:
+        """Begin a progressive (chunked) contact-list rebuild.
+
+        Cancels any in-progress render, clears the ListView, and schedules
+        ``_render_next_chunk`` to append contacts 50-at-a-time.
+        """
+        if self._render_timer is not None:
+            self._render_timer.stop()
+            self._render_timer = None
+
+        self._pending_contacts = list(contacts)
+        self._render_chunk_index = 0
+
+        contact_list = self.query_one("#contact-list", ListView)
+        contact_list.clear()
+        self._contact_widgets.clear()
+        self._render_next_chunk()
+
     def _render_next_chunk(self) -> None:
         """Render the next *chunk_size* contacts (progressive startup).
 
@@ -1314,18 +1332,9 @@ class SignalTUI(App):
                 for i in range(1, len(reordered)):
                     contact_list.move_child(reordered[i], after=reordered[i - 1])
         else:
-            # Composizione/insieme cambiato (filtro nuovo/stato iniziale) ->
-            # rebuild completo.
-            contact_list.clear()
-            self._contact_widgets.clear()
-            for c in filtered:
-                text = self._contact_label(c)
-                item = ListItem(Label(text))
-                item._contact_id = c.cache_key
-                item._label_text = text
-                item.add_class(self._protocol_class(c))
-                contact_list.append(item)
-                self._contact_widgets[c.cache_key] = item
+            # Composizione/insieme cambiato (filtro nuovo / backend aggiunto /
+            # stato iniziale) -> rebuild progressivo (chunked, non blocca la UI).
+            self._start_progressive_render(filtered)
 
         if self.selected_contact and self.selected_contact in filtered:
             contact_list.index = filtered.index(self.selected_contact)
@@ -1377,32 +1386,14 @@ class SignalTUI(App):
         # la cronologia della conversazione in corso.
 
     def _update_contacts_ui(self, contacts: list[ChatContact]):
-        """Update the UI with the (merged) contact list -- progressive render.
+        """Update the UI with the (merged) contact list.
 
-        Instead of building every ListItem in one blocking call, the first
-        chunk is rendered immediately and the remaining contacts are
-        scheduled via ``set_timer`` (50 per frame).  The contact list
-        grows incrementally without freezing the UI.
-
-        Cancels any in-progress progressive render from a previous call
-        (e.g. early render after Signal, then re-render after WhatsApp).
+        Delegates to ``_render_contact_list`` which uses progressive render
+        when the set changes (startup / new backend), and fast/reorder paths
+        on subsequent calls.
         """
-        # Cancel any in-progress progressive render
-        if self._render_timer is not None:
-            self._render_timer.stop()
-            self._render_timer = None
-
         self._sort_contacts()
-        self._pending_contacts = self._filtered_contacts()
-        self._render_chunk_index = 0
-
-        contact_list = self.query_one("#contact-list", ListView)
-        contact_list.clear()
-        self._contact_widgets.clear()
-
-        # Start the progressive render
-        self._render_next_chunk()
-
+        self._render_contact_list(self._filtered_contacts())
         self._update_unread_badges()
 
     # ─── Contact selection ─────────────────────────────────────────────────
