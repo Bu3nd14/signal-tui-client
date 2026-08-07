@@ -136,12 +136,10 @@ Se **tutti** i file mancano dei permessi di esecuzione, la funzione solleva
 
 ---
 
-### #16 — `_parse_contacts_from_output` parsing fragile (`backends/signal.py`, righe 168-186)
+### #16 — `_parse_contacts_from_output` parsing fragile (`backends/signal.py`, righe 177-195) ✅ RISOLTO
 
-Il parser splitta per spazi e cerca prefissi come `Number:`, `Name:`, `ACI:`.
-Se un nome contiene spazi (es. "Mario Rossi"), viene troncato alla prima parola.
-
-**Impatto:** Nomi contatti visualizzati incompleti se hanno spazi.
+**Fix:** sostituito `line.split()` con regex `_RE_CONTACT_LINE` che usa named groups. Ora
+gestisce correttamente nomi con spazi (es. "Mario Rossi"). Commit: (vedi git log).
 
 ---
 

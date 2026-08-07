@@ -111,6 +111,20 @@ class TestSignalBackend:
         assert contacts[0].id == "+391234567890"
         assert contacts[0].extras["aci"] == "uuid-123"
 
+    def test_parse_contacts_from_output_name_with_spaces(self):
+        """Nomi con spazi (es. 'Mario Rossi') non vengono troncati."""
+        backend = SignalBackend()
+        output = (
+            "Number:+391234567890 Name:Mario Rossi ACI:uuid-123\n"
+            "Number:+391111111111 Name:Anna Maria Bianchi\n"
+        )
+        contacts = backend._parse_contacts_from_output(output)
+        assert len(contacts) == 2
+        assert contacts[0].display_name == "Mario Rossi"
+        assert contacts[1].display_name == "Anna Maria Bianchi"
+        # Second contact has no ACI → aci should be empty
+        assert contacts[1].extras.get("aci", "") == ""
+
     def test_set_contacts_recovers_last_message_ts_from_cache(self):
         """_set_contacts calcola last_message_ts dal MAX timestamp della cache."""
         backend = SignalBackend()

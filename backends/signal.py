@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -53,6 +54,14 @@ _SEND_DEDUP_WINDOW_MS = 5000
 # Prevents double-counting when signal-cli re-delivers the same envelope
 # (e.g. sync from another device) with a slightly different timestamp.
 _INCOMING_DEDUP_WINDOW_MS = 2000
+
+_RE_CONTACT_LINE = re.compile(
+    r"Number:(?P<number>\S+)\s+"
+    r"Name:(?P<name>.+?)"
+    r"(?:\s+ACI:(?P<aci>\S+))?"
+    r"(?:\s+Profile name:.*)?"
+    r"$"
+)
 
 
 class SignalBackend(ChatBackend):
@@ -166,22 +175,21 @@ class SignalBackend(ChatBackend):
             pass
 
     def _parse_contacts_from_output(self, output: str) -> list[ChatContact]:
+        """Parse the output of ``signal-cli listContacts`` (subprocess fallback).
+
+        Uses a regex instead of ``line.split()`` to correctly handle names
+        that contain spaces (e.g. ``Mario Rossi``).
+        """
         legacy = []
         for line in output.strip().split("\n"):
-            if not line.strip():
+            line = line.strip()
+            if not line:
                 continue
-            parts = line.split()
-            number, name, aci = "", "", ""
-            for i, p in enumerate(parts):
-                if p.startswith("Number:"):
-                    number = p.split(":", 1)[1].strip()
-                elif p.startswith("Name:"):
-                    name = p.split(":", 1)[1].strip()
-                elif p.startswith("ACI:"):
-                    aci_val = p.split(":", 1)[1].strip()
-                    if aci_val and aci_val != "-":
-                        aci = aci_val
-            if number:
+            m = _RE_CONTACT_LINE.match(line)
+            if m:
+                number = m.group("number")
+                name = m.group("name").strip()
+                aci = m.group("aci") or ""
                 legacy.append(Contact(number=number, name=name, aci=aci))
         return [self._to_chat_contact(c) for c in legacy]
 
