@@ -1019,6 +1019,11 @@ class SignalTUI(App):
                 is_info=True,
             )
 
+        # Start polling for incoming messages NOW, before WhatsApp connect
+        # (which may block for up to 40s waiting for WAHA to be reachable).
+        self._polling_active = True
+        self.run_worker(self._poll_worker, exclusive=False, thread=True)
+
         # Connect the WhatsApp backend when configured (non-fatal if it's
         # unreachable or unpaired — the Signal client keeps working).
         if self.whatsapp_backend is not None:
@@ -1091,10 +1096,6 @@ class SignalTUI(App):
         # the contact list is sorted "most recent first" right from startup.
         self._sync_last_ts()
         self.call_from_thread(self._update_contacts_ui, contacts)
-
-        # Start polling for incoming messages.
-        self._polling_active = True
-        self.run_worker(self._poll_worker, exclusive=True, thread=True)
 
     def _resync_wa_history(self) -> int:
         """Re-sync best-effort dello storico WhatsApp all'avvio.
