@@ -89,6 +89,15 @@ class SignalBackend(ChatBackend):
 
     # ─── Lifecycle ────────────────────────────────────────────────────
 
+    @property
+    def needs_pairing(self) -> bool:
+        """True if the account is not linked or daemon can't authenticate."""
+        try:
+            test = self._rpc._call("listContacts")
+            return "error" in test or "result" not in test
+        except Exception:
+            return True
+
     async def connect(self) -> None:
         """Prune old cache, load history, start daemon and load contacts."""
         await asyncio.to_thread(self._connect_sync)
