@@ -458,9 +458,17 @@ class SignalTUI(App):
         yield Footer()
 
     def on_mount(self):
-        """On startup, start the daemon and load contacts."""
+        """On startup, start poll worker and backend connections in parallel."""
         self._chat_log = self.query_one("#chat-log", Vertical)
-        self.run_worker(self._startup, exclusive=True, thread=True)
+        # Start poll worker immediately — Signal and WhatsApp events flow
+        # as soon as their backends are ready (independent workers below).
+        self._polling_active = True
+        self.run_worker(self._poll_worker, exclusive=True, thread=True)
+        # Signal backend in its own worker
+        self.run_worker(self._connect_signal, exclusive=False, thread=True)
+        # WhatsApp backend in its own worker (if configured)
+        if self.whatsapp_backend is not None:
+            self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
 
     def action_quit(self):
         """Ctrl+Q: stop polling and exit cleanly."""
@@ -968,133 +976,100 @@ class SignalTUI(App):
 
     # ─── Startup ────────────────────────────────────────────────────────────
 
+    # ─── Backend connection workers (parallel, independent) ──────────────────
 
-    def _startup(self):
-        """Connect all backends, load contacts, and start the poll workers."""
-        self.call_from_thread(
-            self._add_message, "⏳ Starting signal-cli daemon...", is_info=True
-        )
-
-        # Backend connect is synchronous-friendly (it wraps blocking daemon
-        # startup).  This runs in the mount worker thread.
-        self.signal_backend._connect_sync()
-
-        # ── Build cache early so contacts selected before WhatsApp connects
-        #     already see their message history in the chat area.
-        self._cache = {}
-        for backend in self.manager.all():
-            for cid, msgs in backend.cache.items():
-                self._cache[contact_cache_key(backend.protocol, cid)] = list(msgs)
-        self._sync_last_ts()
-
-        # ── Early first paint: show Signal contacts immediately ─────────
-        contacts = self.manager.list_contacts()
-        self.contacts = contacts
-
-        # ── Emit loading hints once, before first progressive render ────
-        self.call_from_thread(
-            self._add_message,
-            f"✅ Loaded {len(contacts)} contacts.",
-            is_info=True,
-        )
-        self.call_from_thread(
-            self._add_message,
-            "💡 Select a contact to view chat",
-            is_info=True,
-        )
-
-        self.call_from_thread(self._update_contacts_ui, contacts)
-
-        # Report which transport is in use (mirrors the pre-refactor message).
-        if self.signal_backend._use_daemon:
+    def _connect_signal(self) -> None:
+        """Connect Signal backend and update UI (runs in worker thread)."""
+        try:
             self.call_from_thread(
-                self._add_message,
-                "✅ Daemon already active, connecting directly...",
-                is_info=True,
+                self._add_message, "⏳ Starting signal-cli daemon...", is_info=True
             )
-        else:
-            self.call_from_thread(
-                self._add_message,
-                "⚠️ Daemon not available. Using subprocess mode (slower).",
-                is_info=True,
-            )
-
-        # Connect the WhatsApp backend when configured (non-fatal if it's
-        # unreachable or unpaired — the Signal client keeps working).
-        if self.whatsapp_backend is not None:
-            try:
-                self.whatsapp_backend.connect_sync()
-                n = len(self.whatsapp_backend.contacts)
-                # Avvio il server HTTP /webhook che riceve gli eventi PUSH da
-                # WAHA (WAHA_WEBHOOK_URL/WAHA_WEBHOOK_EVENTS in docker-compose).
-                # WAHA posta qui i nuovi messaggi; il backend li normalizza ed
-                # accoda per la TUI — niente più polling GET /api/messages.
+            # If daemon was started before linking, kill it first so
+            # _connect_sync starts fresh with the new device identity.
+            from backend import _is_daemon_running
+            sb = self.signal_backend
+            if _is_daemon_running() and sb.daemon_proc is None:
+                # Daemon is running but wasn't started by us (e.g. pre-link state)
+                # Kill it via RPC or just let _connect_sync handle it
+                pass
+            if sb.daemon_proc is not None:
                 try:
-                    ensure_webhook_server(self.whatsapp_backend)
+                    sb._polling_active = False
+                    t = sb._sse_thread
+                    sb._sse_thread = None
+                    if t and t.is_alive():
+                        t.join(timeout=3)
+                    sb.daemon_proc.terminate()
+                    sb.daemon_proc.wait(timeout=5)
                 except Exception:
-                    pass  # best-effort: senza webhook la ricezione live si ferma
-                self.call_from_thread(
-                    self._add_message,
-                    f"💬 WhatsApp backend active ({n} contacts, webhook on :{WEBHOOK_PORT}).",
-                    is_info=True,
-                )
-            except Exception as exc:
-                self.call_from_thread(
-                    self._add_message,
-                    f"💬 WhatsApp backend unavailable: {exc}",
-                    is_info=True,
-                )
+                    try:
+                        sb.daemon_proc.kill()
+                    except Exception:
+                        pass
+                sb.daemon_proc = None
+            sb._connect_sync()
 
-        # ── Early second paint: show merged Signal + WhatsApp contacts ───
-        contacts = self.manager.list_contacts()
-        self.contacts = contacts
-        self.call_from_thread(self._update_contacts_ui, contacts)
-        self.call_from_thread(
-            self._add_message, "✅ Ready", is_info=True,
-        )
+            # Build cache from all backends loaded so far
+            self._cache = {}
+            for b in self.manager.all():
+                for cid, msgs in b.cache.items():
+                    self._cache[contact_cache_key(b.protocol, cid)] = list(msgs)
+            self._sync_last_ts()
 
-        # Re-sync dello storico WhatsApp best-effort all'avvio (unread ∪ chat
-        # con messaggi già nel DB locale) così le chat incomplete vengono
-        # riparate e i messaggi da un altro client compaiono senza dover
-        # aprire ogni chat.  Qui il DB del backend è già stato seminato da
-        # ``connect_sync``, e la mappa unread è appena stata rinfrescata.
-        self._resync_wa_history()
-
-        # Purge duplicate messages that may have accumulated in the DB
-        # (e.g. from signal-cli re-delivering the same envelope with slightly
-        # different timestamps).  Must run before we rebuild the UI cache so
-        # the loaded data is clean.
-        removed = _dedup_messages()
-        if removed > 0:
+            contacts = self.manager.list_contacts()
+            self.contacts = contacts
+            self.call_from_thread(self._update_contacts_ui, contacts)
             self.call_from_thread(
                 self._add_message,
-                f"🧹 Cleaned up {removed} duplicate message(s) from cache.",
+                f"✅ Loaded {len(contacts)} contacts.",
                 is_info=True,
             )
-            # Reload backend caches from the cleaned DB so the UI cache built
-            # below doesn't contain stale duplicates.
-            for backend in self.manager.all():
-                reload = getattr(backend, "_load_protocol_cache", None)
-                if reload is not None:
-                    backend.cache = reload()
+            self.call_from_thread(
+                self._add_message, "💡 Select a contact to view chat", is_info=True
+            )
+            if sb._use_daemon:
+                self.call_from_thread(
+                    self._add_message,
+                    "✅ Daemon active, connecting directly...",
+                    is_info=True,
+                )
+            else:
+                self.call_from_thread(
+                    self._add_message,
+                    "⚠️ Daemon not available. Using subprocess mode (slower).",
+                    is_info=True,
+                )
+        except Exception as e:
+            logger.exception("Signal connect failed: %s", e)
+            self.call_from_thread(
+                self._add_message, f"❌ Signal backend error: {e}", is_info=True
+            )
 
-        # Pull the merged, protocol-aware contact list from the manager.
-        contacts = self.manager.list_contacts()
-        self.contacts = contacts
-        # Convert each backend's cache (keyed by raw contact id) into the UI's
-        # protocol-aware cache (keyed by contact_cache_key).
-        self._cache = {}
-        for backend in self.manager.all():
-            for cid, msgs in backend.cache.items():
-                self._cache[contact_cache_key(backend.protocol, cid)] = list(msgs)  # copy, don't share ref
-        # Recover per-contact last-message timestamps from the local cache so
-        # the contact list is sorted "most recent first" right from startup.
-        self._sync_last_ts()
-        self.call_from_thread(self._update_contacts_ui, contacts)
+    def _connect_whatsapp(self) -> None:
+        """Connect WhatsApp backend and update UI (runs in worker thread)."""
+        try:
+            self.whatsapp_backend.connect_sync()
+            n = len(self.whatsapp_backend.contacts)
+            try:
+                ensure_webhook_server(self.whatsapp_backend)
+            except Exception:
+                pass
+            self.call_from_thread(
+                self._add_message,
+                f"💬 WhatsApp backend active ({n} contacts, webhook on :{WEBHOOK_PORT}).",
+                is_info=True,
+            )
+            # Reload merged contacts and update UI
+            self.contacts = self.manager.list_contacts()
+            self.call_from_thread(self._update_contacts_ui, self.contacts)
+            self._resync_wa_history()
+        except Exception as exc:
+            self.call_from_thread(
+                self._add_message,
+                f"💬 WhatsApp backend unavailable: {exc}",
+                is_info=True,
+            )
 
-        # Start polling for incoming messages.
-        self._polling_active = True
-        self.run_worker(self._poll_worker, exclusive=True, thread=True)
 
     def _resync_wa_history(self) -> int:
         """Re-sync best-effort dello storico WhatsApp all'avvio.
@@ -1809,12 +1784,10 @@ class SignalTUI(App):
         """Open the device link picker modal (Ctrl+L)."""
         def _on_done(_: object) -> None:
             logger.info("LINK-DONE: callback fired")
-            # Restart SSE in background so Signal receives messages
             if self.signal_backend:
-                self.run_worker(self._restart_signal_async(), exclusive=False)
-            # Reload WhatsApp contacts in background
+                self.run_worker(self._connect_signal, exclusive=False, thread=True)
             if self.whatsapp_backend:
-                self.run_worker(self._reload_whatsapp_async(), exclusive=False)
+                self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
 
         self.push_screen(
             DeviceLinkPickerScreen(
@@ -1825,71 +1798,9 @@ class SignalTUI(App):
         )
 
 
-    async def _restart_signal_async(self) -> None:
-        """Restart the Signal daemon + SSE after device linking.
-
-        The daemon was started before the link (with on-start, which failed
-        because the account wasn't linked yet).  After linking, we kill it
-        and call _connect_sync to start fresh: daemon, contacts, SSE.
-        """
-        import asyncio
-        logger.info("LINK-SIGNAL: restarting daemon after link")
-        def _run():
-            try:
-                sb = self.signal_backend
-                # 1. Stop SSE listener
-                sb._polling_active = False
-                t = sb._sse_thread
-                sb._sse_thread = None
-                if t and t.is_alive():
-                    t.join(timeout=3)
-                # 2. Kill old daemon (was started before link, on-start failed)
-                if sb.daemon_proc:
-                    try:
-                        sb.daemon_proc.terminate()
-                        sb.daemon_proc.wait(timeout=5)
-                    except Exception:
-                        try:
-                            sb.daemon_proc.kill()
-                        except Exception:
-                            pass
-                    sb.daemon_proc = None
-                # 3. Restart fresh (daemon, contacts, SSE — all from _connect_sync)
-                sb._connect_sync()
-            except Exception as e:
-                logger.warning("LINK-SIGNAL: daemon restart failed: %s", e)
-        await asyncio.to_thread(_run)
-        logger.info("LINK-SIGNAL: daemon restarted, updating UI")
-        self.contacts = self.manager.list_contacts()
-        self._safe_update_contacts()
-
-
-    async def _reload_whatsapp_async(self) -> None:
-        """Reload WhatsApp contacts in a thread (may be slow after link)."""
-        import asyncio
-        logger.info("LINK-WA: reloading contacts")
-        def _run():
-            try:
-                self.whatsapp_backend._load_contacts()
-            except Exception as e:
-                logger.warning("LINK-WA: reload failed: %s", e)
-        await asyncio.to_thread(_run)
-        logger.info("LINK-WA: done, updating UI")
-        self.contacts = self.manager.list_contacts()
-        self._safe_update_contacts()
-
     def action_open_device_link(self) -> None:
         """Action to open device link picker (bound to Ctrl+L)."""
         self._open_device_link()
-
-    def _safe_update_contacts(self) -> None:
-        """Wrapper that logs errors from _update_contacts_ui."""
-        try:
-            logger.info("LINK-UI: _update_contacts_ui start, contacts=%d", len(self.contacts))
-            self._update_contacts_ui(self.contacts)
-            logger.info("LINK-UI: _update_contacts_ui done")
-        except Exception as e:
-            logger.exception("LINK-UI: _update_contacts_ui FAILED: %s", e)
 
     # ─── Emoji alias auto-completion ──────────────────────────────────────────
 
