@@ -1826,18 +1826,42 @@ class SignalTUI(App):
 
 
     async def _restart_signal_async(self) -> None:
-        """Restart Signal SSE + force daemon WebSocket reconnect after link."""
+        """Restart the Signal daemon + SSE after device linking.
+
+        The daemon was started before the link (with on-start, which failed
+        because the account wasn't linked yet).  After linking, we kill it
+        and call _connect_sync to start fresh: daemon, contacts, SSE.
+        """
         import asyncio
-        logger.info("LINK-SIGNAL: restarting SSE + forcing receive")
+        logger.info("LINK-SIGNAL: restarting daemon after link")
         def _run():
             try:
-                self.signal_backend.restart_sse()
-                # Force daemon to re-open WebSocket with new device identity
-                self.signal_backend._rpc._call("receive")
+                sb = self.signal_backend
+                # 1. Stop SSE listener
+                sb._polling_active = False
+                t = sb._sse_thread
+                sb._sse_thread = None
+                if t and t.is_alive():
+                    t.join(timeout=3)
+                # 2. Kill old daemon (was started before link, on-start failed)
+                if sb.daemon_proc:
+                    try:
+                        sb.daemon_proc.terminate()
+                        sb.daemon_proc.wait(timeout=5)
+                    except Exception:
+                        try:
+                            sb.daemon_proc.kill()
+                        except Exception:
+                            pass
+                    sb.daemon_proc = None
+                # 3. Restart fresh (daemon, contacts, SSE — all from _connect_sync)
+                sb._connect_sync()
             except Exception as e:
-                logger.warning("LINK-SIGNAL: restart failed: %s", e)
+                logger.warning("LINK-SIGNAL: daemon restart failed: %s", e)
         await asyncio.to_thread(_run)
-        logger.info("LINK-SIGNAL: done")
+        logger.info("LINK-SIGNAL: daemon restarted, updating UI")
+        self.contacts = self.manager.list_contacts()
+        self._safe_update_contacts()
 
 
     async def _reload_whatsapp_async(self) -> None:
