@@ -1802,8 +1802,11 @@ class SignalTUI(App):
     def _open_device_link(self) -> None:
         """Open the device link picker modal (Ctrl+L)."""
         def _on_done(_: object) -> None:
-            # Schedule reload in background so HTTP calls don't block dismiss
-            self.run_worker(self._reload_after_link(), exclusive=False)
+            # call_after_refresh ensures the modal is fully removed from
+            # the DOM before we try to access the main screen's widgets
+            self.call_after_refresh(
+                lambda: self.run_worker(self._reload_after_link(), exclusive=False)
+            )
 
         self.push_screen(
             DeviceLinkPickerScreen(
