@@ -985,7 +985,9 @@ class SignalTUI(App):
                 self._add_message, "⏳ Starting signal-cli daemon...", is_info=True
             )
             sb = self.signal_backend
+            logger.info("LINK-SIG: start, daemon_proc=%s", sb.daemon_proc is not None)
             sb._connect_sync()
+            logger.info("LINK-SIG: connect_sync done, use_daemon=%s", sb._use_daemon)
 
             # Build cache from all backends loaded so far
             self._cache = {}
@@ -996,7 +998,9 @@ class SignalTUI(App):
 
             contacts = self.manager.list_contacts()
             self.contacts = contacts
+            logger.info("LINK-SIG: calling _update_contacts_ui with %d contacts", len(contacts))
             self.call_from_thread(self._update_contacts_ui, contacts)
+            logger.info("LINK-SIG: done, contacts=%d", len(contacts))
             self.call_from_thread(
                 self._add_message,
                 f"✅ Loaded {len(contacts)} contacts.",
@@ -1018,7 +1022,7 @@ class SignalTUI(App):
                     is_info=True,
                 )
         except Exception as e:
-            logger.exception("Signal connect failed: %s", e)
+            logger.exception("LINK-SIG: failed: %s", e)
             self.call_from_thread(
                 self._add_message, f"❌ Signal backend error: {e}", is_info=True
             )
@@ -1026,8 +1030,10 @@ class SignalTUI(App):
     def _connect_whatsapp(self) -> None:
         """Connect WhatsApp backend and update UI (runs in worker thread)."""
         try:
+            logger.info("LINK-WA: start")
             self.whatsapp_backend.connect_sync()
             n = len(self.whatsapp_backend.contacts)
+            logger.info("LINK-WA: connect_sync done, wa_contacts=%d", n)
             try:
                 ensure_webhook_server(self.whatsapp_backend)
             except Exception:
@@ -1045,9 +1051,12 @@ class SignalTUI(App):
                     self._cache[contact_cache_key(b.protocol, cid)] = list(msgs)
             self._sync_last_ts()
             self.contacts = self.manager.list_contacts()
+            logger.info("LINK-WA: calling _update_contacts_ui with %d contacts", len(self.contacts))
             self.call_from_thread(self._update_contacts_ui, self.contacts)
             self._resync_wa_history()
+            logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
         except Exception as exc:
+            logger.exception("LINK-WA: failed: %s", exc)
             self.call_from_thread(
                 self._add_message,
                 f"💬 WhatsApp backend unavailable: {exc}",
@@ -1388,10 +1397,12 @@ class SignalTUI(App):
         when the set changes (startup / new backend), and fast/reorder paths
         on subsequent calls.
         """
+        logger.info("LINK-UI: start, contacts=%d", len(contacts))
         self.contacts = contacts
         self._sort_contacts()
         self._render_contact_list(self._filtered_contacts())
         self._update_unread_badges()
+        logger.info("LINK-UI: done")
 
     # ─── Contact selection ─────────────────────────────────────────────────
 
