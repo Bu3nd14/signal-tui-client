@@ -69,6 +69,26 @@ class TestDeviceLinkPickerScreen:
         assert screen._should_show_phone_input("whatsapp") is True
         assert screen._should_show_phone_input("anyprotocol") is True
 
+    def test_should_show_phone_signal_without_number(self):
+        """Signal without pre-filled number: show phone input."""
+        screen = DeviceLinkPickerScreen(signal_number="")
+        assert screen._should_show_phone_input("signal") is True
+
+    def test_should_skip_phone_signal_with_number(self):
+        """Signal with pre-filled number: skip phone input."""
+        screen = DeviceLinkPickerScreen(signal_number="+39123456")
+        assert screen._should_show_phone_input("signal") is False
+
+    def test_should_skip_phone_whatsapp(self):
+        """WhatsApp never needs phone input."""
+        screen = DeviceLinkPickerScreen()
+        assert screen._should_show_phone_input("whatsapp") is False
+
+    def test_should_skip_phone_telegram(self):
+        """Telegram never needs phone input."""
+        screen = DeviceLinkPickerScreen()
+        assert screen._should_show_phone_input("telegram") is False
+
     def test_get_qr_data_signal(self):
         """Signal QR data is a fake sgnl:// URL."""
         screen = DeviceLinkPickerScreen()

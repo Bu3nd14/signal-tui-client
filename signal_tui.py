@@ -1809,7 +1809,6 @@ class SignalTUI(App):
             DeviceLinkPickerScreen(
                 signal_number=self.signal_backend.user_number,
                 has_whatsapp=self.whatsapp_backend is not None,
-                force_phone_input=True,  # ← test hook: always show phone input
             ),
             _on_done,
         )
