@@ -1035,9 +1035,10 @@ class SignalTUI(App):
         """Connect WhatsApp backend and update UI (runs in worker thread)."""
         try:
             logger.info("LINK-WA: start")
-            self.call_from_thread(
-                self._add_message, "⏳ Waiting for WhatsApp to sync...", is_info=True
-            )
+            if self.whatsapp_backend.needs_pairing:
+                self.call_from_thread(
+                    self._add_message, "⏳ Waiting for WhatsApp to sync...", is_info=True
+                )
             self.whatsapp_backend.connect_sync()
             n = len(self.whatsapp_backend.contacts)
             logger.info("LINK-WA: connect_sync done, wa_contacts=%d", n)
