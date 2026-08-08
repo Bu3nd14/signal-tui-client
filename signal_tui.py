@@ -1045,11 +1045,12 @@ class SignalTUI(App):
                 ensure_webhook_server(self.whatsapp_backend)
             except Exception:
                 pass
-            self.call_from_thread(
-                self._add_message,
-                f"💬 WhatsApp backend active ({n} contacts, webhook on :{WEBHOOK_PORT}).",
-                is_info=True,
-            )
+            if n > 0:
+                self.call_from_thread(
+                    self._add_message,
+                    f"💬 WhatsApp backend active ({n} contacts, webhook on :{WEBHOOK_PORT}).",
+                    is_info=True,
+                )
             # Rebuild unified cache with protocol-aware keys (Signal may
             # have finished first, missing WhatsApp messages in self._cache).
             self._cache = {}
