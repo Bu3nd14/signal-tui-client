@@ -1809,22 +1809,13 @@ class SignalTUI(App):
         """Open the device link picker modal (Ctrl+L)."""
         def _on_done(_: object) -> None:
             logger.info("LINK-DONE: callback fired")
-            # 1. Immediately refresh UI with contacts already in cache
-            self.call_after_refresh(lambda: self._safe_update_contacts())
-            # 2. Restart SSE in background (Signal reception)
+            # Restart SSE in background so Signal receives messages
             if self.signal_backend:
                 self.run_worker(self._restart_signal_async(), exclusive=False)
-            # 3. Reload WhatsApp contacts in background (may be slow)
+            # Reload WhatsApp contacts in background
             if self.whatsapp_backend:
                 self.run_worker(self._reload_whatsapp_async(), exclusive=False)
 
-        self.push_screen(
-            DeviceLinkPickerScreen(
-                signal_number=self.signal_backend.user_number,
-                has_whatsapp=self.whatsapp_backend is not None,
-            ),
-            _on_done,
-        )
 
     async def _restart_signal_async(self) -> None:
         """Restart Signal SSE listener in a thread (so messages flow)."""
@@ -1833,13 +1824,11 @@ class SignalTUI(App):
         def _run():
             try:
                 self.signal_backend.restart_sse()
-                self.signal_backend._load_contacts_rpc()
             except Exception as e:
                 logger.warning("LINK-SIGNAL: SSE restart failed: %s", e)
         await asyncio.to_thread(_run)
-        logger.info("LINK-SIGNAL: done, updating UI")
-        self.contacts = self.manager.list_contacts()
-        self._safe_update_contacts()
+        logger.info("LINK-SIGNAL: done")
+
 
     async def _reload_whatsapp_async(self) -> None:
         """Reload WhatsApp contacts in a thread (may be slow after link)."""
