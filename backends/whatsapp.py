@@ -1097,12 +1097,15 @@ class WhatsAppBackend(ChatBackend):
                     return False
                 # Pronto: stato WORKING o qualsiasi stato "stabile" non di
                 # connessione/pairing (coerente con needs_pairing).
-                if s == "working" or s and s not in (
+                if s == "working":
+                    return True
+                # Still in transient state — keep waiting
+                if s not in (
                     "pending", "connecting", "unauthorized",
                     "not_authenticated", "unpaired", "scan_qr", "scan_qr_code",
                     "starting", "loading", "syncing",
                 ):
-                    return True
+                    return False  # unknown state, don't wait
             except Exception:
                 # WAHA unreachable — stop waiting
                 return False
