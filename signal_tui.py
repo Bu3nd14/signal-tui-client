@@ -1816,6 +1816,14 @@ class SignalTUI(App):
             if self.whatsapp_backend:
                 self.run_worker(self._reload_whatsapp_async(), exclusive=False)
 
+        self.push_screen(
+            DeviceLinkPickerScreen(
+                signal_number=self.signal_backend.user_number,
+                has_whatsapp=self.whatsapp_backend is not None,
+            ),
+            _on_done,
+        )
+
 
     async def _restart_signal_async(self) -> None:
         """Restart Signal SSE listener in a thread (so messages flow)."""

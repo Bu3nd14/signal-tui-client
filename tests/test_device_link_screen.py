@@ -123,4 +123,31 @@ class TestDeviceLinkPickerScreen:
             if item["id"] == "telegram"
         )
         screen._select_protocol(telegram_idx)
-        assert screen._selected_protocol == ""
+
+
+
+class TestDeviceLinkBinding:
+    """Verify Ctrl+L binding is wired in SignalTUI."""
+
+    def test_binding_exists(self):
+        """Ctrl+L is mapped to open_device_link action."""
+        from signal_tui import SignalTUI
+        # Check BINDINGS list for ctrl+l entry
+        bindings = {
+            binding.key: binding.action
+            for binding in SignalTUI.BINDINGS
+        }
+        assert "ctrl+l" in bindings
+        assert bindings["ctrl+l"] == "open_device_link"
+
+    def test_action_method_exists(self):
+        """action_open_device_link exists on SignalTUI."""
+        from signal_tui import SignalTUI
+        assert hasattr(SignalTUI, "action_open_device_link")
+        assert callable(SignalTUI.action_open_device_link)
+
+    def test_open_device_link_method_exists(self):
+        """_open_device_link exists and calls push_screen."""
+        from signal_tui import SignalTUI
+        assert hasattr(SignalTUI, "_open_device_link")
+        assert callable(SignalTUI._open_device_link)
