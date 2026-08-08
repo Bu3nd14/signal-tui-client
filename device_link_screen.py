@@ -386,16 +386,16 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         deadline = time.time() + 300  # 5 min timeout
         proto = self._selected_protocol
 
-        while time.time() < deadline:
-            if self._phase != "qr":
-                return  # user dismissed or navigated away
-
+        while time.time() < deadline and self._phase == "qr":
             if proto == "signal":
                 done = await self._check_signal_done()
             elif proto == "whatsapp":
                 done = await self._check_whatsapp_done()
             else:
                 return
+
+            if self._phase != "qr":
+                return  # dismissed during check
 
             if done:
                 try:
@@ -412,12 +412,13 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
 
             await _asyncio.sleep(2)
 
-        # Timeout
-        try:
-            status = self.query_one("#link-qr-status", Static)
-            status.update("❌ Timed out waiting for scan")
-        except Exception:
-            pass
+        # Timeout (only if still on QR phase)
+        if self._phase == "qr":
+            try:
+                status = self.query_one("#link-qr-status", Static)
+                status.update("❌ Timed out waiting for scan")
+            except Exception:
+                pass
 
     async def _check_signal_done(self) -> bool:
         """Check if the signal-cli link subprocess finished successfully."""
@@ -570,9 +571,11 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         return await _asyncio.to_thread(_run)
 
     async def _get_whatsapp_qr(self) -> str:
-        """Get the current WhatsApp pairing QR (without resetting session).
+        """Get a WhatsApp pairing QR.
 
-        If the session is already connected, returns a notice instead of an error.
+        If the session is already WORKING → info message.
+        If the session is FAILED / stopped → restarts and gets a fresh QR.
+        Otherwise tries the current QR first, then falls back to a fresh one.
         """
         import asyncio as _asyncio
 
@@ -582,18 +585,40 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             raise RuntimeError("WhatsApp backend not available")
 
         def _run() -> str:
-            # First check if the session is already connected
             status = wa._rest.get_session_status() or {}
             s = str(status.get("status") or "").lower()
+
             if s == "working":
                 return "ALREADY_CONNECTED"
-            # Try to get a current QR
+
+            # If the session is in a dead/failed state, restart it
+            restart_states = {"failed", "stopped", "stop", ""}
+            if s in restart_states:
+                logger.info("WhatsApp session is %s, restarting for fresh QR...", s)
+                qr = wa._rest.get_fresh_pairing_qr(reset=True)
+                if isinstance(qr, bytes):
+                    from qr_utils import qr_png_to_ascii
+                    return qr_png_to_ascii(qr)
+                elif isinstance(qr, str):
+                    return qr
+                raise RuntimeError(f"Failed to restart session (status was: {s})")
+
+            # Try current QR, then fresh
             qr = wa._rest.get_pairing_qr()
             if isinstance(qr, bytes):
                 from qr_utils import qr_png_to_ascii
                 return qr_png_to_ascii(qr)
             elif isinstance(qr, str):
                 return qr
+
+            # Last resort: fresh QR without reset
+            qr = wa._rest.get_fresh_pairing_qr(reset=False)
+            if isinstance(qr, bytes):
+                from qr_utils import qr_png_to_ascii
+                return qr_png_to_ascii(qr)
+            elif isinstance(qr, str):
+                return qr
+
             raise RuntimeError(
                 f"No QR available (session status: {s or 'unknown'}). "
                 "The session may already be linked."
@@ -630,18 +655,17 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
     # ── Cleanup on dismiss ─────────────────────────────────────────────────
 
     def dismiss(self, result: None = None) -> None:
-        """Kill any running subprocess before dismissing the screen."""
+        """Kill any running subprocess and stop workers before dismissing."""
+        # Signal polling worker to stop
+        self._phase = "done"
+        # Kill subprocess if still running
         proc = getattr(self, "_linking_proc", None)
         if proc is not None and proc.poll() is None:
             logger.info("Killing signal-cli link subprocess (PID %s)", proc.pid)
             try:
                 proc.terminate()
-                proc.wait(timeout=3)
             except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+                pass
         self._linking_proc = None
         super().dismiss(result)
     # ── Event handlers ─────────────────────────────────────────────────────
@@ -666,7 +690,9 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         """Handle click / Enter on a protocol in the ListView."""
         if self._phase != "picker":
             return
-        self._select_protocol(event.item_index)
+        lv = self.query_one("#link-protocol-list", ListView)
+        if lv.index is not None:
+            self._select_protocol(lv.index)
 
     def action_select_item(self) -> None:
         """Enter: select the highlighted protocol (or confirm phone)."""
