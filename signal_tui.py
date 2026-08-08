@@ -130,6 +130,12 @@ from device_link_screen import DeviceLinkPickerScreen
 
 
 logger = logging.getLogger(__name__)
+# Ensure LINK-* logs are written to a file (Textual may suppress stderr)
+_link_fh = logging.FileHandler("/tmp/signal-link.log", mode="w")
+_link_fh.setLevel(logging.DEBUG)
+_link_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logger.addHandler(_link_fh)
+logger.setLevel(logging.DEBUG)
 
 
 # ─── Main App ────────────────────────────────────────────────────────────────
