@@ -1802,9 +1802,8 @@ class SignalTUI(App):
     def _open_device_link(self) -> None:
         """Open the device link picker modal (Ctrl+L)."""
         def _on_done(_: object) -> None:
-            # Reload contacts for all backends (newly linked device may have new data)
-            self._reload_all_contacts()
-            self._refresh_chat()
+            # Schedule reload in background so HTTP calls don't block dismiss
+            self.run_worker(self._reload_after_link(), exclusive=False)
 
         self.push_screen(
             DeviceLinkPickerScreen(
@@ -1814,39 +1813,38 @@ class SignalTUI(App):
             _on_done,
         )
 
-    def _reload_all_contacts(self) -> None:
+    async def _reload_after_link(self) -> None:
+        """Async worker: reload contacts + restart SSE after a device link."""
+        import asyncio
+        await asyncio.to_thread(self._reload_all_contacts_sync)
+        self._refresh_chat()
+
+    def _reload_all_contacts_sync(self) -> None:
         """Reload contacts from all backends and rebuild the contact list UI."""
         try:
-            # Trigger a fresh contact load from each backend's API
             for backend in self.manager.all():
-                # WhatsApp: _load_contacts
                 loader = getattr(backend, "_load_contacts", None)
                 if loader:
-                    try:
-                        loader()
+                    try: loader()
                     except Exception as e:
-                        logger.warning(
-                            "Failed to reload contacts for %s: %s",
-                            backend.protocol, e,
-                        )
-                # Signal: _load_contacts_rpc (or subprocess fallback)
+                        logger.warning("Failed reload contacts %s: %s", backend.protocol, e)
                 loader_rpc = getattr(backend, "_load_contacts_rpc", None)
                 if loader_rpc:
-                    try:
-                        loader_rpc()
+                    try: loader_rpc()
                     except Exception:
                         loader_sub = getattr(backend, "_load_contacts_subprocess", None)
                         if loader_sub:
-                            try:
-                                loader_sub()
+                            try: loader_sub()
                             except Exception as e:
-                                logger.warning(
-                                    "Failed to reload Signal contacts: %s", e,
-                                )
-            # Now rebuild the merged contact list
+                                logger.warning("Failed reload Signal: %s", e)
+                restart = getattr(backend, "restart_sse", None)
+                if restart:
+                    try: restart()
+                    except Exception as e:
+                        logger.warning("Failed restart SSE: %s", e)
             contacts = self.manager.list_contacts()
             self.contacts = contacts
-            self._update_contacts_ui(contacts)
+            self.call_from_thread(self._update_contacts_ui, contacts)
         except Exception as e:
             logger.exception("Failed to reload contacts after link: %s", e)
 
