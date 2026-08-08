@@ -1866,18 +1866,14 @@ class SignalTUI(App):
 
 
     async def _reload_whatsapp_async(self) -> None:
-        """Reconnect WhatsApp backend after device link.
-
-        Calls connect_sync() — same as startup — which handles:
-        cache, contacts, session ready wait, webhook registration.
-        """
+        """Reload WhatsApp contacts in a thread (may be slow after link)."""
         import asyncio
-        logger.info("LINK-WA: reconnecting backend")
+        logger.info("LINK-WA: reloading contacts")
         def _run():
             try:
-                self.whatsapp_backend.connect_sync()
+                self.whatsapp_backend._load_contacts()
             except Exception as e:
-                logger.warning("LINK-WA: reconnect failed: %s", e)
+                logger.warning("LINK-WA: reload failed: %s", e)
         await asyncio.to_thread(_run)
         logger.info("LINK-WA: done, updating UI")
         self.contacts = self.manager.list_contacts()
