@@ -461,6 +461,10 @@ class SignalTUI(App):
         """On startup, start the daemon and load contacts."""
         self._chat_log = self.query_one("#chat-log", Vertical)
         self.run_worker(self._startup, exclusive=True, thread=True)
+        # Start poll worker immediately so Signal events flow even while
+        # _startup is blocked on WhatsApp connect_sync (up to 40s).
+        self._polling_active = True
+        self.run_worker(self._poll_worker, exclusive=False, thread=True)
 
     def action_quit(self):
         """Ctrl+Q: stop polling and exit cleanly."""
@@ -1018,11 +1022,6 @@ class SignalTUI(App):
                 "⚠️ Daemon not available. Using subprocess mode (slower).",
                 is_info=True,
             )
-
-        # Start polling for incoming messages NOW, before WhatsApp connect
-        # (which may block for up to 40s waiting for WAHA to be reachable).
-        self._polling_active = True
-        self.run_worker(self._poll_worker, exclusive=False, thread=True)
 
         # Connect the WhatsApp backend when configured (non-fatal if it's
         # unreachable or unpaired — the Signal client keeps working).

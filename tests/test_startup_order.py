@@ -26,6 +26,9 @@ class TestStartupOrder:
         app = SignalTUI()
         app._add_message = MagicMock()
         app._update_contacts_ui = MagicMock()
+        # on_mount sets _polling_active and starts poll worker
+        app._polling_active = True
+        app.query_one = MagicMock()
 
         # Mock Signal backend
         app.signal_backend = MagicMock()
@@ -42,7 +45,6 @@ class TestStartupOrder:
         wa.contacts = []
         wa.connect_sync = MagicMock()
 
-        # Capture polling_active state when WhatsApp connect_sync is called
         captured: dict[str, bool] = {}
 
         def _capture():
