@@ -555,6 +555,8 @@ class SignalTUI(App):
             display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
 
         if is_info:
+            if self.selected_contact is not None:
+                return  # suppress system messages when a chat is open
             widget = Static(display_text, classes="msg-info")
             self._chat_log.mount(widget)
             self.set_timer(3.0, widget.remove)
@@ -1055,7 +1057,7 @@ class SignalTUI(App):
         # different timestamps).  Must run before we rebuild the UI cache so
         # the loaded data is clean.
         removed = _dedup_messages()
-        if removed > 0 and self.selected_contact is None:
+        if removed > 0:
             self.call_from_thread(
                 self._add_message,
                 f"🧹 Cleaned up {removed} duplicate message(s) from cache.",
@@ -1109,7 +1111,7 @@ class SignalTUI(App):
             n = resync()
         except Exception:
             return 0
-        if n and self.selected_contact is None:
+        if n:
             try:
                 self.call_from_thread(
                     self._add_message,
