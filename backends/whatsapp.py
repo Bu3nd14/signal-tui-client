@@ -1092,6 +1092,9 @@ class WhatsAppBackend(ChatBackend):
             try:
                 status = self._rest.get_session_status() or {}
                 s = str(status.get("status") or "").lower()
+                # Dead states: no point waiting, exit immediately
+                if s in ('failed', 'stopped', 'stop', ''):
+                    return False
                 # Pronto: stato WORKING o qualsiasi stato "stabile" non di
                 # connessione/pairing (coerente con needs_pairing).
                 if s == "working" or s and s not in (
@@ -1101,7 +1104,8 @@ class WhatsAppBackend(ChatBackend):
                 ):
                     return True
             except Exception:
-                pass
+                # WAHA unreachable — stop waiting
+                return False
             time.sleep(0.5)
         return False
 
