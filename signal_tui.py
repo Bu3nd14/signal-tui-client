@@ -1804,6 +1804,7 @@ class SignalTUI(App):
         def _on_done(_: object) -> None:
             # call_after_refresh ensures the modal is fully removed from
             # the DOM before we try to access the main screen's widgets
+            logger.info("LINK-DONE: callback fired, scheduling reload")
             self.call_after_refresh(
                 lambda: self.run_worker(self._reload_after_link(), exclusive=False)
             )
@@ -1819,15 +1820,20 @@ class SignalTUI(App):
     async def _reload_after_link(self) -> None:
         """Async worker: reload contacts + restart SSE after a device link."""
         import asyncio
+        logger.info("LINK-RELOAD: starting async reload")
         await asyncio.to_thread(self._reload_all_contacts_sync)
-        # Back on event loop — safe to call UI methods directly
+        logger.info("LINK-RELOAD: thread done, contacts=%d", len(self.contacts))
         self._update_contacts_ui(self.contacts)
+        logger.info("LINK-RELOAD: _update_contacts_ui done")
         self._refresh_chat()
+        logger.info("LINK-RELOAD: complete")
 
     def _reload_all_contacts_sync(self) -> None:
         """Reload contacts from all backends and rebuild the contact list UI."""
         try:
+            logger.info("LINK-SYNC: starting, backends=%d", len(list(self.manager.all())))
             for backend in self.manager.all():
+                logger.info("LINK-SYNC: backend protocol=%s", backend.protocol)
                 loader = getattr(backend, "_load_contacts", None)
                 if loader:
                     try: loader()
@@ -1849,6 +1855,9 @@ class SignalTUI(App):
                         logger.warning("Failed restart SSE: %s", e)
             contacts = self.manager.list_contacts()
             self.contacts = contacts
+            logger.info("LINK-SYNC: done, total contacts=%d", len(contacts))
+            for b in self.manager.all():
+                logger.info("LINK-SYNC:   %s -> %d contacts", b.protocol, len(b.contacts))
         except Exception as e:
             logger.exception("Failed to reload contacts after link: %s", e)
 
