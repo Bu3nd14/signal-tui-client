@@ -1808,12 +1808,15 @@ class SignalTUI(App):
     def _open_device_link(self) -> None:
         """Open the device link picker modal (Ctrl+L)."""
         def _on_done(_: object) -> None:
-            # call_after_refresh ensures the modal is fully removed from
-            # the DOM before we try to access the main screen's widgets
-            logger.info("LINK-DONE: callback fired, scheduling reload")
-            self.call_after_refresh(
-                lambda: self.run_worker(self._reload_after_link(), exclusive=False)
-            )
+            logger.info("LINK-DONE: callback fired")
+            # 1. Immediately refresh UI with contacts already in cache
+            self.call_after_refresh(lambda: self._update_contacts_ui(self.contacts))
+            # 2. Restart SSE in background (Signal reception)
+            if self.signal_backend:
+                self.run_worker(self._restart_signal_async(), exclusive=False)
+            # 3. Reload WhatsApp contacts in background (may be slow)
+            if self.whatsapp_backend:
+                self.run_worker(self._reload_whatsapp_async(), exclusive=False)
 
         self.push_screen(
             DeviceLinkPickerScreen(
@@ -1823,49 +1826,34 @@ class SignalTUI(App):
             _on_done,
         )
 
-    async def _reload_after_link(self) -> None:
-        """Async worker: reload contacts + restart SSE after a device link."""
+    async def _restart_signal_async(self) -> None:
+        """Restart Signal SSE listener in a thread (so messages flow)."""
         import asyncio
-        logger.info("LINK-RELOAD: starting async reload")
-        await asyncio.to_thread(self._reload_all_contacts_sync)
-        logger.info("LINK-RELOAD: thread done, contacts=%d", len(self.contacts))
+        logger.info("LINK-SIGNAL: restarting SSE")
+        def _run():
+            try:
+                self.signal_backend.restart_sse()
+                self.signal_backend._load_contacts_rpc()
+            except Exception as e:
+                logger.warning("LINK-SIGNAL: SSE restart failed: %s", e)
+        await asyncio.to_thread(_run)
+        logger.info("LINK-SIGNAL: done, updating UI")
+        self.contacts = self.manager.list_contacts()
         self._update_contacts_ui(self.contacts)
-        logger.info("LINK-RELOAD: _update_contacts_ui done")
-        self._refresh_chat()
-        logger.info("LINK-RELOAD: complete")
 
-    def _reload_all_contacts_sync(self) -> None:
-        """Reload contacts from all backends and rebuild the contact list UI."""
-        try:
-            logger.info("LINK-SYNC: starting, backends=%d", len(list(self.manager.all())))
-            for backend in self.manager.all():
-                logger.info("LINK-SYNC: backend protocol=%s", backend.protocol)
-                loader = getattr(backend, "_load_contacts", None)
-                if loader:
-                    try: loader()
-                    except Exception as e:
-                        logger.warning("Failed reload contacts %s: %s", backend.protocol, e)
-                loader_rpc = getattr(backend, "_load_contacts_rpc", None)
-                if loader_rpc:
-                    try: loader_rpc()
-                    except Exception:
-                        loader_sub = getattr(backend, "_load_contacts_subprocess", None)
-                        if loader_sub:
-                            try: loader_sub()
-                            except Exception as e:
-                                logger.warning("Failed reload Signal: %s", e)
-                restart = getattr(backend, "restart_sse", None)
-                if restart:
-                    try: restart()
-                    except Exception as e:
-                        logger.warning("Failed restart SSE: %s", e)
-            contacts = self.manager.list_contacts()
-            self.contacts = contacts
-            logger.info("LINK-SYNC: done, total contacts=%d", len(contacts))
-            for b in self.manager.all():
-                logger.info("LINK-SYNC:   %s -> %d contacts", b.protocol, len(b.contacts))
-        except Exception as e:
-            logger.exception("Failed to reload contacts after link: %s", e)
+    async def _reload_whatsapp_async(self) -> None:
+        """Reload WhatsApp contacts in a thread (may be slow after link)."""
+        import asyncio
+        logger.info("LINK-WA: reloading contacts")
+        def _run():
+            try:
+                self.whatsapp_backend._load_contacts()
+            except Exception as e:
+                logger.warning("LINK-WA: reload failed: %s", e)
+        await asyncio.to_thread(_run)
+        logger.info("LINK-WA: done, updating UI")
+        self.contacts = self.manager.list_contacts()
+        self._update_contacts_ui(self.contacts)
 
     def action_open_device_link(self) -> None:
         """Action to open device link picker (bound to Ctrl+L)."""
