@@ -1826,14 +1826,16 @@ class SignalTUI(App):
 
 
     async def _restart_signal_async(self) -> None:
-        """Restart Signal SSE listener in a thread (so messages flow)."""
+        """Restart Signal SSE + force daemon WebSocket reconnect after link."""
         import asyncio
-        logger.info("LINK-SIGNAL: restarting SSE")
+        logger.info("LINK-SIGNAL: restarting SSE + forcing receive")
         def _run():
             try:
                 self.signal_backend.restart_sse()
+                # Force daemon to re-open WebSocket with new device identity
+                self.signal_backend._rpc._call("receive")
             except Exception as e:
-                logger.warning("LINK-SIGNAL: SSE restart failed: %s", e)
+                logger.warning("LINK-SIGNAL: restart failed: %s", e)
         await asyncio.to_thread(_run)
         logger.info("LINK-SIGNAL: done")
 
