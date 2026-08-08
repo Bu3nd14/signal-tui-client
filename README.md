@@ -30,6 +30,7 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 - Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
 - Contact search (`Ctrl+S`) — search contacts by name or number with a live-updating picker
 - Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
+- Device linking (`Ctrl+L`) — link a new Signal or WhatsApp device directly from the TUI with QR code scanning
 - Unified multi-protocol contact list with `Ctrl+W` cycle filter: all → Signal → WhatsApp
 - Protocol-aware theming — 📱 Signal vs 💬 WhatsApp accents in the contact list and message borders
 - Message delivery and read receipts — sent messages show status: *sent* (italic), **delivered** (bold), read (normal).  Works for both Signal and WhatsApp.
@@ -277,6 +278,7 @@ python3 signal_tui.py
 | `Ctrl+S` | Open contact search picker |
 | `Ctrl+D` | Toggle download mode |
 | `Ctrl+W` | Cycle contact filter: all → Signal → WhatsApp |
+| `Ctrl+L` | Link a new device (Signal / WhatsApp) via QR code |
 | `Ctrl+N` / `Ctrl+P` | Navigate emoji suggestions / emoji picker categories |
 | `Ctrl+Q` | Quit |
 | `Ctrl+C` | Quit |
@@ -396,7 +398,7 @@ signal-tui-client/
 ├── requirements-dev.txt     # Development dependencies (ruff)
 ├── config.json              # Local configuration (not committed)
 ├── README.md                # This file
-├── TEST_REPORT.md           # Test report (last run: 378/378 ✅)
+├── TEST_REPORT.md           # Test report (last run: 396/396 ✅)
 ├── PERF_ANALYSIS.md         # Performance analysis (UI reactivity hotspots)
 ├── BUGS.md                  # Known bugs and limitations
 ├── bin/                     # signal-cli binaries (not committed)

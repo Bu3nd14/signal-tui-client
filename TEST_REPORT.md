@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
-**Data:** 2026-08-07
-**Git commit:** `2ba5e05` (master)
+**Data:** 2026-08-08
+**Git commit:** `ad09654` (master)
 **Python:** 3.12.3
-**Stato:** ✅ 378/378 test superati (+72 Telegram test in `Telegram/`)
+**Stato:** ✅ 396/396 test superati (+72 Telegram test in `Telegram/`)
 
 ---
 
@@ -20,6 +20,7 @@
 | Cache (SQLite) | `test_backend_cache.py` | 18 | ✅ |
 | Script installazione | `test_install_script.py` | 17 | ✅ |
 | Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
+| Device Link Screen | `test_device_link_screen.py` | 18 | ✅ |
 | Refresh Chat | `test_refresh_chat.py` | 15 | ✅ |
 | WA Startup/Resync | `test_wa_startup_resync.py` | 15 | ✅ |
 | UI Components | `test_ui_components.py` | 14 | ✅ |
@@ -34,7 +35,7 @@
 | Migrazione SQLite | `test_migrate_sqlite.py` | 4 | ✅ |
 | Contatti | `test_backend_contacts.py` | 4 | ✅ |
 | Docker Compose | `test_docker_compose_extra_hosts.py` | 2 | ✅ |
-| **Totale** | | **378** | **✅ 378/378** |
+| **Totale** | | **396** | **✅ 396/396** |
 
 ---
 
