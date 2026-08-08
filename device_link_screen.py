@@ -455,7 +455,10 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             logger.info("WhatsApp QR expired, refreshing...")
             try:
                 new_qr = await self._get_whatsapp_qr_fresh()
-                qr_ascii = qr_to_ascii(new_qr) if not new_qr.startswith("INFO:") else "\n\n" + new_qr[5:]
+                if new_qr.startswith("INFO:"):
+                    qr_ascii = "\n\n" + new_qr[5:]
+                else:
+                    qr_ascii = new_qr  # already ASCII-rendered
                 code_widget = self.query_one("#link-qr-code", Static)
                 code_widget.update(qr_ascii)
                 code_widget.refresh()
@@ -490,8 +493,30 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         """Background worker: fetch the real QR from the backend."""
         try:
             qr_data = await self._get_qr_data_async(phone)
+
+            # WhatsApp returns pre-rendered ASCII (prefixed with "ASCII:")
+            if qr_data.startswith("ASCII:"):
+                qr_ascii = qr_data[6:]
+                if qr_ascii.startswith("INFO:"):
+                    # Already-connected info message
+                    info_text = qr_ascii[5:].strip()
+                    qr_ascii = f"\n\n{info_text}\n"
+                    code_widget = self.query_one("#link-qr-code", Static)
+                    code_widget.update(qr_ascii)
+                    code_widget.refresh()
+                    status = self.query_one("#link-qr-status", Static)
+                    status.update("")
+                    return
+                code_widget = self.query_one("#link-qr-code", Static)
+                code_widget.update(qr_ascii)
+                code_widget.refresh()
+                status = self.query_one("#link-qr-status", Static)
+                status.update("⏳ Waiting for scan from phone...")
+                self.run_worker(self._poll_completion(phone), exclusive=False)
+                return
+
             if qr_data.startswith("INFO:"):
-                # Special info message (e.g. already connected) — show as text
+                # Already-connected type message
                 info_text = qr_data[5:].strip()
                 code_widget = self.query_one("#link-qr-code", Static)
                 code_widget.update(f"\n\n{info_text}\n")
@@ -500,6 +525,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 status.update("")
                 return
 
+            # Signal: generate QR from link URL
             qr_ascii = qr_to_ascii(qr_data)
             code_widget = self.query_one("#link-qr-code", Static)
             code_widget.update(qr_ascii)
@@ -521,12 +547,17 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 logger.exception("Failed to update QR widget: %s", e)
 
     async def _get_qr_data_async(self, phone: str) -> str:
-        """Return the real QR data for the selected protocol."""
+        """Return the real QR data for the selected protocol.
+
+        For Signal: returns a link URL that still needs ``qr_to_ascii()``.
+        For WhatsApp: returns ``"ASCII:"`` + the pre-rendered QR text.
+        """
         proto = self._selected_protocol
         if proto == "signal":
             return await self._get_signal_link_url()
         elif proto == "whatsapp":
-            return await self._get_whatsapp_qr()
+            ascii_qr = await self._get_whatsapp_qr()
+            return f"ASCII:{ascii_qr}"
         return f"fake-{proto}-link"
 
     async def _get_signal_link_url(self) -> str:
