@@ -1388,6 +1388,7 @@ class SignalTUI(App):
         when the set changes (startup / new backend), and fast/reorder paths
         on subsequent calls.
         """
+        self.contacts = contacts
         self._sort_contacts()
         self._render_contact_list(self._filtered_contacts())
         self._update_unread_badges()
