@@ -106,8 +106,6 @@ class SignalBackend(ChatBackend):
                     "-u", self.user_number,
                     "daemon",
                     "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",
-                    "--receive-mode", "on-start",
-                    "--no-receive-stdout",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
