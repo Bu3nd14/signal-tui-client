@@ -637,15 +637,6 @@ class SignalBackend(ChatBackend):
         )
         self._sse_thread.start()
 
-    def restart_sse(self) -> None:
-        """Restart the SSE listener (called after device linking)."""
-        self._polling_active = False
-        t = self._sse_thread
-        self._sse_thread = None
-        if t is not None and t.is_alive():
-            t.join(timeout=5)
-        self._start_sse_listener()
-
     def _sse_listener(self) -> None:
         """Dedicated thread: connect to signal-cli SSE endpoint, push events
         into ``_event_queue``.  Reconnects automatically on connection loss.
