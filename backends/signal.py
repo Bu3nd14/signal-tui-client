@@ -144,7 +144,7 @@ class SignalBackend(ChatBackend):
             # Wake up the blocking urlopen by closing is not possible,
             # but the thread checks _polling_active; the timeout (30 s)
             # ensures it wakes up and exits within that window.
-            sse_thread.join(timeout=35)
+            sse_thread.join(timeout=5)
 
     # ─── Contact loading ──────────────────────────────────────────────
 

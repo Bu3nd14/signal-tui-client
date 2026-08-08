@@ -1817,6 +1817,8 @@ class SignalTUI(App):
         """Async worker: reload contacts + restart SSE after a device link."""
         import asyncio
         await asyncio.to_thread(self._reload_all_contacts_sync)
+        # Back on event loop — safe to call UI methods directly
+        self._update_contacts_ui(self.contacts)
         self._refresh_chat()
 
     def _reload_all_contacts_sync(self) -> None:
@@ -1844,7 +1846,6 @@ class SignalTUI(App):
                         logger.warning("Failed restart SSE: %s", e)
             contacts = self.manager.list_contacts()
             self.contacts = contacts
-            self.call_from_thread(self._update_contacts_ui, contacts)
         except Exception as e:
             logger.exception("Failed to reload contacts after link: %s", e)
 
