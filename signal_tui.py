@@ -125,6 +125,7 @@ from emoji_picker import (
     replace_emoji_aliases,
 )
 from contact_picker import ContactPickerScreen
+from device_link_screen import DeviceLinkPickerScreen
 
 
 
@@ -338,6 +339,7 @@ class SignalTUI(App):
         Binding("ctrl+s", "open_contact_picker", "Search", priority=True),
         Binding("ctrl+d", "download_mode", "Download", priority=True),
         Binding("ctrl+w", "cycle_protocol_filter", "Filter", show=True, priority=True),
+        Binding("ctrl+l", "open_device_link", "Link", priority=True),
         Binding("ctrl+n", "next_suggestion", "Next", show=False),
         Binding("ctrl+p", "prev_suggestion", "Prev", show=False),
     ]
@@ -1794,6 +1796,27 @@ class SignalTUI(App):
     def action_open_contact_picker(self) -> None:
         """Action to open the contact picker (bound to Ctrl+S)."""
         self._open_contact_picker()
+
+    # ─── Device link picker ────────────────────────────────────────────────────
+
+    def _open_device_link(self) -> None:
+        """Open the device link picker modal (Ctrl+L)."""
+        def _on_done(_: object) -> None:
+            # Refresh chat to show messages that arrived while picker was open
+            self._refresh_chat()
+
+        self.push_screen(
+            DeviceLinkPickerScreen(
+                signal_number=self.signal_backend.user_number,
+                has_whatsapp=self.whatsapp_backend is not None,
+                force_phone_input=True,  # ← test hook: always show phone input
+            ),
+            _on_done,
+        )
+
+    def action_open_device_link(self) -> None:
+        """Action to open device link picker (bound to Ctrl+L)."""
+        self._open_device_link()
 
     # ─── Emoji alias auto-completion ──────────────────────────────────────────
 

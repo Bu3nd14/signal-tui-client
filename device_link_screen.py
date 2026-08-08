@@ -1,0 +1,575 @@
+"""
+Device Link Screen for Signal TUI Client.
+
+Provides:
+- ``DeviceLinkPickerScreen`` — a ModalScreen with three phases:
+  1. **Picker**  — choose protocol (Signal / WhatsApp / future Telegram)
+  2. **Phone**   — phone number + device name input (shown for all protocols
+     during UI testing via ``force_phone_input``; after backend integration
+     this is only shown for Signal when the number is unknown)
+  3. **QR**      — QR code display + status message + cancel button
+"""
+from __future__ import annotations
+
+import logging
+import re
+import subprocess
+from pathlib import Path
+from typing import ClassVar
+
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Vertical, Center
+from textual.screen import ModalScreen
+from textual.widgets import (
+    Static,
+    ListView,
+    ListItem,
+    Label,
+    Input,
+    Button,
+)
+
+from qr_utils import qr_to_ascii
+
+logger = logging.getLogger(__name__)
+
+# ─── Protocol items (extensible) ───────────────────────────────────────────────
+
+_PROTOCOL_ITEMS: list[dict[str, str]] = [
+    {"id": "signal", "label": "📶 Signal", "disabled": False},
+    {"id": "whatsapp", "label": "💬 WhatsApp", "disabled": False},
+    {"id": "telegram", "label": "📱 Telegram (coming soon)", "disabled": True},
+]
+
+# Default device name used for Signal linking when the user doesn't customise it.
+_DEFAULT_SIGNAL_DEVICE_NAME = "Signal-TUI-Client"
+
+
+# ─── Screen ────────────────────────────────────────────────────────────────────
+
+class DeviceLinkPickerScreen(ModalScreen[None]):
+    """Modal screen to link a new device (Signal / WhatsApp).
+
+    Phases
+    ------
+    ``"picker"``
+        ListView with available protocols.  ↑/↓ to navigate, Enter to select.
+
+    ``"phone"`` (shown when ``force_phone_input=True`` or number is unknown)
+        Input for phone number and device name.  Enter / Start button advances.
+
+    ``"qr"``
+        QR code rendered as ASCII, status message, Cancel button.
+    """
+
+    DEFAULT_CSS = """
+    DeviceLinkPickerScreen {
+        align: center middle;
+        background: $surface 80%;
+    }
+
+    #link-picker-container {
+        width: 50;
+        height: auto;
+        min-height: 12;
+        max-height: 60%;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 1;
+    }
+
+    #link-picker-title {
+        text-style: bold;
+        text-align: center;
+        padding: 0 0 1 0;
+        color: $text;
+    }
+
+    #link-protocol-list {
+        height: auto;
+        overflow-y: auto;
+        padding: 0;
+        margin-bottom: 1;
+    }
+
+    #link-protocol-list ListItem {
+        padding: 0 1;
+    }
+
+    #link-protocol-list ListItem:hover {
+        background: $accent 20%;
+    }
+
+    #link-protocol-list ListItem:focus {
+        background: $accent 40%;
+    }
+
+    #link-protocol-list .disabled-item {
+        color: $text-muted;
+        text-style: italic;
+    }
+
+    #link-picker-footer {
+        dock: bottom;
+        height: 1;
+        text-align: center;
+        color: $text-muted;
+        padding: 0 1;
+    }
+
+    /* ── Phone phase ────────────────────────────────── */
+
+    #link-phone-container {
+        width: 50;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 1 2;
+    }
+
+    #link-phone-title {
+        text-style: bold;
+        text-align: center;
+        padding: 0 0 1 0;
+        color: $text;
+    }
+
+    #link-phone-input {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #link-device-input {
+        width: 100%;
+        margin-bottom: 1;
+    }
+
+    #link-phone-buttons {
+        width: 100%;
+        height: auto;
+        align: center middle;
+    }
+
+    #link-phone-buttons Button {
+        margin: 0 1;
+    }
+
+    /* ── QR phase ───────────────────────────────────── */
+
+    #link-qr-container {
+        width: auto;
+        max-width: 85%;
+        height: auto;
+        border: thick $accent;
+        background: $surface;
+        padding: 0 1;
+    }
+
+    #link-qr-title {
+        text-style: bold;
+        text-align: center;
+        padding: 0;
+        color: $text;
+    }
+
+    #link-qr-info {
+        text-align: center;
+        color: $text-muted;
+        margin-bottom: 0;
+    }
+
+    #link-qr-code {
+        width: auto;
+        height: auto;
+        min-height: 12;
+        text-align: left;
+        color: $text;
+        padding: 0;
+        overflow-x: auto;
+    }
+
+    #link-qr-status {
+        text-align: center;
+        color: $warning;
+        margin-top: 0;
+    }
+
+    #link-qr-buttons {
+        width: 100%;
+        height: auto;
+        align: center middle;
+        margin-top: 0;
+    }
+    """
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("escape", "dismiss(None)", "Close", priority=True),
+        Binding("enter", "select_item", "Select", priority=True),
+    ]
+
+    # ── Constructor ────────────────────────────────────────────────────────
+
+    def __init__(
+        self,
+        signal_number: str = "",
+        has_whatsapp: bool = False,
+        force_phone_input: bool = False,
+    ) -> None:
+        super().__init__()
+        self._signal_number = signal_number
+        self._has_whatsapp = has_whatsapp
+        self._force_phone_input = force_phone_input
+        self._phase: str = "picker"
+        self._selected_protocol: str = ""
+        self._device_name: str = _DEFAULT_SIGNAL_DEVICE_NAME
+
+    # ── Compose ────────────────────────────────────────────────────────────
+
+    def compose(self) -> ComposeResult:
+        """Yield all three phase containers; only one is visible at a time."""
+        # Phase 1: Picker
+        yield self._build_picker_container()
+        # Phase 2: Phone (hidden)
+        yield self._build_phone_container()
+        # Phase 3: QR (hidden)
+        yield self._build_qr_container()
+
+    def on_mount(self) -> None:
+        """After all containers are mounted, populate and show the picker."""
+        self._populate_picker_phase()
+        self._show_phase("picker")
+
+    # ── Container builders (empty shells) ──────────────────────────────────
+
+    @staticmethod
+    def _build_picker_container() -> Vertical:
+        return Vertical(id="link-picker-container")
+
+    @staticmethod
+    def _build_phone_container() -> Vertical:
+        container = Vertical(id="link-phone-container")
+        container.display = False
+        return container
+
+    @staticmethod
+    def _build_qr_container() -> Vertical:
+        container = Vertical(id="link-qr-container")
+        container.display = False
+        return container
+
+    # ── Phase visibility ───────────────────────────────────────────────────
+
+    def _show_phase(self, phase: str) -> None:
+        """Show only the given phase container, hide the others."""
+        self._phase = phase
+        for pid in ("link-picker-container", "link-phone-container", "link-qr-container"):
+            try:
+                c = self.query_one(f"#{pid}", Vertical)
+                c.display = (pid == f"link-{phase}-container")
+            except Exception:
+                pass
+
+    # ── Phase populators (fill already-mounted containers) ─────────────────
+
+    def _populate_picker_phase(self) -> None:
+        """Fill the picker container with protocol list items (once)."""
+        if hasattr(self, "_picker_populated") and self._picker_populated:
+            return
+        self._picker_populated = True
+        container = self.query_one("#link-picker-container", Vertical)
+        container.mount(Static("🔗 Link New Device", id="link-picker-title"))
+
+        lv = ListView(id="link-protocol-list")
+        container.mount(lv)
+        for item in _PROTOCOL_ITEMS:
+            if item["id"] == "whatsapp" and not self._has_whatsapp:
+                continue
+            label = Label(item["label"])
+            if item["disabled"]:
+                label.add_class("disabled-item")
+            li = ListItem(label, disabled=item["disabled"])
+            lv.append(li)
+
+        container.mount(Static(
+            "↑/↓ navigate · Enter select · Esc close",
+            id="link-picker-footer",
+        ))
+
+    def _populate_phone_phase(self) -> None:
+        """Fill the phone container (once)."""
+        if hasattr(self, "_phone_populated") and self._phone_populated:
+            # Update just the input values
+            try:
+                pi = self.query_one("#link-phone-input", Input)
+                pi.value = self._signal_number
+                di = self.query_one("#link-device-input", Input)
+                di.value = self._device_name
+            except Exception:
+                pass
+            return
+        self._phone_populated = True
+        container = self.query_one("#link-phone-container", Vertical)
+        container.mount(Static("📱 Device Info", id="link-phone-title"))
+
+        container.mount(Input(
+            placeholder="+39 123 456 7890",
+            value=self._signal_number,
+            id="link-phone-input",
+        ))
+        container.mount(Input(
+            placeholder="Device name",
+            value=self._device_name,
+            id="link-device-input",
+        ))
+
+        btn_row = Center(id="link-phone-buttons")
+        container.mount(btn_row)
+        btn_row.mount(Button("Start Linking ▶", id="link-phone-start", variant="success"))
+        btn_row.mount(Button("Back", id="link-phone-back"))
+
+        container.mount(Static(
+            "Esc back · Enter to confirm",
+            id="link-picker-footer",
+        ))
+
+    def _populate_qr_phase(self, qr_ascii: str, phone: str) -> None:
+        """Fill the QR container (clears and rebuilds each time)."""
+        container = self.query_one("#link-qr-container", Vertical)
+        container.remove_children()
+        title = f"🔗 Link {self._selected_protocol.title()}"
+        container.mount(Static(title, id="link-qr-title"))
+        if phone:
+            info = f"📱 {phone}  ·  🖥 {self._device_name}"
+            container.mount(Static(info, id="link-qr-info"))
+        container.mount(Static(qr_ascii, id="link-qr-code"))
+        container.mount(Static(
+            "⏳ Waiting for scan from phone...",
+            id="link-qr-status",
+        ))
+
+        btn_row = Center(id="link-qr-buttons")
+        container.mount(btn_row)
+        btn_row.mount(Button("Cancel", id="link-qr-cancel", variant="error"))
+
+        container.mount(Static("Esc to cancel", id="link-picker-footer"))
+
+
+
+    # ── Phase transitions ──────────────────────────────────────────────────
+
+    def _transition_to_phone(self) -> None:
+        """Move from picker to phone phase."""
+        self._populate_phone_phase()
+        self._show_phase("phone")
+        self.query_one("#link-phone-input", Input).focus()
+
+    def _transition_to_qr(self, phone: str) -> None:
+        """Move from phone to QR phase, fetching a real QR code."""
+        self._populate_qr_phase("⏳ Generating QR code...", phone)
+        self._show_phase("qr")
+        self._linking_proc: subprocess.Popen | None = None
+        self.run_worker(self._fetch_real_qr(phone), exclusive=True)
+
+    # ── Real QR fetching (async workers) ────────────────────────────────────
+
+    async def _fetch_real_qr(self, phone: str) -> None:
+        """Background worker: fetch the real QR from the backend."""
+        try:
+            qr_data = await self._get_qr_data_async(phone)
+            if qr_data.startswith("INFO:"):
+                # Special info message (e.g. already connected) — show as text
+                info_text = qr_data[5:].strip()
+                code_widget = self.query_one("#link-qr-code", Static)
+                code_widget.update(f"\n\n{info_text}\n")
+                code_widget.refresh()
+                status = self.query_one("#link-qr-status", Static)
+                status.update("")
+                return
+
+            qr_ascii = qr_to_ascii(qr_data)
+            code_widget = self.query_one("#link-qr-code", Static)
+            code_widget.update(qr_ascii)
+            code_widget.refresh()
+            status = self.query_one("#link-qr-status", Static)
+            status.update("⏳ Waiting for scan from phone...")
+        except Exception as exc:
+            logger.exception("Failed to fetch QR data")
+            try:
+                code_widget = self.query_one("#link-qr-code", Static)
+                code_widget.update(f"\n\n❌ {exc}\n")
+                code_widget.refresh()
+                status = self.query_one("#link-qr-status", Static)
+                status.update("")
+            except Exception as e:
+                logger.exception("Failed to update QR widget: %s", e)
+
+    async def _get_qr_data_async(self, phone: str) -> str:
+        """Return the real QR data for the selected protocol."""
+        proto = self._selected_protocol
+        if proto == "signal":
+            return await self._get_signal_link_url()
+        elif proto == "whatsapp":
+            return await self._get_whatsapp_qr()
+        return f"fake-{proto}-link"
+
+    async def _get_signal_link_url(self) -> str:
+        """Run ``signal-cli link`` in a thread, extract the sgnl:// URL."""
+        from backend import SIGNAL_CLI_PATH
+        import asyncio as _asyncio
+
+        def _run() -> str:
+            args = [
+                str(SIGNAL_CLI_PATH),
+                "link", "-n", self._device_name,
+            ]
+            logger.info("Starting signal-cli link: %s", args)
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            self._linking_proc = proc
+
+            link_found = None
+            for line in iter(proc.stdout.readline, ""):
+                line = line.rstrip()
+                logger.debug("signal-cli: %s", line)
+                match = re.search(r"((?:sgnl|signal)://link[^\s]*)", line)
+                if match:
+                    link_found = match.group(1)
+                    break
+                if "error" in line.lower() or "cannot" in line.lower():
+                    logger.warning("signal-cli error line: %s", line)
+
+            if link_found:
+                logger.info("Signal link URL found: %s...", link_found[:40])
+                return link_found
+            raise RuntimeError(
+                "Could not find Signal link URL in signal-cli output. "
+                "Is signal-cli configured correctly?"
+            )
+
+        return await _asyncio.to_thread(_run)
+
+    async def _get_whatsapp_qr(self) -> str:
+        """Get the current WhatsApp pairing QR (without resetting session).
+
+        If the session is already connected, returns a notice instead of an error.
+        """
+        import asyncio as _asyncio
+
+        app = self.app
+        wa = getattr(app, "whatsapp_backend", None)
+        if wa is None or wa._rest is None:
+            raise RuntimeError("WhatsApp backend not available")
+
+        def _run() -> str:
+            # First check if the session is already connected
+            status = wa._rest.get_session_status() or {}
+            s = str(status.get("status") or "").lower()
+            if s == "working":
+                return "ALREADY_CONNECTED"
+            # Try to get a current QR
+            qr = wa._rest.get_pairing_qr()
+            if isinstance(qr, bytes):
+                from qr_utils import qr_png_to_ascii
+                return qr_png_to_ascii(qr)
+            elif isinstance(qr, str):
+                return qr
+            raise RuntimeError(
+                f"No QR available (session status: {s or 'unknown'}). "
+                "The session may already be linked."
+            )
+
+        result = await _asyncio.to_thread(_run)
+        if result == "ALREADY_CONNECTED":
+            return "INFO: WhatsApp is already linked and working ✅\nNo QR needed."
+        return result
+
+    # ── Hooks ──────────────────────────────────────────────────────────────
+
+    def _should_show_phone_input(self, protocol: str) -> bool:
+        """Decide whether to show the phone input phase (test hook for now)."""
+        if self._force_phone_input:
+            return True
+        return True  # ← keep phone phase for now (until backend wired)
+
+    def _get_qr_data(self, phone: str) -> str:
+        """Legacy fake-data hook (kept for tests, not used in normal flow)."""
+        proto = self._selected_protocol
+        if proto == "signal":
+            return f"sgnl://linkdevice?uuid=test-{phone}-{self._device_name}"
+        elif proto == "whatsapp":
+            return "WA:fake-pairing-code-12345-for-ui-testing"
+        return f"fake-{proto}-link"
+    # ── Event handlers ─────────────────────────────────────────────────────
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button presses across all phases."""
+        btn_id = event.button.id
+
+        if btn_id == "link-phone-start":
+            self._on_phone_confirm()
+        elif btn_id == "link-phone-back":
+            self._on_go_back()
+        elif btn_id == "link-qr-cancel":
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Handle Enter in input fields."""
+        if event.input.id in ("link-phone-input", "link-device-input"):
+            self._on_phone_confirm()
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Handle click / Enter on a protocol in the ListView."""
+        if self._phase != "picker":
+            return
+        self._select_protocol(event.item_index)
+
+    def action_select_item(self) -> None:
+        """Enter: select the highlighted protocol (or confirm phone)."""
+        if self._phase == "picker":
+            lv = self.query_one("#link-protocol-list", ListView)
+            idx = lv.index
+            if idx is not None:
+                self._select_protocol(idx)
+        elif self._phase == "phone":
+            self._on_phone_confirm()
+
+    # ── Internal helpers ───────────────────────────────────────────────────
+
+    def _select_protocol(self, index: int) -> None:
+        """Handle protocol selection from the picker list."""
+        filtered = [
+            item for item in _PROTOCOL_ITEMS
+            if not (item["id"] == "whatsapp" and not self._has_whatsapp)
+        ]
+        if index < 0 or index >= len(filtered):
+            return
+        item = filtered[index]
+        if item["disabled"]:
+            return
+
+        self._selected_protocol = item["id"]
+        logger.info("Device link: selected protocol=%s", self._selected_protocol)
+
+        if self._should_show_phone_input(self._selected_protocol):
+            self._transition_to_phone()
+        else:
+            self._transition_to_qr(phone="")
+
+    def _on_phone_confirm(self) -> None:
+        """User confirmed phone number → move to QR phase."""
+        phone = self.query_one("#link-phone-input", Input).value.strip()
+        device = self.query_one("#link-device-input", Input).value.strip()
+        if device:
+            self._device_name = device
+        self._transition_to_qr(phone)
+
+    def _on_go_back(self) -> None:
+        """Go back from phone phase to picker phase."""
+        self._show_phase("picker")
+        self.query_one("#link-protocol-list", ListView).focus()

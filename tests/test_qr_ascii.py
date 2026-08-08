@@ -14,7 +14,7 @@ import zlib
 
 import qrcode
 
-from link_whatsapp import _decode_png_luminance, qr_png_to_ascii
+from qr_utils import _decode_png_luminance, qr_png_to_ascii
 
 
 def _make_qr_matrix(text: str):

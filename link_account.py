@@ -10,7 +10,7 @@ import re
 import signal
 from pathlib import Path
 
-import qrcode
+from qr_utils import print_qr_code
 
 
 def find_signal_cli() -> Path:
@@ -25,21 +25,6 @@ def find_signal_cli() -> Path:
     raise FileNotFoundError(
         "signal-cli not found in ./bin/. Run the download step first."
     )
-
-
-def print_qr_code(link: str) -> None:
-    """
-    Generate and print the QR code in the terminal using the qrcode library.
-    """
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=2,
-        border=2,
-    )
-    qr.add_data(link)
-    qr.make(fit=True)
-    qr.print_ascii(invert=True)
 
 
 def main():
