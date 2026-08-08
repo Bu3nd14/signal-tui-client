@@ -1810,7 +1810,7 @@ class SignalTUI(App):
         def _on_done(_: object) -> None:
             logger.info("LINK-DONE: callback fired")
             # 1. Immediately refresh UI with contacts already in cache
-            self.call_after_refresh(lambda: self._update_contacts_ui(self.contacts))
+            self.call_after_refresh(lambda: self._safe_update_contacts())
             # 2. Restart SSE in background (Signal reception)
             if self.signal_backend:
                 self.run_worker(self._restart_signal_async(), exclusive=False)
@@ -1839,7 +1839,7 @@ class SignalTUI(App):
         await asyncio.to_thread(_run)
         logger.info("LINK-SIGNAL: done, updating UI")
         self.contacts = self.manager.list_contacts()
-        self._update_contacts_ui(self.contacts)
+        self._safe_update_contacts()
 
     async def _reload_whatsapp_async(self) -> None:
         """Reload WhatsApp contacts in a thread (may be slow after link)."""
@@ -1853,11 +1853,20 @@ class SignalTUI(App):
         await asyncio.to_thread(_run)
         logger.info("LINK-WA: done, updating UI")
         self.contacts = self.manager.list_contacts()
-        self._update_contacts_ui(self.contacts)
+        self._safe_update_contacts()
 
     def action_open_device_link(self) -> None:
         """Action to open device link picker (bound to Ctrl+L)."""
         self._open_device_link()
+
+    def _safe_update_contacts(self) -> None:
+        """Wrapper that logs errors from _update_contacts_ui."""
+        try:
+            logger.info("LINK-UI: _update_contacts_ui start, contacts=%d", len(self.contacts))
+            self._update_contacts_ui(self.contacts)
+            logger.info("LINK-UI: _update_contacts_ui done")
+        except Exception as e:
+            logger.exception("LINK-UI: _update_contacts_ui FAILED: %s", e)
 
     # ─── Emoji alias auto-completion ──────────────────────────────────────────
 
