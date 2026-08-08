@@ -984,29 +984,7 @@ class SignalTUI(App):
             self.call_from_thread(
                 self._add_message, "⏳ Starting signal-cli daemon...", is_info=True
             )
-            # If daemon was started before linking, kill it first so
-            # _connect_sync starts fresh with the new device identity.
-            from backend import _is_daemon_running
             sb = self.signal_backend
-            if _is_daemon_running() and sb.daemon_proc is None:
-                # Daemon is running but wasn't started by us (e.g. pre-link state)
-                # Kill it via RPC or just let _connect_sync handle it
-                pass
-            if sb.daemon_proc is not None:
-                try:
-                    sb._polling_active = False
-                    t = sb._sse_thread
-                    sb._sse_thread = None
-                    if t and t.is_alive():
-                        t.join(timeout=3)
-                    sb.daemon_proc.terminate()
-                    sb.daemon_proc.wait(timeout=5)
-                except Exception:
-                    try:
-                        sb.daemon_proc.kill()
-                    except Exception:
-                        pass
-                sb.daemon_proc = None
             sb._connect_sync()
 
             # Build cache from all backends loaded so far
@@ -1059,7 +1037,13 @@ class SignalTUI(App):
                 f"💬 WhatsApp backend active ({n} contacts, webhook on :{WEBHOOK_PORT}).",
                 is_info=True,
             )
-            # Reload merged contacts and update UI
+            # Rebuild unified cache with protocol-aware keys (Signal may
+            # have finished first, missing WhatsApp messages in self._cache).
+            self._cache = {}
+            for b in self.manager.all():
+                for cid, msgs in b.cache.items():
+                    self._cache[contact_cache_key(b.protocol, cid)] = list(msgs)
+            self._sync_last_ts()
             self.contacts = self.manager.list_contacts()
             self.call_from_thread(self._update_contacts_ui, self.contacts)
             self._resync_wa_history()

@@ -1065,21 +1065,13 @@ class WhatsAppBackend(ChatBackend):
         if not self._rest:
             self._connected = False
             return
+        # Wait for session WORKING before loading contacts (otherwise
+        # we get empty list while WAHA syncs after a device link).
+        self._wait_session_ready(timeout=40.0)
         try:
             self._load_contacts()
         except Exception:
             pass
-        # La ricezione è basata sui webhook (Push) di WAHA Core, gestiti dall'HTTP
-        # handler ``/webhook`` avviato dalla TUI (``ensure_webhook_server``) che
-        # chiama ``handle_webhook`` su questo backend.  Qui non si avvia alcun
-        # thread di polling: il client NON interroga più ``GET /api/messages``.
-        # Fix C: attende che la sessione WAHA sia pronta (status WORKING) prima
-        # di marcare il backend come connesso.  Senza questa attesa, i fetch di
-        # apertura (/api/messages) eseguiti nei primi ~10-30s interrogano una
-        # sessione ancora in connessione e WAHA risponde con una lista VUOTA ->
-        # chat viste come vuote / "No message history".  Best-effort: se scade
-        # il timeout, procede comunque (non blocca l'avvio all'infinito).
-        self._wait_session_ready(timeout=40.0)
         # Registra (o ri-registra) il webhook push per-sessione ora che la
         # sessione e` pronta: il solo WAHA_WEBHOOK_URL (env) non basta a far
         # emettere gli eventi a WAHA, serve la config webhooks sulla sessione.
