@@ -1802,7 +1802,8 @@ class SignalTUI(App):
     def _open_device_link(self) -> None:
         """Open the device link picker modal (Ctrl+L)."""
         def _on_done(_: object) -> None:
-            # Refresh chat to show messages that arrived while picker was open
+            # Reload contacts for all backends (newly linked device may have new data)
+            self._reload_all_contacts()
             self._refresh_chat()
 
         self.push_screen(
@@ -1812,6 +1813,42 @@ class SignalTUI(App):
             ),
             _on_done,
         )
+
+    def _reload_all_contacts(self) -> None:
+        """Reload contacts from all backends and rebuild the contact list UI."""
+        try:
+            # Trigger a fresh contact load from each backend's API
+            for backend in self.manager.all():
+                # WhatsApp: _load_contacts
+                loader = getattr(backend, "_load_contacts", None)
+                if loader:
+                    try:
+                        loader()
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to reload contacts for %s: %s",
+                            backend.protocol, e,
+                        )
+                # Signal: _load_contacts_rpc (or subprocess fallback)
+                loader_rpc = getattr(backend, "_load_contacts_rpc", None)
+                if loader_rpc:
+                    try:
+                        loader_rpc()
+                    except Exception:
+                        loader_sub = getattr(backend, "_load_contacts_subprocess", None)
+                        if loader_sub:
+                            try:
+                                loader_sub()
+                            except Exception as e:
+                                logger.warning(
+                                    "Failed to reload Signal contacts: %s", e,
+                                )
+            # Now rebuild the merged contact list
+            contacts = self.manager.list_contacts()
+            self.contacts = contacts
+            self._update_contacts_ui(contacts)
+        except Exception as e:
+            logger.exception("Failed to reload contacts after link: %s", e)
 
     def action_open_device_link(self) -> None:
         """Action to open device link picker (bound to Ctrl+L)."""
