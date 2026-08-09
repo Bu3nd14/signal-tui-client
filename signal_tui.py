@@ -1063,6 +1063,17 @@ class SignalTUI(App):
             logger.info("LINK-WA: calling _update_contacts_ui with %d contacts", len(self.contacts))
             self.call_from_thread(self._update_contacts_ui, self.contacts)
             self._resync_wa_history()
+            # Rebuild UI cache AFTER the resync so that unread badges and
+            # contact list ordering reflect the freshly-fetched messages.
+            # _resync_wa_history populates backend.cache but the UI cache
+            # was built before it — without this second rebuild the
+            # startup experience shows stale unread counts for WhatsApp.
+            self._cache = {}
+            for b in self.manager.all():
+                for cid, msgs in b.cache.items():
+                    self._cache[contact_cache_key(b.protocol, cid)] = list(msgs)
+            self._sync_last_ts()
+            self.call_from_thread(self._update_contacts_ui, self.manager.list_contacts())
             logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
         except Exception as exc:
             logger.exception("LINK-WA: failed: %s", exc)
