@@ -466,8 +466,7 @@ class SignalTUI(App):
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
         # Only connect backends that are already linked (skip slow daemon
         # startup for unlinked accounts — they connect after Ctrl+L link).
-        if not self.signal_backend.needs_pairing:
-            self.run_worker(self._connect_signal, exclusive=False, thread=True)
+        self.run_worker(self._connect_signal, exclusive=False, thread=True)
         if self.whatsapp_backend is not None and not self.whatsapp_backend.needs_pairing:
             self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
 
