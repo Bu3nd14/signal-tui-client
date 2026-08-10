@@ -10,6 +10,7 @@ TUI is gathered here so the UI only deals with normalized ``ChatContact`` /
 
 from __future__ import annotations
 
+import logging
 import asyncio
 import queue
 import re
@@ -24,6 +25,13 @@ from models import (
 )
 
 from .base import ChatBackend
+
+logger = logging.getLogger(__name__)
+_fh = logging.FileHandler("/tmp/signal-sse.log", mode="w")
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logger.addHandler(_fh)
+logger.setLevel(logging.DEBUG)
 
 from backend import (
     Contact,
@@ -148,9 +156,11 @@ class SignalBackend(ChatBackend):
             # With SSE already connected, they will arrive via the normal
             # pipeline.  Best-effort, never blocks startup.
             try:
-                self._rpc._call("sendSyncRequest")
-            except Exception:
-                pass
+                result = self._rpc._call("sendSyncRequest")
+                logger.info("SYNC-REQUEST: result=%s", 
+                           "ok" if isinstance(result, dict) and "result" in result else str(result)[:100])
+            except Exception as e:
+                logger.info("SYNC-REQUEST: exception=%s", e)
 
     async def disconnect(self) -> None:
         """Stop the SSE listener and polling.  The daemon itself is left running by design."""
@@ -675,8 +685,12 @@ class SignalBackend(ChatBackend):
                     for event in events:
                         if event is not None:
                             self._event_queue.put(event)
-            except Exception:
-                pass
+                    if events:
+                        logger.info("SSE: received %d events", len(events))
+                if envelope:
+                    logger.info("SSE: envelope received")
+            except Exception as e:
+                logger.info("SSE: connection lost, retrying... (%s)", e)
             # Brief pause before reconnect — keep it short (1s)
             # so we don't miss pending messages from a fresh daemon
             # startup with --receive-mode on-start.
@@ -703,6 +717,8 @@ class SignalBackend(ChatBackend):
 
     def poll_once(self) -> list[ChatEvent]:
         """Drain all pending events from the SSE queue without blocking.
+        
+        Called by the poll worker thread.
 
         Called by the ``_poll_worker`` thread in ``signal_tui.py``.
         Replaces the old HTTP-polling approach with a non-blocking queue
