@@ -1344,6 +1344,13 @@ class SignalTUI(App):
         cur_ids = [getattr(it, "_contact_id", None) for it in existing]
         want_ids = [c.cache_key for c in filtered]
 
+        # Stop any in-flight progressive render timer so stale chunks
+        # don't interfere with this render (critical when a second
+        # _update_contacts_ui call arrives during a previous render).
+        if self._render_timer is not None:
+            self._render_timer.stop()
+            self._render_timer = None
+
         def _sync_item(item, c):
             """Aggiorna testo/classe di un ListItem esistente per il contatto c."""
             label = item.children[0] if item.children else None
