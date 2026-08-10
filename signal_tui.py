@@ -507,17 +507,14 @@ class SignalTUI(App):
         try:
             self.query_one("#status-bar", Static).update(text)
             if duration > 0:
-                self.set_timer(duration, lambda: self._status_clear(text))
+                self.set_timer(duration, self._status_clear)
         except Exception:
             pass  # widget not mounted yet
 
-    def _status_clear(self, expected: str) -> None:
-        """Clear the status bar only if it still shows *expected*."""
+    def _status_clear(self) -> None:
+        """Clear the status bar."""
         try:
-            widget = self.query_one("#status-bar", Static)
-            current = str(widget.renderable)
-            if expected in current:
-                widget.update("")
+            self.query_one("#status-bar", Static).update("")
         except Exception:
             pass
 
