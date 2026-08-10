@@ -144,6 +144,13 @@ class SignalBackend(ChatBackend):
         # it here.  _start_sse_listener is idempotent.
         if self._use_daemon:
             self._start_sse_listener()
+            # Request the Signal server to re-send any pending messages.
+            # With SSE already connected, they will arrive via the normal
+            # pipeline.  Best-effort, never blocks startup.
+            try:
+                self._rpc._call("sendSyncRequest")
+            except Exception:
+                pass
 
     async def disconnect(self) -> None:
         """Stop the SSE listener and polling.  The daemon itself is left running by design."""
