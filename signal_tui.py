@@ -499,12 +499,26 @@ class SignalTUI(App):
         self._polling_active = False
         # No flush needed — SQLite writes are incremental
 
-    def _status(self, text: str) -> None:
-        """Update the status bar (bottom-right, thread-safe)."""
+    def _status(self, text: str, duration: float = 0.0) -> None:
+        """Update the status bar (bottom-right, thread-safe).
+
+        Clears automatically after *duration* seconds (0 = persistent).
+        """
         try:
             self.query_one("#status-bar", Static).update(text)
+            if duration > 0:
+                self.set_timer(duration, lambda: self._status_clear(text))
         except Exception:
             pass  # widget not mounted yet
+
+    def _status_clear(self, expected: str) -> None:
+        """Clear the status bar only if it still shows *expected*."""
+        try:
+            widget = self.query_one("#status-bar", Static)
+            if widget.renderable == expected:
+                widget.update("")
+        except Exception:
+            pass
 
 
     # ─── Chat helper methods ────────────────────────────────────────────────
@@ -1034,7 +1048,7 @@ class SignalTUI(App):
                 self._status, f"✅ Signal: {len(contacts)} contatti",
             )
             self.call_from_thread(
-                self._add_message, "💡 Select a contact to view chat", is_info=True
+                self._status, "💡 Select a contact to view chat", 3.0
             )
             if sb._use_daemon:
                 self.call_from_thread(
@@ -1806,7 +1820,7 @@ class SignalTUI(App):
         else:
             self._loaded_all = True
             self.call_from_thread(
-                self._add_message, "No message history for this contact", is_info=True
+                self._status, "No message history for this contact", 3.0
             )
 
     def _add_load_more_widget(self, remaining: int):
@@ -2033,7 +2047,7 @@ class SignalTUI(App):
             )
 
         self._loaded_all = True
-        self._add_message(f"📋 Loaded all {len(cached)} messages", is_info=True)
+        self._status(f"📋 Loaded all {len(cached)} messages", 3.0)
 
     def _poll_worker(self):
         """Thread worker that polls the backend receive loop.
@@ -2415,7 +2429,7 @@ class SignalTUI(App):
             url = serve_text_as_file(text, filename=fname)
 
         if url.startswith("ERROR:"):
-            self._status(f"❌ {url}")
+            self._status(f"❌ {url}", 3.0)
         else:
             # Mount a clickable download link widget
             chat_log = self.chat_log
@@ -2434,9 +2448,9 @@ class SignalTUI(App):
 
         Shows a confirmation message in the chat log.
         """
-        self._add_message(
+        self._status(
             "📋 URL ready — select it above and press Cmd+C / Ctrl+C to copy",
-            is_info=True,
+            3.0,
         )
 
     # ─── Image modal ─────────────────────────────────────────────────────────
@@ -2470,7 +2484,7 @@ class SignalTUI(App):
         if att_path:
             self.push_screen(ImageModalScreen(att_path))
         else:
-            self._status("❌ Image file not found on server")
+            self._status("❌ Image file not found on server", 3.0)
 
     # ─── Sending messages ─────────────────────────────────────────────────────
 
@@ -2484,7 +2498,7 @@ class SignalTUI(App):
             return
 
         if not self.selected_contact:
-            self._status("❌ Select a contact first!")
+            self._status("❌ Select a contact first!", 3.0)
             return
 
         # Hide completion if visible
