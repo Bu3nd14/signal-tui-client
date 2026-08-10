@@ -339,7 +339,7 @@ class SignalTUI(App):
     }
 
     #bottom-bar {
-        height: auto;
+        height: 1;
     }
 
     #status-bar {
@@ -347,7 +347,6 @@ class SignalTUI(App):
         text-align: right;
         color: $text-muted;
         background: $surface;
-        border: solid $primary;
     }
 
     """
@@ -1188,9 +1187,8 @@ class SignalTUI(App):
         if n:
             try:
                 self.call_from_thread(
-                    self._add_message,
-                    f"💬 WhatsApp history re-synced for {n} chats.",
-                    is_info=True,
+                    self._status,
+                    f"✅ WAHA: cronologia sincronizzata per {n} chat",
                 )
             except Exception:
                 pass  # il report è solo informativo
@@ -2604,9 +2602,8 @@ class SignalTUI(App):
         backend = self.manager.get(contact.protocol)
         if backend is None:
             self.call_from_thread(
-                self._add_message,
+                self._status,
                 f"❌ No backend for protocol: {contact.protocol}",
-                is_info=True,
             )
             return
 
@@ -2620,9 +2617,8 @@ class SignalTUI(App):
             )
         except Exception as e:
             self.call_from_thread(
-                self._add_message,
+                self._status,
                 f"❌ Send error: {e}",
-                is_info=True,
             )
 
 
