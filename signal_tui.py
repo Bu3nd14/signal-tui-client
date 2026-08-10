@@ -1008,12 +1008,12 @@ class SignalTUI(App):
         """Connect Signal backend and update UI (runs in worker thread)."""
         try:
             self.call_from_thread(
-                self._add_message, "⏳ Starting signal-cli daemon...", is_info=True
+                self._status, "⏳ Signal: avvio daemon..."
             )
             sb = self.signal_backend
             logger.info("LINK-SIG: start, daemon_proc=%s", sb.daemon_proc is not None)
             self.call_from_thread(
-                self._add_message, "⏳ Waiting for Signal daemon...", is_info=True
+                self._status, "⏳ Signal: attesa connessione..."
             )
             sb._connect_sync()
             logger.info("LINK-SIG: connect_sync done, use_daemon=%s", sb._use_daemon)
@@ -1031,29 +1031,23 @@ class SignalTUI(App):
             self.call_from_thread(self._update_contacts_ui, contacts)
             logger.info("LINK-SIG: done, contacts=%d", len(contacts))
             self.call_from_thread(
-                self._add_message,
-                f"✅ Loaded {len(contacts)} contacts.",
-                is_info=True,
+                self._status, f"✅ Signal: {len(contacts)} contatti",
             )
             self.call_from_thread(
                 self._add_message, "💡 Select a contact to view chat", is_info=True
             )
             if sb._use_daemon:
                 self.call_from_thread(
-                    self._add_message,
-                    "✅ Daemon active, connecting directly...",
-                    is_info=True,
+                    self._status, "✅ Signal: daemon attivo",
                 )
             else:
                 self.call_from_thread(
-                    self._add_message,
-                    "⚠️ Daemon not available. Using subprocess mode (slower).",
-                    is_info=True,
+                    self._status, "⚠️ Signal: daemon non disponibile (subprocess)",
                 )
         except Exception as e:
             logger.exception("LINK-SIG: failed: %s", e)
             self.call_from_thread(
-                self._add_message, f"❌ Signal backend error: {e}", is_info=True
+                self._status, f"❌ Signal: errore — {e}",
             )
 
     def _connect_whatsapp(self) -> None:
@@ -1072,7 +1066,7 @@ class SignalTUI(App):
             logger.info("LINK-WA: start")
             if self.whatsapp_backend.needs_pairing:
                 self.call_from_thread(
-                    self._add_message, "⏳ Waiting for WhatsApp to sync...", is_info=True
+                    self._status, "⏳ WAHA: attesa pairing..."
                 )
             self.whatsapp_backend.connect_sync()
             n = len(self.whatsapp_backend.contacts)
@@ -1083,9 +1077,8 @@ class SignalTUI(App):
                 pass
             if n > 0:
                 self.call_from_thread(
-                    self._add_message,
-                    f"💬 WhatsApp backend active ({n} contacts, webhook on :{WEBHOOK_PORT}).",
-                    is_info=True,
+                    self._status,
+                    f"✅ WAHA: {n} contatti (webhook :{WEBHOOK_PORT})",
                 )
                 self._finalize_wa_connect()
                 self._wa_connecting = False
@@ -1097,9 +1090,7 @@ class SignalTUI(App):
         except Exception as exc:
             logger.exception("LINK-WA: failed: %s", exc)
             self.call_from_thread(
-                self._add_message,
-                f"💬 WhatsApp backend unavailable: {exc}",
-                is_info=True,
+                self._status, f"❌ WAHA: non disponibile — {exc}",
             )
             self._wa_connecting = False
 
