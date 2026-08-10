@@ -338,8 +338,11 @@ class SignalTUI(App):
         height: 1fr;
     }
 
+    #bottom-bar {
+        height: auto;
+    }
+
     #status-bar {
-        dock: bottom;
         height: 1;
         text-align: right;
         color: $text-muted;
@@ -467,7 +470,8 @@ class SignalTUI(App):
             ChatAreaWidget(),
         )
         yield Footer()
-        yield Static("", id="status-bar")
+        with Vertical(id="bottom-bar"):
+            yield Static("", id="status-bar")
 
     def on_mount(self):
         """On startup, start poll worker and backend connections in parallel."""
