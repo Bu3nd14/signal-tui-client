@@ -108,24 +108,6 @@ class SignalBackend(ChatBackend):
         if _is_daemon_running():
             self._use_daemon = True
             self._load_contacts_rpc()
-            # Fetch any pending messages that arrived while the TUI was
-            # disconnected.  The daemon's SSE stream is connection-scoped:
-            # messages received by the daemon during the gap will NOT be
-            # replayed via SSE.  Explicitly calling ``receive`` drains the
-            # daemon's internal queue (if any) and processes the envelopes
-            # through the normal pipeline so they land in the in-memory
-            # cache and are visible immediately after startup.
-            try:
-                pending = self._rpc.receive()
-                for envelope in pending:
-                    events = self.envelope_to_event(
-                        envelope.get("envelope", {})
-                    )
-                    for event in events:
-                        if event is not None:
-                            self._event_queue.put(event)
-            except Exception:
-                pass  # best-effort: never block startup for this
         else:
             self.daemon_proc = subprocess.Popen(
                 [
