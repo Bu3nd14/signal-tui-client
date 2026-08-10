@@ -347,6 +347,7 @@ class SignalTUI(App):
         text-align: right;
         color: $text-muted;
         background: $surface;
+        border: solid $primary;
     }
 
     """
@@ -2416,7 +2417,7 @@ class SignalTUI(App):
             url = serve_text_as_file(text, filename=fname)
 
         if url.startswith("ERROR:"):
-            self._add_message(f"❌ {url}", is_info=True)
+            self._status(f"❌ {url}")
         else:
             # Mount a clickable download link widget
             chat_log = self.chat_log
@@ -2471,7 +2472,7 @@ class SignalTUI(App):
         if att_path:
             self.push_screen(ImageModalScreen(att_path))
         else:
-            self._add_message("❌ Image file not found on server", is_info=True)
+            self._status("❌ Image file not found on server")
 
     # ─── Sending messages ─────────────────────────────────────────────────────
 
@@ -2485,7 +2486,7 @@ class SignalTUI(App):
             return
 
         if not self.selected_contact:
-            self._add_message("❌ Select a contact first!", is_info=True)
+            self._status("❌ Select a contact first!")
             return
 
         # Hide completion if visible
