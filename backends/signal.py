@@ -10,7 +10,6 @@ TUI is gathered here so the UI only deals with normalized ``ChatContact`` /
 
 from __future__ import annotations
 
-import logging
 import asyncio
 import queue
 import re
@@ -25,13 +24,6 @@ from models import (
 )
 
 from .base import ChatBackend
-
-logger = logging.getLogger(__name__)
-_fh = logging.FileHandler("/tmp/signal-receive.log", mode="w")
-_fh.setLevel(logging.DEBUG)
-_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-logger.addHandler(_fh)
-logger.setLevel(logging.DEBUG)
 
 from backend import (
     Contact,
@@ -72,8 +64,6 @@ _RE_CONTACT_LINE = re.compile(
 )
 
 
-
-
 class SignalBackend(ChatBackend):
     """signal-cli backend adapted to the ``ChatBackend`` interface."""
 
@@ -98,15 +88,6 @@ class SignalBackend(ChatBackend):
         self.cache: dict[str, list[dict]] = {}
 
     # ─── Lifecycle ────────────────────────────────────────────────────
-
-    @property
-    def needs_pairing(self) -> bool:
-        """True if the account is not linked or daemon can't authenticate."""
-        try:
-            test = self._rpc._call("listContacts")
-            return "error" in test or "result" not in test
-        except Exception:
-            return True
 
     async def connect(self) -> None:
         """Prune old cache, load history, start daemon and load contacts."""
@@ -142,6 +123,7 @@ class SignalBackend(ChatBackend):
                     pass
                 time.sleep(1)
             else:
+                # Daemon not available in time → use subprocess fallback.
                 self._use_daemon = False
                 self._load_contacts_subprocess()
 
@@ -151,11 +133,6 @@ class SignalBackend(ChatBackend):
         # Start real-time SSE listener if daemon is available
         if self._use_daemon:
             self._start_sse_listener()
-            # Attempt to drain pending messages via RPC.  The daemon's SSE
-            # only forwards events received while a client is connected.
-            # The receive RPC may return pending envelopes if the daemon
-            # has them queued.  Best-effort with a short timeout.
-            self._drain_pending_receive()
 
     async def disconnect(self) -> None:
         """Stop the SSE listener and polling.  The daemon itself is left running by design."""
@@ -641,32 +618,6 @@ class SignalBackend(ChatBackend):
 
     # ─── Receive loop (SSE real-time) ───────────────────────────────────
 
-    def _drain_pending_receive(self) -> None:
-        """Call the receive RPC to drain pending messages into the event queue."""
-        try:
-            logger.info("SIGNAL-RECEIVE: attempting RPC receive with timeout=5")
-            result = self._rpc._call("receive", {"timeout": 5})
-            logger.info("SIGNAL-RECEIVE: result type=%s keys=%s",
-                        type(result).__name__,
-                        list(result.keys()) if isinstance(result, dict) else "N/A")
-            if isinstance(result, dict) and "error" in result:
-                logger.warning("SIGNAL-RECEIVE: RPC error: %s", result["error"])
-            pending = result.get("result", []) if isinstance(result, dict) else []
-            logger.info("SIGNAL-RECEIVE: pending_count=%d", len(pending))
-            for i, envelope in enumerate(pending):
-                events = self.envelope_to_event(
-                    envelope.get("envelope", {})
-                )
-                logger.info("SIGNAL-RECEIVE: envelope[%d] events=%d", i, len(events))
-                for event in events:
-                    if event is not None:
-                        logger.info("SIGNAL-RECEIVE: enqueuing event type=%s contact=%s",
-                                    event.type, event.contact_id)
-                        self._event_queue.put(event)
-            logger.info("SIGNAL-RECEIVE: done")
-        except Exception as e:
-            logger.warning("SIGNAL-RECEIVE: exception: %s", e)
-
     def _start_sse_listener(self) -> None:
         """Start the SSE listener in a dedicated daemon thread."""
         if self._sse_thread is not None and self._sse_thread.is_alive():
@@ -676,6 +627,15 @@ class SignalBackend(ChatBackend):
             target=self._sse_listener, name="signal-sse", daemon=True,
         )
         self._sse_thread.start()
+
+    def restart_sse(self) -> None:
+        """Restart the SSE listener (called after device linking)."""
+        self._polling_active = False
+        t = self._sse_thread
+        self._sse_thread = None
+        if t is not None and t.is_alive():
+            t.join(timeout=5)
+        self._start_sse_listener()
 
     def _sse_listener(self) -> None:
         """Dedicated thread: connect to signal-cli SSE endpoint, push events
