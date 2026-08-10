@@ -338,14 +338,17 @@ class SignalTUI(App):
         height: 1fr;
     }
 
-    #bottom-status {
+    Footer {
+        dock: none;
+    }
+
+    #bottom-bar {
+        dock: bottom;
         height: 1;
-        align-horizontal: right;
     }
 
     #status-bar {
-        width: auto;
-        min-width: 25;
+        width: 30;
         text-align: right;
         color: $text-muted;
         background: $surface;
@@ -471,8 +474,8 @@ class SignalTUI(App):
             ContactListWidget(),
             ChatAreaWidget(),
         )
-        yield Footer()
-        with Vertical(id="bottom-status"):
+        with Horizontal(id="bottom-bar"):
+            yield Footer()
             yield Static("", id="status-bar")
 
     def on_mount(self):
