@@ -8,14 +8,6 @@ Messages are saved in a local cache for persistence across sessions.
 import logging
 import os
 import sys
-
-# Debug log for startup sequence tracing
-_debug_log = logging.getLogger("signal_tui_debug")
-_debug_fh = logging.FileHandler("/tmp/signal-debug.log", mode="w")
-_debug_fh.setLevel(logging.DEBUG)
-_debug_fh.setFormatter(logging.Formatter("%(asctime)s.%(msecs)03d %(message)s", datefmt="%H:%M:%S"))
-_debug_log.addHandler(_debug_fh)
-_debug_log.setLevel(logging.DEBUG)
 import time
 import traceback
 from pathlib import Path
@@ -445,7 +437,6 @@ class SignalTUI(App):
         # O(N) CSS selector scans via query_one on every message mount.
         self._chat_log: Vertical | None = None
 
-
     @property
     def chat_log(self) -> Vertical:
         """The ``#chat-log`` widget, lazily cached on first access."""
@@ -473,6 +464,8 @@ class SignalTUI(App):
         # as soon as their backends are ready (independent workers below).
         self._polling_active = True
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
+        # Only connect backends that are already linked (skip slow daemon
+        # startup for unlinked accounts — they connect after Ctrl+L link).
         self.run_worker(self._connect_signal, exclusive=False, thread=True)
         if self.whatsapp_backend is not None and not self.whatsapp_backend.needs_pairing:
             self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
@@ -485,6 +478,7 @@ class SignalTUI(App):
     def on_exit(self):
         """On exit, stop polling and do NOT kill the daemon."""
         self._polling_active = False
+        # No flush needed — SQLite writes are incremental
 
 
     # ─── Chat helper methods ────────────────────────────────────────────────
@@ -992,17 +986,11 @@ class SignalTUI(App):
             )
             sb = self.signal_backend
             logger.info("LINK-SIG: start, daemon_proc=%s", sb.daemon_proc is not None)
-            _debug_log.info("SIG-START daemon_proc=%s contacts=%d cache_keys=%d",
-                            sb.daemon_proc is not None, len(self.contacts),
-                            len(self._cache))
             self.call_from_thread(
                 self._add_message, "⏳ Waiting for Signal daemon...", is_info=True
             )
             sb._connect_sync()
             logger.info("LINK-SIG: connect_sync done, use_daemon=%s", sb._use_daemon)
-            _debug_log.info("SIG-SYNC use_daemon=%s sig_contacts=%d sig_cache_keys=%d",
-                            sb._use_daemon, len(sb.contacts),
-                            len(sb.cache))
 
             # Build cache from all backends loaded so far
             self._cache = {}
@@ -1013,8 +1001,6 @@ class SignalTUI(App):
 
             contacts = self.manager.list_contacts()
             self.contacts = contacts
-            _debug_log.info("SIG-CACHE cache_keys=%d total_contacts=%d",
-                            len(self._cache), len(contacts))
             logger.info("LINK-SIG: calling _update_contacts_ui with %d contacts", len(contacts))
             self.call_from_thread(self._update_contacts_ui, contacts)
             logger.info("LINK-SIG: done, contacts=%d", len(contacts))
@@ -1048,8 +1034,6 @@ class SignalTUI(App):
         """Connect WhatsApp backend and update UI (runs in worker thread)."""
         try:
             logger.info("LINK-WA: start")
-            _debug_log.info("WA-START contacts=%d cache_keys=%d",
-                            len(self.contacts), len(self._cache))
             if self.whatsapp_backend.needs_pairing:
                 self.call_from_thread(
                     self._add_message, "⏳ Waiting for WhatsApp to sync...", is_info=True
@@ -1057,8 +1041,6 @@ class SignalTUI(App):
             self.whatsapp_backend.connect_sync()
             n = len(self.whatsapp_backend.contacts)
             logger.info("LINK-WA: connect_sync done, wa_contacts=%d", n)
-            _debug_log.info("WA-SYNC wa_contacts=%d wa_cache_keys=%d",
-                            n, len(self.whatsapp_backend.cache))
             try:
                 ensure_webhook_server(self.whatsapp_backend)
             except Exception:
@@ -1077,8 +1059,6 @@ class SignalTUI(App):
                     self._cache[contact_cache_key(b.protocol, cid)] = list(msgs)
             self._sync_last_ts()
             self.contacts = self.manager.list_contacts()
-            _debug_log.info("WA-CACHE cache_keys=%d total_contacts=%d",
-                            len(self._cache), len(self.contacts))
             logger.info("LINK-WA: calling _update_contacts_ui with %d contacts", len(self.contacts))
             self.call_from_thread(self._update_contacts_ui, self.contacts)
             self._resync_wa_history()
@@ -1308,12 +1288,12 @@ class SignalTUI(App):
         cur_ids = [getattr(it, "_contact_id", None) for it in existing]
         want_ids = [c.cache_key for c in filtered]
 
-        # Stop any in-flight progressive render timer so stale chunks
-        # don't interfere with this render (critical when a second
-        # _update_contacts_ui call arrives during a previous render).
+        # Stop any in-flight progressive render so stale chunks
+        # don't corrupt this render.
         if self._render_timer is not None:
             self._render_timer.stop()
             self._render_timer = None
+
 
         def _sync_item(item, c):
             """Aggiorna testo/classe di un ListItem esistente per il contatto c."""
@@ -1433,13 +1413,10 @@ class SignalTUI(App):
         on subsequent calls.
         """
         logger.info("LINK-UI: start, contacts=%d", len(contacts))
-        _debug_log.info("UI-UPDATE contacts=%d existing_contacts=%d existing_cache=%d",
-                        len(contacts), len(self.contacts), len(self._cache))
         self.contacts = contacts
         self._sort_contacts()
         self._render_contact_list(self._filtered_contacts())
         self._update_unread_badges()
-        _debug_log.info("UI-DONE")
         logger.info("LINK-UI: done")
 
     # ─── Contact selection ─────────────────────────────────────────────────
