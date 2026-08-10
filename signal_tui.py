@@ -5,7 +5,6 @@ If the daemon is unavailable, falls back to subprocess (slower but works).
 Messages are saved in a local cache for persistence across sessions.
 """
 
-import atexit
 import logging
 import os
 import sys
@@ -446,10 +445,6 @@ class SignalTUI(App):
         # O(N) CSS selector scans via query_one on every message mount.
         self._chat_log: Vertical | None = None
 
-        # Ensure daemon is killed on exit (clean or crash) so the next
-        # startup is a fresh daemon with --receive-mode on-start that
-        # downloads all pending messages.
-        atexit.register(self._cleanup_daemon)
 
     @property
     def chat_log(self) -> Vertical:
@@ -488,9 +483,8 @@ class SignalTUI(App):
         self.exit()
 
     def on_exit(self):
-        """On exit, stop polling and kill the daemon."""
+        """On exit, stop polling and do NOT kill the daemon."""
         self._polling_active = False
-        self._cleanup_daemon()
 
 
     # ─── Chat helper methods ────────────────────────────────────────────────
@@ -701,36 +695,6 @@ class SignalTUI(App):
         chat_log.remove_children()
         self._shown_in_log.clear()
         self._seen_message_ids.clear()
-
-    # ─── Daemon cleanup ───────────────────────────────────────────────────
-
-    def _cleanup_daemon(self) -> None:
-        """Terminate the signal-cli daemon process.
-
-        Called on normal exit (on_exit) and via atexit for crash safety.
-        Best-effort: failures are silently ignored.
-        """
-        try:
-            sb = self.signal_backend
-            # Stop SSE listener thread
-            sb._polling_active = False
-            t = sb._sse_thread
-            sb._sse_thread = None
-            if t is not None and t.is_alive():
-                t.join(timeout=3)
-            # Terminate daemon subprocess
-            if sb.daemon_proc is not None:
-                try:
-                    sb.daemon_proc.terminate()
-                    sb.daemon_proc.wait(timeout=5)
-                except Exception:
-                    try:
-                        sb.daemon_proc.kill()
-                    except Exception:
-                        pass
-                sb.daemon_proc = None
-        except Exception:
-            pass
 
     # ─── Envelope processing ─────────────────────────────────────────────────
 
