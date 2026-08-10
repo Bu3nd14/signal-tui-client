@@ -231,14 +231,14 @@ class WhatsAppRESTClient:
         back to ``GET /api/{session}/chats``, which returns the session's chats
         (aka the active contacts) with ``id._serialized`` + ``name``.
         """
-        result = self._request("GET", f"/api/contacts?session={self.session_name}")
-        contacts = self._unwrap_contacts(result)
-        if contacts:
-            return contacts
-        # Fallback: per-session chats endpoint (works on WAHA CORE 2026.x).
-        chats = self._request("GET", f"/api/{self.session_name}/chats")
+        timeout = 5
+        chats = self._request(
+            "GET", f"/api/{self.session_name}/chats", timeout=timeout,
+        )
         if not chats or not isinstance(chats, list):
-            return []
+            return None if chats is None else []
+        if not chats:
+            return []  # API alive, no contacts yet
         out: list[dict] = []
         for chat in chats:
             cid = chat.get("id")
@@ -1034,6 +1034,15 @@ class WhatsAppBackend(ChatBackend):
             "unpaired", "scan_qr", "scan_qr_code",
         )
 
+    @property
+    def is_working(self) -> bool:
+        """Whether the WAHA session is confirmed WORKING (genuinely ready)."""
+        if not self._rest:
+            return False
+        status = self._rest.get_session_status() or {}
+        s = str(status.get("status") or "").lower()
+        return s == "working"
+
     async def get_pairing_qr(self) -> str | bytes | None:
         """Return the current pairing QR (text or PNG bytes), or ``None``."""
         if not self._rest:
@@ -1203,18 +1212,8 @@ class WhatsAppBackend(ChatBackend):
         """Fetch contacts from the API into ``self.contacts``."""
         if not self._rest:
             return
-        # Retry best-effort: il GET /chatsWAHA (grande, ~1.3MB) può andare in
-        # timeout/fallire nei primi istanti -> restituirebbe 0 contatti pur con
-        # session WORKING (sintomo "backend attivo ma zero contatti" osservato
-        # nei run 4-6).  Riproviamo un paio di volte prima di rinunciare.
-        raw_contacts = self._rest.list_contacts()
-        attempt = 0
-        while not raw_contacts and attempt < 3:
-            attempt += 1
-            time.sleep(1.0)
-            raw_contacts = self._rest.list_contacts()
-        # Se anche dopo il retry non ci sono contatti, lasciamo comunque
-        # list(this).contacts vuoto (best-effort, senza crash).
+        # Single call — list_contacts now uses only /chats with 5 s timeout.
+        raw_contacts = self._rest.list_contacts() or []
         contacts: list[ChatContact] = []
         for c in raw_contacts:
             jid = c.get("id") or c.get("jid") or c.get("remoteJid")

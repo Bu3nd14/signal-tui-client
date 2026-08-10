@@ -437,6 +437,11 @@ class SignalTUI(App):
         # O(N) CSS selector scans via query_one on every message mount.
         self._chat_log: Vertical | None = None
 
+        # WhatsApp link guard: prevents duplicate concurrent connect workers.
+        self._wa_connecting: bool = False
+        # Timer-based poll counter for post-link contacts sync.
+        self._wa_poll_count: int = 0
+
     @property
     def chat_log(self) -> Vertical:
         """The ``#chat-log`` widget, lazily cached on first access."""
@@ -468,7 +473,10 @@ class SignalTUI(App):
         # startup for unlinked accounts — they connect after Ctrl+L link).
         self.run_worker(self._connect_signal, exclusive=False, thread=True)
         if self.whatsapp_backend is not None and not self.whatsapp_backend.needs_pairing:
-            self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
+            # Only auto-connect at boot if the session is truly WORKING
+            # (not just "not pairing" — could be failed/stopped).
+            if self.whatsapp_backend.is_working:
+                self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
 
     def action_quit(self):
         """Ctrl+Q: stop polling and exit cleanly."""
@@ -1031,7 +1039,17 @@ class SignalTUI(App):
             )
 
     def _connect_whatsapp(self) -> None:
-        """Connect WhatsApp backend and update UI (runs in worker thread)."""
+        """Connect WhatsApp backend (runs in worker thread).
+
+        If contacts are already synced (e.g. boot with existing session),
+        finalises immediately.  Otherwise schedules a non-blocking
+        ``set_timer`` that delegates HTTP calls back to worker threads,
+        keeping the asyncio event loop free.
+        """
+        if self._wa_connecting:
+            logger.info("LINK-WA: already connecting, skipping duplicate worker")
+            return
+        self._wa_connecting = True
         try:
             logger.info("LINK-WA: start")
             if self.whatsapp_backend.needs_pairing:
@@ -1051,18 +1069,14 @@ class SignalTUI(App):
                     f"💬 WhatsApp backend active ({n} contacts, webhook on :{WEBHOOK_PORT}).",
                     is_info=True,
                 )
-            # Rebuild unified cache with protocol-aware keys (Signal may
-            # have finished first, missing WhatsApp messages in self._cache).
-            self._cache = {}
-            for b in self.manager.all():
-                for cid, msgs in b.cache.items():
-                    self._cache[contact_cache_key(b.protocol, cid)] = list(msgs)
-            self._sync_last_ts()
-            self.contacts = self.manager.list_contacts()
-            logger.info("LINK-WA: calling _update_contacts_ui with %d contacts", len(self.contacts))
-            self.call_from_thread(self._update_contacts_ui, self.contacts)
-            self._resync_wa_history()
-            logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
+                self._finalize_wa_connect()
+                self._wa_connecting = False
+            else:
+                # WAHA is working but server-side contacts sync still in
+                # progress.  Launch a background poller worker — sleeps in
+                # a thread, never blocks the UI.
+                self._wa_poll_count = 0
+                self.run_worker(self._poll_wa_contacts, thread=True)
         except Exception as exc:
             logger.exception("LINK-WA: failed: %s", exc)
             self.call_from_thread(
@@ -1070,6 +1084,60 @@ class SignalTUI(App):
                 f"💬 WhatsApp backend unavailable: {exc}",
                 is_info=True,
             )
+            self._wa_connecting = False
+
+    def _poll_wa_contacts(self) -> None:
+        """Worker thread: poll WAHA until contacts are synced or timeout.
+
+        Sleeps in a background thread — zero UI impact.  Each iteration
+        calls ``_load_contacts()`` (single /chats HTTP, 5 s timeout max).
+        When contacts appear, finalises and posts the UI update.
+        """
+        deadline = time.monotonic() + 120.0
+        while time.monotonic() < deadline:
+            time.sleep(2.0)
+            self._wa_poll_count += 1
+            self.whatsapp_backend._load_contacts()
+            n = len(self.whatsapp_backend.contacts)
+            if n > 0:
+                logger.info(
+                    "LINK-WA: contacts synced after %d polls, wa_contacts=%d",
+                    self._wa_poll_count, n,
+                )
+                self._finalize_wa_connect()
+                self._wa_connecting = False
+                return
+            logger.info(
+                "LINK-WA: waiting for contacts (poll=%d)",
+                self._wa_poll_count,
+            )
+        logger.warning("LINK-WA: gave up waiting for contacts after 2 min")
+        self.call_from_thread(
+            self._add_message,
+            "⚠️ Impossibile sincronizzare i contatti WA. Controlla WAHA.",
+            is_info=True,
+        )
+        self._wa_connecting = False
+
+    def _finalize_wa_connect(self) -> None:
+        """Worker thread: history sync + cache rebuild + UI update.
+
+        Keeps heavy work (REST calls, SQLite writes) off the UI thread.
+        Only the final ``_update_contacts_ui`` is posted to the event loop.
+        """
+        self._resync_wa_history()
+        self._cache = {}
+        for b in self.manager.all():
+            for cid, msgs in b.cache.items():
+                self._cache[contact_cache_key(b.protocol, cid)] = list(msgs)
+        self._sync_last_ts()
+        self.contacts = self.manager.list_contacts()
+        logger.info(
+            "LINK-WA: calling _update_contacts_ui with %d contacts",
+            len(self.contacts),
+        )
+        self.call_from_thread(self._update_contacts_ui, self.contacts)
+        logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
 
 
     def _resync_wa_history(self) -> int:
