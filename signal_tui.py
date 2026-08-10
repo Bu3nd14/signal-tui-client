@@ -515,7 +515,8 @@ class SignalTUI(App):
         """Clear the status bar only if it still shows *expected*."""
         try:
             widget = self.query_one("#status-bar", Static)
-            if widget.renderable == expected:
+            current = str(widget.renderable)
+            if expected in current:
                 widget.update("")
         except Exception:
             pass
