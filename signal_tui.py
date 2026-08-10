@@ -470,8 +470,7 @@ class SignalTUI(App):
         # as soon as their backends are ready (independent workers below).
         self._polling_active = True
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
-        if not self.signal_backend.needs_pairing:
-            self.run_worker(self._connect_signal, exclusive=False, thread=True)
+        self.run_worker(self._connect_signal, exclusive=False, thread=True)
         if self.whatsapp_backend is not None and not self.whatsapp_backend.needs_pairing:
             self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
 
