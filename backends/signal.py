@@ -11,6 +11,7 @@ TUI is gathered here so the UI only deals with normalized ``ChatContact`` /
 from __future__ import annotations
 
 import asyncio
+import os
 import queue
 import re
 import subprocess
@@ -64,6 +65,30 @@ _RE_CONTACT_LINE = re.compile(
 )
 
 
+
+def _kill_existing_daemon(user_number: str) -> None:
+    """Kill any leftover signal-cli daemon for *user_number*.
+
+    Best-effort: failures are silently ignored so startup is never blocked.
+    """
+    import signal as _signal
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"signal-cli.*{user_number}.*daemon"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for pid_str in result.stdout.strip().splitlines():
+            pid = int(pid_str.strip())
+            try:
+                os.kill(pid, _signal.SIGTERM)
+            except OSError:
+                pass
+        # Give the daemon a moment to release the port.
+        time.sleep(1.5)
+    except Exception:
+        pass
+
+
 class SignalBackend(ChatBackend):
     """signal-cli backend adapted to the ``ChatBackend`` interface."""
 
@@ -105,57 +130,43 @@ class SignalBackend(ChatBackend):
     def _connect_sync(self) -> None:
         self.cache = self._load_protocol_cache()
 
-        if _is_daemon_running():
-            self._use_daemon = True
-            self._load_contacts_rpc()
-            # Fetch any pending messages that arrived while the TUI was
-            # disconnected.  The daemon's SSE stream is connection-scoped:
-            # messages received by the daemon during the gap will NOT be
-            # replayed via SSE.  Explicitly calling ``receive`` drains the
-            # daemon's internal queue (if any) and processes the envelopes
-            # through the normal pipeline so they land in the in-memory
-            # cache and are visible immediately after startup.
+        # Kill any leftover daemon from a previous session so we always
+        # start fresh with ``--receive-mode on-start``.  Otherwise the
+        # daemon's SSE stream is connection-scoped: messages received by
+        # the daemon during the TUI's absence have already been delivered
+        # (to nobody) and will never be replayed.  The only reliable way
+        # to fetch pending messages is a daemon restart.
+        _kill_existing_daemon(self.user_number)
+
+        self.daemon_proc = subprocess.Popen(
+            [
+                str(SIGNAL_CLI_PATH),
+                "-u", self.user_number,
+                "daemon",
+                "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",
+                "--receive-mode", "on-start",
+                "--no-receive-stdout",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        for _ in range(15):
             try:
-                pending = self._rpc.receive()
-                for envelope in pending:
-                    events = self.envelope_to_event(
-                        envelope.get("envelope", {})
-                    )
-                    for event in events:
-                        if event is not None:
-                            self._event_queue.put(event)
+                test = self._rpc._call("listContacts")
+                if "result" in test:
+                    self._use_daemon = True
+                    break
             except Exception:
-                pass  # best-effort: never block startup for this
+                pass
+            time.sleep(1)
         else:
-            self.daemon_proc = subprocess.Popen(
-                [
-                    str(SIGNAL_CLI_PATH),
-                    "-u", self.user_number,
-                    "daemon",
-                    "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",
-                    "--receive-mode", "on-start",
-                    "--no-receive-stdout",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            # Daemon not available in time → use subprocess fallback.
+            self._use_daemon = False
+            self._load_contacts_subprocess()
 
-            for _ in range(15):
-                try:
-                    test = self._rpc._call("listContacts")
-                    if "result" in test:
-                        self._use_daemon = True
-                        break
-                except Exception:
-                    pass
-                time.sleep(1)
-            else:
-                # Daemon not available in time → use subprocess fallback.
-                self._use_daemon = False
-                self._load_contacts_subprocess()
-
-            if self._use_daemon:
-                self._load_contacts_rpc()
+        if self._use_daemon:
+            self._load_contacts_rpc()
 
         # Start real-time SSE listener if daemon is available
         if self._use_daemon:
