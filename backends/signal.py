@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import asyncio
-import os
 import queue
 import re
 import subprocess
@@ -74,28 +73,6 @@ _RE_CONTACT_LINE = re.compile(
 
 
 
-def _kill_existing_daemon(user_number: str) -> None:
-    """Kill any leftover signal-cli daemon for *user_number*.
-
-    Best-effort: failures are silently ignored so startup is never blocked.
-    """
-    import signal as _signal
-    try:
-        result = subprocess.run(
-            ["pgrep", "-f", f"signal-cli.*{user_number}.*daemon"],
-            capture_output=True, text=True, timeout=5,
-        )
-        for pid_str in result.stdout.strip().splitlines():
-            pid = int(pid_str.strip())
-            try:
-                os.kill(pid, _signal.SIGTERM)
-            except OSError:
-                pass
-        # Give the daemon a moment to release the port.
-        time.sleep(1.5)
-    except Exception:
-        pass
-
 
 class SignalBackend(ChatBackend):
     """signal-cli backend adapted to the ``ChatBackend`` interface."""
@@ -138,79 +115,47 @@ class SignalBackend(ChatBackend):
     def _connect_sync(self) -> None:
         self.cache = self._load_protocol_cache()
 
-        # Kill any leftover daemon from a previous session so we always
-        # start fresh.  The daemon's SSE
-        # stream only delivers events received while a client is connected;
-        # messages that arrived during the TUI's absence are not replayed.
-        # The only reliable way to fetch pending messages is a daemon restart.
-        _kill_existing_daemon(self.user_number)
-
-        self.daemon_proc = subprocess.Popen(
-            [
-                str(SIGNAL_CLI_PATH),
-                "-u", self.user_number,
-                "daemon",
-                "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-
-        for _ in range(15):
-            try:
-                test = self._rpc._call("listContacts")
-                if "result" in test:
-                    self._use_daemon = True
-                    break
-            except Exception:
-                pass
-            time.sleep(1)
-        else:
-            # Daemon not available in time → use subprocess fallback.
-            self._use_daemon = False
-            self._load_contacts_subprocess()
-
-        if self._use_daemon:
+        if _is_daemon_running():
+            self._use_daemon = True
             self._load_contacts_rpc()
+        else:
+            self.daemon_proc = subprocess.Popen(
+                [
+                    str(SIGNAL_CLI_PATH),
+                    "-u", self.user_number,
+                    "daemon",
+                    "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",
+                    "--receive-mode", "on-start",
+                    "--no-receive-stdout",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            for _ in range(15):
+                try:
+                    test = self._rpc._call("listContacts")
+                    if "result" in test:
+                        self._use_daemon = True
+                        break
+                except Exception:
+                    pass
+                time.sleep(1)
+            else:
+                self._use_daemon = False
+                self._load_contacts_subprocess()
+
+            if self._use_daemon:
+                self._load_contacts_rpc()
 
         # Start real-time SSE listener if daemon is available
         if self._use_daemon:
             self._start_sse_listener()
-            # Drain any pending messages via RPC so they enter the normal
-            # pipeline (envelope_to_event → _event_queue → poll worker →
-            # ingest_message → SQLite).  The daemon's SSE only forwards
-            # events received WHILE a client is connected; messages that
-            # arrived before the SSE connection are not replayed.  The
-            # receive RPC fetches them and we push them through the same
-            # pipeline the poll worker uses.
-            try:
-                # Use a short timeout: the daemon was started without
-                # --receive-mode on-start, so the receive RPC is free
-                # to drain any pending messages.  If none are pending,
-                # messages (if any) are returned quickly.  Never block
-                # startup for more than 5 seconds.
-                logger.info("SIGNAL-RECEIVE: attempting RPC receive with timeout=5")
-                result = self._rpc._call("receive", {"timeout": 5})
-                logger.info("SIGNAL-RECEIVE: result type=%s keys=%s",
-                            type(result).__name__,
-                            list(result.keys()) if isinstance(result, dict) else "N/A")
-                if isinstance(result, dict) and "error" in result:
-                    logger.warning("SIGNAL-RECEIVE: RPC error: %s", result["error"])
-                pending = result.get("result", []) if isinstance(result, dict) else []
-                logger.info("SIGNAL-RECEIVE: pending_count=%d", len(pending))
-                for i, envelope in enumerate(pending):
-                    events = self.envelope_to_event(
-                        envelope.get("envelope", {})
-                    )
-                    logger.info("SIGNAL-RECEIVE: envelope[%d] events=%d", i, len(events))
-                    for event in events:
-                        if event is not None:
-                            logger.info("SIGNAL-RECEIVE: enqueuing event type=%s contact=%s",
-                                        event.type, event.contact_id)
-                            self._event_queue.put(event)
-                logger.info("SIGNAL-RECEIVE: done")
-            except Exception as e:
-                logger.warning("SIGNAL-RECEIVE: exception: %s", e)
+            # Attempt to drain pending messages via RPC.  The daemon's SSE
+            # only forwards events received while a client is connected.
+            # The receive RPC may return pending envelopes if the daemon
+            # has them queued.  Best-effort with a short timeout.
+            self._drain_pending_receive()
 
     async def disconnect(self) -> None:
         """Stop the SSE listener and polling.  The daemon itself is left running by design."""
@@ -695,6 +640,32 @@ class SignalBackend(ChatBackend):
         return updated
 
     # ─── Receive loop (SSE real-time) ───────────────────────────────────
+
+    def _drain_pending_receive(self) -> None:
+        """Call the receive RPC to drain pending messages into the event queue."""
+        try:
+            logger.info("SIGNAL-RECEIVE: attempting RPC receive with timeout=5")
+            result = self._rpc._call("receive", {"timeout": 5})
+            logger.info("SIGNAL-RECEIVE: result type=%s keys=%s",
+                        type(result).__name__,
+                        list(result.keys()) if isinstance(result, dict) else "N/A")
+            if isinstance(result, dict) and "error" in result:
+                logger.warning("SIGNAL-RECEIVE: RPC error: %s", result["error"])
+            pending = result.get("result", []) if isinstance(result, dict) else []
+            logger.info("SIGNAL-RECEIVE: pending_count=%d", len(pending))
+            for i, envelope in enumerate(pending):
+                events = self.envelope_to_event(
+                    envelope.get("envelope", {})
+                )
+                logger.info("SIGNAL-RECEIVE: envelope[%d] events=%d", i, len(events))
+                for event in events:
+                    if event is not None:
+                        logger.info("SIGNAL-RECEIVE: enqueuing event type=%s contact=%s",
+                                    event.type, event.contact_id)
+                        self._event_queue.put(event)
+            logger.info("SIGNAL-RECEIVE: done")
+        except Exception as e:
+            logger.warning("SIGNAL-RECEIVE: exception: %s", e)
 
     def _start_sse_listener(self) -> None:
         """Start the SSE listener in a dedicated daemon thread."""
