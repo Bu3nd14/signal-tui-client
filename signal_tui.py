@@ -346,13 +346,13 @@ class SignalTUI(App):
     #bottom-bar {
         dock: bottom;
         height: 1;
+        background: $footer-background;
     }
 
     #status-bar {
         width: 35;
         text-align: right;
         color: $footer-foreground;
-        background: $footer-background;
     }
 
     """
@@ -457,6 +457,9 @@ class SignalTUI(App):
         # WhatsApp link guard: prevents duplicate concurrent connect workers.
         self._wa_connecting: bool = False
 
+        # Status bar auto-clear timer.
+        self._status_timer: Timer | None = None
+
     @property
     def chat_log(self) -> Vertical:
         """The ``#chat-log`` widget, lazily cached on first access."""
@@ -509,18 +512,23 @@ class SignalTUI(App):
         """Update the status bar (bottom-right, thread-safe).
 
         Clears automatically after *duration* seconds (0 = persistent).
+        New messages cancel the previous auto-clear timer.
         """
         try:
             self.query_one("#status-bar", Static).update(text)
+            if self._status_timer is not None:
+                self._status_timer.stop()
+                self._status_timer = None
             if duration > 0:
-                self.set_timer(duration, self._status_clear)
+                self._status_timer = self.set_timer(duration, self._status_clear)
         except Exception:
-            pass  # widget not mounted yet
+            pass
 
     def _status_clear(self) -> None:
         """Clear the status bar."""
         try:
             self.query_one("#status-bar", Static).update("")
+            self._status_timer = None
         except Exception:
             pass
 
