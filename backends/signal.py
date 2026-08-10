@@ -113,17 +113,19 @@ class SignalBackend(ChatBackend):
                 stderr=subprocess.DEVNULL,
             )
 
+            # Start SSE listener immediately — the daemon's HTTP server
+            # comes up before it's fully initialized.  The SSE listener
+            # has built-in retry logic: it reconnects every 5s on failure.
+            # This way we connect as soon as the HTTP server is ready,
+            # capturing pending messages that --receive-mode on-start
+            # downloads in the first few seconds of daemon startup.
+            self._start_sse_listener()
+
             for _ in range(15):
                 try:
                     test = self._rpc._call("listContacts")
                     if "result" in test:
                         self._use_daemon = True
-                        # Start SSE immediately — the daemon with
-                        # --receive-mode on-start is already downloading
-                        # pending messages and will forward them via SSE
-                        # as soon as a client connects.  The sooner we
-                        # connect, the fewer messages we miss.
-                        self._start_sse_listener()
                         break
                 except Exception:
                     pass
