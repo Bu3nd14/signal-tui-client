@@ -10,6 +10,7 @@ TUI is gathered here so the UI only deals with normalized ``ChatContact`` /
 
 from __future__ import annotations
 
+import logging
 import asyncio
 import os
 import queue
@@ -25,6 +26,13 @@ from models import (
 )
 
 from .base import ChatBackend
+
+logger = logging.getLogger(__name__)
+_fh = logging.FileHandler("/tmp/signal-receive.log", mode="w")
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logger.addHandler(_fh)
+logger.setLevel(logging.DEBUG)
 
 from backend import (
     Contact,
@@ -181,17 +189,28 @@ class SignalBackend(ChatBackend):
                 # to drain any pending messages.  If none are pending,
                 # messages (if any) are returned quickly.  Never block
                 # startup for more than 5 seconds.
+                logger.info("SIGNAL-RECEIVE: attempting RPC receive with timeout=5")
                 result = self._rpc._call("receive", {"timeout": 5})
+                logger.info("SIGNAL-RECEIVE: result type=%s keys=%s",
+                            type(result).__name__,
+                            list(result.keys()) if isinstance(result, dict) else "N/A")
+                if isinstance(result, dict) and "error" in result:
+                    logger.warning("SIGNAL-RECEIVE: RPC error: %s", result["error"])
                 pending = result.get("result", []) if isinstance(result, dict) else []
-                for envelope in pending:
+                logger.info("SIGNAL-RECEIVE: pending_count=%d", len(pending))
+                for i, envelope in enumerate(pending):
                     events = self.envelope_to_event(
                         envelope.get("envelope", {})
                     )
+                    logger.info("SIGNAL-RECEIVE: envelope[%d] events=%d", i, len(events))
                     for event in events:
                         if event is not None:
+                            logger.info("SIGNAL-RECEIVE: enqueuing event type=%s contact=%s",
+                                        event.type, event.contact_id)
                             self._event_queue.put(event)
-            except Exception:
-                pass  # best-effort: may fail if daemon is already receiving
+                logger.info("SIGNAL-RECEIVE: done")
+            except Exception as e:
+                logger.warning("SIGNAL-RECEIVE: exception: %s", e)
 
     async def disconnect(self) -> None:
         """Stop the SSE listener and polling.  The daemon itself is left running by design."""
