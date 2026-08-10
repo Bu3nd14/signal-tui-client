@@ -170,6 +170,30 @@ class SignalBackend(ChatBackend):
         # Start real-time SSE listener if daemon is available
         if self._use_daemon:
             self._start_sse_listener()
+            # Drain any pending messages via RPC so they enter the normal
+            # pipeline (envelope_to_event → _event_queue → poll worker →
+            # ingest_message → SQLite).  The daemon's SSE only forwards
+            # events received WHILE a client is connected; messages that
+            # arrived before the SSE connection are not replayed.  The
+            # receive RPC fetches them and we push them through the same
+            # pipeline the poll worker uses.
+            try:
+                # Use a short timeout: if the daemon is already receiving
+                # (--receive-mode on-start session still active), the RPC
+                # returns an error immediately.  If it finished, pending
+                # messages (if any) are returned quickly.  Never block
+                # startup for more than 5 seconds.
+                result = self._rpc._call("receive", {"timeout": 5})
+                pending = result.get("result", []) if isinstance(result, dict) else []
+                for envelope in pending:
+                    events = self.envelope_to_event(
+                        envelope.get("envelope", {})
+                    )
+                    for event in events:
+                        if event is not None:
+                            self._event_queue.put(event)
+            except Exception:
+                pass  # best-effort: may fail if daemon is already receiving
 
     async def disconnect(self) -> None:
         """Stop the SSE listener and polling.  The daemon itself is left running by design."""
