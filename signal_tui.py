@@ -351,8 +351,8 @@ class SignalTUI(App):
     #status-bar {
         width: 35;
         text-align: right;
-        color: $text;
-        background: $accent;
+        color: $footer-foreground;
+        background: $footer-background;
     }
 
     """
