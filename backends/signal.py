@@ -670,11 +670,13 @@ class SignalBackend(ChatBackend):
                             self._event_queue.put(event)
             except Exception:
                 pass
-            # Brief pause before reconnect
+            # Brief pause before reconnect — keep it short (1s)
+            # so we don't miss pending messages from a fresh daemon
+            # startup with --receive-mode on-start.
             for _ in range(10):
                 if not self._polling_active:
                     return
-                time.sleep(0.5)
+                time.sleep(0.1)
 
     async def receive(self):
         """Yield normalized ``ChatEvent`` objects from the SSE queue.
