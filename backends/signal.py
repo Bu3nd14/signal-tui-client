@@ -131,7 +131,7 @@ class SignalBackend(ChatBackend):
         self.cache = self._load_protocol_cache()
 
         # Kill any leftover daemon from a previous session so we always
-        # start fresh with ``--receive-mode on-start``.  The daemon's SSE
+        # start fresh.  The daemon's SSE
         # stream only delivers events received while a client is connected;
         # messages that arrived during the TUI's absence are not replayed.
         # The only reliable way to fetch pending messages is a daemon restart.
@@ -143,8 +143,6 @@ class SignalBackend(ChatBackend):
                 "-u", self.user_number,
                 "daemon",
                 "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",
-                "--receive-mode", "on-start",
-                "--no-receive-stdout",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -178,9 +176,9 @@ class SignalBackend(ChatBackend):
             # receive RPC fetches them and we push them through the same
             # pipeline the poll worker uses.
             try:
-                # Use a short timeout: if the daemon is already receiving
-                # (--receive-mode on-start session still active), the RPC
-                # returns an error immediately.  If it finished, pending
+                # Use a short timeout: the daemon was started without
+                # --receive-mode on-start, so the receive RPC is free
+                # to drain any pending messages.  If none are pending,
                 # messages (if any) are returned quickly.  Never block
                 # startup for more than 5 seconds.
                 result = self._rpc._call("receive", {"timeout": 5})
