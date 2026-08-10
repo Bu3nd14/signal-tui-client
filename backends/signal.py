@@ -118,6 +118,12 @@ class SignalBackend(ChatBackend):
                     test = self._rpc._call("listContacts")
                     if "result" in test:
                         self._use_daemon = True
+                        # Start SSE immediately — the daemon with
+                        # --receive-mode on-start is already downloading
+                        # pending messages and will forward them via SSE
+                        # as soon as a client connects.  The sooner we
+                        # connect, the fewer messages we miss.
+                        self._start_sse_listener()
                         break
                 except Exception:
                     pass
@@ -130,7 +136,10 @@ class SignalBackend(ChatBackend):
             if self._use_daemon:
                 self._load_contacts_rpc()
 
-        # Start real-time SSE listener if daemon is available
+        # Start real-time SSE listener if daemon is available.
+        # For fresh starts it was already started above (as soon as
+        # the daemon responded).  For already-running daemons, start
+        # it here.  _start_sse_listener is idempotent.
         if self._use_daemon:
             self._start_sse_listener()
 
