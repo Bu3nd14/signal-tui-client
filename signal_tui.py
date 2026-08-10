@@ -499,7 +499,7 @@ class SignalTUI(App):
         self._polling_active = False
         # No flush needed — SQLite writes are incremental
 
-    def _status(self, text: str, duration: float = 0.0) -> None:
+    def _status(self, text: str, duration: float = 3.0) -> None:
         """Update the status bar (bottom-right, thread-safe).
 
         Clears automatically after *duration* seconds (0 = persistent).
@@ -1049,7 +1049,7 @@ class SignalTUI(App):
                 self._status, f"✅ Signal: {len(contacts)} contatti",
             )
             self.call_from_thread(
-                self._status, "💡 Select a contact to view chat", 3.0
+                self._status, "💡 Select a contact to view chat"
             )
             if sb._use_daemon:
                 self.call_from_thread(
@@ -1821,7 +1821,7 @@ class SignalTUI(App):
         else:
             self._loaded_all = True
             self.call_from_thread(
-                self._status, "No message history for this contact", 3.0
+                self._status, "No message history for this contact"
             )
 
     def _add_load_more_widget(self, remaining: int):
@@ -2048,7 +2048,7 @@ class SignalTUI(App):
             )
 
         self._loaded_all = True
-        self._status(f"📋 Loaded all {len(cached)} messages", 3.0)
+        self._status(f"📋 Loaded all {len(cached)} messages")
 
     def _poll_worker(self):
         """Thread worker that polls the backend receive loop.
@@ -2430,7 +2430,7 @@ class SignalTUI(App):
             url = serve_text_as_file(text, filename=fname)
 
         if url.startswith("ERROR:"):
-            self._status(f"❌ {url}", 3.0)
+            self._status(f"❌ {url}")
         else:
             # Mount a clickable download link widget
             chat_log = self.chat_log
@@ -2451,7 +2451,6 @@ class SignalTUI(App):
         """
         self._status(
             "📋 URL ready — select it above and press Cmd+C / Ctrl+C to copy",
-            3.0,
         )
 
     # ─── Image modal ─────────────────────────────────────────────────────────
@@ -2485,7 +2484,7 @@ class SignalTUI(App):
         if att_path:
             self.push_screen(ImageModalScreen(att_path))
         else:
-            self._status("❌ Image file not found on server", 3.0)
+            self._status("❌ Image file not found on server")
 
     # ─── Sending messages ─────────────────────────────────────────────────────
 
@@ -2499,7 +2498,7 @@ class SignalTUI(App):
             return
 
         if not self.selected_contact:
-            self._status("❌ Select a contact first!", 3.0)
+            self._status("❌ Select a contact first!")
             return
 
         # Hide completion if visible
