@@ -464,10 +464,11 @@ class SignalTUI(App):
         # as soon as their backends are ready (independent workers below).
         self._polling_active = True
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
-        # Only connect backends that are already linked (skip slow daemon
-        # startup for unlinked accounts — they connect after Ctrl+L link).
-        if not self.signal_backend.needs_pairing:
-            self.run_worker(self._connect_signal, exclusive=False, thread=True)
+        # Always connect Signal: _connect_sync handles daemon startup
+        # (or subprocess fallback if unlinked).  The daemon is now killed
+        # and restarted on every connect to ensure --receive-mode on-start
+        # downloads pending messages.
+        self.run_worker(self._connect_signal, exclusive=False, thread=True)
         if self.whatsapp_backend is not None and not self.whatsapp_backend.needs_pairing:
             self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
 
