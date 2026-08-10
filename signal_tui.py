@@ -340,6 +340,7 @@ class SignalTUI(App):
 
     Footer {
         dock: none;
+        width: 1fr;
     }
 
     #bottom-bar {
@@ -348,10 +349,10 @@ class SignalTUI(App):
     }
 
     #status-bar {
-        width: 30;
+        width: 35;
         text-align: right;
-        color: $text-muted;
-        background: $surface;
+        color: $text;
+        background: $accent;
     }
 
     """
