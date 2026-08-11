@@ -1034,12 +1034,12 @@ class SignalTUI(App):
         """Connect Signal backend and update UI (runs in worker thread)."""
         try:
             self.call_from_thread(
-                self._status, "⏳ Signal: avvio daemon..."
+                self._status, "⏳ Signal: avvio daemon...", 0
             )
             sb = self.signal_backend
             logger.info("LINK-SIG: start, daemon_proc=%s", sb.daemon_proc is not None)
             self.call_from_thread(
-                self._status, "⏳ Signal: attesa connessione..."
+                self._status, "⏳ Signal: attesa connessione...", 0
             )
             sb._connect_sync()
             logger.info("LINK-SIG: connect_sync done, use_daemon=%s", sb._use_daemon)
@@ -1057,23 +1057,23 @@ class SignalTUI(App):
             self.call_from_thread(self._update_contacts_ui, contacts)
             logger.info("LINK-SIG: done, contacts=%d", len(contacts))
             self.call_from_thread(
-                self._status, f"✅ Signal: {len(contacts)} contatti",
+                self._status, f"✅ Signal: {len(contacts)} contatti", 0
             )
             self.call_from_thread(
                 self._status, "💡 Select a contact to view chat"
             )
             if sb._use_daemon:
                 self.call_from_thread(
-                    self._status, "✅ Signal: daemon attivo",
+                    self._status, "✅ Signal: daemon attivo", 0
                 )
             else:
                 self.call_from_thread(
-                    self._status, "⚠️ Signal: daemon non disponibile (subprocess)",
+                    self._status, "⚠️ Signal: daemon non disponibile (subprocess)", 0
                 )
         except Exception as e:
             logger.exception("LINK-SIG: failed: %s", e)
             self.call_from_thread(
-                self._status, f"❌ Signal: errore — {e}",
+                self._status, f"❌ Signal: errore — {e}", 0
             )
 
     def _connect_whatsapp(self) -> None:
@@ -1092,7 +1092,7 @@ class SignalTUI(App):
             logger.info("LINK-WA: start")
             if self.whatsapp_backend.needs_pairing:
                 self.call_from_thread(
-                    self._status, "⏳ WAHA: attesa pairing..."
+                    self._status, "⏳ WAHA: attesa pairing...", 0
                 )
             self.whatsapp_backend.connect_sync()
             n = len(self.whatsapp_backend.contacts)
@@ -1116,7 +1116,7 @@ class SignalTUI(App):
         except Exception as exc:
             logger.exception("LINK-WA: failed: %s", exc)
             self.call_from_thread(
-                self._status, f"❌ WAHA: non disponibile — {exc}",
+                self._status, f"❌ WAHA: non disponibile — {exc}", 0
             )
             self._wa_connecting = False
 
@@ -1124,7 +1124,7 @@ class SignalTUI(App):
         """Worker thread: poll WAHA until contacts are synced or timeout."""
         poll_count = 0
         deadline = time.monotonic() + 120.0
-        self.call_from_thread(self._status, "🔄 WAHA: sync contatti...")
+        self.call_from_thread(self._status, "🔄 WAHA: sync contatti...", 0)
         while time.monotonic() < deadline:
             time.sleep(2.0)
             poll_count += 1
@@ -1136,20 +1136,20 @@ class SignalTUI(App):
                     poll_count, n,
                 )
                 self.call_from_thread(
-                    self._status, f"📥 WAHA: {n} contatti caricati",
+                    self._status, f"📥 WAHA: {n} contatti caricati", 0,
                 )
                 break
             logger.info("LINK-WA: waiting (poll=%d)", poll_count)
         else:
             logger.warning("LINK-WA: timeout after 2 min")
             self.call_from_thread(
-                self._status, "⚠️ WAHA: timeout contatti",
+                self._status, "⚠️ WAHA: timeout contatti", 0,
             )
             self._wa_connecting = False
             return
 
         # History sync (in worker, no UI block)
-        self.call_from_thread(self._status, "⏳ WAHA: sync cronologia...")
+        self.call_from_thread(self._status, "⏳ WAHA: sync cronologia...", 0)
         self._resync_wa_history()
         self._cache = {}
         for b in self.manager.all():
@@ -1162,7 +1162,7 @@ class SignalTUI(App):
             len(self.contacts),
         )
         self.call_from_thread(self._update_contacts_ui, self.contacts)
-        self.call_from_thread(self._status, f"✅ WAHA: {n} contatti pronti")
+        self.call_from_thread(self._status, f"✅ WAHA: {n} contatti pronti", 0)
         logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
         self._wa_connecting = False
 
@@ -1214,7 +1214,7 @@ class SignalTUI(App):
             try:
                 self.call_from_thread(
                     self._status,
-                    f"✅ WAHA: cronologia sincronizzata per {n} chat",
+                    f"✅ WAHA: cronologia sincronizzata per {n} chat", 0
                 )
             except Exception:
                 pass  # il report è solo informativo
@@ -2628,7 +2628,7 @@ class SignalTUI(App):
         if backend is None:
             self.call_from_thread(
                 self._status,
-                f"❌ No backend for protocol: {contact.protocol}",
+                f"❌ No backend for protocol: {contact.protocol}", 0
             )
             return
 
@@ -2643,7 +2643,7 @@ class SignalTUI(App):
         except Exception as e:
             self.call_from_thread(
                 self._status,
-                f"❌ Send error: {e}",
+                f"❌ Send error: {e}", 0
             )
 
 
