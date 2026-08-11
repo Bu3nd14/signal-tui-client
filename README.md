@@ -47,7 +47,7 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 - **Docker + Docker Compose** — required for the **WhatsApp** backend (runs the WAHA container).
   Skip this if you only use Signal.
 - **catimg** — for rendering images in the terminal (optional; falls back to text placeholder if missing)
-- A linked account — Signal (via `link_account.py`) and/or WhatsApp (via `link_whatsapp.py`)
+- A linked account — Signal (via `link_account.py` or TUI `Ctrl+L`) and/or WhatsApp (via `link_whatsapp.py` or TUI `Ctrl+L`)
 
 > **Note:** A Python virtual environment (venv) is **recommended** but not strictly required. See [Virtual environment](#virtual-environment-optional-but-recommended).
 
@@ -215,6 +215,10 @@ python3 link_whatsapp.py         # prints a QR to scan with WhatsApp
 
 > Tip: `link_whatsapp.py` **auto-restarts** inside `.venv/bin/python` if you run
 > it with the system python, so `python3 link_whatsapp.py` works either way.
+>
+> **Alternatively**, link directly from the TUI: launch the app and press `Ctrl+L`,
+> select WhatsApp, and scan the QR code. The TUI handles the entire flow including
+> waiting for server-side contacts sync with a progress indicator.
 
 
 
@@ -249,13 +253,23 @@ This downloads the latest JVM build, extracts it into `./bin/`, and removes the 
 
 ## Device Linking
 
-Before using the client, you need to link your Signal account:
+Before using the client, you need to link your accounts. You can do this
+either from the command line or directly from the TUI.
+
+### From the command line
 
 ```bash
-python3 link_account.py
+python3 link_account.py          # Signal
+python3 link_whatsapp.py         # WhatsApp
 ```
 
-This will display a QR code. Scan it with the Signal app on your phone (Settings → Linked Devices → Link New Device).
+Each script displays a QR code. Scan it with the respective app on your phone.
+
+### From the TUI
+
+Launch the app and press `Ctrl+L`, select Signal or WhatsApp, enter your
+phone number (Signal) and device name, then scan the QR code. The TUI
+handles the entire linking flow with a progress indicator in the status bar.
 
 ## Usage
 
@@ -375,8 +389,8 @@ signal-tui-client/
 ├── emoji_picker.py          # Emoji picker modal screen and auto-completion widget (Ctrl+E)
 ├── emoji_data.py            # Emoji database (categories, aliases, search index)
 ├── contact_picker.py        # Contact search picker modal screen (Ctrl+S)
-├── link_account.py          # Signal device linking script (QR code)
-├── link_whatsapp.py         # WhatsApp device linking script (QR code)
+├── link_account.py          # Signal device linking script (QR code — or use Ctrl+L in TUI)
+├── link_whatsapp.py         # WhatsApp device linking script (QR code — or use Ctrl+L in TUI)
 ├── migrate_cache_sqlite.py  # One-shot migration: JSON cache → SQLite
 ├── migrate_cache_protocol.py# One-shot migration: add protocol field to cache
 ├── migrate_cache_status.py  # One-shot migration: add status field to cache
