@@ -1055,10 +1055,8 @@ class SignalTUI(App):
             self.contacts = contacts
             logger.info("LINK-SIG: calling _update_contacts_ui with %d contacts", len(contacts))
             self.call_from_thread(self._update_contacts_ui, contacts)
+            self.call_from_thread(self._status, "")
             logger.info("LINK-SIG: done, contacts=%d", len(contacts))
-            self.call_from_thread(
-                self._status, f"✅ Signal: {len(contacts)} contatti", 0
-            )
             self.call_from_thread(
                 self._status, "💡 Select a contact to view chat"
             )
@@ -1162,7 +1160,7 @@ class SignalTUI(App):
             len(self.contacts),
         )
         self.call_from_thread(self._update_contacts_ui, self.contacts)
-        self.call_from_thread(self._status, f"✅ WAHA: {n} contatti pronti", 0)
+        self.call_from_thread(self._status, "")
         logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
         self._wa_connecting = False
 
@@ -1184,6 +1182,7 @@ class SignalTUI(App):
             len(self.contacts),
         )
         self.call_from_thread(self._update_contacts_ui, self.contacts)
+        self.call_from_thread(self._status, "")
         logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
 
 
