@@ -1,7 +1,7 @@
 # Test Report — Signal TUI Client
 
-**Data:** 2026-08-08
-**Git commit:** `ad09654` (master)
+**Data:** 2026-08-10
+**Git commit:** `6e01fcd` (master)
 **Python:** 3.12.3
 **Stato:** ✅ 396/396 test superati (+72 Telegram test in `Telegram/`)
 
@@ -40,6 +40,14 @@
 ---
 
 ## Novità — Ultimi aggiornamenti
+
+### WhatsApp Link Profiling (branch `opt/wa-link-profile`, merged)
+- **list_contacts**: usa solo `/chats` con timeout 5s (niente fallback su `/contacts` rotto)
+- **_load_contacts**: chiamata singola, no retry loop
+- **_connect_whatsapp**: guardia anti-duplicati `_wa_connecting`
+- **_poll_wa_contacts**: worker thread dedicato per polling post-link, non bloccante
+- **is_working** property su `WhatsAppBackend`: avvio solo se sessione WORKING
+- **Status bar**: tutti i messaggi di sistema in `#status-bar` (stessa riga del Footer), auto-clear 3s o persistenti
 
 ### Lazy Contact Render (10 commit, `87f52c5..2ba5e05`)
 - **Progressive render**: contatti caricati 50 per frame via `set_timer`, UI mai bloccata
