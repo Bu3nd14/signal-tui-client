@@ -1130,7 +1130,7 @@ class SignalTUI(App):
 
         self._sync_last_ts()
         self._sort_contacts()
-        self._render_contact_list(self._filtered_contacts())
+        self._render_contact_list(list(self.contacts))
         self._update_unread_badges()
 
         n = len(backend.contacts)
@@ -1325,7 +1325,7 @@ class SignalTUI(App):
         filter) and does not touch the chat log.  Runs in the UI thread.
         """
         self._sort_contacts()
-        self._render_contact_list(self._filtered_contacts())
+        self._render_contact_list(list(self.contacts))
 
     def _sync_last_ts(self):
         """Recover ``last_message_ts`` for every contact from the local cache.
@@ -1376,26 +1376,31 @@ class SignalTUI(App):
         only sets ``display=True`` / ``display=False`` on the children that
         are already in the DOM.  Called on every Ctrl+W cycle instead of a
         full rebuild, keeping the UI responsive even with 600+ contacts.
+
+        The DOM must always hold the FULL contact set (``_render_contact_list``
+        renders ``self.contacts``); this method only decides what's visible.
+        It keeps the highlight on the selected contact while it's still
+        visible under the filter, falling back to the first visible row.
         """
         contact_list = self.query_one("#contact-list", ListView)
-
-        if self._protocol_filter == "all":
-            visible = {c.cache_key for c in self.contacts}
-        else:
-            visible = {
-                c.cache_key for c in self.contacts
-                if c.protocol == self._protocol_filter
-            }
+        visible = {c.cache_key for c in self._filtered_contacts()}
 
         first_visible: int | None = None
+        selected_index: int | None = None
         for i, child in enumerate(contact_list.children):
             key: str | None = getattr(child, "_contact_id", None)
             show = key in visible
             child.display = show
-            if show and first_visible is None:
-                first_visible = i
+            if show:
+                if first_visible is None:
+                    first_visible = i
+                if self.selected_contact is not None and key == self.selected_contact.cache_key:
+                    selected_index = i
 
-        if first_visible is not None:
+        if selected_index is not None:
+            # Keep the highlight on the still-visible selected contact.
+            contact_list.index = selected_index
+        elif first_visible is not None:
             contact_list.index = first_visible
         elif self.selected_contact is not None:
             # No contact visible under this filter — deselect.
@@ -1428,6 +1433,7 @@ class SignalTUI(App):
         loop so the UI never freezes.
         """
         contact_list = self.query_one("#contact-list", ListView)
+        visible = {c.cache_key for c in self._filtered_contacts()}
         start = self._render_chunk_index
         end = min(start + self._render_chunk_size, len(self._pending_contacts))
         chunk = self._pending_contacts[start:end]
@@ -1438,6 +1444,7 @@ class SignalTUI(App):
             item._contact_id = c.cache_key
             item._label_text = text
             item.add_class(self._protocol_class(c))
+            item.display = c.cache_key in visible
             contact_list.append(item)
             self._contact_widgets[c.cache_key] = item
 
@@ -1446,16 +1453,18 @@ class SignalTUI(App):
             self._render_timer = self.set_timer(0.05, self._render_next_chunk)
         else:
             self._render_timer = None
-            # All chunks rendered — restore selection highlight if a contact
-            # was already selected before this progressive render started.
-            if self.selected_contact is not None:
-                item = self._contact_widgets.get(self.selected_contact.cache_key)
-                if item is not None:
-                    contact_list.index = contact_list.children.index(item)
+            # All chunks rendered — re-apply the filter's visibility and restore
+            # the selection highlight (or fall back to the first visible row).
+            self._apply_contact_visibility()
 
     def _render_contact_list(self, filtered: list[ChatContact]) -> None:
         """Renderizza la lista contatti, aggiornandola *in-place* quando la
         composizione/ordine non cambia.
+
+        ``filtered`` è SEMPRE la lista completa (``list(self.contacts)``): il
+        DOM deve contenere tutti i contatti; il filtro protocollo viene poi
+        applicato solo via ``_apply_contact_visibility`` (toggle ``display``).
+        In questo modo Ctrl+W non perde mai i contatti degli altri protocolli.
 
         Textual, dopo un ``clear()``+ri-append, ricostruisce man mano gli item:
         con ~350 contatti e un refresh frequente (poll ~1s) questo smonta/rimonta
@@ -1542,8 +1551,9 @@ class SignalTUI(App):
             # stato iniziale) -> rebuild progressivo (chunked, non blocca la UI).
             self._start_progressive_render(filtered)
 
-        if self.selected_contact and self.selected_contact in filtered:
-            contact_list.index = filtered.index(self.selected_contact)
+        # Re-apply the active protocol filter so newly added items get the
+        # right ``display`` and the highlight lands on the correct row.
+        self._apply_contact_visibility()
 
 
 
@@ -1652,22 +1662,26 @@ class SignalTUI(App):
 
 
         # Highlight the contact in the left list and remove the *N badge.
-        # The ListView holds only the filtered/visible contacts, so we must
-        # index it by the position in that filtered list — not in self.contacts
-        # (a contact picked from the picker may be beyond the visible subset,
-        # which used to raise IndexError: list index out of range).
+        # The ListView keeps ALL contacts in the DOM after the Ctrl+W filter
+        # (hidden ones have ``display=False``), so we must locate the row via
+        # its ListItem (``_contact_widgets``) and index it by its real position
+        # in ``contact_list.children`` — NOT by its position in the filtered
+        # list (that only matches when the filter is "all").
         contact_list = self.query_one("#contact-list", ListView)
-        visible = self._filtered_contacts()
-        try:
-            idx = visible.index(contact)
-            contact_list.index = idx
-            if idx < len(contact_list.children):
-                item = contact_list.children[idx]
-                item.children[0].update(self._contact_label(self.selected_contact))
-        except ValueError:
-            # Contact is filtered out of the visible list; still select it but
-            # don't try to highlight a row that isn't rendered.
-            pass
+        item = self._contact_widgets.get(self.selected_contact.cache_key)
+        if item is not None:
+            # Refresh the row label (removes the *N unread badge for this contact).
+            label = item.children[0] if item.children else None
+            if label is not None:
+                label.update(self._contact_label(self.selected_contact))
+            # Only highlight when the row is currently visible (a contact picked
+            # from the picker may be filtered out of the active list).
+            if getattr(item, "display", True):
+                try:
+                    contact_list.index = contact_list.children.index(item)
+                except ValueError:
+                    # Item not currently mounted (e.g. mid progressive render).
+                    pass
 
         # Return focus to the message input so the user can start typing
         # immediately after selecting a contact.
@@ -2360,7 +2374,7 @@ class SignalTUI(App):
 
         # Re-sort and rebuild the list
         self._sort_contacts()
-        self._render_contact_list(self._filtered_contacts())
+        self._render_contact_list(list(self.contacts))
 
     # ─── Reply-to (quote) handling ───────────────────────────────────────────
 

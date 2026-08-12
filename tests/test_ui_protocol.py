@@ -121,23 +121,30 @@ class TestProtocolFilter:
         assert binding is not None
         assert binding.priority is True
 
-    def test_select_contact_no_crash_when_beyond_visible_list(self):
-        """Selezionando un contatto che è oltre la lista visibile/filtrata non
-        deve più sollevare IndexError (era: contact_list.children[index] con
-        l'indice globale di self.contacts fuori range)."""
+    def test_select_contact_no_crash_when_filtered_out(self):
+        """Selezionando un contatto fuori dal filtro attivo (es. dal picker)
+        non deve sollevare errori: la selezione si aggiorna ma NON si
+        evidenzia una riga nascosta."""
         app = _make_app()
         # 3 contatti: 2 signal, 1 whatsapp
         app.contacts = [_signal("+1"), _signal("+2"), _whatsapp()]
         app._protocol_filter = "signal"
-        target = app.contacts[1]  # secondo Signal, visibile nel filtro signal
+        target = app.contacts[2]  # WhatsApp, fuori dal filtro signal
 
-        # ListView finta: contiene solo 2 children (i soli signal del filtro).
         class _Item:
-            def __init__(self):
+            def __init__(self, cid, display=True):
+                self._contact_id = cid
+                self.display = display
                 self.children = [MagicMock()]
+        items = [
+            _Item(app.contacts[0].cache_key),
+            _Item(app.contacts[1].cache_key),
+            _Item(target.cache_key, display=False),
+        ]
         fake_list = MagicMock()
-        fake_list.index = 0
-        fake_list.children = [_Item(), _Item()]
+        fake_list.index = 1
+        fake_list.children = items
+        app._contact_widgets = {it._contact_id: it for it in items}
 
         # Patch le operazioni pesanti di _select_contact.
         app.query_one = MagicMock(return_value=fake_list)
@@ -152,27 +159,30 @@ class TestProtocolFilter:
         app.run_worker = MagicMock()
         app.run_worker.return_value = None
 
-        # Non deve sollevare IndexError.
+        # Non deve sollevare errori.
         app._select_contact(target)
         assert app.selected_contact == target
-        # L'evidenziazione deve usare *visible.index* (indice nel filtro), non il
-        # globale: per target (2° signal) il visible.index è 1.
-        fake_list.index = 1
+        # Riga nascosta: nessuna evidenziazione (index invariato).
         assert fake_list.index == 1
 
     def test_select_contact_ok_without_filter_when_visible(self):
-        """Senza filtro, il contatto visibile viene evidenziato correttamente."""
+        """Senza filtro, il contatto visibile viene evidenziato alla sua
+        posizione reale (via ``_contact_widgets``) e il label aggiornato."""
         app = _make_app()
         app.contacts = [_signal("+1"), _signal("+2")]
         target = app.contacts[1]
 
         class _Item:
-            def __init__(self):
+            def __init__(self, cid):
+                self._contact_id = cid
+                self.display = True
                 self.children = [MagicMock()]  # con update attivo
         fake_list = MagicMock()
         fake_list.index = 0
-        item = _Item()
-        fake_list.children = [_Item(), item]
+        first = _Item(app.contacts[0].cache_key)
+        item = _Item(target.cache_key)
+        fake_list.children = [first, item]
+        app._contact_widgets = {it._contact_id: it for it in fake_list.children}
         app.query_one = MagicMock(return_value=fake_list)
         app._add_message = MagicMock()
         app._clear_chat = MagicMock()
@@ -184,9 +194,91 @@ class TestProtocolFilter:
         app.run_worker.return_value = None
 
         app._select_contact(target)
-        # visible = tutti (no filtro): target è index 1 -> evidenziato e update chiamato.
+        # Evidenziata la riga reale (index 1) e aggiornato il label.
         assert fake_list.index == 1
         item.children[0].update.assert_called_once()
+
+    def test_select_contact_highlights_correct_row_with_hidden_contacts(self):
+        """Con contatti nascosti interleaved (Ctrl+W), evidenzia la riga REALE
+        del contatto e NON corrompe il label di un altro contatto."""
+        app = _make_app()
+        app.contacts = [_signal("+1", "Mario"), _whatsapp(), _signal("+2", "Luigi")]
+        app._protocol_filter = "signal"
+        target = app.contacts[2]  # Luigi (2° Signal, posizione reale 2)
+
+        class _Item:
+            def __init__(self, cid):
+                self._contact_id = cid
+                self.display = True
+                self.children = [MagicMock()]
+        items = [_Item(c.cache_key) for c in app.contacts]
+        # WhatsApp è nascosto sotto il filtro signal.
+        items[1].display = False
+        fake_list = MagicMock()
+        fake_list.index = 0
+        fake_list.children = items
+        app._contact_widgets = {it._contact_id: it for it in items}
+        app.query_one = MagicMock(return_value=fake_list)
+        app._add_message = MagicMock()
+        app._clear_chat = MagicMock()
+        app._cancel_reply = MagicMock()
+        app._load_messages_worker = MagicMock()
+        app.manager = MagicMock()
+        app.manager.get.return_value = MagicMock()
+        app.run_worker = MagicMock()
+        app.run_worker.return_value = None
+
+        app._select_contact(target)
+        # Evidenziata la riga REALE (2), non la posizione filtrata (1).
+        assert fake_list.index == 2
+        # Il label aggiornato è quello di Luigi, non quello di Anna.
+        items[2].children[0].update.assert_called_once()
+        items[1].children[0].update.assert_not_called()
+
+    def test_apply_contact_visibility_preserves_selected_highlight(self):
+        """Il filtro (Ctrl+W) mantiene l'evidenziazione sul contatto selezionato
+        se ancora visibile, e nasconde i contatti degli altri protocolli."""
+        app = _make_app(_signal("+1", "Mario"), _whatsapp(), _signal("+2", "Luigi"))
+        app._protocol_filter = "signal"
+        app.selected_contact = app.contacts[2]  # Luigi, posizione reale 2
+
+        class _Item:
+            def __init__(self, cid):
+                self._contact_id = cid
+                self.display = True
+        items = [_Item(c.cache_key) for c in app.contacts]
+        fake = MagicMock()
+        fake.children = items
+        fake.index = None
+        app.query_one = MagicMock(return_value=fake)
+
+        app._apply_contact_visibility()
+
+        # Luigi (visibile) resta evidenziato alla posizione reale 2.
+        assert fake.index == 2
+        assert items[0].display is True   # Mario (signal)
+        assert items[1].display is False  # Anna (whatsapp, nascosta)
+        assert items[2].display is True   # Luigi (signal)
+
+    def test_reorder_keeps_all_contacts_in_dom_with_filter(self):
+        """Anche con filtro attivo, il re-render mantiene TUTTI i contatti nel
+        DOM (solo ``display`` togglato): Ctrl+W non deve perdere contatti."""
+        app = _make_app(_signal("+1", "Mario"), _whatsapp(), _signal("+2", "Luigi"))
+        wa = app.contacts[1]
+        app._protocol_filter = "signal"
+        fake = _FakeListView()
+        app.query_one = MagicMock(return_value=fake)
+        app.selected_contact = None
+
+        app._reorder_contact_list()
+
+        # Tutti e 3 i contatti restano nel DOM (nessuno perso dal filtro).
+        assert len(fake.items) == 3
+        assert {it._contact_id for it in fake.items} == {c.cache_key for c in app.contacts}
+        # Il contatto WhatsApp è nel DOM ma nascosto (display=False).
+        wa_item = next(it for it in fake.items if it._contact_id == wa.cache_key)
+        assert wa_item.display is False
+
 
     def test_filter_render_applies_to_view(self):
         """Il filtro aggiorna dinamicamente la ListView (senza reload DB)."""
