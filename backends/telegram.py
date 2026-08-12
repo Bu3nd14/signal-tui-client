@@ -448,12 +448,7 @@ class TelegramBackend(ChatBackend):
         """Load Telegram message cache from the shared SQLite database."""
         try:
             from backend import _load_cache as _load_sqlite_cache
-            raw = _load_sqlite_cache()
-            return {
-                key: msgs
-                for key, msgs in raw.items()
-                if key.startswith(f"{PROTOCOL_TELEGRAM}:")
-            }
+            return _load_sqlite_cache(protocol=PROTOCOL_TELEGRAM)
         except Exception:
             logger.exception("Telegram: failed to load protocol cache")
             return {}
