@@ -157,7 +157,11 @@ class TelegramBackend(ChatBackend):
 
         @self._client.on(events.Raw)
         async def _on_raw(update: Any) -> None:
-            logger.info("Telegram raw: %s", type(update).__name__)
+            from telethon.tl.types import UpdateReadHistoryOutbox
+            if isinstance(update, UpdateReadHistoryOutbox):
+                await self._handle_read_receipt(update)
+            else:
+                logger.info("Telegram raw: %s", type(update).__name__)
 
         self._running = True
         self._loop_thread = threading.Thread(
@@ -468,6 +472,49 @@ class TelegramBackend(ChatBackend):
             contact_id=chat_id,
             payload=payload,
         )
+
+    async def _handle_read_receipt(self, update: Any) -> None:
+        """Handle ``UpdateReadHistoryOutbox`` — marks sent messages as read."""
+        from telethon.tl.types import PeerUser, PeerChat, PeerChannel
+
+        # Determine the peer's ID
+        peer = update.peer
+        if isinstance(peer, PeerUser):
+            contact_id = str(peer.user_id)
+        elif isinstance(peer, PeerChat):
+            contact_id = str(peer.chat_id)
+        elif isinstance(peer, PeerChannel):
+            contact_id = str(peer.channel_id)
+        else:
+            return
+
+        max_id = update.max_id
+        logger.info("Telegram read receipt: contact=%s max_id=%s", contact_id, max_id)
+
+        # Update in-memory cache status
+        updated: list[dict] = []
+        for msg in self.cache.get(contact_id, []):
+            mid = msg.get("id")
+            if mid and int(mid) <= max_id and msg.get("is_mine") and msg.get("status") != "read":
+                msg["status"] = "read"
+                updated.append(msg)
+
+        if updated:
+            # Persist to SQLite
+            try:
+                from backend import _update_message_status
+                for msg in updated:
+                    _update_message_status(msg["timestamp"], "read")
+            except Exception:
+                logger.exception("Telegram: _update_message_status failed")
+
+            # Enqueue receipt event for the TUI
+            self._events.put(ChatEvent(
+                type="receipt",
+                protocol=PROTOCOL_TELEGRAM,
+                contact_id=contact_id,
+                payload={"updated": updated},
+            ))
 
     # ─── poll_once (queue drain) ───────────────────────────────────────────
 
