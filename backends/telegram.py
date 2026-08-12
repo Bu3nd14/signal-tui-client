@@ -142,7 +142,13 @@ class TelegramBackend(ChatBackend):
             return
 
         self._connected = True
-        self._loop.run_until_complete(self._load_contacts())
+        try:
+            self._loop.run_until_complete(self._load_contacts())
+        except Exception as exc:
+            logger.exception("Telegram _load_contacts failed: %s", exc)
+            self.contacts = []
+            self._contacts_by_id = {}
+        logger.info("Telegram: loaded %d contacts", len(self.contacts))
 
         # Register Telethon event handlers
         @self._client.on(events.NewMessage)

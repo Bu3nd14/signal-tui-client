@@ -1217,8 +1217,11 @@ class SignalTUI(App):
     def _connect_telegram(self) -> None:
         """Worker thread: connette Telegram, poi merge nel UI thread."""
         try:
+            logger.info("LINK-TG: start, needs_pairing=%s", self.telegram_backend.needs_pairing)
             self.call_from_thread(self._status, "⏳ Telegram: connecting...", 0)
             self.telegram_backend._connect_sync()
+            n = len(self.telegram_backend.contacts)
+            logger.info("LINK-TG: connect_sync done, contacts=%d, connected=%s", n, self.telegram_backend._connected)
             self.call_from_thread(self._on_backend_ready, self.telegram_backend)
         except Exception as e:
             logger.exception("Telegram connect failed: %s", e)
