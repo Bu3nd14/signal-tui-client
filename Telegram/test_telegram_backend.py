@@ -112,6 +112,7 @@ def _make_backend() -> "TelegramBackend":
     backend.contacts = []
     backend.cache = {}
     backend._contacts_by_id = {}
+    backend._seen_msg_ids = set()
     return backend
 
 
@@ -345,9 +346,13 @@ class TestEventQueue:
             t.join()
         assert len(errors) == 0
 
-        all_events = []
+        all_events: list[ChatEvent] = []
         while True:
             batch = backend.poll_once()
+            if not batch:
+                break
+            all_events.extend(batch)
+        assert len(all_events) == 200
 
 # ─── Cache and dedup ──────────────────────────────────────────────────────
 

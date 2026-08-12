@@ -238,6 +238,7 @@ class TestCacheIsolation:
         telegram.cache = {}
         telegram._events = queue.Queue()
         telegram._contacts_by_id = {}
+        telegram._seen_msg_ids = set()
 
         manager, signal, whatsapp = _make_multi_manager()
         signal.cache = {}

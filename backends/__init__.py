@@ -11,6 +11,7 @@ from __future__ import annotations
 from .base import ChatBackend
 from .manager import BackendManager
 from .signal import SignalBackend
+from .telegram import TelegramBackend
 from .whatsapp import WhatsAppBackend
 
-__all__ = ["ChatBackend", "BackendManager", "SignalBackend", "WhatsAppBackend"]
+__all__ = ["ChatBackend", "BackendManager", "SignalBackend", "TelegramBackend", "WhatsAppBackend"]
