@@ -105,10 +105,10 @@ class TestProtocolFilter:
         app._apply_contact_filter = lambda: None  # avoid UI touches
         with patch.object(app, "_add_message"):
             observed = []
-            for _ in range(3):
+            for _ in range(4):
                 app.action_cycle_protocol_filter()
                 observed.append(app._protocol_filter)
-        assert observed == ["signal", "whatsapp", "all"]
+        assert observed == ["signal", "whatsapp", "telegram", "all"]
 
     def test_ctrl_w_binding_is_priority(self):
         """Ctrl+W (filtro) deve avere priority=True così funziona anche quando
@@ -284,7 +284,7 @@ class TestProtocolFilter:
 
         app._protocol_filter = "whatsapp"
         app._apply_contact_filter()
-        chat_log.remove_class.assert_called_with("chat-filter-signal", "chat-filter-whatsapp")
+        chat_log.remove_class.assert_called_with("chat-filter-signal", "chat-filter-whatsapp", "chat-filter-telegram")
         chat_log.add_class.assert_called_with("chat-filter-whatsapp")
         contact_list.add_class.assert_called_with("chat-filter-whatsapp")
         chat_title.add_class.assert_called_with("chat-filter-whatsapp")

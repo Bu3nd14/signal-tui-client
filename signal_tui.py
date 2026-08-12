@@ -91,6 +91,7 @@ from models import (
     ChatEvent,
     PROTOCOL_SIGNAL,
     PROTOCOL_WHATSAPP,
+    PROTOCOL_TELEGRAM,
     contact_cache_key,
     protocol_emoji,
 )
@@ -99,9 +100,10 @@ from backends import (
     BackendManager,
     ChatBackend,
     SignalBackend,
+    TelegramBackend,
     WhatsAppBackend,
 )
-from backends.config import whatsapp_enabled
+from backends.config import whatsapp_enabled, telegram_enabled
 
 from backend import (
     serve_text_as_file,
@@ -174,6 +176,10 @@ class SignalTUI(App):
         border: solid #25d366;
     }
 
+    #contact-list.chat-filter-telegram {
+        border: solid #0088cc;
+    }
+
     #contact-list ListItem {
         padding: 1 1;
     }
@@ -195,8 +201,13 @@ class SignalTUI(App):
         color: #20c997;
     }
 
+    .protocol-telegram {
+        color: #34aadc;
+    }
+
     #contact-list .protocol-signal:hover,
-    #contact-list .protocol-whatsapp:hover {
+    #contact-list .protocol-whatsapp:hover,
+    #contact-list .protocol-telegram:hover {
         color: $text;
     }
 
@@ -237,6 +248,10 @@ class SignalTUI(App):
         border: solid #25d366;
     }
 
+    #chat-log.chat-filter-telegram {
+        border: solid #0088cc;
+    }
+
     /* Banner (titoli di sezione) sincroni col bordo della chat per filtro. */
     #ContactsTitle.chat-filter-signal,
     #ChatTitle.chat-filter-signal {
@@ -246,6 +261,11 @@ class SignalTUI(App):
     #ContactsTitle.chat-filter-whatsapp,
     #ChatTitle.chat-filter-whatsapp {
         background: #25d366;
+    }
+
+    #ContactsTitle.chat-filter-telegram,
+    #ChatTitle.chat-filter-telegram {
+        background: #0088cc;
     }
     .msg-quote {
         text-align: left;
@@ -391,6 +411,13 @@ class SignalTUI(App):
             self.whatsapp_backend = WhatsAppBackend()
             self.manager.register(self.whatsapp_backend)
 
+        # Telegram backend is registered only when credentials are configured;
+        # otherwise it's skipped gracefully.
+        self.telegram_backend: Optional[TelegramBackend] = None
+        if telegram_enabled():
+            self.telegram_backend = TelegramBackend()
+            self.manager.register(self.telegram_backend)
+
         self.contacts: list[ChatContact] = []
         self.selected_contact: Optional[ChatContact] = None
 
@@ -498,6 +525,8 @@ class SignalTUI(App):
             # (not just "not pairing" — could be failed/stopped).
             if self.whatsapp_backend.is_working:
                 self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
+        if self.telegram_backend is not None and not self.telegram_backend.needs_pairing:
+            self.run_worker(self._connect_telegram, exclusive=False, thread=True)
 
     def action_quit(self):
         """Ctrl+Q: stop polling and exit cleanly."""
@@ -505,8 +534,13 @@ class SignalTUI(App):
         self.exit()
 
     def on_exit(self):
-        """On exit, stop polling and do NOT kill the daemon."""
+        """On exit, stop polling and disconnect backends."""
         self._polling_active = False
+        if self.telegram_backend is not None:
+            try:
+                self.telegram_backend.disconnect_sync()
+            except Exception:
+                pass
         # No flush needed — SQLite writes are incremental
 
     def _status(self, text: str, duration: float = 3.0) -> None:
@@ -1180,6 +1214,16 @@ class SignalTUI(App):
         self._wa_connecting = False
 
 
+    def _connect_telegram(self) -> None:
+        """Worker thread: connette Telegram, poi merge nel UI thread."""
+        try:
+            self.call_from_thread(self._status, "⏳ Telegram: connecting...", 0)
+            self.telegram_backend._connect_sync()
+            self.call_from_thread(self._on_backend_ready, self.telegram_backend)
+        except Exception as e:
+            logger.exception("Telegram connect failed: %s", e)
+            self.call_from_thread(self._status, f"❌ Telegram: {e}", 0)
+
     def _resync_wa_history(self) -> int:
         """Re-sync best-effort dello storico WhatsApp all'avvio.
 
@@ -1271,7 +1315,7 @@ class SignalTUI(App):
 
     def _filtered_contacts(self) -> list[ChatContact]:
         """Return contacts matching the active protocol filter."""
-        if self._protocol_filter in ("signal", "whatsapp"):
+        if self._protocol_filter in ("signal", "whatsapp", "telegram"):
             return [c for c in self.contacts if c.protocol == self._protocol_filter]
         return list(self.contacts)
 
@@ -1285,6 +1329,8 @@ class SignalTUI(App):
             return " - Signal"
         if self._protocol_filter == "whatsapp":
             return " - WhatsApp"
+        if self._protocol_filter == "telegram":
+            return " - Telegram"
         if self._protocol_filter == "all":
             return " - All"
         return ""
@@ -1410,7 +1456,7 @@ class SignalTUI(App):
                 label.update(new_text)
                 item._label_text = new_text
             if not item.has_class(self._protocol_class(c)):
-                for cl in ("protocol-signal", "protocol-whatsapp"):
+                for cl in ("protocol-signal", "protocol-whatsapp", "protocol-telegram"):
                     item.remove_class(cl)
                 item.add_class(self._protocol_class(c))
 
@@ -1488,6 +1534,7 @@ class SignalTUI(App):
         # and the two section banners (📇 Contacts / 💬 Chat).
         cls_signal = "chat-filter-signal"
         cls_whats = "chat-filter-whatsapp"
+        cls_telegram = "chat-filter-telegram"
         widgets = [self.chat_log]
         for selector in ("#contact-list", "#ContactsTitle", "#ChatTitle"):
             try:
@@ -1495,16 +1542,18 @@ class SignalTUI(App):
             except Exception:
                 pass
         for node in widgets:
-            node.remove_class(cls_signal, cls_whats)
+            node.remove_class(cls_signal, cls_whats, cls_telegram)
             if self._protocol_filter == "signal":
                 node.add_class(cls_signal)
             elif self._protocol_filter == "whatsapp":
                 node.add_class(cls_whats)
+            elif self._protocol_filter == "telegram":
+                node.add_class(cls_telegram)
                 # filtro "all": nessuna classe -> default (giallo).
 
     def action_cycle_protocol_filter(self):
-        """Ctrl+W: cycle the contact list filter ALL -> SIGNAL -> WHATSAPP."""
-        order = ["all", "signal", "whatsapp"]
+        """Ctrl+W: cycle the contact list filter ALL -> SIGNAL -> WHATSAPP -> TELEGRAM."""
+        order = ["all", "signal", "whatsapp", "telegram"]
         idx = order.index(self._protocol_filter) if self._protocol_filter in order else 0
         self._protocol_filter = order[(idx + 1) % len(order)]
         self._apply_contact_filter()
@@ -1892,11 +1941,14 @@ class SignalTUI(App):
                 self.run_worker(self._connect_signal, exclusive=False, thread=True)
             if self.whatsapp_backend:
                 self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
+            if self.telegram_backend:
+                self.run_worker(self._connect_telegram, exclusive=False, thread=True)
 
         self.push_screen(
             DeviceLinkPickerScreen(
                 signal_number=self.signal_backend.user_number,
                 has_whatsapp=self.whatsapp_backend is not None,
+                has_telegram=self.telegram_backend is not None,
             ),
             _on_done,
         )
