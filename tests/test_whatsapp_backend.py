@@ -87,20 +87,21 @@ class TestWhatsAppRESTClient:
 
         assert len(contacts) == 2
         assert contacts[0]["id"] == "wa:39123@s.whatsapp.net"
-        # L'endpoint contatti deve passare la sessione (su WAHA è obbligatoria).
-        assert any("?session=default" in u for m, u in seen)
-        assert any("/api/contacts?" in u for m, u in seen)
+        # list_contacts ora usa solo /api/{session}/chats (refactoring opt/wa-link-profile).
+        assert any("/api/default/chats" in u for m, u in seen)
 
     def test_list_contacts_nested_data(self):
         client = WhatsAppRESTClient("http://api.test")
+        # list_contacts now uses /api/{session}/chats which returns a flat list
+        # (opt/wa-link-profile refactoring removed /api/contacts fallback).
         with patch("urllib.request.urlopen", _json_response(
-            {"data": [{"id": "wa:x@s.whatsapp.net", "name": "A"}]}
+            [{"id": "wa:x@s.whatsapp.net", "name": "A"}]
         )):
             contacts = client.list_contacts()
         assert len(contacts) == 1
 
-    def test_list_contacts_falls_back_to_chats(self):
-        """Su WAHA core /api/contacts è rotto (500) -> fallback su /api/{sess}/chats."""
+    def test_list_contacts_uses_chats_directly(self):
+        """list_contacts chiama direttamente /api/{session}/chats (refactoring opt/wa-link-profile)."""
         client = WhatsAppRESTClient("http://api.test")
         seen = []
 
@@ -108,15 +109,11 @@ class TestWhatsAppRESTClient:
             seen.append((req.method, req.full_url))
             resp = MagicMock()
             resp.status = 200
-            if req.full_url.endswith("/api/contacts?session=default"):
-                # contatti endpoint: restituisce un 500/None (JSON non gestito) -> fallback
-                resp.read.return_value = b'{"statusCode":500,"error":"Internal Server Error"}'
-            else:
-                # chats endpoint: lista di chat/contatti
-                resp.read.return_value = json.dumps([
-                    {"id": {"_serialized": "3112@c.us"}, "name": "Anna", "isGroup": False},
-                    {"id": {"_serialized": "139153@lid"}, "pushName": "Bob", "isGroup": False},
-                ]).encode("utf-8")
+            # chats endpoint: lista di chat/contatti
+            resp.read.return_value = json.dumps([
+                {"id": {"_serialized": "3112@c.us"}, "name": "Anna", "isGroup": False},
+                {"id": {"_serialized": "139153@lid"}, "pushName": "Bob", "isGroup": False},
+            ]).encode("utf-8")
             ctx = MagicMock()
             ctx.__enter__.return_value = resp
             return ctx
@@ -124,9 +121,7 @@ class TestWhatsAppRESTClient:
         with patch("urllib.request.urlopen", fake_urlopen):
             contacts = client.list_contacts()
 
-        assert any("/api/contacts?session=default" in u for m, u in seen)
         assert any("/api/default/chats" in u for m, u in seen)
-        # Il fallback mappa chats -> {id, name}.
         assert len(contacts) == 2
         assert contacts[0]["id"] == "3112@c.us"
         assert contacts[1]["name"] == "Bob"
@@ -1280,7 +1275,7 @@ class TestWAHAContract:
             client.get_session_status()   # /api/sessions/{name}
             client.get_session_qr()       # /api/{name}/auth/qr (PNG binario)
 
-        assert any(m == "GET" and "/api/contacts" in u for m, u in seen)
+        assert any(m == "GET" and "/api/default/chats" in u for m, u in seen)
         assert any(m == "POST" and "/api/sendText" in u for m, u in seen)
         assert any(m == "GET" and "/api/sessions/default" in u for m, u in seen)
         assert any(m == "GET" and "/api/default/auth/qr" in u for m, u in seen)
@@ -1865,20 +1860,17 @@ class TestSeedCacheFromDB:
         mock_upd.assert_called_once()
 
 
-    def test_load_contacts_retries_when_first_empty(self):
-        """Fix run 4-6: se list_contacts() restituisce vuoto al primo tentativo
-        (GET /chats può fallire/timeout all'avvio), _load_contacts riprova prima
-        di rinunciare."""
+    def test_load_contacts_single_call(self):
+        """_load_contacts fa una singola chiamata a list_contacts() (refactoring opt/wa-link-profile)."""
         backend = _make_backend()
-        mock = MagicMock(side_effect=[[], [{"id": "wa:1@s.whatsapp.net", "name": "Mario"}]])
+        mock = MagicMock(return_value=[{"id": "wa:1@s.whatsapp.net", "name": "Mario"}])
         with patch.object(backend._rest, "list_contacts", new=mock):
             backend._load_contacts()
         assert len(backend.contacts) == 1
         assert backend.contacts[0].id == "wa:1@s.whatsapp.net"
-        assert mock.call_count == 2
-    def test_load_contacts_stays_empty_after_retries(self):
-        """Se list_contacts resta vuoto anche dopo i retry, nessuna eccezione e
-        0 contatti (best-effort, il backend resta "attivo" senza crashare)."""
+        assert mock.call_count == 1
+    def test_load_contacts_stays_empty_after_single_call(self):
+        """Se list_contacts restituisce vuoto, 0 contatti (best-effort, nessuna eccezione)."""
         backend = _make_backend()
         mock = MagicMock(return_value=[])
         with patch.object(backend._rest, "list_contacts", new=mock):
