@@ -155,6 +155,10 @@ class TelegramBackend(ChatBackend):
         async def _on_new_message(event: Any) -> None:
             await self._handle_new_message(event)
 
+        @self._client.on(events.Raw)
+        async def _on_raw(update: Any) -> None:
+            logger.info("Telegram raw: %s", type(update).__name__)
+
         self._running = True
         self._loop_thread = threading.Thread(
             target=self._run_event_loop,
@@ -332,11 +336,14 @@ class TelegramBackend(ChatBackend):
     async def _handle_new_message(self, event: Any) -> None:
         """Telethon event handler: normalise and enqueue a new message."""
         msg = event.message
+        logger.info("Telegram: NewMessage event, msg_id=%s chat_id=%s", 
+                     getattr(msg, 'id', '?'), getattr(msg, 'chat_id', '?'))
         if msg is None:
             return
         evt = self._message_to_chat_event(msg)
         if evt is not None:
             self._events.put(evt)
+            logger.info("Telegram: enqueued event for chat %s", evt.contact_id)
 
     def _message_to_chat_event(self, msg: Any) -> ChatEvent | None:
         """Convert a Telethon ``Message`` (or mock) into a ``ChatEvent``."""
