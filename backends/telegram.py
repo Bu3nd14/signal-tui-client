@@ -366,8 +366,12 @@ class TelegramBackend(ChatBackend):
         return future.result(timeout=30)
 
     def mark_read_sync(self, contact_id: str) -> None:
-        """Synchronous mark-read, for use from the TUI's sync callbacks."""
-        pass  # Telethon handles read receipts automatically
+        """Synchronous mark-read — persists read status to SQLite."""
+        try:
+            from backend import _mark_as_read
+            _mark_as_read(contact_id, protocol=PROTOCOL_TELEGRAM)
+        except Exception:
+            pass
 
     # ─── Event reception ───────────────────────────────────────────────────
 
