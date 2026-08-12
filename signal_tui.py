@@ -1105,13 +1105,7 @@ class SignalTUI(App):
             )
 
     def _connect_whatsapp(self) -> None:
-        """Connect WhatsApp backend (runs in worker thread).
-
-        If contacts are already synced (e.g. boot with existing session),
-        finalises immediately.  Otherwise schedules a non-blocking
-        ``set_timer`` that delegates HTTP calls back to worker threads,
-        keeping the asyncio event loop free.
-        """
+        """Worker thread: avvia WhatsApp, mostra contatti subito, sync cronologia dopo."""
         if self._wa_connecting:
             logger.info("LINK-WA: already connecting, skipping duplicate worker")
             return
@@ -1134,8 +1128,8 @@ class SignalTUI(App):
                     self._status,
                     f"✅ WAHA: {n} contatti (webhook :{WEBHOOK_PORT})",
                 )
-                self._resync_wa_history()
                 self.call_from_thread(self._on_backend_ready, self.whatsapp_backend)
+                self._resync_wa_history()
                 self._wa_connecting = False
             else:
                 # WAHA is working but server-side contacts sync still in
@@ -1150,7 +1144,7 @@ class SignalTUI(App):
             self._wa_connecting = False
 
     def _poll_wa_contacts(self) -> None:
-        """Worker thread: poll WAHA until contacts are synced or timeout."""
+        """Worker thread: attende sync contatti WAHA, mostra subito, poi cronologia."""
         poll_count = 0
         deadline = time.monotonic() + 120.0
         self.call_from_thread(self._status, "🔄 WAHA: sync contatti...", 0)
@@ -1177,10 +1171,10 @@ class SignalTUI(App):
             self._wa_connecting = False
             return
 
-        # History sync (in worker, no UI block)
+        # Mostra i contatti SUBITO, poi sync cronologia in background
+        self.call_from_thread(self._on_backend_ready, self.whatsapp_backend)
         self.call_from_thread(self._status, "⏳ WAHA: sync cronologia...", 0)
         self._resync_wa_history()
-        self.call_from_thread(self._on_backend_ready, self.whatsapp_backend)
         self.call_from_thread(self._status, "")
         logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
         self._wa_connecting = False
