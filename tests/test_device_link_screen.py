@@ -31,12 +31,13 @@ class TestDeviceLinkPickerScreen:
         assert "signal" in ids
         assert "whatsapp" in ids
 
-    def test_telegram_is_disabled(self):
-        """Telegram placeholder is present and marked disabled."""
+    def test_telegram_is_enabled(self):
+        """Telegram is present and enabled (not a placeholder anymore)."""
         telegram = next(
             item for item in _PROTOCOL_ITEMS if item["id"] == "telegram"
         )
-        assert telegram["disabled"] is True
+        assert telegram["disabled"] is False
+        assert "📨" in telegram["label"]
 
     def test_screen_init_defaults(self):
         """Screen initialises with default values and phase = picker."""

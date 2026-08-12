@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _PROTOCOL_ITEMS: list[dict[str, str]] = [
     {"id": "signal", "label": "📶 Signal", "disabled": False},
     {"id": "whatsapp", "label": "💬 WhatsApp", "disabled": False},
-    {"id": "telegram", "label": "📱 Telegram (coming soon)", "disabled": True},
+    {"id": "telegram", "label": "📨 Telegram", "disabled": False},
 ]
 
 # Default device name used for Signal linking when the user doesn't customise it.
@@ -215,11 +215,13 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         self,
         signal_number: str = "",
         has_whatsapp: bool = False,
+        has_telegram: bool = False,
         force_phone_input: bool = False,
     ) -> None:
         super().__init__()
         self._signal_number = signal_number
         self._has_whatsapp = has_whatsapp
+        self._has_telegram = has_telegram
         self._force_phone_input = force_phone_input
         self._phase: str = "picker"
         self._selected_protocol: str = ""
@@ -285,6 +287,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         container.mount(lv)
         for item in _PROTOCOL_ITEMS:
             if item["id"] == "whatsapp" and not self._has_whatsapp:
+                continue
+            if item["id"] == "telegram" and not self._has_telegram:
                 continue
             label = Label(item["label"])
             if item["disabled"]:
@@ -391,6 +395,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 done = await self._check_signal_done()
             elif proto == "whatsapp":
                 done = await self._check_whatsapp_done()
+            elif proto == "telegram":
+                done = await self._check_telegram_done()
             else:
                 return
 
@@ -465,6 +471,54 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 self._qr_start_time = time.time()
             except Exception as e:
                 logger.exception("Failed to refresh WhatsApp QR: %s", e)
+
+        return done
+
+    async def _check_telegram_done(self) -> bool:
+        """Check if Telegram QR login completed; refresh QR if expired."""
+        import asyncio as _asyncio
+        app = self.app
+        tb = getattr(app, "telegram_backend", None)
+        if tb is None:
+            return False
+
+        # Check if the client is now authorised
+        def _run() -> tuple[bool, bool]:
+            if tb._client is None or tb._loop is None:
+                return False, False
+            loop = tb._loop
+            try:
+                auth = asyncio.run_coroutine_threadsafe(
+                    tb._client.is_user_authorized(), loop
+                ).result(timeout=5)
+                if auth:
+                    return True, False  # done!
+            except Exception:
+                pass
+            # Check QR age for refresh (Telegram QR tokens expire ~30s)
+            age = time.time() - self._qr_start_time
+            if age >= 30:
+                return False, True  # need refresh
+            return False, False
+
+        done, need_refresh = await _asyncio.to_thread(_run)
+
+        if need_refresh:
+            logger.info("Telegram QR expired, refreshing...")
+            try:
+                new_url = await self._get_telegram_qr_link()
+                if new_url.startswith("INFO:"):
+                    code_widget = self.query_one("#link-qr-code", Static)
+                    code_widget.update(f"\n\n{new_url[5:]}\n")
+                    code_widget.refresh()
+                    return False
+                qr_ascii = qr_to_ascii(new_url)
+                code_widget = self.query_one("#link-qr-code", Static)
+                code_widget.update(qr_ascii)
+                code_widget.refresh()
+                self._qr_start_time = time.time()
+            except Exception as e:
+                logger.exception("Failed to refresh Telegram QR: %s", e)
 
         return done
 
@@ -558,6 +612,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         elif proto == "whatsapp":
             ascii_qr = await self._get_whatsapp_qr()
             return f"ASCII:{ascii_qr}"
+        elif proto == "telegram":
+            return await self._get_telegram_qr_link()
         return f"fake-{proto}-link"
 
     async def _get_signal_link_url(self) -> str:
@@ -659,6 +715,26 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         if result == "ALREADY_CONNECTED":
             return "INFO: WhatsApp is already linked and working ✅\nNo QR needed."
         return result
+
+    async def _get_telegram_qr_link(self) -> str:
+        """Get a Telegram pairing QR link via the backend."""
+        import asyncio as _asyncio
+
+        app = self.app
+        tb = getattr(app, "telegram_backend", None)
+        if tb is None:
+            raise RuntimeError("Telegram backend not available")
+
+        def _run() -> str:
+            loop = _asyncio.new_event_loop()
+            _asyncio.set_event_loop(loop)
+            try:
+                result = loop.run_until_complete(tb.get_pairing_qr())
+                return result or "ERROR: No QR data"
+            finally:
+                loop.close()
+
+        return await _asyncio.to_thread(_run)
 
     # ── Hooks ──────────────────────────────────────────────────────────────
 
