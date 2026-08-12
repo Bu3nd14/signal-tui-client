@@ -806,7 +806,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             self._select_protocol(lv.index)
 
     def action_select_item(self) -> None:
-        """Enter: select the highlighted protocol (or confirm phone)."""
+        """Enter: select protocol, confirm phone, or submit 2FA."""
         if self._phase == "picker":
             lv = self.query_one("#link-protocol-list", ListView)
             idx = lv.index
@@ -814,6 +814,14 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 self._select_protocol(idx)
         elif self._phase == "phone":
             self._on_phone_confirm()
+        elif self._phase == "qr":
+            # If 2FA input is visible, submit the password
+            try:
+                inp = self.query_one("#link-2fa-input", Input)
+                if inp.value.strip():
+                    self._on_2fa_submit()
+            except Exception:
+                pass
 
     # ── Internal helpers ───────────────────────────────────────────────────
 
