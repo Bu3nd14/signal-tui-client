@@ -498,32 +498,20 @@ class TelegramBackend(ChatBackend):
 
     @property
     def needs_pairing(self) -> bool:
-        """True if the backend needs QR pairing (not authorised)."""
+        """True if the backend needs QR pairing (not authorised).
+
+        Performs a quick check only — no network I/O.  The actual auth
+        verification is done by ``_connect_sync``.
+        """
         if self._api_id == 0 or not self._api_hash:
             return False
         if self._connected:
             return False
-        session_file = Path(self._session_path)
-        if not session_file.exists():
+        # No session file → definitely needs pairing
+        if not Path(self._session_path).exists():
             return True
-        try:
-            loop = asyncio.new_event_loop()
-            from telethon import TelegramClient
-            client = TelegramClient(
-                self._session_path, self._api_id, self._api_hash, loop=loop,
-            )
-            try:
-                loop.run_until_complete(client.connect())
-                auth = loop.run_until_complete(client.is_user_authorized())
-            finally:
-                try:
-                    loop.run_until_complete(client.disconnect())
-                except Exception:
-                    pass
-                loop.close()
-            return not auth
-        except Exception:
-            return True
+        # Session file exists → let _connect_sync verify it
+        return False
 
     def get_pairing_qr(self) -> str | None:
         """Start QR login, return the ``tg://login?token=...`` URL.
