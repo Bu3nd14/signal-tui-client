@@ -45,6 +45,9 @@ logger.setLevel(logging.DEBUG)
 # Max cached messages per contact.
 _MAX_CACHE_PER_CONTACT = 50
 
+# Dedup window (ms) for incoming messages from the same (contact, text).
+_INCOMING_DEDUP_WINDOW_MS = 2000
+
 
 # ─── TelegramBackend ──────────────────────────────────────────────────────────
 
@@ -584,7 +587,15 @@ class TelegramBackend(ChatBackend):
         if mid:
             self._seen_msg_ids.add(mid)
 
+        # Dedup by (contact, text, ts) within a small window
         text = data.get("text", "")
+        for m in self.cache.get(contact_id, []):
+            if (
+                m.get("text") == text
+                and abs(int(m.get("timestamp", 0)) - ts) <= _INCOMING_DEDUP_WINDOW_MS
+            ):
+                return False
+
         # Persist to SQLite (same pattern as Signal/WhatsApp backends)
         try:
             _add_message_to_cache(
