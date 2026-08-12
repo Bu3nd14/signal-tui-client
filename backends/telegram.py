@@ -508,13 +508,42 @@ class TelegramBackend(ChatBackend):
             except Exception:
                 logger.exception("Telegram: _update_message_status failed")
 
-            # Enqueue receipt event for the TUI
+            # Enqueue receipt event for the TUI (matches generic pattern)
+            message_ids = [msg.get("id") for msg in updated if msg.get("id")]
             self._events.put(ChatEvent(
                 type="receipt",
                 protocol=PROTOCOL_TELEGRAM,
                 contact_id=contact_id,
-                payload={"updated": updated},
+                payload={"message_ids": message_ids, "is_read": True},
             ))
+
+    # ─── poll_once (queue drain) ───────────────────────────────────────────
+
+    def process_receipt(self, envelope: dict) -> list[dict]:
+        """Handle a receipt batch against the in-memory cache.
+
+        Updates ``status`` for sent messages matching the reported ids.
+        Follows the same pattern as WhatsApp's ``process_receipt``.
+        """
+        ids = envelope.get("message_ids") or []
+        if not ids:
+            return []
+        is_read = bool(envelope.get("is_read"))
+        target = "read" if is_read else "delivered"
+        updated: list[dict] = []
+        for msgs in self.cache.values():
+            for msg in msgs:
+                if msg.get("is_mine") and str(msg.get("id", "")) in {str(i) for i in ids}:
+                    old = msg.get("status", "sent")
+                    rank = {"sent": 0, "delivered": 1, "read": 2}
+                    if old != target and rank.get(target, 0) > rank.get(old, 0):
+                        msg["status"] = target
+                        updated.append(msg)
+        if updated:
+            from backend import _update_message_status
+            for msg in updated:
+                _update_message_status(msg["timestamp"], msg["status"])
+        return updated
 
     # ─── poll_once (queue drain) ───────────────────────────────────────────
 
