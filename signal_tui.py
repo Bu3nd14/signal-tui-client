@@ -169,7 +169,7 @@ class SignalTUI(App):
     }
 
     #contact-list.chat-filter-signal {
-        border: solid #2c3e80;
+        border: solid #3b82f6;
     }
 
     #contact-list.chat-filter-whatsapp {
@@ -194,7 +194,7 @@ class SignalTUI(App):
 
     /* Protocol accents in the contact list */
     .protocol-signal {
-        color: #2c3e80;
+        color: #3b82f6;
     }
 
     .protocol-whatsapp {
@@ -241,7 +241,7 @@ class SignalTUI(App):
        verde WhatsApp, default/giallo per ALL).  Non usiamo più una "barra"
        laterale (border-left) su ogni messaggio. */
     #chat-log.chat-filter-signal {
-        border: solid #2c3e80;
+        border: solid #3b82f6;
     }
 
     #chat-log.chat-filter-whatsapp {
@@ -255,7 +255,7 @@ class SignalTUI(App):
     /* Banner (titoli di sezione) sincroni col bordo della chat per filtro. */
     #ContactsTitle.chat-filter-signal,
     #ChatTitle.chat-filter-signal {
-        background: #2c3e80;
+        background: #3b82f6;
     }
 
     #ContactsTitle.chat-filter-whatsapp,
