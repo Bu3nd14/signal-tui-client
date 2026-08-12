@@ -485,38 +485,94 @@ class TelegramBackend(ChatBackend):
                 return True
         return True
 
-    async def get_pairing_qr(self) -> str | None:
-        """Start QR login and return the ``tg://login?token=...`` URL."""
+    def get_pairing_qr(self) -> str | None:
+        """Start QR login, return the ``tg://login?token=...`` URL.
+
+        A background thread runs the Telethon event loop and waits for
+        the QR scan to complete.  On success, ``_connected`` is set to
+        ``True`` and the TUI can detect it via ``_check_telegram_done``.
+
+        If 2FA is required, the error is logged and the user must disable
+        2FA temporarily or use the ``link_telegram.py`` CLI script.
+        """
         if self._api_id == 0 or not self._api_hash:
             return None
 
         from telethon import TelegramClient
+        from telethon.errors import SessionPasswordNeededError
+
+        # Clean up any previous QR login attempt
+        if self._loop_thread is not None and self._loop_thread.is_alive():
+            self._connected = False
+        if self._loop is not None:
+            try:
+                self._loop.call_soon_threadsafe(self._loop.stop)
+            except Exception:
+                pass
 
         loop = asyncio.new_event_loop()
+        self._loop = loop
+
         client = TelegramClient(
             self._session_path, self._api_id, self._api_hash, loop=loop,
         )
+        self._client = client
+
         try:
-            await client.connect()
-            if await client.is_user_authorized():
-                await client.disconnect()
-                loop.close()
-                return "INFO: Already logged in"
-
-            qr_login = await client.qr_login()
-            qr_url = qr_login.url if hasattr(qr_login, "url") else ""
-            if not qr_url:
-                qr_url = f"tg://login?token={qr_login.token}"
-
-            # Store client for QR completion check
-            self._client = client
-            self._loop = loop
-            return qr_url
+            loop.run_until_complete(client.connect())
         except Exception as exc:
-            logger.exception("Telegram QR login failed: %s", exc)
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
+            logger.exception("Telegram QR connect failed: %s", exc)
             loop.close()
+            self._loop = None
+            self._client = None
             return f"ERROR: {exc}"
+
+        if loop.run_until_complete(client.is_user_authorized()):
+            loop.run_until_complete(client.disconnect())
+            loop.close()
+            self._loop = None
+            self._client = None
+            self._connected = True
+            return "INFO: Already logged in"
+
+        try:
+            qr_login = loop.run_until_complete(client.qr_login())
+        except Exception as exc:
+            logger.exception("Telegram QR login start failed: %s", exc)
+            loop.run_until_complete(client.disconnect())
+            loop.close()
+            self._loop = None
+            self._client = None
+            return f"ERROR: {exc}"
+
+        qr_url = qr_login.url if hasattr(qr_login, "url") else ""
+        if not qr_url:
+            qr_url = f"tg://login?token={qr_login.token}"
+
+        # Start a background thread that waits for the QR scan
+        def _wait_thread() -> None:
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(qr_login.wait())
+                logger.info("Telegram QR login: scan completed successfully")
+                self._connected = True
+            except SessionPasswordNeededError:
+                logger.warning(
+                    "Telegram QR login: 2FA password required. "
+                    "Disable 2FA in Telegram settings or use link_telegram.py CLI."
+                )
+            except Exception as exc:
+                logger.exception("Telegram QR login wait failed: %s", exc)
+            finally:
+                try:
+                    loop.run_until_complete(client.disconnect())
+                except Exception:
+                    pass
+                loop.close()
+
+        self._loop_thread = threading.Thread(
+            target=_wait_thread, name="telegram-qr-wait", daemon=True,
+        )
+        self._loop_thread.start()
+
+        return qr_url

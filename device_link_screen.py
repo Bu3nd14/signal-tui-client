@@ -476,34 +476,18 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
 
     async def _check_telegram_done(self) -> bool:
         """Check if Telegram QR login completed; refresh QR if expired."""
-        import asyncio as _asyncio
         app = self.app
         tb = getattr(app, "telegram_backend", None)
         if tb is None:
             return False
 
-        # Check if the client is now authorised
-        def _run() -> tuple[bool, bool]:
-            if tb._client is None or tb._loop is None:
-                return False, False
-            loop = tb._loop
-            try:
-                auth = asyncio.run_coroutine_threadsafe(
-                    tb._client.is_user_authorized(), loop
-                ).result(timeout=5)
-                if auth:
-                    return True, False  # done!
-            except Exception:
-                pass
-            # Check QR age for refresh (Telegram QR tokens expire ~30s)
-            age = time.time() - self._qr_start_time
-            if age >= 30:
-                return False, True  # need refresh
-            return False, False
+        # _connected is set to True by the background wait task
+        if tb._connected:
+            return True
 
-        done, need_refresh = await _asyncio.to_thread(_run)
-
-        if need_refresh:
+        # Check QR age for refresh (Telegram QR tokens expire ~30s)
+        age = time.time() - self._qr_start_time
+        if age >= 30:
             logger.info("Telegram QR expired, refreshing...")
             try:
                 new_url = await self._get_telegram_qr_link()
@@ -511,16 +495,20 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                     code_widget = self.query_one("#link-qr-code", Static)
                     code_widget.update(f"\n\n{new_url[5:]}\n")
                     code_widget.refresh()
-                    return False
-                qr_ascii = qr_to_ascii(new_url)
-                code_widget = self.query_one("#link-qr-code", Static)
-                code_widget.update(qr_ascii)
-                code_widget.refresh()
+                elif new_url.startswith("ERROR:"):
+                    code_widget = self.query_one("#link-qr-code", Static)
+                    code_widget.update(f"\n\n❌ {new_url[7:]}\n")
+                    code_widget.refresh()
+                else:
+                    qr_ascii = qr_to_ascii(new_url)
+                    code_widget = self.query_one("#link-qr-code", Static)
+                    code_widget.update(qr_ascii)
+                    code_widget.refresh()
                 self._qr_start_time = time.time()
             except Exception as e:
                 logger.exception("Failed to refresh Telegram QR: %s", e)
 
-        return done
+        return False
 
     async def _get_whatsapp_qr_fresh(self) -> str:
         """Get a fresh WhatsApp QR (resets session, unlike _get_whatsapp_qr)."""
@@ -725,16 +713,9 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         if tb is None:
             raise RuntimeError("Telegram backend not available")
 
-        def _run() -> str:
-            loop = _asyncio.new_event_loop()
-            _asyncio.set_event_loop(loop)
-            try:
-                result = loop.run_until_complete(tb.get_pairing_qr())
-                return result or "ERROR: No QR data"
-            finally:
-                loop.close()
-
-        return await _asyncio.to_thread(_run)
+        # get_pairing_qr is sync (manages its own event loop internally)
+        # Run in thread to avoid blocking the UI
+        return await _asyncio.to_thread(tb.get_pairing_qr) or "ERROR: No QR data"
 
     # ── Hooks ──────────────────────────────────────────────────────────────
 
