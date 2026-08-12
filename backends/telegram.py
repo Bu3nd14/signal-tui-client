@@ -627,6 +627,8 @@ class TelegramBackend(ChatBackend):
             "msg_type": data.get("msg_type", "text"),
             "attachment_info": data.get("attachment_info"),
             "attachment_id": data.get("attachment_id"),
+            "read": data.get("is_mine", False),  # incoming = unread
+            "status": "sent" if data.get("is_mine") else "read",
         })
 
         # Keep cache bounded
