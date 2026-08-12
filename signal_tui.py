@@ -97,6 +97,7 @@ from models import (
 
 from backends import (
     BackendManager,
+    ChatBackend,
     SignalBackend,
     WhatsAppBackend,
 )
@@ -1030,33 +1031,62 @@ class SignalTUI(App):
 
     # ─── Backend connection workers (parallel, independent) ──────────────────
 
+    # ─── Backend connection workers (parallel, independent) ──────────────────
+
+    def _on_backend_ready(self, backend: ChatBackend) -> None:
+        """UI thread: merge atomico di cache e contatti da UN backend.
+
+        Chiamato via ``call_from_thread`` dopo che un backend ha completato
+        la connessione.  Poiché Textual esegue le callback del UI thread in
+        ordine FIFO, i merge di backend multipli sono naturalmente serializzati
+        senza bisogno di lock espliciti.
+        """
+        proto = backend.protocol
+
+        # ── Merge cache (incrementale, no clear) ──
+        for cid, msgs in backend.cache.items():
+            key = contact_cache_key(proto, cid)
+            if key not in self._cache:
+                self._cache[key] = []
+            existing_ids = {m.get("id") for m in self._cache[key] if m.get("id")}
+            for m in msgs:
+                mid = m.get("id")
+                if mid and mid in existing_ids:
+                    continue
+                self._cache[key].append(m)
+            self._cache[key].sort(key=lambda m: int(m.get("timestamp") or 0))
+
+        # ── Merge contatti (aggiunge nuovi, aggiorna last_message_ts) ──
+        existing_ids = {c.cache_key for c in self.contacts}
+        for c in backend.contacts:
+            if c.cache_key in existing_ids:
+                for old in self.contacts:
+                    if old.cache_key == c.cache_key:
+                        if (c.last_message_ts or 0) > (old.last_message_ts or 0):
+                            old.last_message_ts = c.last_message_ts
+                        break
+            else:
+                self.contacts.append(c)
+
+        self._sync_last_ts()
+        self._sort_contacts()
+        self._render_contact_list(self._filtered_contacts())
+        self._update_unread_badges()
+
+        n = len(backend.contacts)
+        logger.info("Backend %s ready: %d contacts", proto, n)
+        self._status(f"✅ {proto.title()}: {n} contacts loaded")
     def _connect_signal(self) -> None:
-        """Connect Signal backend and update UI (runs in worker thread)."""
+        """Worker thread: avvia Signal, poi merge nel UI thread."""
         try:
             self.call_from_thread(
                 self._status, "⏳ Signal: avvio daemon...", 0
             )
             sb = self.signal_backend
             logger.info("LINK-SIG: start, daemon_proc=%s", sb.daemon_proc is not None)
-            self.call_from_thread(
-                self._status, "⏳ Signal: attesa connessione...", 0
-            )
             sb._connect_sync()
             logger.info("LINK-SIG: connect_sync done, use_daemon=%s", sb._use_daemon)
-
-            # Build cache from all backends loaded so far
-            self._cache = {}
-            for b in self.manager.all():
-                for cid, msgs in b.cache.items():
-                    self._cache[contact_cache_key(b.protocol, cid)] = list(msgs)
-            self._sync_last_ts()
-
-            contacts = self.manager.list_contacts()
-            self.contacts = contacts
-            logger.info("LINK-SIG: calling _update_contacts_ui with %d contacts", len(contacts))
-            self.call_from_thread(self._update_contacts_ui, contacts)
-            self.call_from_thread(self._status, "")
-            logger.info("LINK-SIG: done, contacts=%d", len(contacts))
+            self.call_from_thread(self._on_backend_ready, sb)
             self.call_from_thread(
                 self._status, "💡 Select a contact to view chat"
             )
@@ -1104,7 +1134,8 @@ class SignalTUI(App):
                     self._status,
                     f"✅ WAHA: {n} contatti (webhook :{WEBHOOK_PORT})",
                 )
-                self._finalize_wa_connect()
+                self._resync_wa_history()
+                self.call_from_thread(self._on_backend_ready, self.whatsapp_backend)
                 self._wa_connecting = False
             else:
                 # WAHA is working but server-side contacts sync still in
@@ -1149,41 +1180,10 @@ class SignalTUI(App):
         # History sync (in worker, no UI block)
         self.call_from_thread(self._status, "⏳ WAHA: sync cronologia...", 0)
         self._resync_wa_history()
-        self._cache = {}
-        for b in self.manager.all():
-            for cid, msgs in b.cache.items():
-                self._cache[contact_cache_key(b.protocol, cid)] = list(msgs)
-        self._sync_last_ts()
-        self.contacts = self.manager.list_contacts()
-        logger.info(
-            "LINK-WA: calling _update_contacts_ui with %d contacts",
-            len(self.contacts),
-        )
-        self.call_from_thread(self._update_contacts_ui, self.contacts)
+        self.call_from_thread(self._on_backend_ready, self.whatsapp_backend)
         self.call_from_thread(self._status, "")
         logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
         self._wa_connecting = False
-
-    def _finalize_wa_connect(self) -> None:
-        """Worker thread: history sync + cache rebuild + UI update.
-
-        Keeps heavy work (REST calls, SQLite writes) off the UI thread.
-        Only the final ``_update_contacts_ui`` is posted to the event loop.
-        """
-        self._resync_wa_history()
-        self._cache = {}
-        for b in self.manager.all():
-            for cid, msgs in b.cache.items():
-                self._cache[contact_cache_key(b.protocol, cid)] = list(msgs)
-        self._sync_last_ts()
-        self.contacts = self.manager.list_contacts()
-        logger.info(
-            "LINK-WA: calling _update_contacts_ui with %d contacts",
-            len(self.contacts),
-        )
-        self.call_from_thread(self._update_contacts_ui, self.contacts)
-        self.call_from_thread(self._status, "")
-        logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
 
 
     def _resync_wa_history(self) -> int:
@@ -1349,7 +1349,7 @@ class SignalTUI(App):
     def _render_next_chunk(self) -> None:
         """Render the next *chunk_size* contacts (progressive startup).
 
-        Called initially from ``_update_contacts_ui`` and then
+        Called initially from ``_on_backend_ready`` and then
         self-schedules via ``set_timer`` until all pending contacts are
         rendered.  Each chunk yields control back to the Textual event
         loop so the UI never freezes.
@@ -1517,20 +1517,6 @@ class SignalTUI(App):
         # NB: volutamente NON scriviamo niente nella chat qui: il ctrl+W aggiorna
         # solo il titolo della barra contatti e la lista visibile, senza inquinare
         # la cronologia della conversazione in corso.
-
-    def _update_contacts_ui(self, contacts: list[ChatContact]):
-        """Update the UI with the (merged) contact list.
-
-        Delegates to ``_render_contact_list`` which uses progressive render
-        when the set changes (startup / new backend), and fast/reorder paths
-        on subsequent calls.
-        """
-        logger.info("LINK-UI: start, contacts=%d", len(contacts))
-        self.contacts = contacts
-        self._sort_contacts()
-        self._render_contact_list(self._filtered_contacts())
-        self._update_unread_badges()
-        logger.info("LINK-UI: done")
 
     # ─── Contact selection ─────────────────────────────────────────────────
 
