@@ -290,6 +290,32 @@ class TelegramBackend(ChatBackend):
         """Mark messages as read (Telethon handles this automatically)."""
         pass
 
+    def send_message_sync(
+        self,
+        contact_id: str,
+        text: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+    ) -> str:
+        """Synchronous send, for use from the TUI's sync callbacks."""
+        if self._loop is None or self._client is None:
+            raise RuntimeError("Telegram backend not connected")
+        async def _send():
+            try:
+                eid = int(contact_id)
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid Telegram contact id: {contact_id}")
+            entity = await self._client.get_input_entity(eid)
+            msg = await self._client.send_message(entity, text)
+            return str(msg.id)
+        future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
+        return future.result(timeout=30)
+
+    def mark_read_sync(self, contact_id: str) -> None:
+        """Synchronous mark-read, for use from the TUI's sync callbacks."""
+        pass  # Telethon handles read receipts automatically
+
     # ─── Event reception ───────────────────────────────────────────────────
 
     async def receive(self):
