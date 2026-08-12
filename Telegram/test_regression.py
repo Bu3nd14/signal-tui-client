@@ -378,6 +378,19 @@ class TestProtocolFilterFourWay:
     def test_filtered_contacts_respects_telegram(self):
         """_filtered_contacts filtra per 'telegram' come per signal/whatsapp."""
         contacts = [
+            _signal_contact(), _whatsapp_contact(), _telegram_contact(),
+            _telegram_contact("999", "Paolo"),
+        ]
+        # Simula _filtered_contacts
+        def filtered(protocol_filter):
+            if protocol_filter == "all":
+                return contacts
+            return [c for c in contacts if c.protocol == protocol_filter]
+
+        assert len(filtered("all")) == 4
+        assert len(filtered(PROTOCOL_SIGNAL)) == 1
+        assert len(filtered(PROTOCOL_WHATSAPP)) == 1
+        assert len(filtered(PROTOCOL_TELEGRAM)) == 2
 
 
 # ─── Edge cases and unhappy paths ────────────────────────────────────────
@@ -489,20 +502,6 @@ class TestEdgeCases:
         client = WhatsAppRESTClient("http://test.local")
         assert client.base_url == "http://test.local"
         assert client.session_name is not None
-
-            _signal_contact(), _whatsapp_contact(), _telegram_contact(),
-            _telegram_contact("999", "Paolo"),
-        ]
-        # Simula _filtered_contacts
-        def filtered(protocol_filter):
-            if protocol_filter == "all":
-                return contacts
-            return [c for c in contacts if c.protocol == protocol_filter]
-
-        assert len(filtered("all")) == 4
-        assert len(filtered(PROTOCOL_SIGNAL)) == 1
-        assert len(filtered(PROTOCOL_WHATSAPP)) == 1
-        assert len(filtered(PROTOCOL_TELEGRAM)) == 2
 
     def test_filter_title_suffix_includes_telegram(self):
         """Il suffisso del titolo include Telegram."""

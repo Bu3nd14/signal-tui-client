@@ -19,11 +19,13 @@ from typing import Any
 
 PROTOCOL_SIGNAL = "signal"
 PROTOCOL_WHATSAPP = "whatsapp"
+PROTOCOL_TELEGRAM = "telegram"
 
 #: Human-friendly emoji shown next to a contact of a given protocol.
 PROTOCOL_EMOJI: dict[str, str] = {
     PROTOCOL_SIGNAL: "📱",
     PROTOCOL_WHATSAPP: "💬",
+    PROTOCOL_TELEGRAM: "📨",
 }
 
 

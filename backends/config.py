@@ -183,3 +183,51 @@ def get_whatsapp_webhook_url() -> str:
     if explicit:
         return explicit.rstrip("/")
     return f"http://host.docker.internal:{get_whatsapp_webhook_port()}/webhook"
+
+
+# ─── Telegram configuration ────────────────────────────────────────────────
+
+def get_telegram_api_id() -> int:
+    """Read ``TELEGRAM_API_ID`` from env, config.json, or .env.
+
+    Returns 0 if not configured, which effectively disables Telegram.
+    """
+    raw = os.environ.get("TELEGRAM_API_ID", "")
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            return 0
+    cfg = _load_config()
+    val = cfg.get("telegram_api_id", 0)
+    try:
+        return int(val) if val else 0
+    except (ValueError, TypeError):
+        return 0
+
+
+def get_telegram_api_hash() -> str:
+    """Read ``TELEGRAM_API_HASH`` from env, config.json, or .env."""
+    raw = os.environ.get("TELEGRAM_API_HASH", "")
+    if raw:
+        return raw.strip()
+    cfg = _load_config()
+    val = cfg.get("telegram_api_hash", "")
+    return str(val).strip() if val else ""
+
+
+def get_telegram_session_path() -> Path:
+    """Return the path where the Telethon ``.session`` file is stored.
+
+    Uses ``XDG_DATA_HOME`` (default ``~/.local/share``) +
+    ``signal-tui-client/telegram.session``.
+    """
+    data_dir = Path(
+        os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    )
+    return data_dir / "signal-tui-client" / "telegram.session"
+
+
+def telegram_enabled() -> bool:
+    """Return True if Telegram credentials are configured."""
+    return get_telegram_api_id() != 0 and bool(get_telegram_api_hash())
