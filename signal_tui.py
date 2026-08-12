@@ -2679,13 +2679,23 @@ class SignalTUI(App):
             return
 
         try:
-            backend.send_message_sync(
+            result = backend.send_message_sync(
                 contact.id,
                 message,
                 quote_timestamp=quote_timestamp,
                 quote_author=quote_author,
                 quote_message=quote_message,
             )
+            # For Telegram, ingest the real message id to upgrade the optimistic entry
+            if contact.protocol == PROTOCOL_TELEGRAM and result:
+                ingest_backend = self.manager.get(contact.protocol)
+                if ingest_backend is not None:
+                    ingest_backend.ingest_message(
+                        contact.id,
+                        {"id": result, "text": message, "is_mine": True,
+                         "sender": "You", "timestamp": int(time.time() * 1000)},
+                        int(time.time() * 1000),
+                    )
         except Exception as e:
             self.call_from_thread(
                 self._status,

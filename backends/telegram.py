@@ -587,13 +587,17 @@ class TelegramBackend(ChatBackend):
         if mid:
             self._seen_msg_ids.add(mid)
 
-        # Dedup by (contact, text, ts) within a small window
+        # Dedup by (contact, text, ts) within a small window.
+        # If the existing entry has no id and the new one does, upgrade it.
         text = data.get("text", "")
         for m in self.cache.get(contact_id, []):
             if (
                 m.get("text") == text
                 and abs(int(m.get("timestamp", 0)) - ts) <= _INCOMING_DEDUP_WINDOW_MS
             ):
+                if mid and not m.get("id"):
+                    m["id"] = mid
+                    m["timestamp"] = ts  # update to real timestamp
                 return False
 
         # Persist to SQLite (same pattern as Signal/WhatsApp backends)
