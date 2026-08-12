@@ -80,6 +80,9 @@ class TelegramBackend(ChatBackend):
         # Seen message ids for dedup
         self._seen_msg_ids: set[str] = set()
 
+        # 2FA state for QR login
+        self._needs_2fa: bool = False
+
     # ─── Lifecycle ─────────────────────────────────────────────────────────
 
     async def connect(self) -> None:
@@ -561,20 +564,22 @@ class TelegramBackend(ChatBackend):
                 logger.info("Telegram QR login: scan completed successfully")
                 self._connected = True
             except SessionPasswordNeededError:
-                logger.warning(
-                    "Telegram QR login: 2FA password required. "
-                    "Disable 2FA in Telegram settings or use link_telegram.py CLI."
-                )
+                logger.info("Telegram QR login: 2FA required, waiting for password")
+                self._needs_2fa = True
+                # Keep client + loop alive for complete_2fa()
+                return
             except TimeoutError:
                 logger.info("Telegram QR login: timeout (120s), will refresh")
             except Exception as exc:
                 logger.exception("Telegram QR login wait failed: %s", exc)
             finally:
-                try:
-                    loop.run_until_complete(client.disconnect())
-                except Exception:
-                    pass
-                loop.close()
+                # Only cleanup if not waiting for 2FA
+                if not self._needs_2fa:
+                    try:
+                        loop.run_until_complete(client.disconnect())
+                    except Exception:
+                        pass
+                    loop.close()
 
         self._loop_thread = threading.Thread(
             target=_wait_thread, name="telegram-qr-wait", daemon=True,
@@ -582,3 +587,33 @@ class TelegramBackend(ChatBackend):
         self._loop_thread.start()
 
         return qr_url
+
+    def complete_2fa(self, password: str) -> bool:
+        """Complete 2FA after QR scan using the given password.
+
+        Returns True on success, False on failure.
+        """
+        if not self._needs_2fa or self._client is None or self._loop is None:
+            return False
+
+        async def _sign_in():
+            return await self._client.sign_in(password=password)
+
+        try:
+            self._loop.run_until_complete(_sign_in())
+            logger.info("Telegram 2FA: sign_in succeeded")
+            self._connected = True
+            self._needs_2fa = False
+            # Cleanup
+            try:
+                self._loop.run_until_complete(self._client.disconnect())
+            except Exception:
+                pass
+            self._loop.close()
+            self._loop = None
+            self._loop_thread = None
+            return True
+        except Exception as exc:
+            logger.exception("Telegram 2FA sign_in failed: %s", exc)
+            self._needs_2fa = False
+            return False

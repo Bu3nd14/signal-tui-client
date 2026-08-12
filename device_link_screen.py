@@ -485,12 +485,33 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         if tb._connected:
             return True
 
+        # Check if 2FA password is needed
+        if getattr(tb, "_needs_2fa", False) and not getattr(self, "_2fa_shown", False):
+            self._2fa_shown = True
+            try:
+                status = self.query_one("#link-qr-status", Static)
+                status.update("🔐 2FA required — enter password below")
+            except Exception:
+                pass
+            try:
+                container = self.query_one("#link-qr-container", Vertical)
+                self._2fa_input = Input(
+                    placeholder="Telegram 2FA password",
+                    password=True,
+                    id="link-2fa-input",
+                )
+                container.mount(self._2fa_input)
+                self._2fa_input.focus()
+            except Exception:
+                pass
+
         # Check QR age for refresh (Telegram QR tokens expire ~60s)
         age = time.time() - self._qr_start_time
         if age >= 60:
             logger.info("Telegram QR expired, refreshing...")
             try:
                 new_url = await self._get_telegram_qr_link()
+                self._2fa_shown = False
                 if new_url.startswith("INFO:"):
                     code_widget = self.query_one("#link-qr-code", Static)
                     code_widget.update(f"\n\n{new_url[5:]}\n")
@@ -773,6 +794,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         """Handle Enter in input fields."""
         if event.input.id in ("link-phone-input", "link-device-input"):
             self._on_phone_confirm()
+        elif event.input.id == "link-2fa-input":
+            self._on_2fa_submit()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         """Handle click / Enter on a protocol in the ListView."""
@@ -821,6 +844,48 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         if device:
             self._device_name = device
         self._transition_to_qr(phone)
+
+    def _on_2fa_submit(self) -> None:
+        """User submitted 2FA password — complete login."""
+        app = self.app
+        tb = getattr(app, "telegram_backend", None)
+        if tb is None:
+            return
+        password = self.query_one("#link-2fa-input", Input).value.strip()
+        if not password:
+            return
+        try:
+            status = self.query_one("#link-qr-status", Static)
+            status.update("⏳ Verifying 2FA password...")
+        except Exception:
+            pass
+        # Run in thread to not block UI
+        self.run_worker(self._complete_2fa_worker(tb, password), exclusive=False)
+
+    async def _complete_2fa_worker(self, tb, password: str) -> None:
+        """Worker: call complete_2fa and update UI."""
+        import asyncio as _asyncio
+
+        def _run():
+            return tb.complete_2fa(password)
+
+        success = await _asyncio.to_thread(_run)
+        if success:
+            try:
+                self.query_one("#link-qr-status", Static).update("✅ Device linked successfully!")
+                self.query_one("#link-qr-code", Static).update("\n\n✅ Linked!\n")
+            except Exception:
+                pass
+            await _asyncio.sleep(2)
+            self.dismiss(None)
+        else:
+            try:
+                self.query_one("#link-qr-status", Static).update("❌ Wrong password — try again")
+                inp = self.query_one("#link-2fa-input", Input)
+                inp.value = ""
+                inp.focus()
+            except Exception:
+                pass
 
     def _on_go_back(self) -> None:
         """Go back from phone phase to picker phase."""
