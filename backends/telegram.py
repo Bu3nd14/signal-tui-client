@@ -504,21 +504,26 @@ class TelegramBackend(ChatBackend):
         if self._connected:
             return False
         session_file = Path(self._session_path)
-        if session_file.exists():
+        if not session_file.exists():
+            return True
+        try:
+            loop = asyncio.new_event_loop()
+            from telethon import TelegramClient
+            client = TelegramClient(
+                self._session_path, self._api_id, self._api_hash, loop=loop,
+            )
             try:
-                loop = asyncio.new_event_loop()
-                from telethon import TelegramClient
-                client = TelegramClient(
-                    self._session_path, self._api_id, self._api_hash, loop=loop,
-                )
                 loop.run_until_complete(client.connect())
                 auth = loop.run_until_complete(client.is_user_authorized())
-                loop.run_until_complete(client.disconnect())
+            finally:
+                try:
+                    loop.run_until_complete(client.disconnect())
+                except Exception:
+                    pass
                 loop.close()
-                return not auth
-            except Exception:
-                return True
-        return True
+            return not auth
+        except Exception:
+            return True
 
     def get_pairing_qr(self) -> str | None:
         """Start QR login, return the ``tg://login?token=...`` URL.
