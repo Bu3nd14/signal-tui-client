@@ -319,9 +319,9 @@ class TestConfigIsolation:
 
     def test_telegram_disabled_by_default(self):
         """Senza credenziali, telegram_enabled() è False."""
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("backends.config._load_dotenv", return_value={}):
             from backends.config import telegram_enabled
-            # Without TELEGRAM_API_ID/API_HASH in env, should be False
             assert telegram_enabled() is False
 
     def test_whatsapp_enabled_not_affected_by_telegram_config(self):
@@ -331,17 +331,18 @@ class TestConfigIsolation:
             "TELEGRAM_API_HASH": "abc",
         }, clear=True):
             from backends.config import telegram_enabled, whatsapp_enabled
-            # Mock the TCP reachability check since WAHA may be running locally
             with patch("backends.config._local_waha_reachable", return_value=False):
                 assert telegram_enabled() is True
                 assert whatsapp_enabled() is False
 
     def test_telegram_enabled_requires_both_credentials(self):
-        with patch.dict("os.environ", {"TELEGRAM_API_ID": "12345"}, clear=True):
+        with patch.dict("os.environ", {"TELEGRAM_API_ID": "12345"}, clear=True), \
+             patch("backends.config._load_dotenv", return_value={}):
             from backends.config import telegram_enabled
             assert telegram_enabled() is False
 
-        with patch.dict("os.environ", {"TELEGRAM_API_HASH": "abc"}, clear=True):
+        with patch.dict("os.environ", {"TELEGRAM_API_HASH": "abc"}, clear=True), \
+             patch("backends.config._load_dotenv", return_value={}):
             from backends.config import telegram_enabled
             assert telegram_enabled() is False
 

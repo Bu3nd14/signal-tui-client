@@ -201,7 +201,15 @@ def get_telegram_api_id() -> int:
     cfg = _load_config()
     val = cfg.get("telegram_api_id", 0)
     try:
-        return int(val) if val else 0
+        if int(val):
+            return int(val)
+    except (ValueError, TypeError):
+        pass
+    # Fallback: .env file (same pattern as WhatsApp config)
+    dotenv = _load_dotenv()
+    raw = dotenv.get("TELEGRAM_API_ID", "")
+    try:
+        return int(raw) if raw else 0
     except (ValueError, TypeError):
         return 0
 
@@ -213,7 +221,11 @@ def get_telegram_api_hash() -> str:
         return raw.strip()
     cfg = _load_config()
     val = cfg.get("telegram_api_hash", "")
-    return str(val).strip() if val else ""
+    if val:
+        return str(val).strip()
+    # Fallback: .env file
+    dotenv = _load_dotenv()
+    return dotenv.get("TELEGRAM_API_HASH", "").strip()
 
 
 def get_telegram_session_path() -> Path:
