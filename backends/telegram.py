@@ -461,10 +461,12 @@ class TelegramBackend(ChatBackend):
     def ingest_message(
         self, contact_id: str, data: dict, ts: int
     ) -> bool:
-        """Add a message to the in-memory cache with dedup.
+        """Add a message to the in-memory cache AND SQLite with dedup.
 
         Returns True if the message was newly added, False if duplicate.
         """
+        from backend import _add_message_to_cache
+
         mid = data.get("id", "")
         if mid and mid in self._seen_msg_ids:
             return False
@@ -479,6 +481,24 @@ class TelegramBackend(ChatBackend):
                 and abs(int(m.get("timestamp", 0)) - ts) <= _INCOMING_DEDUP_WINDOW_MS
             ):
                 return False
+
+        # Persist to SQLite (same pattern as Signal/WhatsApp backends)
+        try:
+            _add_message_to_cache(
+                contact_id,
+                text,
+                data.get("is_mine", False),
+                data.get("sender", ""),
+                ts,
+                quote_text=data.get("quote_text"),
+                msg_type=data.get("msg_type", "text"),
+                attachment_info=data.get("attachment_info"),
+                attachment_id=data.get("attachment_id"),
+                protocol=PROTOCOL_TELEGRAM,
+                msg_id=mid,
+            )
+        except Exception:
+            logger.exception("Telegram: _add_message_to_cache failed")
 
         if contact_id not in self.cache:
             self.cache[contact_id] = []

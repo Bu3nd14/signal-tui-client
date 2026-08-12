@@ -816,6 +816,14 @@ class SignalTUI(App):
                     display_name=event.contact_id,
                     protocol=event.protocol,
                 )
+                # New contact discovered live — add to lists and trigger re-render
+                existing = {c.cache_key for c in self.contacts}
+                if contact.cache_key not in existing:
+                    self.contacts.append(contact)
+                    if hasattr(backend, 'contacts'):
+                        backend.contacts.append(contact)
+                    self._contact_list_dirty = True
+                    self._dirty_contact_keys.add(contact.cache_key)
         cache_key = contact.cache_key
         ts = event.payload.get("timestamp", 0)
         is_mine = event.payload.get("is_mine", False)
