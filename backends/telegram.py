@@ -292,7 +292,8 @@ class TelegramBackend(ChatBackend):
             return total
 
         try:
-            return self._loop.run_until_complete(_fetch())
+            future = asyncio.run_coroutine_threadsafe(_fetch(), self._loop)
+            return future.result(timeout=120)
         except Exception:
             logger.exception("Telegram fetch_recent_history failed")
             return 0
