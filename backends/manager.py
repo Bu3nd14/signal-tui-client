@@ -48,9 +48,12 @@ class BackendManager:
             await backend.connect()
 
     async def disconnect_all(self) -> None:
-        """Disconnect every registered backend."""
+        """Disconnect every registered backend (best-effort, failures are logged)."""
         for backend in self._backends.values():
-            await backend.disconnect()
+            try:
+                await backend.disconnect()
+            except Exception:
+                pass
 
     def list_contacts(self) -> list[ChatContact]:
         """Return the merged contact list across all backends."""

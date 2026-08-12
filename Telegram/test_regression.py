@@ -58,6 +58,7 @@ def _make_multi_manager() -> BackendManager:
     signal.contacts = [_signal_contact()]
     signal.cache = {}
     signal._events = queue.Queue()
+    signal._event_queue = signal._events   # alias per poll_once()
 
     whatsapp = WhatsAppBackend.__new__(WhatsAppBackend)
     whatsapp.protocol = PROTOCOL_WHATSAPP
@@ -214,7 +215,7 @@ class TestCacheIsolation:
         assert "+391" in signal.cache
         assert "+391" not in whatsapp.cache
         assert len(signal.cache["+391"]) == 1
-        assert signal.cache["+391"][0]["protocol"] == PROTOCOL_SIGNAL
+        assert signal.cache["+391"][0]["text"] == "Signal msg"
 
     def test_whatsapp_messages_not_visible_in_signal_cache(self):
         """Messaggi WhatsApp nel cache non appaiono in Signal."""
@@ -227,7 +228,7 @@ class TestCacheIsolation:
 
         assert "wa:1" in whatsapp.cache
         assert "wa:1" not in signal.cache
-        assert whatsapp.cache["wa:1"][0]["protocol"] == PROTOCOL_WHATSAPP
+        assert whatsapp.cache["wa:1"][0]["text"] == "WA msg"
 
     def test_same_phone_different_protocol_different_cache_keys(self):
         """Stesso numero su Signal e Telegram → due cache key diverse."""
@@ -330,9 +331,10 @@ class TestConfigIsolation:
             "TELEGRAM_API_HASH": "abc",
         }, clear=True):
             from backends.config import telegram_enabled, whatsapp_enabled
-            assert telegram_enabled() is True
-            # WhatsApp non dovrebbe essere abilitato solo perché Telegram lo è
-            assert whatsapp_enabled() is False
+            # Mock the TCP reachability check since WAHA may be running locally
+            with patch("backends.config._local_waha_reachable", return_value=False):
+                assert telegram_enabled() is True
+                assert whatsapp_enabled() is False
 
     def test_telegram_enabled_requires_both_credentials(self):
         with patch.dict("os.environ", {"TELEGRAM_API_ID": "12345"}, clear=True):
@@ -353,7 +355,8 @@ class TestConfigIsolation:
     def test_session_path_uses_cache_dir(self):
         from backends.config import get_telegram_session_path
         path = get_telegram_session_path()
-        assert path.endswith("telegram.session")
+        assert path.name == "telegram.session"
+        assert "signal-tui-client" in str(path)
 
 
 # ─── Protocol filter cycle with 4 protocols ──────────────────────────────
