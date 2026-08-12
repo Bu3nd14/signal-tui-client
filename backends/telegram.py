@@ -259,6 +259,44 @@ class TelegramBackend(ChatBackend):
         self.contacts = contacts
         self._contacts_by_id = by_id
 
+    def fetch_recent_history(self, limit: int = 20) -> int:
+        """Fetch recent messages for all known contacts from Telethon.
+
+        Processes them through ``ingest_message`` to populate cache + SQLite.
+        Returns the number of messages fetched.
+        """
+        if self._client is None or self._loop is None or not self._connected:
+            return 0
+
+        async def _fetch():
+            total = 0
+            for contact in self.contacts:
+                try:
+                    eid = int(contact.id)
+                except (ValueError, TypeError):
+                    continue
+                try:
+                    entity = await self._client.get_input_entity(eid)
+                    messages = await self._client.get_messages(entity, limit=limit)
+                    for msg in messages:
+                        if msg is None or not msg.date:
+                            continue
+                        evt = self._message_to_chat_event(msg)
+                        if evt is None:
+                            continue
+                        ts = evt.payload.get("timestamp", 0)
+                        self.ingest_message(contact.id, evt.payload, ts)
+                        total += 1
+                except Exception:
+                    logger.exception("Telegram fetch_history failed for %s", contact.id)
+            return total
+
+        try:
+            return self._loop.run_until_complete(_fetch())
+        except Exception:
+            logger.exception("Telegram fetch_recent_history failed")
+            return 0
+
     def _identify_contact(self, contact_id: str) -> ChatContact | None:
         """Resolve a Telegram user id to a known ``ChatContact``."""
         try:

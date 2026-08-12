@@ -1230,6 +1230,10 @@ class SignalTUI(App):
             self.telegram_backend._connect_sync()
             n = len(self.telegram_backend.contacts)
             logger.info("LINK-TG: connect_sync done, contacts=%d, connected=%s", n, self.telegram_backend._connected)
+            if n > 0:
+                self.call_from_thread(self._status, "⏳ Telegram: sync cronologia...", 0)
+                fetched = self.telegram_backend.fetch_recent_history(limit=20)
+                logger.info("LINK-TG: history synced, %d messages", fetched)
             self.call_from_thread(self._on_backend_ready, self.telegram_backend)
         except Exception as e:
             logger.exception("Telegram connect failed: %s", e)
