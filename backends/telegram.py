@@ -503,12 +503,16 @@ class TelegramBackend(ChatBackend):
 
         # Clean up any previous QR login attempt
         if self._loop_thread is not None and self._loop_thread.is_alive():
-            self._connected = False
+            # Previous attempt still waiting — let it finish naturally
+            self._loop_thread.join(timeout=2)
+        self._connected = False
         if self._loop is not None:
             try:
                 self._loop.call_soon_threadsafe(self._loop.stop)
             except Exception:
                 pass
+            self._loop.close()
+            self._loop = None
 
         loop = asyncio.new_event_loop()
         self._loop = loop
@@ -553,7 +557,7 @@ class TelegramBackend(ChatBackend):
         def _wait_thread() -> None:
             asyncio.set_event_loop(loop)
             try:
-                loop.run_until_complete(qr_login.wait())
+                loop.run_until_complete(qr_login.wait(timeout=120))
                 logger.info("Telegram QR login: scan completed successfully")
                 self._connected = True
             except SessionPasswordNeededError:
@@ -561,6 +565,8 @@ class TelegramBackend(ChatBackend):
                     "Telegram QR login: 2FA password required. "
                     "Disable 2FA in Telegram settings or use link_telegram.py CLI."
                 )
+            except TimeoutError:
+                logger.info("Telegram QR login: timeout (120s), will refresh")
             except Exception as exc:
                 logger.exception("Telegram QR login wait failed: %s", exc)
             finally:

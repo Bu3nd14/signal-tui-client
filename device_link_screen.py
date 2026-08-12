@@ -485,9 +485,9 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         if tb._connected:
             return True
 
-        # Check QR age for refresh (Telegram QR tokens expire ~30s)
+        # Check QR age for refresh (Telegram QR tokens expire ~60s)
         age = time.time() - self._qr_start_time
-        if age >= 30:
+        if age >= 60:
             logger.info("Telegram QR expired, refreshing...")
             try:
                 new_url = await self._get_telegram_qr_link()
