@@ -1,4 +1,4 @@
-# Signal / WhatsApp TUI Client
+# Signal / WhatsApp / Telegram TUI Client
 
 A terminal-based (TUI) multi-protocol client built with [Textual](https://textual.textualize.io/).
 
@@ -6,6 +6,8 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
   fallback to subprocess if the daemon is unavailable.
 - **WhatsApp**: optional backend via the lightweight [WAHA](https://waha.devlike.pro/) Docker
   container — incoming messages arrive in real time through webhooks, no polling needed.
+- **Telegram**: optional backend using [Telethon](https://docs.telethon.dev/) (MTProto) —
+  native Python, no external daemon required. QR login with 2FA support.
 
 ![Main interface](screenshot.png)
 *Main chat interface*
@@ -18,23 +20,24 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 
 ## Features
 
-- Full contact list with unread badges — unified across Signal and WhatsApp
-- Real-time message receiving and sending on both protocols
+- Full contact list with unread badges — unified across Signal, WhatsApp, and Telegram
+- Real-time message receiving and sending on all three protocols
 - **Multiple attachments** — a message with several photos shows each one separately (both Signal and WhatsApp).  Clickable image placeholders with fullscreen viewer (via catimg).
 - Message history with local SQLite cache (last 200 messages per contact retained)
-- Device linking via QR code — both Signal and WhatsApp
+- Device linking via QR code — Signal, WhatsApp, and Telegram
 - Daemon mode for fast JSON-RPC communication (Signal)
 - WhatsApp event-driven mode — webhook-based, no polling (WAHA + Docker)
+- Telegram native mode — MTProto event loop in dedicated thread (Telethon)
 - Automatic fallback to subprocess if daemon is not running (Signal)
 - Reply to messages — click any message to quote it in your reply
 - Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
 - Contact search (`Ctrl+S`) — search contacts by name or number with a live-updating picker
 - Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
-- Device linking (`Ctrl+L`) — link a new Signal or WhatsApp device directly from the TUI with QR code scanning
-- Unified multi-protocol contact list with `Ctrl+W` cycle filter: all → Signal → WhatsApp
-- Protocol-aware theming — 📱 Signal vs 💬 WhatsApp accents in the contact list and message borders
-- Message delivery and read receipts — sent messages show status: *sent* (italic), **delivered** (bold), read (normal).  Works for both Signal and WhatsApp.
-- Typing indicators — see when a contact is typing (✍️ icon next to their name); a 💭 icon shows briefly after they stop typing or send a message.  Works for both protocols.
+- Device linking (`Ctrl+L`) — link a new Signal, WhatsApp, or Telegram device directly from the TUI with QR code scanning
+- Unified multi-protocol contact list with `Ctrl+W` cycle filter: all → Signal → WhatsApp → Telegram
+- Protocol-aware theming — 📱 Signal, 💬 WhatsApp, 📨 Telegram with distinct emoji labels
+- Message delivery and read receipts — sent messages show status: *sent* (italic), **delivered** (bold), read (normal).  Works for all three protocols.
+- Typing indicators — see when a contact is typing (✍️ icon next to their name); a 💭 icon shows briefly after they stop typing or send a message.  Works for Signal and WhatsApp.
 
 
 
@@ -221,6 +224,46 @@ python3 link_whatsapp.py         # prints a QR to scan with WhatsApp
 > waiting for server-side contacts sync with a progress indicator.
 
 
+#### 7. (Optional) Enable the Telegram backend
+
+The Telegram backend uses [Telethon](https://docs.telethon.dev/) and requires
+**no external daemon** — everything runs in-process.
+
+##### 7a. Get API credentials
+
+1. Go to [my.telegram.org](https://my.telegram.org) and log in with your phone number
+2. Click **API Development Tools**
+3. Fill in **App title** and **Short name** (any values are fine, no URL needed)
+4. Click **Create application**
+5. Copy your **`api_id`** (integer) and **`api_hash`** (string)
+
+> ⚠️ Your `api_hash` is **secret** — never commit it or share it publicly.
+
+##### 7b. Configure credentials
+
+Add to the project `.env` file (`cp .env.example .env` if not already present):
+
+```bash
+TELEGRAM_API_ID=123456
+TELEGRAM_API_HASH=your_hash_here
+```
+
+##### 7c. Pair the device (QR login)
+
+With credentials configured, launch the TUI:
+
+```bash
+source .venv/bin/activate
+python3 signal_tui.py
+```
+
+Press `Ctrl+L`, select **📨 Telegram**, and scan the QR code with your phone.
+
+> If your Telegram account has **2FA** enabled, the TUI will show a password
+> field after scanning the QR. Enter your 2FA password and press Enter.
+>
+> If you don't have 2FA, the login completes automatically.
+
 
 ## Virtual environment (optional but recommended)
 
@@ -261,15 +304,16 @@ either from the command line or directly from the TUI.
 ```bash
 python3 link_account.py          # Signal
 python3 link_whatsapp.py         # WhatsApp
+python3 link_telegram.py         # Telegram (if script exists)
 ```
 
 Each script displays a QR code. Scan it with the respective app on your phone.
 
 ### From the TUI
 
-Launch the app and press `Ctrl+L`, select Signal or WhatsApp, enter your
-phone number (Signal) and device name, then scan the QR code. The TUI
-handles the entire linking flow with a progress indicator in the status bar.
+Launch the app and press `Ctrl+L`, select Signal, WhatsApp, or Telegram, then
+scan the QR code. For Signal you may need to enter your phone number. For
+Telegram with 2FA, the TUI will prompt for your password after scanning.
 
 ## Usage
 
@@ -291,8 +335,8 @@ python3 signal_tui.py
 | `Ctrl+E` | Open emoji picker |
 | `Ctrl+S` | Open contact search picker |
 | `Ctrl+D` | Toggle download mode |
-| `Ctrl+W` | Cycle contact filter: all → Signal → WhatsApp |
-| `Ctrl+L` | Link a new device (Signal / WhatsApp) via QR code |
+| `Ctrl+W` | Cycle contact filter: all → Signal → WhatsApp → Telegram |
+| `Ctrl+L` | Link a new device (Signal / WhatsApp / Telegram) via QR code |
 | `Ctrl+N` / `Ctrl+P` | Navigate emoji suggestions / emoji picker categories |
 | `Ctrl+Q` | Quit |
 | `Ctrl+C` | Quit |
@@ -379,23 +423,29 @@ signal-tui-client/
 ├── backend.py               # Shared backend: SQLite persistence, signal-cli RPC/subprocess, webhook/HTTP server, receipts
 ├── models.py                # Shared data models (ChatContact, ChatMessage, ChatEvent)
 ├── backends/                # Per-protocol backend implementations
-│   ├── __init__.py          #   Package init — exports ChatBackend, BackendManager, SignalBackend, WhatsAppBackend
+│   ├── __init__.py          #   Package init — exports ChatBackend, BackendManager, SignalBackend, WhatsAppBackend, TelegramBackend
 │   ├── base.py              #   Abstract ChatBackend interface
 │   ├── manager.py           #   Multi-backend registry and routing
 │   ├── signal.py            #   Signal backend (signal-cli daemon / subprocess, envelope parsing)
 │   ├── whatsapp.py          #   WhatsApp backend (WAHA REST + webhook push)
-│   └── config.py            #   WhatsApp configuration helpers
+│   ├── telegram.py          #   Telegram backend (Telethon MTProto, QR login, read receipts)
+│   └── config.py            #   WhatsApp + Telegram configuration helpers
 ├── ui_components.py         # Custom Textual widgets (MessageWidget, ImageWidget, ImageModalScreen, …)
 ├── emoji_picker.py          # Emoji picker modal screen and auto-completion widget (Ctrl+E)
 ├── emoji_data.py            # Emoji database (categories, aliases, search index)
 ├── contact_picker.py        # Contact search picker modal screen (Ctrl+S)
+├── device_link_screen.py    # Device link picker (Signal / WhatsApp / Telegram QR pairing)
+├── qr_utils.py              # QR code renderer (ASCII / PNG-to-ASCII)
 ├── link_account.py          # Signal device linking script (QR code — or use Ctrl+L in TUI)
 ├── link_whatsapp.py         # WhatsApp device linking script (QR code — or use Ctrl+L in TUI)
 ├── migrate_cache_sqlite.py  # One-shot migration: JSON cache → SQLite
 ├── migrate_cache_protocol.py# One-shot migration: add protocol field to cache
 ├── migrate_cache_status.py  # One-shot migration: add status field to cache
 ├── purge_whatsapp_cache.py  # Utility: purge WhatsApp messages from cache
-├── tests/                   # Test suite (pytest, 378 tests)
+├── Telegram/                # Telegram test suite (72 tests)
+│   ├── test_telegram_backend.py  (33 tests)
+│   └── test_regression.py        (39 tests)
+├── tests/                   # Test suite (pytest, 396 tests)
 │   ├── conftest.py
 │   ├── test_whatsapp_backend.py (101 tests)
 │   ├── test_ui_protocol.py      (44 tests)
@@ -405,14 +455,14 @@ signal-tui-client/
 ├── profiling/               # Performance profiling tools (CPU, RAM, I/O)
 ├── scripts/                 # Helper scripts (start_whatsapp.sh)
 ├── docker-compose.yml       # WAHA (WhatsApp HTTP API) Docker container
-├── .env.example             # Template for WAHA credentials
+├── .env.example             # Template for WAHA + Telegram credentials
 ├── .dockerignore            # Docker build exclusions
 ├── install.sh               # Automatic installation script
-├── requirements.txt         # Python dependencies
+├── requirements.txt         # Python dependencies (textual, telethon, qrcode, ...)
 ├── requirements-dev.txt     # Development dependencies (ruff)
 ├── config.json              # Local configuration (not committed)
 ├── README.md                # This file
-├── TEST_REPORT.md           # Test report (last run: 396/396 ✅)
+├── TEST_REPORT.md           # Test report (last run: 468/468 ✅)
 ├── PERF_ANALYSIS.md         # Performance analysis (UI reactivity hotspots)
 ├── BUGS.md                  # Known bugs and limitations
 ├── bin/                     # signal-cli binaries (not committed)

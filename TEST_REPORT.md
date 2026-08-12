@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
-**Data:** 2026-08-10
-**Git commit:** `6e01fcd` (master)
+**Data:** 2026-08-12
+**Git commit:** `f9b14dd` (master)
 **Python:** 3.12.3
-**Stato:** ✅ 396/396 test superati (+72 Telegram test in `Telegram/`)
+**Stato:** ✅ 468/468 test superati (396 main + 72 Telegram)
 
 ---
 
@@ -13,9 +13,9 @@
 |--------|------|------|-------|
 | WhatsApp Backend | `test_whatsapp_backend.py` | 101 | ✅ |
 | UI Protocol | `test_ui_protocol.py` | 44 | ✅ |
-| Telegram Regression | `Telegram/test_regression.py` | 39 | ⏳ (backend non ancora creato) |
+| Telegram Regression | `Telegram/test_regression.py` | 39 | ✅ |
 | Backends (Manager) | `test_backends.py` | 36 | ✅ |
-| Telegram Backend | `Telegram/test_telegram_backend.py` | 33 | ⏳ (backend non ancora creato) |
+| Telegram Backend | `Telegram/test_telegram_backend.py` | 33 | ✅ |
 | Typing Indicator | `test_typing_indicator.py` | 29 | ✅ |
 | Cache (SQLite) | `test_backend_cache.py` | 18 | ✅ |
 | Script installazione | `test_install_script.py` | 17 | ✅ |
@@ -35,19 +35,30 @@
 | Migrazione SQLite | `test_migrate_sqlite.py` | 4 | ✅ |
 | Contatti | `test_backend_contacts.py` | 4 | ✅ |
 | Docker Compose | `test_docker_compose_extra_hosts.py` | 2 | ✅ |
-| **Totale** | | **396** | **✅ 396/396** |
+| **Totale** | | **468** | **✅ 468/468** |
 
 ---
 
 ## Novità — Ultimi aggiornamenti
 
-### WhatsApp Link Profiling (branch `opt/wa-link-profile`, merged)
-- **list_contacts**: usa solo `/chats` con timeout 5s (niente fallback su `/contacts` rotto)
-- **_load_contacts**: chiamata singola, no retry loop
-- **_connect_whatsapp**: guardia anti-duplicati `_wa_connecting`
-- **_poll_wa_contacts**: worker thread dedicato per polling post-link, non bloccante
-- **is_working** property su `WhatsAppBackend`: avvio solo se sessione WORKING
-- **Status bar**: tutti i messaggi di sistema in `#status-bar` (stessa riga del Footer), auto-clear 3s o persistenti
+### Telegram Backend (branch `feature/telegram-backend`, merged)
+
+- **`backends/telegram.py`** (~780 righe): `TelegramBackend` con Telethon, pattern identico a Signal
+  - Thread + event loop asyncio dedicato per MTProto
+  - Queue-based event bridge: handler Telethon → `poll_once()`
+  - `_entity_to_contact()` per User/Chat/Channel → `ChatContact`
+  - `_message_to_chat_event()` per Message → `ChatEvent` con supporto media/quote
+  - `ingest_message()` con dedup + persistenza SQLite
+  - `fetch_recent_history()`: recupera ultimi 20 messaggi per contatto all'avvio
+  - `get_pairing_qr()`: QR login con supporto 2FA (`complete_2fa`)
+  - `process_receipt()`: ricevute di lettura via `UpdateReadHistoryOutbox`
+  - `mark_read_sync()`: persiste stato lettura su SQLite
+  - `send_message_sync()`: invio con `run_coroutine_threadsafe`
+- **`device_link_screen.py`**: QR Telegram nel picker (Ctrl+L) con password 2FA inline
+- **`signal_tui.py`**: `_on_backend_ready` merge atomico, `_connect_telegram` worker, filtro Ctrl+W a 4 protocolli
+- **CSS**: colore unificato `#0088cc` per tutti i protocolli, distinzione via emoji (📱📨💬)
+- **72 nuovi test** in `Telegram/`: 33 backend + 39 regressione
+- **`PERF_ANALYSIS.md`**: aggiornato con pattern Telegram e stato attuale
 
 ### Lazy Contact Render (10 commit, `87f52c5..2ba5e05`)
 - **Progressive render**: contatti caricati 50 per frame via `set_timer`, UI mai bloccata
