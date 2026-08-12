@@ -83,6 +83,13 @@ class TelegramBackend(ChatBackend):
         # 2FA state for QR login
         self._needs_2fa: bool = False
 
+    # ─── Attachments ──────────────────────────────────────────────────────
+
+    def get_attachment_path(self, attachment_id: str) -> Path | None:
+        """Resolve an attachment id to a local file path."""
+        p = Path(attachment_id)
+        return p if p.is_file() else None
+
     # ─── Lifecycle ─────────────────────────────────────────────────────────
 
     async def connect(self) -> None:
@@ -387,12 +394,27 @@ class TelegramBackend(ChatBackend):
                      getattr(msg, 'id', '?'), getattr(msg, 'chat_id', '?'))
         if msg is None:
             return
-        evt = self._message_to_chat_event(msg)
+
+        # Download media attachments (photos, documents) for inline viewing
+        attachment_id: str | None = None
+        if msg.photo or msg.document:
+            try:
+                import tempfile, os
+                media_dir = os.path.join(tempfile.gettempdir(), "telegram-media")
+                os.makedirs(media_dir, exist_ok=True)
+                path = await msg.download_media(file=media_dir)
+                if path:
+                    attachment_id = str(path)
+                    logger.info("Telegram: downloaded media to %s", path)
+            except Exception:
+                logger.exception("Telegram: failed to download media")
+
+        evt = self._message_to_chat_event(msg, attachment_id=attachment_id)
         if evt is not None:
             self._events.put(evt)
             logger.info("Telegram: enqueued event for chat %s", evt.contact_id)
 
-    def _message_to_chat_event(self, msg: Any) -> ChatEvent | None:
+    def _message_to_chat_event(self, msg: Any, attachment_id: str | None = None) -> ChatEvent | None:
         """Convert a Telethon ``Message`` (or mock) into a ``ChatEvent``."""
         try:
             chat_id = str(msg.chat_id) if msg.chat_id else None
@@ -418,7 +440,7 @@ class TelegramBackend(ChatBackend):
             ts = int(msg.date.timestamp() * 1000)
 
         msg_type = "text"
-        attachment_id: str | None = None
+        att_id = attachment_id  # use downloaded path if available
         attachment_info: str | None = None
 
         if msg.photo:
@@ -426,7 +448,8 @@ class TelegramBackend(ChatBackend):
             attachment_info = "🖼️ Photo"
         elif msg.document:
             msg_type = "attachment"
-            attachment_id = str(msg.id) if msg.id else None
+            if not att_id:
+                att_id = str(msg.id) if msg.id else None
             attachment_info = "📎 Document"
             for attr in getattr(msg.document, "attributes", []):
                 name = getattr(attr, "file_name", None)
@@ -464,7 +487,7 @@ class TelegramBackend(ChatBackend):
             "quote_text": quote_text,
             "msg_type": msg_type,
             "attachment_info": attachment_info,
-            "attachment_id": attachment_id,
+            "attachment_id": att_id,
             "status": "sent",
             "protocol": PROTOCOL_TELEGRAM,
             "contact": self._identify_contact(chat_id),

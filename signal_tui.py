@@ -169,11 +169,11 @@ class SignalTUI(App):
     }
 
     #contact-list.chat-filter-signal {
-        border: solid #0088cc;
+        border: solid #3b82f6;
     }
 
     #contact-list.chat-filter-whatsapp {
-        border: solid #0088cc;
+        border: solid #25d366;
     }
 
     #contact-list.chat-filter-telegram {
@@ -194,15 +194,15 @@ class SignalTUI(App):
 
     /* Protocol accents in the contact list */
     .protocol-signal {
-        color: #0088cc;
+        color: #b5c9a8;
     }
 
     .protocol-whatsapp {
-        color: #0088cc;
+        color: #4a9e63;
     }
 
     .protocol-telegram {
-        color: #0088cc;
+        color: #1a8a4a;
     }
 
     #contact-list .protocol-signal:hover,
@@ -241,11 +241,11 @@ class SignalTUI(App):
        verde WhatsApp, default/giallo per ALL).  Non usiamo più una "barra"
        laterale (border-left) su ogni messaggio. */
     #chat-log.chat-filter-signal {
-        border: solid #0088cc;
+        border: solid #3b82f6;
     }
 
     #chat-log.chat-filter-whatsapp {
-        border: solid #0088cc;
+        border: solid #25d366;
     }
 
     #chat-log.chat-filter-telegram {
@@ -255,12 +255,12 @@ class SignalTUI(App):
     /* Banner (titoli di sezione) sincroni col bordo della chat per filtro. */
     #ContactsTitle.chat-filter-signal,
     #ChatTitle.chat-filter-signal {
-        background: #0088cc;
+        background: #3b82f6;
     }
 
     #ContactsTitle.chat-filter-whatsapp,
     #ChatTitle.chat-filter-whatsapp {
-        background: #0088cc;
+        background: #25d366;
     }
 
     #ContactsTitle.chat-filter-telegram,
@@ -1660,20 +1660,25 @@ class SignalTUI(App):
 
     def on_list_view_selected(self, event: ListView.Selected):
         """When a contact is selected, show the chat."""
-        index = self.query_one("#contact-list", ListView).index
-        # The ListView is built from the filtered/visible contacts, so resolve
-        # the selected row against that filtered list (not self.contacts) to
-        # avoid picking the wrong contact when the protocol filter is active.
-        visible = self._filtered_contacts()
-        if index is not None and 0 <= index < len(visible):
-            contact = visible[index]
-            # Guard: when _select_contact sets contact_list.index programmatically
-            # (e.g. from the contact picker), Textual fires ListView.Selected again.
-            # If the contact is already selected, skip to avoid reloading the chat
-            # twice (which duplicates the messages).
-            if contact == self.selected_contact:
-                return
-            self._select_contact(contact)
+        # Resolve the contact directly from the clicked ListItem's _contact_id.
+        # Using ListView.index + _filtered_contacts() fails when hidden
+        # children (display=False) are in the ListView (Ctrl+W filter).
+        item = event.item
+        cache_key = getattr(item, "_contact_id", None)
+        if cache_key is None:
+            return
+        # Find the contact by cache_key
+        contact = None
+        for c in self.contacts:
+            if c.cache_key == cache_key:
+                contact = c
+                break
+        if contact is None:
+            return
+        # Guard: skip if already selected (avoids double reload)
+        if contact == self.selected_contact:
+            return
+        self._select_contact(contact)
 
 
 
