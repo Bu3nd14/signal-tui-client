@@ -32,6 +32,13 @@ class ContactListView(ListView):
 
     ALLOW_SELECT = False
 
+    # NB: a ogni MouseDown lo Screen di Textual mette a fuoco automaticamente
+    # il primo widget focusable sotto il cursore, se `focus_on_click()` è True
+    # (default `Widget.FOCUS_ON_CLICK = True`).  Qui lo disabilitiamo: la lista
+    # contatti non deve rubare il focus all'input quando ci si clicca sopra,
+    # altrimenti il bordo dell'input lampeggia (input→ListView→input).
+    FOCUS_ON_CLICK = False
+
     def _on_list_item__child_clicked(self, event: ListItem._ChildClicked) -> None:
         """Gestisci il click su un elemento senza crash se è stato rimosso.
 
@@ -40,9 +47,13 @@ class ContactListView(ListView):
         essere più figlio dell'albero quando il click viene elaborato: Textual
         farebbe ``self._nodes.index(event.item)`` e solleverebbe ValueError.
         Qui ignoriamo il click su un item ormai estraneo (l'utente ricliccherà).
+
+        NB: NON chiamiamo ``self.focus()`` (a differenza del default Textual):
+        ``_select_contact`` riporta comunque subito il focus sull'input, quindi
+        un ``focus()`` qui causerebbe solo un giro input→ListView→input che fa
+        lampeggiare il bordo dell'input.
         """
         event.stop()
-        self.focus()
         try:
             index = self._nodes.index(event.item)
         except ValueError:

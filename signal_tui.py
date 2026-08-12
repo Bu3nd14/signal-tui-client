@@ -192,6 +192,24 @@ class SignalTUI(App):
         background: $accent 40%;
     }
 
+    /* La riga selezionata (classe `-highlight`) usa SEMPRE il colore "blurred",
+       anche quando la ListView ha il focus: così il colore non cambia tra il
+       primo click (focus torna all'input) e il secondo click (focus resta sulla
+       ListView). */
+    #contact-list ListItem.-highlight,
+    #contact-list:focus ListItem.-highlight {
+        color: $block-cursor-blurred-foreground;
+        background: $block-cursor-blurred-background;
+        text-style: $block-cursor-blurred-text-style;
+    }
+
+    /* Anche lo sfondo dell'intera lista non deve schiarirsi quando la ListView
+       prende il focus (2° click sullo stesso contatto): il tint di default di
+       Textual `$foreground 5%` viene annullato. */
+    #contact-list:focus {
+        background-tint: transparent;
+    }
+
     /* Protocol accents in the contact list */
     .protocol-signal {
         color: #b5c9a8;
