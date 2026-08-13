@@ -30,18 +30,40 @@ class BackendConnectMixin:
         """
         proto = backend.protocol
 
-        # ── Merge cache (incrementale, no clear) ──
+        # ── Merge cache (incrementale, no clear, idempotente) ──
+        # `_on_backend_ready` può girare più volte (avvio + device-link Ctrl+L,
+        # che ri-connette tutti i backend).  Un dedup basato SOLO su `id`
+        # ri-appenderebbe i messaggi senza id (Signal, optimistic send) ad ogni
+        # merge → duplicati in UI per tutte le chat.  Dedup quindi anche per
+        # identità esatta (is_mine, testo, timestamp).
         for cid, msgs in backend.cache.items():
             key = contact_cache_key(proto, cid)
-            if key not in self._cache:
-                self._cache[key] = []
-            existing_ids = {m.get("id") for m in self._cache[key] if m.get("id")}
+            ui_msgs = self._cache.setdefault(key, [])
+            seen_ids = {m.get("id") for m in ui_msgs if m.get("id")}
+            seen_identities = {
+                (
+                    bool(m.get("is_mine", False)),
+                    m.get("text", ""),
+                    int(m.get("timestamp") or 0),
+                )
+                for m in ui_msgs
+            }
             for m in msgs:
                 mid = m.get("id")
-                if mid and mid in existing_ids:
+                if mid and mid in seen_ids:
                     continue
-                self._cache[key].append(m)
-            self._cache[key].sort(key=lambda m: int(m.get("timestamp") or 0))
+                identity = (
+                    bool(m.get("is_mine", False)),
+                    m.get("text", ""),
+                    int(m.get("timestamp") or 0),
+                )
+                if identity in seen_identities:
+                    continue
+                ui_msgs.append(m)
+                if mid:
+                    seen_ids.add(mid)
+                seen_identities.add(identity)
+            ui_msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
 
         # ── Merge contatti (aggiunge nuovi, aggiorna last_message_ts) ──
         existing_ids = {c.cache_key for c in self.contacts}
