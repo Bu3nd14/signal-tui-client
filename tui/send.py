@@ -1,18 +1,31 @@
 """Message sending (input submit + send worker)."""
 
 import logging
+import sys
 import time
-
-import signal_tui as _stui
 
 from textual.widgets import Input
 
 from models import (
     PROTOCOL_TELEGRAM,
 )
-from emoji_picker import EmojiCompletionWidget
+from emoji_picker import EmojiCompletionWidget, replace_emoji_aliases as _replace_emoji_aliases
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_emoji_replacer():
+    """Return the alias replacer, patchable via ``signal_tui.replace_emoji_aliases``.
+
+    Resolved lazily (instead of importing ``signal_tui`` at module level) to
+    avoid a circular import: ``tui.send`` → ``signal_tui`` → ``tui.app``.
+    Tests patch ``signal_tui.replace_emoji_aliases``, so we read it from the
+    already-imported ``signal_tui`` module when available.
+    """
+    stui = sys.modules.get("signal_tui")
+    if stui is not None:
+        return stui.replace_emoji_aliases
+    return _replace_emoji_aliases
 
 
 class SendMixin:
@@ -38,7 +51,7 @@ class SendMixin:
             pass
 
         # Convert emoji aliases (e.g. :smile: → 😊)
-        message = _stui.replace_emoji_aliases(event.value.strip())
+        message = _resolve_emoji_replacer()(event.value.strip())
 
         if not message:
             return
