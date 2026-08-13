@@ -1918,6 +1918,11 @@ class SignalTUI(App):
         temporarily smaller than the UI cache can not shrink the rendered
         history (and can not drop the "load more" banner).
 
+        Dedup mirrors ``WhatsAppBackend._message_already_cached``: for INCOMING
+        messages the id differs between webhook and REST, so the identity is
+        (text, timestamp +/-5s); for OUTGOING messages the id is stable (echo
+        fallback by text + a wider window).
+
         Returns ``True`` if at least one new message was added.
         """
         backend_msgs = getattr(backend, "cache", {}).get(contact.id, [])
@@ -1926,26 +1931,37 @@ class SignalTUI(App):
 
         ui_key = contact.cache_key
         ui_msgs = self._cache.setdefault(ui_key, [])
-        known_ids = {m.get("id") for m in ui_msgs if m.get("id")}
-        # Identity for messages without a stable id: (timestamp, text).
-        known_identities = {
-            (int(m.get("timestamp") or 0), m.get("text", ""))
-            for m in ui_msgs
-            if not m.get("id")
-        }
+
+        def _already_present(m: dict) -> bool:
+            is_mine = bool(m.get("is_mine", False))
+            text = m.get("text", "")
+            ts = int(m.get("timestamp") or 0)
+            mid = m.get("id")
+            for existing in ui_msgs:
+                if bool(existing.get("is_mine", False)) != is_mine:
+                    continue
+                if existing.get("text", "") != text:
+                    continue
+                existing_ts = int(existing.get("timestamp") or 0)
+                if not is_mine:
+                    # Incoming: id unreliable -> text + fuzzy timestamp (+/-5s).
+                    if abs(existing_ts - ts) <= 5000:
+                        return True
+                elif mid:
+                    # Outgoing: stable id first, then text + echo window (10 min).
+                    cached_id = existing.get("id")
+                    if cached_id and cached_id == mid:
+                        return True
+                    if abs(existing_ts - ts) <= 600000:
+                        return True
+                elif abs(existing_ts - ts) <= 5000:
+                    return True
+            return False
 
         added = False
         for m in backend_msgs:
-            mid = m.get("id")
-            if mid:
-                if mid in known_ids:
-                    continue
-                known_ids.add(mid)
-            else:
-                ident = (int(m.get("timestamp") or 0), m.get("text", ""))
-                if ident in known_identities:
-                    continue
-                known_identities.add(ident)
+            if _already_present(m):
+                continue
             ui_msgs.append(m)
             added = True
 

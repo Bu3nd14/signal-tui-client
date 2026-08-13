@@ -1147,3 +1147,20 @@ class TestWhatsAppRenderFirst:
         assert len(app._cache[app.selected_contact.cache_key]) == 144
         app._add_load_more_widget.assert_called_once_with(124)
 
+
+    def test_incoming_message_with_different_ids_not_duplicated(self):
+        """Stesso messaggio ricevuto con id diversi (webhook vs REST) non duplica."""
+        from unittest.mock import MagicMock
+        msg_text = "E Kimi k2.7 coding? Che per me ha fatto la maggior parte del lavoro"
+        # UI cache ha il messaggio con id webhook; backend cache lo ha con id REST.
+        ui_msg = {"id": "webhook-1", "text": msg_text, "is_mine": False,
+                  "read": True, "timestamp": 5000}
+        backend_msg = {"id": "rest-1", "text": msg_text, "is_mine": False,
+                       "read": True, "timestamp": 5000}
+        app = self._make_app(cache_msgs=[ui_msg], backend_msgs=[backend_msg])
+        app._make_message_widget = MagicMock(return_value=MagicMock())
+
+        app._load_messages_worker()
+
+        texts = [m["text"] for m in app._cache[app.selected_contact.cache_key]]
+        assert texts.count(msg_text) == 1
