@@ -11,6 +11,14 @@ import sys
 import traceback
 
 
+if __name__ == "__main__":
+    # When launched as a script (`python signal_tui.py`), also register this
+    # module under its canonical name so that `import signal_tui` from within
+    # the `tui` package resolves to THIS module instead of re-executing the
+    # script (which would cause a circular import through `tui.app`).
+    sys.modules["signal_tui"] = sys.modules["__main__"]
+
+
 LOCK_FILE = "/tmp/signal-tui.lock"
 
 
@@ -68,7 +76,7 @@ from emoji_picker import replace_emoji_aliases  # noqa: F401 (re-exported for te
 from tui.app import SignalTUI
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("signal_tui")
 # Ensure LINK-* logs are written to a file (Textual may suppress stderr)
 _link_fh = logging.FileHandler("/tmp/signal-link.log", mode="w")
 _link_fh.setLevel(logging.DEBUG)
