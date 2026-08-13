@@ -371,6 +371,7 @@ class SignalTUI(App):
     #message-input {
         width: 1fr;
         margin: 0 1 0 0;
+        border: tall $border;
     }
 
     Horizontal {
