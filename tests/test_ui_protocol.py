@@ -1002,3 +1002,148 @@ class TestWhatsAppMountOrdering:
         assert mounted == ["vecchio", "medio", "Ok  ci sentiamo"]
         # nessun duplicato
         assert len(mounted) == len(set(mounted))
+
+
+class TestWhatsAppRenderFirst:
+    """⚡ Render-first + fetch-after: la chat viene dipinta subito dal cache e
+    il fetch remoto, se porta messaggi nuovi, fa un unico full re-render
+    (ordine e banner "load more" sempre corretti)."""
+
+    def _make_app(self, cache_msgs, backend_msgs):
+        from unittest.mock import MagicMock
+
+        from models import PROTOCOL_WHATSAPP, ChatContact
+        from signal_tui import SignalTUI
+        app = SignalTUI()
+        c = ChatContact(id="16660245291231@lid", display_name="Pix",
+                        protocol=PROTOCOL_WHATSAPP)
+        app.contacts = [c]
+        app.selected_contact = c
+        app._chat_reload_token = 1
+        app._cache = {c.cache_key: list(cache_msgs)}
+        app._seen_timestamps = set()
+        app._seen_message_ids = set()
+        app._shown_in_log = set()
+        app._loaded_all = False
+
+        backend = MagicMock()
+        backend.cache = {c.id: list(backend_msgs)}
+        backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
+        app.manager = MagicMock()
+        app.manager.get.return_value = backend
+
+        app._add_load_more_widget = MagicMock()
+        app._clear_chat = MagicMock()
+        app.call_from_thread = MagicMock(
+            side_effect=lambda fn, *a, **k: fn(*a, **k)
+        )
+        app.query_one = MagicMock()
+        return app
+
+    def test_renders_cache_before_fetch_then_appends_new(self):
+        from unittest.mock import MagicMock
+        app = self._make_app(
+            cache_msgs=[{"text": "gia in cache", "is_mine": False,
+                         "read": True, "timestamp": 1000}],
+            backend_msgs=[
+                {"text": "gia in cache", "is_mine": False, "read": True,
+                 "timestamp": 1000},
+                {"text": "nuovo", "is_mine": True, "read": True, "timestamp": 2000},
+            ],
+        )
+
+        c = app.selected_contact
+
+        order = []
+        def fake_make_widget(text, *a, **k):
+            order.append(text)
+            return MagicMock()
+        app._make_message_widget = MagicMock(side_effect=fake_make_widget)
+        fetch = app.manager.get.return_value.fetch_history
+
+        app._load_messages_worker()
+
+        # il cache è stato renderizzato PRIMA del fetch (paint istantaneo)
+        assert order[0] == "gia in cache"
+        # il fetch remoto è comunque avvenuto con limit=50
+        fetch.assert_called_once_with(c.id, limit=50)
+        # fase 2 (cache cambiato): full re-render ordinato con il nuovo messaggio
+        assert order[-2:] == ["gia in cache", "nuovo"]
+
+    def test_no_remount_when_fetch_adds_nothing(self):
+        from unittest.mock import MagicMock
+        app = self._make_app(
+            cache_msgs=[{"text": "solo", "is_mine": False, "read": True,
+                         "timestamp": 1000}],
+            backend_msgs=[{"text": "solo", "is_mine": False, "read": True,
+                           "timestamp": 1000}],
+        )
+        app._make_message_widget = MagicMock(return_value=MagicMock())
+
+        app._load_messages_worker()
+
+        # un solo mount (fase 1), nessun remount in fase 2 → niente flash
+        assert app._make_message_widget.call_count == 1
+        assert app._clear_chat.call_count == 1
+
+    def test_older_gapfill_rerenders_in_correct_order(self):
+        from unittest.mock import MagicMock
+        app = self._make_app(
+            cache_msgs=[{"text": "recente", "is_mine": False, "read": True,
+                         "timestamp": 2000}],
+            backend_msgs=[
+                {"text": "vecchio", "is_mine": False, "read": True,
+                 "timestamp": 1000},
+                {"text": "recente", "is_mine": False, "read": True,
+                 "timestamp": 2000},
+            ],
+        )
+        mounted = []
+        def fake_make_widget(text, *a, **k):
+            mounted.append(text)
+            return MagicMock()
+        app._make_message_widget = MagicMock(side_effect=fake_make_widget)
+
+        app._load_messages_worker()
+
+        # fase 1 mostra "recente"; il fetch porta anche "vecchio" (più vecchio):
+        # il full re-render rimonta TUTTO in ordine cronologico.
+        assert mounted[0] == "recente"
+        assert mounted[-2:] == ["vecchio", "recente"]
+
+    def test_load_more_banner_shows_for_144_messages(self):
+        """144 messaggi in cache → il banner "124 older" resta presente."""
+        from unittest.mock import MagicMock
+        msgs = [
+            {"id": f"m{i}", "text": f"msg-{i}", "is_mine": False,
+             "read": True, "timestamp": 1000 + i}
+            for i in range(144)
+        ]
+        app = self._make_app(cache_msgs=msgs, backend_msgs=msgs)
+        app._make_message_widget = MagicMock(return_value=MagicMock())
+
+        app._load_messages_worker()
+
+        # la fase 2 non porta nulla di nuovo (dedup) → niente remount, ma il
+        # banner della fase 1 resta e indica 144 - 20 = 124 messaggi precedenti.
+        app._add_load_more_widget.assert_called_once_with(124)
+
+    def test_merge_never_shrinks_ui_cache(self):
+        """Un backend.cache più piccolo non deve ridurre la cache UI (né il banner)."""
+        from unittest.mock import MagicMock
+        ui_msgs = [
+            {"id": f"m{i}", "text": f"msg-{i}", "is_mine": False,
+             "read": True, "timestamp": 1000 + i}
+            for i in range(144)
+        ]
+        # backend cache contiene solo gli ultimi 20 (es. cache non allineata).
+        backend_msgs = ui_msgs[-20:]
+        app = self._make_app(cache_msgs=ui_msgs, backend_msgs=backend_msgs)
+        app._make_message_widget = MagicMock(return_value=MagicMock())
+
+        app._load_messages_worker()
+
+        # la cache UI non è stata ridotta a 20: ha ancora 144 messaggi
+        assert len(app._cache[app.selected_contact.cache_key]) == 144
+        app._add_load_more_widget.assert_called_once_with(124)
+

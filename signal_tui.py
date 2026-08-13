@@ -1718,13 +1718,19 @@ class SignalTUI(App):
     # ─── Message logic ────────────────────────────────────────────────────
 
     def _load_messages_worker(self):
-        """Load messages: last 20 from cache.
-        If there are more than 20 messages, show a widget to load the rest.
+        """Load messages: last 20 from cache, then reconcile remote history.
+
+        Phase 1 paints the newest cached messages immediately (no network
+        wait).  For WhatsApp, phase 2 downloads the remote history in this
+        same worker thread and merges ONLY the messages not already on
+        screen (diff + append), so the chronological order stays correct and
+        there is no clear+remount flash.
 
         Runs in a worker thread; before each render it verifies the reload
         token is still current (no newer contact selection happened) so a
-        stale worker stops mounting messages after a more recent ``_clear_chat``
-        — otherwise re-selecting a contact can double the messages.
+        stale worker stops mounting messages after a more recent
+        ``_clear_chat`` — otherwise re-selecting a contact can double the
+        messages.
         """
         if not self.selected_contact:
             return
@@ -1733,9 +1739,6 @@ class SignalTUI(App):
         reload_token = self._chat_reload_token
         self._loaded_all = False
 
-        cached = self._cache.get(contact.cache_key, [])
-        total = len(cached)
-
         def _is_stale() -> bool:
             """True if a newer selection happened or the contact changed."""
             return (
@@ -1743,178 +1746,257 @@ class SignalTUI(App):
                 or self.selected_contact != contact
             )
 
-        # Per WhatsApp: WAHA CORE non spinge lo storico (niente WS/stream) e il
-        # cache locale si riempie solo tramite il polling live (limitatо alle chat
-        # "calde") e dagli invii della TUI.  Per avere sempre i messaggi più
-        # recenti — inclusi quelli inviati da UN ALTRO client — scarichiamo lo
-        # storico remoto (default ~20) a ogni apertura: `fetch_history` usa il
-        # dedup interno di `ingest_message`, quindi i messaggi già presenti non
-        # vengono duplicati.  Fallisce in modo non distruttivo.
-        if contact.protocol == WhatsAppBackend.protocol and not _is_stale():
-            backend = self.manager.get(contact.protocol)
-            fetch = getattr(backend, "fetch_history", None)
-            if fetch is not None:
-                try:
-                    # Finestra più ampia: `fetch_history` riconcilia lo storico
-                    # remoto con il DB (aggiunge i messaggi mancanti, aggiorna
-                    # le entry senza id).  Con limit=20 un DB a cui mancavano
-                    # messaggi (corrotto dai vecchi bug di dedup) non veniva
-                    # mai riparato perché i 20 più recenti erano già presenti.
-                    # Retry sul fetch: se il primo fetch restituisce vuoto (WAHA
-                    # può rispondere [] appena avviato anche con session WORKING,
-                    # vedi sintomo "No message history"), riproviamo un paio di
-                    # volte con una breve pausa prima di arrenderci.  Rispetta
-                    # _is_stale() per non montare in una selezione scaduta.
-                    _retry = 0
-                    while True:
-                        fetch(contact.id, limit=50)
-                        _bm = getattr(backend, "cache", {}).get(contact.id, [])
-                        if _bm or _is_stale() or _retry >= 2:
-                            break
-                        _retry += 1
-                        time.sleep(0.8)
+        is_whatsapp = contact.protocol == WhatsAppBackend.protocol
 
-                    # fetch_history alimenta il cache del backend; lo specchiamo
-                    # nel cache protocol-aware dell'UI per renderizzarlo.
-                    backend_msgs = getattr(backend, "cache", {}).get(contact.id, [])
-                    if backend_msgs:
-                        self._cache[contact.cache_key] = list(backend_msgs)
-                    if contact.cache_key in self._cache:
-                        cached = self._cache[contact.cache_key]
-                        total = len(cached)
-                    # Li sto visualizzando: i messaggi appena scaricati non
-                    # devono gonfiare i badge unread (già azzerati da _select_contact).
-                    for msg in self._cache.get(contact.cache_key, []):
-                        if not msg.get("is_mine"):
-                            msg["read"] = True
-                except Exception:
-                    pass  # fallback: resta sul cache locale
+        # Phase 1: paint instantly from the local cache (no network wait).
+        rendered_any = self._render_chat_window(
+            contact, _is_stale, pending_fetch=is_whatsapp
+        )
 
-        # Ordina la cache della chat per timestamp (stabile) PRIMA di tagliare
-        # la finestra `[-N:]` per il render.  Fiss: la cache può essere popolata
-        # fuori ordine (append da più fonti) o riordinata dall'upgrade dell'echo;
-        # senza sort, ```[-20:]``` non selezionerebbe davvero gli ultimi messaggi
-        # e l'ultimo (es. "Ok ci sentiamo") spariva dalla vista.  sort stabile:
-        # a parità di timestamp preserva l'ordine di arrivo (niente tie-break).
+        if not is_whatsapp or _is_stale():
+            return
+
+        # Phase 2 (WhatsApp): WAHA CORE does not push history over a stream, so
+        # the local cache only fills from live polling and TUI sends.  To always
+        # show the most recent messages — including those sent from ANOTHER
+        # client — download the remote history on every open.  `fetch_history`
+        # dedups internally via `ingest_message`, so already-known messages are
+        # not duplicated.  Fails non-destructively.
+        backend = self.manager.get(contact.protocol)
+        fetch = getattr(backend, "fetch_history", None)
+        cache_changed = False
+        if fetch is not None:
+            try:
+                # Wider window: `fetch_history` reconciles remote history with
+                # the DB (adds missing messages, upgrades entries without id).
+                # With limit=20 a DB missing messages could never be repaired
+                # because the 20 newest were already present.  Retry: WAHA can
+                # return [] right after boot even with a WORKING session, so
+                # retry a couple of times with a short pause.  Respects
+                # _is_stale() to avoid mounting into a stale selection.
+                _retry = 0
+                while True:
+                    fetch(contact.id, limit=50)
+                    _bm = getattr(backend, "cache", {}).get(contact.id, [])
+                    if _bm or _is_stale() or _retry >= 2:
+                        break
+                    _retry += 1
+                    time.sleep(0.8)
+
+                # fetch_history fills the BACKEND cache; merge only the
+                # genuinely new messages into the protocol-aware UI cache
+                # (never replace: the UI cache must not shrink).
+                cache_changed = self._merge_backend_cache(contact, backend)
+                # I'm viewing them now: freshly downloaded messages must not
+                # inflate unread badges (already zeroed by _select_contact).
+                for msg in self._cache.get(contact.cache_key, []):
+                    if not msg.get("is_mine"):
+                        msg["read"] = True
+            except Exception:
+                pass  # fallback: stay on the local cache
+
+        if _is_stale():
+            return
+
+        # Phase 2 render: only when the fetch actually added new messages or
+        # nothing was on screen yet (empty cache at phase 1).  A single full
+        # render recomputes the window AND the "load more" banner from the final
+        # cache, so both order and banner stay correct by construction.
+        if cache_changed or not rendered_any:
+            self._render_chat_window(contact, _is_stale, pending_fetch=False)
+
+    def _render_chat_window(self, contact, is_stale, pending_fetch: bool = False) -> bool:
+        """Sort the contact's cache, take the newest window and mount it atomically.
+
+        Returns ``True`` if at least one message was rendered, ``False`` if the
+        cache was empty (a status is shown instead).  When ``pending_fetch`` is
+        true, an empty cache shows a transient "loading" status instead of
+        "no message history" (a remote fetch is about to fill it).
+        """
+        cached = self._cache.get(contact.cache_key, [])
+        total = len(cached)
+        # Sort the chat cache by timestamp (stable) BEFORE slicing the `[-N:]`
+        # render window.  The cache can be populated out of order (append from
+        # multiple sources) or reordered by the echo upgrade; without the sort,
+        # `[-20:]` would not really pick the newest messages.
         cached = sorted(cached, key=lambda m: int(m.get("timestamp") or 0))
 
-        if cached:
-            if total > 20:
-                messages_to_show = cached[-20:]
-            else:
-                messages_to_show = cached
-                self._loaded_all = True
-
-            # Fix B: mounting ATOMICO.  Invece di chiamare _add_message una volta
-            # per messaggio (via call_from_thread il live può INfilarsi a metà
-            # e rompere l'ordine / duplicare l'ultimo), raccogliamo la finestra
-            # nel worker e rimontiamo il log UN'UNICA volta sul thread UI, dopo
-            # uno _clear_chat.  Così l'ordine finale riflette la cronologia
-            # (l'ultimo messaggio sta in fondo) senza interleaving col live.
-            batch = []
-            for msg in messages_to_show:
-                if _is_stale():
-                    return
-                text = msg.get("text", "")
-                is_mine = msg.get("is_mine", False)
-                quote_text = msg.get("quote_text")
-                ts = msg.get("timestamp", 0)
-                msg_type = msg.get("msg_type", "text")
-                attachment_info = msg.get("attachment_info")
-                attachment_id = msg.get("attachment_id")
-                sender = msg.get("sender", "")
-                status = msg.get("status", "sent" if is_mine else "read")
-
-                if ts:
-                    self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
-                    self._seen_message_ids.add((contact.protocol, contact.cache_key, ts, text))
-                    mid = msg.get("id")
-                    if mid:
-                        self._seen_message_ids.add(
-                            (contact.protocol, contact.cache_key, mid)
-                        )
-                batch.append((text, is_mine, quote_text, msg_type, attachment_info,
-                              attachment_id, ts, sender, status))
-
-            def _mount_window():
-                # Sul thread UI: svuota il log e rimonta la finestra ordinata in
-                # UN SOLO mount così Textual fa un solo layout pass invece di 20+.
-                if not _is_stale():
-                    try:
-                        self._clear_chat()
-                    except Exception:
-                        pass
-                if _is_stale():
-                    return
-
-                is_group = (
-                    self.selected_contact is not None
-                    and self.selected_contact.id.endswith("@g.us")
-                )
-                protocol = contact.protocol
-                widgets: list = []
-
-                for (text, is_mine, quote_text, msg_type, attachment_info,
-                     attachment_id, ts, sender, status) in batch:
-                    try:
-                        if ts:
-                            self._shown_in_log.add(
-                                (protocol, contact.cache_key, ts, text)
-                            )
-
-                        if quote_text:
-                            quote_class = "msg-quote-right" if is_mine else "msg-quote"
-                            widgets.append(Static(f"▎ {quote_text}", classes=quote_class))
-
-                        if msg_type == "image":
-                            # Image placeholder — async rendering is separate
-                            from ui_components import ImageWidget
-                            display = attachment_info or text or "Image"
-                            widgets.append(ImageWidget(
-                                attachment_path=None,
-                                attachment_id=attachment_id or "",
-                                fallback_text=f"[🖼️ {display}]",
-                            ))
-                        else:
-                            display_text = text
-                            if msg_type == "sticker":
-                                display_text = f"🎨 {text}" if text and text != "Media" else "🎨 [Sticker]"
-                            elif msg_type == "attachment":
-                                display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
-                            widgets.append(self._make_message_widget(
-                                text=display_text,
-                                is_mine=is_mine,
-                                timestamp=ts,
-                                sender=sender,
-                                status=status,
-                                protocol=protocol,
-                                is_group=is_group,
-                            ))
-                    except Exception:
-                        pass
-
-                if widgets:
-                    chat_log = self.chat_log
-                    chat_log.mount(*widgets)
-                    chat_log.scroll_end(animate=False)
-
-                # Banner "load more" rimontato DOPO lo _clear_chat
-                if total > 20 and not _is_stale():
-                    try:
-                        self._add_load_more_widget(total - 20)
-                    except Exception:
-                        pass
-
-            try:
-                self.call_from_thread(_mount_window)
-            except Exception:
-                pass  # fallback: resta sul cache UI già specchiato
-
-        else:
+        if not cached:
+            if pending_fetch:
+                try:
+                    self.call_from_thread(self._status, "⏳ Loading message history…")
+                except Exception:
+                    pass
+                return False
             self._loaded_all = True
-            self.call_from_thread(
-                self._status, "No message history for this contact"
+            try:
+                self.call_from_thread(
+                    self._status, "No message history for this contact"
+                )
+            except Exception:
+                pass
+            return False
+
+        if total > 20:
+            messages_to_show = cached[-20:]
+        else:
+            messages_to_show = cached
+            self._loaded_all = True
+
+        batch = []
+        for msg in messages_to_show:
+            if is_stale():
+                return False
+            text = msg.get("text", "")
+            ts = msg.get("timestamp", 0)
+            if ts:
+                self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
+                self._seen_message_ids.add((contact.protocol, contact.cache_key, ts, text))
+                mid = msg.get("id")
+                if mid:
+                    self._seen_message_ids.add(
+                        (contact.protocol, contact.cache_key, mid)
+                    )
+            batch.append(msg)
+
+        def _mount_window():
+            # On the UI thread: empty the log and remount the ordered window in
+            # ONE mount so Textual does a single layout pass instead of 20+.
+            if not is_stale():
+                try:
+                    self._clear_chat()
+                except Exception:
+                    pass
+            if is_stale():
+                return
+
+            protocol = contact.protocol
+            is_group = (
+                self.selected_contact is not None
+                and self.selected_contact.id.endswith("@g.us")
             )
+            widgets: list = []
+            for msg in batch:
+                try:
+                    text = msg.get("text", "")
+                    ts = msg.get("timestamp", 0)
+                    if ts:
+                        self._shown_in_log.add(
+                            (protocol, contact.cache_key, ts, text)
+                        )
+                    widgets.extend(
+                        self._build_message_widgets(protocol, is_group, msg)
+                    )
+                except Exception:
+                    pass
+
+            if widgets:
+                chat_log = self.chat_log
+                chat_log.mount(*widgets)
+                chat_log.scroll_end(animate=False)
+
+            # "load more" banner remounted AFTER the _clear_chat.
+            if total > 20 and not is_stale():
+                try:
+                    self._add_load_more_widget(total - 20)
+                except Exception:
+                    pass
+
+        try:
+            self.call_from_thread(_mount_window)
+        except Exception:
+            pass  # fallback: stay on the already-mirrored UI cache
+
+        return True
+
+    def _merge_backend_cache(self, contact, backend) -> bool:
+        """Merge ``backend.cache`` into the UI cache for *contact*, add-only.
+
+        ``fetch_history`` fills the BACKEND cache (keyed by raw id); this
+        mirrors only the genuinely new messages into the protocol-aware UI
+        cache.  It never removes existing entries, so a backend cache that is
+        temporarily smaller than the UI cache can not shrink the rendered
+        history (and can not drop the "load more" banner).
+
+        Returns ``True`` if at least one new message was added.
+        """
+        backend_msgs = getattr(backend, "cache", {}).get(contact.id, [])
+        if not backend_msgs:
+            return False
+
+        ui_key = contact.cache_key
+        ui_msgs = self._cache.setdefault(ui_key, [])
+        known_ids = {m.get("id") for m in ui_msgs if m.get("id")}
+        # Identity for messages without a stable id: (timestamp, text).
+        known_identities = {
+            (int(m.get("timestamp") or 0), m.get("text", ""))
+            for m in ui_msgs
+            if not m.get("id")
+        }
+
+        added = False
+        for m in backend_msgs:
+            mid = m.get("id")
+            if mid:
+                if mid in known_ids:
+                    continue
+                known_ids.add(mid)
+            else:
+                ident = (int(m.get("timestamp") or 0), m.get("text", ""))
+                if ident in known_identities:
+                    continue
+                known_identities.add(ident)
+            ui_msgs.append(m)
+            added = True
+
+        if added:
+            ui_msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
+        return added
+
+    def _build_message_widgets(self, protocol: str, is_group: bool, msg: dict) -> list:
+        """Build the widgets for a single cached message (quote + message).
+
+        Does NOT mount anything: callers are responsible for ``mount()``.
+        """
+        text = msg.get("text", "")
+        is_mine = msg.get("is_mine", False)
+        quote_text = msg.get("quote_text")
+        msg_type = msg.get("msg_type", "text")
+        attachment_info = msg.get("attachment_info")
+        attachment_id = msg.get("attachment_id")
+        sender = msg.get("sender", "")
+        status = msg.get("status", "sent" if is_mine else "read")
+        ts = msg.get("timestamp", 0)
+
+        widgets: list = []
+        if quote_text:
+            quote_class = "msg-quote-right" if is_mine else "msg-quote"
+            widgets.append(Static(f"▎ {quote_text}", classes=quote_class))
+
+        if msg_type == "image":
+            from ui_components import ImageWidget
+            display = attachment_info or text or "Image"
+            widgets.append(ImageWidget(
+                attachment_path=None,
+                attachment_id=attachment_id or "",
+                fallback_text=f"[🖼️ {display}]",
+            ))
+        else:
+            display_text = text
+            if msg_type == "sticker":
+                display_text = f"🎨 {text}" if text and text != "Media" else "🎨 [Sticker]"
+            elif msg_type == "attachment":
+                display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
+            widgets.append(self._make_message_widget(
+                text=display_text,
+                is_mine=is_mine,
+                timestamp=ts,
+                sender=sender,
+                status=status,
+                protocol=protocol,
+                is_group=is_group,
+            ))
+        return widgets
 
     def _add_load_more_widget(self, remaining: int):
         """Add a clickable widget to load older messages."""
