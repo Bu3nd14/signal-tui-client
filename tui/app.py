@@ -161,6 +161,11 @@ class SignalTUI(
         # WhatsApp link guard: prevents duplicate concurrent connect workers.
         self._wa_connecting: bool = False
 
+        # Backends currently connecting (pending a ready/failure report).
+        # Populated as each connect worker starts and drained when the backend
+        # reports (ready OR failed); when empty, the startup auto-selection runs.
+        self._pending_backends: set[str] = set()
+
         # Status bar auto-clear timer.
         self._status_timer: Timer | None = None
 

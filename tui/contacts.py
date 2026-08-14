@@ -129,6 +129,27 @@ class ContactListMixin:
             # No contact visible under this filter — deselect.
             self.selected_contact = None
 
+        # Re-sync the `-highlight` class to exactly one row.  After an in-place
+        # reorder (move_child) the ListView's highlight can remain stuck on a
+        # stale ListItem because `index` didn't change (so `watch_index` never
+        # fired to clear it).  Forcing `highlighted` to match `index` guarantees
+        # a single highlighted contact.
+        self._sync_contact_highlight(contact_list, contact_list.index)
+
+    def _sync_contact_highlight(self, contact_list, index) -> None:
+        """Force the `-highlight` class to match `index` on exactly one row.
+
+        Textual's `ListView` tracks the highlighted row via `ListItem.highlighted`
+        (the `-highlight` CSS class), toggled in `watch_index`.  When rows are
+        reordered with `move_child` the highlighted widget can stay highlighted
+        while `index` still points to a different position; the next `index`
+        change then highlights a *second* row without clearing the first.  This
+        helper re-aligns every row to `index`, leaving a single highlight.
+        O(N) with cheap equality short-circuits, so it's safe on the hot path.
+        """
+        for i, child in enumerate(contact_list.children):
+            child.highlighted = index is not None and i == index
+
     def _start_progressive_render(self, contacts: list[ChatContact]) -> None:
         """Begin a progressive (chunked) contact-list rebuild.
 
@@ -405,6 +426,10 @@ class ContactListMixin:
                 except ValueError:
                     # Item not currently mounted (e.g. mid progressive render).
                     pass
+
+        # Re-sync the `-highlight` class so exactly one row is highlighted even
+        # if a previous in-place reorder left a stale highlight behind.
+        self._sync_contact_highlight(contact_list, contact_list.index)
 
         # Return focus to the message input so the user can start typing
         # immediately after selecting a contact.

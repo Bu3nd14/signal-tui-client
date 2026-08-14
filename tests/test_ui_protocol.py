@@ -260,6 +260,77 @@ class TestProtocolFilter:
         assert items[1].display is False  # Anna (whatsapp, nascosta)
         assert items[2].display is True   # Luigi (signal)
 
+    def test_apply_contact_visibility_clears_stale_highlight_after_reorder(self):
+        """Dopo un riordino in-place (``move_child``) la riga evidenziata può
+        restare ``highlighted=True`` pur non essendo più a ``index``: la
+        selezione successiva evidenzierebbe una SECONDA riga.  Verifica che
+        ``_apply_contact_visibility`` riallinei ``highlighted`` esattamente
+        alla riga indicata da ``index`` (una sola evidenziazione)."""
+        app = _make_app(_signal("+1", "Mario"), _signal("+2", "Luigi"), _whatsapp())
+        app.selected_contact = None
+
+        class _Item:
+            def __init__(self, cid):
+                self._contact_id = cid
+                self.display = True
+                self.highlighted = False
+
+        items = [_Item(c.cache_key) for c in app.contacts]
+        # Simula la desincronizzazione: index=0 ma l'evidenziazione è rimasta
+        # sulla vecchia posizione (items[2]) dopo il move_child.
+        items[2].highlighted = True
+
+        fake = MagicMock()
+        fake.children = items
+        fake.index = 0
+        app.query_one = MagicMock(return_value=fake)
+
+        app._apply_contact_visibility()
+
+        # Esattamente UNA riga evidenziata: quella a `index` (0), non items[2].
+        assert [i for i, it in enumerate(items) if it.highlighted] == [0]
+        assert items[1].highlighted is False
+        assert items[2].highlighted is False
+
+    def test_select_contact_clears_stale_highlight(self):
+        """Selezionando un contatto, anche una riga evidenziata in modo
+        "stantio" da un precedente riordino deve essere ripulita: resta una
+        sola riga evidenziata (quella del contatto selezionato)."""
+        app = _make_app()
+        app.contacts = [_signal("+1", "Mario"), _signal("+2", "Luigi")]
+        target = app.contacts[1]
+
+        class _Item:
+            def __init__(self, cid):
+                self._contact_id = cid
+                self.display = True
+                self.children = [MagicMock()]  # con update attivo
+                self.highlighted = False
+
+        fake_list = MagicMock()
+        fake_list.index = 0
+        first = _Item(app.contacts[0].cache_key)
+        item = _Item(target.cache_key)
+        # Evidenziazione "stantia" sulla prima riga (non più selezionata).
+        first.highlighted = True
+        fake_list.children = [first, item]
+        app._contact_widgets = {it._contact_id: it for it in fake_list.children}
+        app.query_one = MagicMock(return_value=fake_list)
+        app._add_message = MagicMock()
+        app._clear_chat = MagicMock()
+        app._cancel_reply = MagicMock()
+        app._load_messages_worker = MagicMock()
+        app.manager = MagicMock()
+        app.manager.get.return_value = MagicMock()
+        app.run_worker = MagicMock()
+        app.run_worker.return_value = None
+
+        app._select_contact(target)
+
+        assert fake_list.index == 1
+        assert first.highlighted is False  # lo stantio viene ripulito
+        assert item.highlighted is True    # solo il selezionato resta evidenziato
+
     def test_reorder_keeps_all_contacts_in_dom_with_filter(self):
         """Anche con filtro attivo, il re-render mantiene TUTTI i contatti nel
         DOM (solo ``display`` togglato): Ctrl+W non deve perdere contatti."""

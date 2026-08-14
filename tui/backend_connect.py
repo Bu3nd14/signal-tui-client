@@ -20,6 +20,22 @@ logger = logging.getLogger("signal_tui")
 
 class BackendConnectMixin:
 
+    def _mark_backend_connecting(self, proto: str) -> None:
+        """UI thread: un backend ha avviato la connessione (in attesa di report)."""
+        self._pending_backends.add(proto)
+
+    def _mark_backend_done(self, proto: str) -> None:
+        """UI thread: un backend ha terminato (ready o fallito).
+
+        Quando TUTTI i backend attesi hanno riportato un esito, se non c'è
+        ancora una selezione e ci sono contatti, seleziona il primo (il più
+        recente).  Così l'auto-selezione attende l'ULTIMO backend — non il
+        primo — e finisce sul contatto in cima alla lista finale.
+        """
+        self._pending_backends.discard(proto)
+        if not self._pending_backends and self.selected_contact is None and self.contacts:
+            self._select_contact(self.contacts[0])
+
     def _on_backend_ready(self, backend: ChatBackend) -> None:
         """UI thread: merge atomico di cache e contatti da UN backend.
 
@@ -82,12 +98,21 @@ class BackendConnectMixin:
         self._render_contact_list(list(self.contacts))
         self._update_unread_badges()
 
+        # Report this backend as done (ready).  The startup auto-selection is
+        # triggered by `_mark_backend_done` only once ALL expected backends have
+        # reported (ready or failed), so the selection lands on the top contact
+        # of the final, fully-merged list.
+        self._mark_backend_done(proto)
+
         n = len(backend.contacts)
         logger.info("Backend %s ready: %d contacts", proto, n)
         self._status(f"✅ {proto.title()}: {n} contacts loaded")
 
     def _connect_signal(self) -> None:
         """Worker thread: avvia Signal, poi merge nel UI thread."""
+        self.call_from_thread(
+            self._mark_backend_connecting, self.signal_backend.protocol
+        )
         try:
             self.call_from_thread(
                 self._status, "⏳ Signal: avvio daemon...", 0
@@ -102,7 +127,7 @@ class BackendConnectMixin:
             )
             if sb._use_daemon:
                 self.call_from_thread(
-                    self._status, "✅ Signal: daemon attivo", 0
+                    self._status, "✅ Signal: daemon attivo"
                 )
             else:
                 self.call_from_thread(
@@ -113,6 +138,9 @@ class BackendConnectMixin:
             self.call_from_thread(
                 self._status, f"❌ Signal: errore — {e}", 0
             )
+            self.call_from_thread(
+                self._mark_backend_done, self.signal_backend.protocol
+            )
 
     def _connect_whatsapp(self) -> None:
         """Worker thread: avvia WhatsApp, mostra contatti subito, sync cronologia dopo."""
@@ -120,6 +148,9 @@ class BackendConnectMixin:
             logger.info("LINK-WA: already connecting, skipping duplicate worker")
             return
         self._wa_connecting = True
+        self.call_from_thread(
+            self._mark_backend_connecting, self.whatsapp_backend.protocol
+        )
         try:
             logger.info("LINK-WA: start")
             if self.whatsapp_backend.needs_pairing:
@@ -151,6 +182,9 @@ class BackendConnectMixin:
             self.call_from_thread(
                 self._status, f"❌ WAHA: non disponibile — {exc}", 0
             )
+            self.call_from_thread(
+                self._mark_backend_done, self.whatsapp_backend.protocol
+            )
             self._wa_connecting = False
 
     def _poll_wa_contacts(self) -> None:
@@ -169,7 +203,7 @@ class BackendConnectMixin:
                     poll_count, n,
                 )
                 self.call_from_thread(
-                    self._status, f"📥 WAHA: {n} contatti caricati", 0,
+                    self._status, f"📥 WAHA: {n} contatti caricati",
                 )
                 break
             logger.info("LINK-WA: waiting (poll=%d)", poll_count)
@@ -177,6 +211,9 @@ class BackendConnectMixin:
             logger.warning("LINK-WA: timeout after 2 min")
             self.call_from_thread(
                 self._status, "⚠️ WAHA: timeout contatti", 0,
+            )
+            self.call_from_thread(
+                self._mark_backend_done, self.whatsapp_backend.protocol
             )
             self._wa_connecting = False
             return
@@ -192,6 +229,9 @@ class BackendConnectMixin:
 
     def _connect_telegram(self) -> None:
         """Worker thread: connette Telegram, poi merge nel UI thread."""
+        self.call_from_thread(
+            self._mark_backend_connecting, self.telegram_backend.protocol
+        )
         try:
             logger.info("LINK-TG: start, needs_pairing=%s", self.telegram_backend.needs_pairing)
             self.call_from_thread(self._status, "⏳ Telegram: connecting...", 0)
@@ -206,6 +246,9 @@ class BackendConnectMixin:
         except Exception as e:
             logger.exception("Telegram connect failed: %s", e)
             self.call_from_thread(self._status, f"❌ Telegram: {e}", 0)
+            self.call_from_thread(
+                self._mark_backend_done, self.telegram_backend.protocol
+            )
 
     def _resync_wa_history(self) -> int:
         """Re-sync best-effort dello storico WhatsApp all'avvio.
@@ -234,7 +277,7 @@ class BackendConnectMixin:
             try:
                 self.call_from_thread(
                     self._status,
-                    f"✅ WAHA: cronologia sincronizzata per {n} chat", 0
+                    f"✅ WAHA: cronologia sincronizzata per {n} chat"
                 )
             except Exception:
                 pass  # il report è solo informativo
