@@ -279,13 +279,15 @@ class WhatsAppRESTClient:
 
         Usato SOLO per il caricamento dello storico di una chat all'apertura
         (``fetch_history``) — NON più per un polling periodico: la ricezione live
-        arriva via webhook (Push).  Mantiene comunque un timeout breve (3s) così
-        una richiesta lenta non blocca la UI.
+        arriva via webhook (Push).  Gira in un worker thread, quindi un timeout
+        generoso non blocca la UI; WAHA può impiegare >10s a rispondere a
+        ``/api/messages`` (sync lato telefono), e 3s facevano fallire il fetch
+        silenziosamente (messaggi mancanti nella TUI).
         """
         result = self._request(
             "GET",
             f"/api/messages?session={self.session_name}&chatId={chat_id}&limit={int(limit)}",
-            timeout=3,
+            timeout=30,
         )
         if not isinstance(result, list):
             return []

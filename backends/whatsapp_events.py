@@ -114,6 +114,11 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[
     if not chat_jid:
         return None
 
+    # Gli status (storie) arrivano con JID "status@broadcast": non sono
+    # messaggi di chat, li ignoriamo del tutto (niente ingestione in cache/DB).
+    if "@broadcast" in chat_jid:
+        return []
+
     text = raw.get("text") or raw.get("body") or (raw.get("message") or {}).get("conversation") or ""
     ts = raw.get("timestamp")
     ts_ms = 0

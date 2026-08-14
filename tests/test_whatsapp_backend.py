@@ -332,6 +332,19 @@ class TestWhatsAppEvents:
         assert ev.payload["timestamp"] == 1700000000000  # seconds → ms
         assert ev.payload["is_mine"] is False
 
+    def test_status_broadcast_is_ignored(self):
+        """Gli status (storie) con JID status@broadcast non sono messaggi di
+        chat: devono produrre ZERO eventi (niente ingestione in cache/DB)."""
+        events = _event_from_message({
+            "id": "false_status@broadcast_ABC",
+            "chatId": "status@broadcast",
+            "from": "191169011163167@lid",
+            "timestamp": 1700000000,
+            "body": "una storia",
+            "fromMe": False,
+        })
+        assert events == []
+
     def test_typing_event(self):
         ev = _event_from_typing({"from": "wa:39123@s.whatsapp.net", "presence": "composing"})
         assert ev is not None
@@ -1086,8 +1099,9 @@ class TestWhatsAppWebhook:
         assert ev.payload["msg_type"] == "text"  # default
         assert ev.payload.get("attachment_id") is None
 
-    def test_list_messages_uses_short_poll_timeout(self):
-        """list_messages usa un timeout BREVE (per il giro veloce ~1s)."""
+    def test_list_messages_uses_worker_timeout(self):
+        """list_messages usa un timeout generoso (30s): gira in un worker
+        thread e WAHA può impiegare >10s a rispondere a /api/messages."""
         client = WhatsAppRESTClient("http://api.test")
         seen_timeout = []
 
@@ -1102,8 +1116,7 @@ class TestWhatsAppWebhook:
 
         with patch("urllib.request.urlopen", fake_urlopen):
             client.list_messages("X@lid", limit=1)
-        # un GET di poll non deve mai poter affamare per decine di secondi
-        assert seen_timeout and seen_timeout[0] == 3
+        assert seen_timeout and seen_timeout[0] == 30
 
 
     def test_list_messages_rest(self):
