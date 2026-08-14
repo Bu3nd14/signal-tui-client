@@ -3,6 +3,10 @@
 bin/signal-cli-*/
 __pycache__/
 *.pyc
+# Coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
 config.json
 # WAHA credentials (API key, dashboard/swagger auth)
 .env
@@ -10,6 +14,7 @@ signal-tui-client.code-workspace
 *.log
 profiling/output/
 MIGRATION_SQLITE_PLAN.md
+CI_Plan.md
 whatsapp-data/
 .docker/
 

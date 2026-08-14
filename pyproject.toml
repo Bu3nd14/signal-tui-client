@@ -1,0 +1,43 @@
+# =============================================================================
+# pyproject.toml — Configurazione condivisa (test, coverage, lint)
+# Signal TUI Client — Fase 1 del piano CI
+#
+# Unica fonte di verità usata sia in locale sia in CI (runner Ubuntu).
+# I comandi di Makefile/CI restano "minimi": tutti i flag vivono qui.
+# =============================================================================
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "Telegram"]
+pythonpath = ["."]
+addopts = "-ra --tb=short --strict-markers"
+
+[tool.coverage.run]
+source = ["."]
+branch = true
+omit = [
+    "tests/*",
+    "Telegram/*",
+    "profiling/*",
+    "scripts/*",
+    "bin/*",
+    ".venv/*",
+    ".venv-test/*",
+    ".pytest_cache/*",
+    ".ruff_cache/*",
+    "whatsapp-data/*",
+    "__pycache__/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+fail_under = 52
+show_missing = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+exclude = ["profiling"]
+
+[tool.ruff.lint]
+
+[tool.ruff.format]

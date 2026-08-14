@@ -1,1 +1,19 @@
-ruff>=0.12.0
+# Dipendenze di sviluppo / CI — Signal TUI Client
+# Installare con:  pip install -r requirements-dev.txt
+#
+# pytest-asyncio è RIMANDATO alla Fase 6 (test TUI async, vedi PLAN_TUI_TESTING.md):
+# nessun test usa @pytest.mark.asyncio oggi, quindi aggiungerlo ora introdurrebbe
+# una dipendenza inutilizzata senza benefici (e non va impostato `asyncio_mode`).
+
+# --- Test runner ---
+pytest>=9.1,<10
+
+# --- Coverage (plugin pytest + libreria) ---
+pytest-cov>=7.1,<8
+coverage>=7.15,<8
+
+# --- Lint / format ---
+# PINNATO: il set di regole di DEFAULT di ruff cambia tra versioni (0.16.1 ha un
+# default più ampio delle 0.9.x). La baseline dei 354 errori è stata misurata con
+# 0.16.1: la versione va bloccata per non far "muovere" il gate lint.
+ruff==0.16.1
