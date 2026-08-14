@@ -229,10 +229,14 @@ class BackendConnectMixin:
 
     def _connect_telegram(self) -> None:
         """Worker thread: connette Telegram, poi merge nel UI thread."""
-        self.call_from_thread(
-            self._mark_backend_connecting, self.telegram_backend.protocol
-        )
+        if self._tg_connecting:
+            logger.info("LINK-TG: already connecting, skipping duplicate worker")
+            return
+        self._tg_connecting = True
         try:
+            self.call_from_thread(
+                self._mark_backend_connecting, self.telegram_backend.protocol
+            )
             logger.info("LINK-TG: start, needs_pairing=%s", self.telegram_backend.needs_pairing)
             self.call_from_thread(self._status, "⏳ Telegram: connecting...", 0)
             self.telegram_backend._connect_sync()
@@ -249,6 +253,8 @@ class BackendConnectMixin:
             self.call_from_thread(
                 self._mark_backend_done, self.telegram_backend.protocol
             )
+        finally:
+            self._tg_connecting = False
 
     def _resync_wa_history(self) -> int:
         """Re-sync best-effort dello storico WhatsApp all'avvio.

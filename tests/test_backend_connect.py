@@ -89,3 +89,45 @@ class TestBackendReadyAutoSelect:
         app._mark_backend_connecting("whatsapp")
 
         assert app._pending_backends == {"signal", "whatsapp"}
+
+
+
+class TestTelegramConnectGuard:
+    """🛡️ _connect_telegram non deve avviare due worker in parallelo.
+
+    Due Ctrl+L→Esc ravvicinati avviavano due worker concorrenti che gareggiavano
+    sullo stesso stato del backend (client/loop), rompendo la ricezione live.
+    """
+
+    def _make_app(self) -> SignalTUI:
+        app = _make_app()
+        app.call_from_thread = MagicMock()
+        app.telegram_backend = MagicMock()
+        app.telegram_backend.protocol = PROTOCOL_SIGNAL
+        return app
+
+    def test_skips_when_already_connecting(self):
+        app = self._make_app()
+        app._tg_connecting = True
+
+        app._connect_telegram()
+
+        app.telegram_backend._connect_sync.assert_not_called()
+
+    def test_runs_and_resets_guard(self):
+        app = self._make_app()
+        app._tg_connecting = False
+
+        app._connect_telegram()
+
+        app.telegram_backend._connect_sync.assert_called_once()
+        assert app._tg_connecting is False
+
+    def test_guard_reset_on_failure(self):
+        app = self._make_app()
+        app._tg_connecting = False
+        app.telegram_backend._connect_sync.side_effect = RuntimeError("boom")
+
+        app._connect_telegram()
+
+        assert app._tg_connecting is False
