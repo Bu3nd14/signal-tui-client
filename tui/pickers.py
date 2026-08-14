@@ -74,23 +74,17 @@ class PickerMixin:
 
     def _open_device_link(self) -> None:
         """Open the device link picker modal (Ctrl+L)."""
+        screen = DeviceLinkPickerScreen(
+            signal_number=self.signal_backend.user_number,
+            has_whatsapp=self.whatsapp_backend is not None,
+            has_telegram=self.telegram_backend is not None,
+        )
+
         def _on_done(_: object) -> None:
             logger.info("LINK-DONE: callback fired")
-            if self.signal_backend:
-                self.run_worker(self._connect_signal, exclusive=False, thread=True)
-            if self.whatsapp_backend:
-                self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
-            if self.telegram_backend:
-                self.run_worker(self._connect_telegram, exclusive=False, thread=True)
+            self._reconnect_touched_backends(screen._touched_protocols)
 
-        self.push_screen(
-            DeviceLinkPickerScreen(
-                signal_number=self.signal_backend.user_number,
-                has_whatsapp=self.whatsapp_backend is not None,
-                has_telegram=self.telegram_backend is not None,
-            ),
-            _on_done,
-        )
+        self.push_screen(screen, _on_done)
 
 
     def action_open_device_link(self) -> None:

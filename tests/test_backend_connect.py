@@ -131,3 +131,55 @@ class TestTelegramConnectGuard:
         app._connect_telegram()
 
         assert app._tg_connecting is False
+
+
+
+class TestReconnectTouchedBackends:
+    """🎯 _reconnect_touched_backends riconnette solo i backend toccati."""
+
+    def _make_app(self) -> SignalTUI:
+        app = _make_app()
+        app.run_worker = MagicMock()
+        app._connect_signal = MagicMock()
+        app._connect_whatsapp = MagicMock()
+        app._connect_telegram = MagicMock()
+        app.signal_backend = MagicMock()
+        app.whatsapp_backend = MagicMock()
+        app.telegram_backend = MagicMock()
+        return app
+
+    def test_empty_set_reconnects_nothing(self):
+        app = self._make_app()
+        app._reconnect_touched_backends(set())
+        app.run_worker.assert_not_called()
+
+    def test_telegram_only(self):
+        app = self._make_app()
+        app._reconnect_touched_backends({"telegram"})
+        app.run_worker.assert_called_once_with(
+            app._connect_telegram, exclusive=False, thread=True)
+
+    def test_signal_only(self):
+        app = self._make_app()
+        app._reconnect_touched_backends({"signal"})
+        app.run_worker.assert_called_once_with(
+            app._connect_signal, exclusive=False, thread=True)
+
+    def test_whatsapp_only(self):
+        app = self._make_app()
+        app._reconnect_touched_backends({"whatsapp"})
+        app.run_worker.assert_called_once_with(
+            app._connect_whatsapp, exclusive=False, thread=True)
+
+    def test_multiple(self):
+        app = self._make_app()
+        app._reconnect_touched_backends({"signal", "telegram"})
+        assert app.run_worker.call_count == 2
+        app.run_worker.assert_any_call(app._connect_signal, exclusive=False, thread=True)
+        app.run_worker.assert_any_call(app._connect_telegram, exclusive=False, thread=True)
+
+    def test_missing_backend_skipped(self):
+        app = self._make_app()
+        app.telegram_backend = None
+        app._reconnect_touched_backends({"telegram"})
+        app.run_worker.assert_not_called()

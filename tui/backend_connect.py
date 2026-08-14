@@ -108,6 +108,22 @@ class BackendConnectMixin:
         logger.info("Backend %s ready: %d contacts", proto, n)
         self._status(f"✅ {proto.title()}: {n} contacts loaded")
 
+    def _reconnect_touched_backends(self, protocols: set[str]) -> None:
+        """Reconnect only the backends whose link flow was actually started.
+
+        Called after the device-link screen dismisses.  A plain ``Ctrl+L`` →
+        ``Esc`` touches nothing and reconnects nothing; starting a QR flow for
+        a protocol marks it and, on dismiss, only that backend is reconnected
+        (to restore the connection the QR flow disturbed or to activate a just
+        linked account).
+        """
+        if self.signal_backend and "signal" in protocols:
+            self.run_worker(self._connect_signal, exclusive=False, thread=True)
+        if self.whatsapp_backend and "whatsapp" in protocols:
+            self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
+        if self.telegram_backend and "telegram" in protocols:
+            self.run_worker(self._connect_telegram, exclusive=False, thread=True)
+
     def _connect_signal(self) -> None:
         """Worker thread: avvia Signal, poi merge nel UI thread."""
         self.call_from_thread(

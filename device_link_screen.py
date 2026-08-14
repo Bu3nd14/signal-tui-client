@@ -226,6 +226,9 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         self._phase: str = "picker"
         self._selected_protocol: str = ""
         self._device_name: str = _DEFAULT_SIGNAL_DEVICE_NAME
+        # Protocolli il cui flusso QR è stato effettivamente avviato in questa
+        # schermata: al dismiss servono a riconnettere solo i backend toccati.
+        self._touched_protocols: set[str] = set()
 
     # ── Compose ────────────────────────────────────────────────────────────
 
@@ -371,6 +374,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
 
     def _transition_to_qr(self, phone: str) -> None:
         """Move from phone to QR phase, fetching a real QR code."""
+        self._touched_protocols.add(self._selected_protocol)
         self._populate_qr_phase("⏳ Generating QR code...", phone)
         self._show_phase("qr")
         self._linking_proc: subprocess.Popen | None = None
