@@ -6,24 +6,24 @@ so remote terminal sessions can fetch them.  No Textual dependency.
 """
 
 import http.server
+import logging
 import os
 import socket
 import socketserver
 import threading
 from pathlib import Path
-from typing import Optional
 
 from .db import CACHE_DIR
 from .rpc import get_attachment_path
 
-
+logger = logging.getLogger(__name__)
 
 # ─── Download server (temporary HTTP) ───────────────────────────────────────
 
 DOWNLOAD_PORT = 10042
-_DOWNLOAD_SERVER: Optional[socketserver.TCPServer] = None
-_DOWNLOAD_URL_BASE: Optional[str] = None
-_TEMP_DOWNLOAD_DIR: Optional[Path] = None
+_DOWNLOAD_SERVER: socketserver.TCPServer | None = None
+_DOWNLOAD_URL_BASE: str | None = None
+_TEMP_DOWNLOAD_DIR: Path | None = None
 
 
 def _get_temp_download_dir() -> Path:
@@ -53,7 +53,8 @@ def get_local_ip() -> str:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("10.255.255.255", 1))
             return s.getsockname()[0]
-    except Exception:
+    except Exception as _e:
+        logger.debug("Failed to determine local IP, using 127.0.0.1", exc_info=True)
         return "127.0.0.1"
 
 
@@ -70,7 +71,6 @@ class _DownloadHTTPHandler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, format: str, *args) -> None:
         """Suppress default HTTP log output."""
-        pass
 
 
 def _ensure_download_server() -> str:

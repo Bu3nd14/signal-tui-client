@@ -22,14 +22,14 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from signal_tui import SignalTUI
-from models import ChatContact, ChatEvent, contact_cache_key, PROTOCOL_SIGNAL
 from backend import (
-    _load_cache,
     _add_message_to_cache,
+    _load_cache,
     _mark_as_read,
     _update_message_status,
 )
+from models import PROTOCOL_SIGNAL, ChatContact, ChatEvent, contact_cache_key
+from signal_tui import SignalTUI
 
 
 @pytest.fixture

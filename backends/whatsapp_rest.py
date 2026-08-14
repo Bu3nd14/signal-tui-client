@@ -10,10 +10,13 @@ can patch them on that module.
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 
 import backends.whatsapp as _wa
+
+logger = logging.getLogger(__name__)
 
 
 class WhatsAppRESTClient:
@@ -333,7 +336,7 @@ class WhatsAppRESTClient:
         from urllib.parse import quote, urlparse
 
         # 0) Direct URL (WAHA media.url is often a full HTTP link).
-        if media_id_or_url.startswith("http://") or media_id_or_url.startswith("https://"):
+        if media_id_or_url.startswith(("http://", "https://")):
             try:
                 parsed = urlparse(media_id_or_url)
                 # Rewrite container-internal port 3000 → real host port.
@@ -347,7 +350,8 @@ class WhatsAppRESTClient:
                 if parsed.query:
                     safe_path += "?" + parsed.query
                 safe_url = parsed.scheme + "://" + host + safe_path
-            except Exception:
+            except Exception as _e:
+                logger.debug("Failed to rewrite media URL, using original", exc_info=True)
                 safe_url = media_id_or_url
             try:
                 headers = {"Accept": "*/*"}

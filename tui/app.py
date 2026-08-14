@@ -1,7 +1,7 @@
 """SignalTUI main App — composes the functional mixins and owns app lifecycle."""
 
 import logging
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 from textual.app import App
 from textual.binding import Binding
@@ -15,31 +15,30 @@ from textual.widgets import (
     Static,
 )
 
-from models import (
-    ChatContact,
-)
 from backends import (
     BackendManager,
     SignalBackend,
     TelegramBackend,
     WhatsAppBackend,
 )
-from backends.config import whatsapp_enabled, telegram_enabled
-from ui_components import (
-    ContactListWidget,
-    ChatAreaWidget,
+from backends.config import telegram_enabled, whatsapp_enabled
+from models import (
+    ChatContact,
 )
-
-from tui.css import APP_CSS
-from tui.chat_view import ChatViewMixin
-from tui.events import EventHandlingMixin
-from tui.contacts import ContactListMixin
 from tui.backend_connect import BackendConnectMixin
+from tui.chat_view import ChatViewMixin
+from tui.contacts import ContactListMixin
+from tui.css import APP_CSS
+from tui.download import DownloadModeMixin
+from tui.events import EventHandlingMixin
+from tui.pickers import PickerMixin
 from tui.polling import PollingMixin
 from tui.send import SendMixin
 from tui.unread_reply import UnreadReplyMixin
-from tui.download import DownloadModeMixin
-from tui.pickers import PickerMixin
+from ui_components import (
+    ChatAreaWidget,
+    ContactListWidget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,20 +81,20 @@ class SignalTUI(
 
         # WhatsApp backend is registered only when configured (env/config.json);
         # otherwise it's skipped gracefully and the Signal TUI keeps working.
-        self.whatsapp_backend: Optional[WhatsAppBackend] = None
+        self.whatsapp_backend: WhatsAppBackend | None = None
         if whatsapp_enabled():
             self.whatsapp_backend = WhatsAppBackend()
             self.manager.register(self.whatsapp_backend)
 
         # Telegram backend is registered only when credentials are configured;
         # otherwise it's skipped gracefully.
-        self.telegram_backend: Optional[TelegramBackend] = None
+        self.telegram_backend: TelegramBackend | None = None
         if telegram_enabled():
             self.telegram_backend = TelegramBackend()
             self.manager.register(self.telegram_backend)
 
         self.contacts: list[ChatContact] = []
-        self.selected_contact: Optional[ChatContact] = None
+        self.selected_contact: ChatContact | None = None
 
         # Active protocol filter for the unified contact list:
         # "all" -> "signal" -> "whatsapp" (cycled with Ctrl+W).
@@ -137,7 +136,7 @@ class SignalTUI(
         # nello stesso secondo verrebbero scartati (il secondo non compariva).
         self._shown_in_log: set[tuple[str, str, int, str]] = set()
 
-        self._reply_to: Optional[dict] = None  # message being replied to
+        self._reply_to: dict | None = None  # message being replied to
         self._download_mode = False  # Ctrl+D download mode active
         self._typing_contacts: dict[str, float] = {}  # contact cache_key → time of last typing STARTED
 
@@ -193,11 +192,14 @@ class SignalTUI(
         # Only connect backends that are already linked (skip slow daemon
         # startup for unlinked accounts — they connect after Ctrl+L link).
         self.run_worker(self._connect_signal, exclusive=False, thread=True)
-        if self.whatsapp_backend is not None and not self.whatsapp_backend.needs_pairing:
+        if (
+            self.whatsapp_backend is not None
+            and not self.whatsapp_backend.needs_pairing
             # Only auto-connect at boot if the session is truly WORKING
             # (not just "not pairing" — could be failed/stopped).
-            if self.whatsapp_backend.is_working:
-                self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
+            and self.whatsapp_backend.is_working
+        ):
+            self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
         if self.telegram_backend is not None and not self.telegram_backend.needs_pairing:
             self.run_worker(self._connect_telegram, exclusive=False, thread=True)
 
@@ -212,8 +214,8 @@ class SignalTUI(
         if self.telegram_backend is not None:
             try:
                 self.telegram_backend.disconnect_sync()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Telegram disconnect on exit failed", exc_info=True)
         # No flush needed — SQLite writes are incremental
 
     def _status(self, text: str, duration: float = 3.0) -> None:
@@ -229,16 +231,16 @@ class SignalTUI(
                 self._status_timer = None
             if duration > 0:
                 self._status_timer = self.set_timer(duration, self._status_clear)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Failed to update status bar", exc_info=True)
 
     def _status_clear(self) -> None:
         """Clear the status bar."""
         try:
             self.query_one("#status-bar", Static).update("")
             self._status_timer = None
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Failed to clear status bar", exc_info=True)
 
     def on_button_pressed(self, event: Button.Pressed):
         """When the user clicks a button."""

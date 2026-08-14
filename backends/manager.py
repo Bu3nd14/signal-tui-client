@@ -9,9 +9,13 @@ send/mark-read calls to the correct backend.
 
 from __future__ import annotations
 
+import logging
+
 from models import ChatContact
 
 from .base import ChatBackend
+
+logger = logging.getLogger(__name__)
 
 
 class BackendManager:
@@ -52,8 +56,8 @@ class BackendManager:
         for backend in self._backends.values():
             try:
                 await backend.disconnect()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Backend disconnect failed", exc_info=True)
 
     def list_contacts(self) -> list[ChatContact]:
         """Return the merged contact list across all backends."""

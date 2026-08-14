@@ -17,12 +17,11 @@ from typing import ClassVar
 
 import emoji
 from rich.cells import cell_len
-from rich.text import Text as RichText
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, Grid
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Input, Static, Button, Label
+from textual.widgets import Button, Input, Static
 
 from emoji_data import PREDEFINED_CATEGORIES
 
@@ -287,16 +286,15 @@ class EmojiPickerScreen(ModalScreen[str]):
         with Vertical(id="emoji-picker-container"):
             yield Static("😊 Emoji Picker", id="emoji-picker-title")
             # Category tabs
-            with Vertical(id="emoji-category-tabs"):
-                with Horizontal():
-                    for i, (label, icon, _) in enumerate(self._categories):
-                        btn = Button(
-                            _normalize_emoji_width(icon),
-                            id=f"emoji-cat-{i}",
-                            classes="emoji-cat-btn",
-                            tooltip=label,
-                        )
-                        yield btn
+            with Vertical(id="emoji-category-tabs"), Horizontal():
+                for i, (label, icon, _) in enumerate(self._categories):
+                    btn = Button(
+                        _normalize_emoji_width(icon),
+                        id=f"emoji-cat-{i}",
+                        classes="emoji-cat-btn",
+                        tooltip=label,
+                    )
+                    yield btn
             # Emoji grid
             with Vertical(id="emoji-grid"):
                 yield Vertical(id="emoji-grid-container")
@@ -429,8 +427,7 @@ class EmojiPickerScreen(ModalScreen[str]):
                         break
                     parent = parent.parent
 
-        if current_section < 0:
-            current_section = 0
+        current_section = max(current_section, 0)
 
         next_section = (current_section + direction) % len(sections)
 
@@ -660,7 +657,6 @@ class EmojiCompletionWidget(Vertical):
         Called when the user clicks a suggestion or presses Enter.
         """
         # Walk up to the app and insert the emoji into the message input
-        from textual.app import App
         app = self.app
         try:
             msg_input = app.query_one("#message-input", Input)
@@ -670,12 +666,12 @@ class EmojiCompletionWidget(Vertical):
                 new_value = value[:last_colon] + emoji_char + " "
                 msg_input.value = new_value
                 msg_input.cursor_position = len(new_value)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Failed to insert emoji into input", exc_info=True)
         self.hide_suggestions()
         # Refocus the input
         try:
             msg_input = app.query_one("#message-input", Input)
             msg_input.focus()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Failed to refocus message input", exc_info=True)

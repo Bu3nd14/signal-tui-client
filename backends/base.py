@@ -15,8 +15,8 @@ Textual reactive event loop.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import AsyncIterator
 
 from models import ChatContact, ChatEvent
 

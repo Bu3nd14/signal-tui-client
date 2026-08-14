@@ -18,7 +18,6 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import PROTOCOL_SIGNAL
 from backends.whatsapp import WhatsAppBackend
 from signal_tui import SignalTUI
 
@@ -233,7 +232,6 @@ class TestWaitSessionReady:
 
     def test_retries_until_working(self):
         """Se inizialmente è connecting, riterara finché non diventa lavorativo."""
-        import time as _t
         backend = _make_backend()
         states = iter([{"status": "CONNECTING"}, {"status": "PENDING"}, {"status": "WORKING"}])
         backend._rest.get_session_status.side_effect = lambda: next(states)

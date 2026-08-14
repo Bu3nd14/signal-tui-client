@@ -5,16 +5,16 @@ import logging
 from textual.containers import Horizontal
 from textual.widgets import Static
 
-from models import (
-    PROTOCOL_SIGNAL,
-)
 from backend import (
     serve_text_as_file,
 )
+from models import (
+    PROTOCOL_SIGNAL,
+)
 from ui_components import (
-    ImageWidget,
-    ImageModalScreen,
     DownloadLinkWidget,
+    ImageModalScreen,
+    ImageWidget,
 )
 
 logger = logging.getLogger(__name__)

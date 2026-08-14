@@ -3,11 +3,10 @@
 import logging
 import time
 
-
 from models import (
+    PROTOCOL_SIGNAL,
     ChatContact,
     ChatEvent,
-    PROTOCOL_SIGNAL,
     contact_cache_key,
     protocol_emoji,
 )

@@ -15,15 +15,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from models import PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
 from signal_tui import SignalTUI
-from models import ChatContact, contact_cache_key, PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP
 from ui_components import ImageWidget
 
 
@@ -261,15 +259,13 @@ class TestLoadWorkerStaleness:
         # The cache holds 20 msgs; we simulate a slow mount by sleeping a tiny
         # bit in call_from_thread so a race is observable.
         def slow_call(fn, *a, **k):
-            import time
             fn(*a, **k)
 
         with patch.object(app, "_make_message_widget", side_effect=fake_make_widget), \
              patch.object(app, "query_one", return_value=fake_chat_log), \
              patch.object(app, "call_from_thread", side_effect=slow_call):
-            # Selection #1: capture the reload token.
+            # Selection #1: bump the reload token.
             app._chat_reload_token += 1
-            captured = app._chat_reload_token
 
             def worker():
                 # Run the real load; it captures the CURRENT token (=captured).

@@ -8,7 +8,7 @@ Pure helpers (``_msg_type``, ``_jid_string``, ``_resolve_sender_name``) plus the
 
 from __future__ import annotations
 
-from models import ChatEvent, PROTOCOL_WHATSAPP
+from models import PROTOCOL_WHATSAPP, ChatEvent
 
 
 def _msg_type(raw: dict) -> str:
@@ -192,11 +192,7 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[
             mime = (media.get("mimetype") or "").lower()
             if mime.startswith("image/"):
                 att_type = "image"
-            elif mime.startswith("video/"):
-                att_type = "attachment"
-            elif mime.startswith("audio/"):
-                att_type = "attachment"
-            elif mime.startswith("application/"):
+            elif mime.startswith(("video/", "audio/", "application/")):
                 att_type = "attachment"
             elif raw.get("stickerMessage") is not None:
                 att_type = "sticker"
@@ -260,7 +256,7 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[
             if not msg_text:
                 label = att_info or "Media"
                 if multiple and att_id:
-                    msg_text = f"{label}: {str(att_id)}"
+                    msg_text = f"{label}: {att_id!s}"
                 else:
                     msg_text = label
             events.append(ChatEvent(
@@ -432,11 +428,12 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> list[Chat
         event = _event_from_ack(content)
         return [event] if event is not None else []
     # Some APIs emit the message object directly without an 'event' field.
-    if content.get("remoteJid") or content.get("from") or content.get("chatId"):
-        if ("text" in content or "body" in content or content.get("message")
-                or content.get("attachments") or content.get("hasMedia")
-                or content.get("media")):
-            return _event_from_message(content, contacts_by_jid)
+    if (content.get("remoteJid") or content.get("from") or content.get("chatId")) and (
+        "text" in content or "body" in content or content.get("message")
+        or content.get("attachments") or content.get("hasMedia")
+        or content.get("media")
+    ):
+        return _event_from_message(content, contacts_by_jid)
     return []
 
 

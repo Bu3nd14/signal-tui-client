@@ -12,24 +12,21 @@ from __future__ import annotations
 import queue
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from backends.telegram import TelegramBackend
 from models import (
-    ChatContact,
-    ChatEvent,
-    ChatMessage,
     PROTOCOL_TELEGRAM,
+    ChatEvent,
     contact_cache_key,
 )
-
 
 # ─── Telethon mock objects ────────────────────────────────────────────────
 
@@ -98,10 +95,8 @@ class MockReplyTo:
 
 # ─── Test helpers ─────────────────────────────────────────────────────────
 
-def _make_backend() -> "TelegramBackend":
+def _make_backend() -> TelegramBackend:
     """Create a TelegramBackend with Telethon client mocked."""
-    from backends.telegram import TelegramBackend
-
     backend = TelegramBackend.__new__(TelegramBackend)
     backend._client = None
     backend._events = queue.Queue()
@@ -336,7 +331,7 @@ class TestEventQueue:
                         type="message", protocol=PROTOCOL_TELEGRAM,
                         contact_id=str(i), payload={"n": i},
                     ))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
 
         threads = [threading.Thread(target=producer) for _ in range(4)]
@@ -522,9 +517,9 @@ class TestDisconnect:
 
         with patch.object(backend, "disconnect_sync") as mock_disc, \
              patch.object(backend, "_load_protocol_cache",
-                          side_effect=RuntimeError("stop early")):
-            with pytest.raises(RuntimeError):
-                backend._connect_sync()
+                          side_effect=RuntimeError("stop early")), \
+             pytest.raises(RuntimeError):
+            backend._connect_sync()
 
         # `disconnect_sync` è stato chiamato PRIMA di `_load_protocol_cache`
         # (che solleva: se l'ordine fosse invertito non verrebbe mai chiamato).

@@ -9,13 +9,13 @@ PATH, so no real downloads or installs happen.
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import stat
 import subprocess
 import sys
 import tarfile
-import io
 from pathlib import Path
 
 import pytest
@@ -217,7 +217,7 @@ def _run_install(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
     script = tmp_path / "install.sh"
     shutil.copy(INSTALL_SCRIPT, script)
     _make_executable(script)
-    return subprocess.run(
+    return subprocess.run(  # noqa: PLW1510 — return code inspected by each test
         ["bash", str(script), *args],
         capture_output=True,
         text=True,
@@ -264,7 +264,7 @@ class TestInstalledVersionDetection:
             "echo \"$(get_installed_version)\"\n",
             encoding="utf-8",
         )
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: PLW1510 — return code asserted below
             ["bash", str(script)], capture_output=True, text=True, timeout=30
         )
         assert result.returncode == 0
@@ -282,7 +282,7 @@ class TestInstalledVersionDetection:
             "echo \"[$(get_installed_version)]\"\n",
             encoding="utf-8",
         )
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: PLW1510 — return code asserted below
             ["bash", str(script)], capture_output=True, text=True, timeout=30
         )
         assert result.returncode == 0

@@ -4,7 +4,6 @@ Regression tests for backend.py — attachment helpers and classification.
 
 from __future__ import annotations
 
-import pytest
 import sys
 from pathlib import Path
 from unittest.mock import patch

@@ -4,10 +4,9 @@ Generates a QR code to scan with the Signal app on your smartphone.
 The signal-cli process stays running waiting for the scan.
 """
 
+import re
 import subprocess
 import sys
-import re
-import signal
 from pathlib import Path
 
 from qr_utils import print_qr_code
@@ -41,7 +40,7 @@ def main():
     print("=" * 60)
     print()
     print(f"✅ signal-cli found: {signal_cli_path}")
-    print(f"⏳ Starting link command...")
+    print("⏳ Starting link command...")
     print()
 
     # Start signal-cli link in a separate process (non-blocking)

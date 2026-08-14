@@ -3,16 +3,15 @@
 import logging
 import time
 
-
-from models import (
-    contact_cache_key,
+from backend import (
+    WEBHOOK_PORT,
+    ensure_webhook_server,
 )
 from backends import (
     ChatBackend,
 )
-from backend import (
-    ensure_webhook_server,
-    WEBHOOK_PORT,
+from models import (
+    contact_cache_key,
 )
 
 logger = logging.getLogger("signal_tui")
@@ -150,7 +149,7 @@ class BackendConnectMixin:
                     self._status, "⚠️ Signal: daemon non disponibile (subprocess)", 0
                 )
         except Exception as e:
-            logger.exception("LINK-SIG: failed: %s", e)
+            logger.exception("LINK-SIG: failed")
             self.call_from_thread(
                 self._status, f"❌ Signal: errore — {e}", 0
             )
@@ -178,8 +177,8 @@ class BackendConnectMixin:
             logger.info("LINK-WA: connect_sync done, wa_contacts=%d", n)
             try:
                 ensure_webhook_server(self.whatsapp_backend)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Webhook server startup failed", exc_info=True)
             if n > 0:
                 self.call_from_thread(
                     self._status,
@@ -194,7 +193,7 @@ class BackendConnectMixin:
                 # a thread, never blocks the UI.
                 self.run_worker(self._poll_wa_contacts, thread=True)
         except Exception as exc:
-            logger.exception("LINK-WA: failed: %s", exc)
+            logger.exception("LINK-WA: failed")
             self.call_from_thread(
                 self._status, f"❌ WAHA: non disponibile — {exc}", 0
             )
@@ -264,7 +263,7 @@ class BackendConnectMixin:
                 logger.info("LINK-TG: history synced, %d messages", fetched)
             self.call_from_thread(self._on_backend_ready, self.telegram_backend)
         except Exception as e:
-            logger.exception("Telegram connect failed: %s", e)
+            logger.exception("Telegram connect failed")
             self.call_from_thread(self._status, f"❌ Telegram: {e}", 0)
             self.call_from_thread(
                 self._mark_backend_done, self.telegram_backend.protocol
@@ -287,13 +286,15 @@ class BackendConnectMixin:
             return 0
         try:
             resync = getattr(self.whatsapp_backend, "resync_history", None)
-        except Exception:
+        except Exception as _e:
+            logger.debug("Failed to resolve resync_history", exc_info=True)
             return 0
         if resync is None:
             return 0
         try:
             n = resync()
-        except Exception:
+        except Exception as _e:
+            logger.debug("WhatsApp history resync failed", exc_info=True)
             return 0
         if n:
             try:
@@ -301,6 +302,6 @@ class BackendConnectMixin:
                     self._status,
                     f"✅ WAHA: cronologia sincronizzata per {n} chat"
                 )
-            except Exception:
-                pass  # il report è solo informativo
+            except Exception as _e:
+                logger.debug("Status report failed", exc_info=True)  # il report è solo informativo
         return n

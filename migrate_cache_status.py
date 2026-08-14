@@ -32,7 +32,7 @@ def main() -> None:
 
     total_migrated = 0
 
-    for contact, messages in cache.items():
+    for messages in cache.values():
         for msg in messages:
             # Only touch sent messages that lack the status field
             if "status" not in msg and msg.get("is_mine", False):

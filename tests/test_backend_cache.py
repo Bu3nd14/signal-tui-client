@@ -4,24 +4,25 @@ Regression tests for backend.py — message cache (SQLite: add, load, prune, rec
 
 from __future__ import annotations
 
-import time
-import pytest
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # We'll test the cache functions by temporarily patching DB_FILE / CACHE_DIR
 from backend import (
-    _load_cache,
-    _add_message_to_cache,
-    _prune_cache,
-    _mark_as_read,
-    _update_message_status,
-    _process_receipt,
     CACHE_RETENTION_DAYS,
+    _add_message_to_cache,
+    _load_cache,
+    _mark_as_read,
+    _process_receipt,
+    _prune_cache,
+    _update_message_status,
 )
 
 

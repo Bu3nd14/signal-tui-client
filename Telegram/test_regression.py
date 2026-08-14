@@ -17,26 +17,24 @@ from __future__ import annotations
 import queue
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from backends import BackendManager, SignalBackend, WhatsAppBackend
+from backends.base import ChatBackend
 from models import (
+    PROTOCOL_SIGNAL,
+    PROTOCOL_TELEGRAM,
+    PROTOCOL_WHATSAPP,
     ChatContact,
     ChatEvent,
-    ChatMessage,
-    PROTOCOL_SIGNAL,
-    PROTOCOL_WHATSAPP,
-    PROTOCOL_TELEGRAM,
     contact_cache_key,
     protocol_emoji,
 )
-from backends import BackendManager, SignalBackend, WhatsAppBackend
-from backends.base import ChatBackend
-
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -78,7 +76,7 @@ class TestMultiBackendRouting:
     """🗂️ 3 backends registrati: routing corretto per ogni protocollo."""
 
     def test_all_protocols_registered(self):
-        manager, signal, whatsapp = _make_multi_manager()
+        manager, _, _ = _make_multi_manager()
         from backends.telegram import TelegramBackend
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
@@ -92,7 +90,7 @@ class TestMultiBackendRouting:
         }
 
     def test_list_contacts_merges_three_backends(self):
-        manager, signal, whatsapp = _make_multi_manager()
+        manager, _, _ = _make_multi_manager()
         from backends.telegram import TelegramBackend
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
@@ -141,7 +139,7 @@ class TestMultiBackendRouting:
 
     def test_send_message_unknown_protocol_still_raises(self):
         import asyncio
-        manager, signal, whatsapp = _make_multi_manager()
+        manager, _, _ = _make_multi_manager()
         # Adding Telegram doesn't make unknown protocols valid
         with pytest.raises(KeyError):
             asyncio.run(manager.send_message("madeup", "x", "y"))
@@ -160,7 +158,7 @@ class TestMultiBackendRouting:
 
     def test_poll_once_independent_per_backend(self):
         """Ogni backend ha la sua coda: poll_once non mischia eventi."""
-        manager, signal, whatsapp = _make_multi_manager()
+        _, signal, whatsapp = _make_multi_manager()
         signal._events.put(ChatEvent(
             type="message", protocol=PROTOCOL_SIGNAL,
             contact_id="+391", payload={"text": "sig"},
@@ -180,7 +178,7 @@ class TestMultiBackendRouting:
 
     def test_register_same_protocol_twice_overwrites(self):
         """Registrare due backend con lo stesso protocol sovrascrive."""
-        manager, signal, _ = _make_multi_manager()
+        manager, _, _ = _make_multi_manager()
         signal2 = SignalBackend.__new__(SignalBackend)
         signal2.protocol = PROTOCOL_SIGNAL
         signal2.contacts = []
@@ -204,7 +202,7 @@ class TestCacheIsolation:
 
     def test_signal_messages_not_visible_in_whatsapp_cache(self):
         """Messaggi Signal nel cache non appaiono in WhatsApp."""
-        manager, signal, whatsapp = _make_multi_manager()
+        _, signal, whatsapp = _make_multi_manager()
         signal.cache = {}
         whatsapp.cache = {}
 
@@ -219,7 +217,7 @@ class TestCacheIsolation:
 
     def test_whatsapp_messages_not_visible_in_signal_cache(self):
         """Messaggi WhatsApp nel cache non appaiono in Signal."""
-        manager, signal, whatsapp = _make_multi_manager()
+        _, signal, whatsapp = _make_multi_manager()
         signal.cache = {}
         whatsapp.cache = {}
 
@@ -241,7 +239,7 @@ class TestCacheIsolation:
         telegram._contacts_by_id = {}
         telegram._seen_msg_ids = set()
 
-        manager, signal, whatsapp = _make_multi_manager()
+        manager, signal, _ = _make_multi_manager()
         signal.cache = {}
         manager.register(telegram)
 
@@ -473,12 +471,12 @@ class TestEdgeCases:
 
     def test_mark_read_unknown_protocol_still_raises(self):
         import asyncio
-        manager, signal, _ = _make_multi_manager()
+        manager, _, _ = _make_multi_manager()
         with pytest.raises(KeyError):
             asyncio.run(manager.mark_read("nope", "x"))
 
     def test_get_unknown_protocol_still_returns_none(self):
-        manager, signal, _ = _make_multi_manager()
+        manager, _, _ = _make_multi_manager()
         assert manager.get("fantasy") is None
 
     def test_signal_contacts_unchanged_after_telegram_registration(self):

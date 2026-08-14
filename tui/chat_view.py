@@ -7,15 +7,15 @@ from pathlib import Path
 from textual.containers import Vertical
 from textual.widgets import Button, Static
 
-from models import (
-    PROTOCOL_SIGNAL,
-)
 from backends import (
     WhatsAppBackend,
 )
+from models import (
+    PROTOCOL_SIGNAL,
+)
 from ui_components import (
-    MessageWidget,
     ImageWidget,
+    MessageWidget,
 )
 
 logger = logging.getLogger(__name__)
@@ -312,8 +312,8 @@ class ChatViewMixin:
                 for msg in self._cache.get(contact.cache_key, []):
                     if not msg.get("is_mine"):
                         msg["read"] = True
-            except Exception:
-                pass  # fallback: stay on the local cache
+            except Exception as _e:  # fallback: stay on the local cache
+                logger.debug("History fetch failed, staying on local cache", exc_info=True)
 
         if _is_stale():
             return
@@ -345,16 +345,16 @@ class ChatViewMixin:
             if pending_fetch:
                 try:
                     self.call_from_thread(self._status, "⏳ Loading message history…")
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("Failed to show loading status", exc_info=True)
                 return False
             self._loaded_all = True
             try:
                 self.call_from_thread(
                     self._status, "No message history for this contact"
                 )
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to show empty-history status", exc_info=True)
             return False
 
         if total > 20:
@@ -385,8 +385,8 @@ class ChatViewMixin:
             if not is_stale():
                 try:
                     self._clear_chat()
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("Failed to clear chat log", exc_info=True)
             if is_stale():
                 return
 
@@ -407,8 +407,8 @@ class ChatViewMixin:
                     widgets.extend(
                         self._build_message_widgets(protocol, is_group, msg)
                     )
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("Failed to build a message widget", exc_info=True)
 
             if widgets:
                 chat_log = self.chat_log
@@ -419,13 +419,13 @@ class ChatViewMixin:
             if total > 20 and not is_stale():
                 try:
                     self._add_load_more_widget(total - 20)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("Failed to mount load-more widget", exc_info=True)
 
         try:
             self.call_from_thread(_mount_window)
-        except Exception:
-            pass  # fallback: stay on the already-mirrored UI cache
+        except Exception as _e:  # fallback: stay on the already-mirrored UI cache
+            logger.debug("Failed to schedule window mount", exc_info=True)
 
         return True
 

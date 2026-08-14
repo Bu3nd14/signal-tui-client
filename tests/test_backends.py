@@ -12,22 +12,20 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from backends import BackendManager, SignalBackend
+from backends.base import ChatBackend
 from models import (
-    ChatContact,
-    ChatEvent,
     PROTOCOL_SIGNAL,
+    ChatContact,
     contact_cache_key,
 )
-from backends import SignalBackend, BackendManager
-from backends.base import ChatBackend
-
 
 # ─── ChatBackend ABC ─────────────────────────────────────────────────────────
 
@@ -86,8 +84,9 @@ class TestSignalBackend:
 
     def test_mark_read_sync_persists(self, tmp_path):
         """mark_read_sync persiste lo stato letto su SQLite."""
-        import backend as backend_mod
         from unittest.mock import patch
+
+        import backend as backend_mod
         db_file = tmp_path / "messages.db"
         with patch.object(backend_mod, "DB_FILE", db_file), \
              patch.object(backend_mod, "CACHE_DIR", tmp_path):
@@ -505,7 +504,6 @@ class TestSendMsgSync:
 
     def test_send_message_sync_fallback_subprocess(self):
         """Senza daemon, invia via subprocess."""
-        from backend import _send_subprocess
         backend = SignalBackend()
         backend._use_daemon = False
         with patch("backends.signal._send_subprocess") as mock_sub:
@@ -595,8 +593,9 @@ class TestIngestDedup:
         consegna un messaggio con N attachment.  Usa un DB temporaneo
         (tmp_path) per non toccare il DB reale.
         """
-        import backend as backend_mod
         from unittest.mock import patch
+
+        import backend as backend_mod
 
         TEST_CONTACT = "+399999999999"
         db_file = tmp_path / "messages.db"

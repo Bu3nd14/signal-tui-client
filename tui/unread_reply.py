@@ -109,8 +109,8 @@ class UnreadReplyMixin:
             if prev_widget is not None:
                 try:
                     prev_widget.set_selected(False)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("Failed to deselect previous reply widget", exc_info=True)
         self._reply_to = None
         self._update_reply_bar()
 
@@ -146,8 +146,8 @@ class UnreadReplyMixin:
             if prev_widget is not None:
                 try:
                     prev_widget.set_selected(False)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("Failed to deselect previous reply widget", exc_info=True)
 
         # Store the new reply target
         self._reply_to = {
@@ -171,5 +171,5 @@ class UnreadReplyMixin:
         # the reply immediately.
         try:
             self.query_one("#message-input", Input).focus()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Failed to focus message input", exc_info=True)

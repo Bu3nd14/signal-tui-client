@@ -65,10 +65,8 @@ class ContactListMixin:
             ts = c.last_message_ts
             for m in msgs:
                 mts = int(m.get("timestamp") or 0)
-                if mts > ts:
-                    ts = mts
-            if ts > c.last_message_ts:
-                c.last_message_ts = ts
+                ts = max(ts, mts)
+            c.last_message_ts = max(c.last_message_ts, ts)
 
     def _filtered_contacts(self) -> list[ChatContact]:
         """Return contacts matching the active protocol filter."""
@@ -312,7 +310,8 @@ class ContactListMixin:
         self._apply_contact_visibility()
         try:
             section_lbl = self.query_one("#ContactsTitle", Label)
-        except Exception:
+        except Exception as _e:
+            logger.debug("Contacts title not found", exc_info=True)
             section_lbl = None
         if section_lbl is not None:
             section_lbl.update(f"📇 Contacts{self._filter_title_suffix()}")
@@ -326,8 +325,8 @@ class ContactListMixin:
         for selector in ("#contact-list", "#ContactsTitle", "#ChatTitle"):
             try:
                 widgets.append(self.query_one(selector))
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Filter widget not found: %s", selector, exc_info=True)
         for node in widgets:
             node.remove_class(cls_signal, cls_whats, cls_telegram)
             if self._protocol_filter == "signal":
@@ -435,8 +434,8 @@ class ContactListMixin:
         # immediately after selecting a contact.
         try:
             self.query_one("#message-input", Input).focus()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Failed to focus message input", exc_info=True)
 
     def on_list_view_selected(self, event: ListView.Selected):
         """When a contact is selected, show the chat."""

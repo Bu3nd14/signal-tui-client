@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -40,13 +41,14 @@ _ensure_venv()
 
 import time
 
+logger = logging.getLogger(__name__)
+
 from backends.config import (
-    resolve_whatsapp_api_url,
     get_whatsapp_session_name,
+    resolve_whatsapp_api_url,
 )
 from backends.whatsapp import WhatsAppRESTClient
 from qr_utils import print_qr_code, qr_png_to_ascii
-
 
 
 def main() -> None:
@@ -86,7 +88,7 @@ def main() -> None:
             print(f"       curl -H 'X-Api-Key: <chiave>' {api_url}/api/version", file=sys.stderr)
         sys.exit(1)
 
-    qr_path = _save_qr_png(qr, session_name)
+    _save_qr_png(qr, session_name)
     _print_qr(qr)
 
     print("⏳ Waiting for scan from phone...")
@@ -115,7 +117,7 @@ def main() -> None:
             print("⟳ Il QR è scaduto: ne genero uno nuovo...")
             new_qr = client.get_fresh_pairing_qr(reset=False)
             if new_qr:
-                qr_path = _save_qr_png(new_qr, session_name)
+                _save_qr_png(new_qr, session_name)
                 _print_qr(new_qr)
             qr_age = 0.0
 
@@ -166,8 +168,9 @@ def _print_qr(qr) -> None:
             print()
             print(qr_png_to_ascii(qr))
             print()
-        except Exception:
+        except Exception as _e:
             # Fallback: instruct the user to open the saved PNG instead.
+            logger.debug("Failed to render QR PNG as ASCII", exc_info=True)
             print()
             print("📸 QR (PNG) salvato su disco: aprilo e INQUADRATELO con WhatsApp.")
             print()

@@ -15,20 +15,19 @@ import logging
 import re
 import subprocess
 import time
-from pathlib import Path
 from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, Center
+from textual.containers import Center, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (
-    Static,
-    ListView,
-    ListItem,
-    Label,
-    Input,
     Button,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    Static,
 )
 
 from qr_utils import qr_to_ascii
@@ -273,8 +272,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             try:
                 c = self.query_one(f"#{pid}", Vertical)
                 c.display = (pid == f"link-{phase}-container")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to toggle phase container", exc_info=True)
 
     # ── Phase populators (fill already-mounted containers) ─────────────────
 
@@ -313,8 +312,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 pi.value = self._signal_number
                 di = self.query_one("#link-device-input", Input)
                 di.value = self._device_name
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to update phone inputs", exc_info=True)
             return
         self._phone_populated = True
         container = self.query_one("#link-phone-container", Vertical)
@@ -414,8 +413,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                     code = self.query_one("#link-qr-code", Static)
                     code.update("\n\n✅ Linked!\n")
                     code.refresh()
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("Failed to update linked status", exc_info=True)
                 await _asyncio.sleep(2)
                 self.dismiss(None)
                 return
@@ -427,8 +426,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             try:
                 status = self.query_one("#link-qr-status", Static)
                 status.update("❌ Timed out waiting for scan")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to update timeout status", exc_info=True)
 
     async def _check_signal_done(self) -> bool:
         """Check if the signal-cli link subprocess finished successfully."""
@@ -473,8 +472,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 code_widget.update(qr_ascii)
                 code_widget.refresh()
                 self._qr_start_time = time.time()
-            except Exception as e:
-                logger.exception("Failed to refresh WhatsApp QR: %s", e)
+            except Exception:
+                logger.exception("Failed to refresh WhatsApp QR")
 
         return done
 
@@ -495,8 +494,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             try:
                 status = self.query_one("#link-qr-status", Static)
                 status.update("🔐 2FA required — enter password below")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to update 2FA status", exc_info=True)
             try:
                 container = self.query_one("#link-qr-container", Vertical)
                 self._2fa_input = Input(
@@ -506,8 +505,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 )
                 container.mount(self._2fa_input)
                 self._2fa_input.focus()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to mount 2FA input", exc_info=True)
 
         # Check QR age for refresh (Telegram QR tokens expire ~60s)
         age = time.time() - self._qr_start_time
@@ -530,8 +529,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                     code_widget.update(qr_ascii)
                     code_widget.refresh()
                 self._qr_start_time = time.time()
-            except Exception as e:
-                logger.exception("Failed to refresh Telegram QR: %s", e)
+            except Exception:
+                logger.exception("Failed to refresh Telegram QR")
 
         return False
 
@@ -610,8 +609,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 code_widget.refresh()
                 status = self.query_one("#link-qr-status", Static)
                 status.update("")
-            except Exception as e:
-                logger.exception("Failed to update QR widget: %s", e)
+            except Exception:
+                logger.exception("Failed to update QR widget")
 
     async def _get_qr_data_async(self, phone: str) -> str:
         """Return the real QR data for the selected protocol.
@@ -631,8 +630,9 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
 
     async def _get_signal_link_url(self) -> str:
         """Run ``signal-cli link`` in a thread, extract the sgnl:// URL."""
-        from backend import SIGNAL_CLI_PATH
         import asyncio as _asyncio
+
+        from backend import SIGNAL_CLI_PATH
 
         def _run() -> str:
             args = [
@@ -777,8 +777,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             logger.info("Killing signal-cli link subprocess (PID %s)", proc.pid)
             try:
                 proc.terminate()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to terminate link subprocess", exc_info=True)
         self._linking_proc = None
         super().dismiss(result)
     # ── Event handlers ─────────────────────────────────────────────────────
@@ -824,8 +824,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 inp = self.query_one("#link-2fa-input", Input)
                 if inp.value.strip():
                     self._on_2fa_submit()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to read 2FA input", exc_info=True)
 
     # ── Internal helpers ───────────────────────────────────────────────────
 
@@ -869,8 +869,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         try:
             status = self.query_one("#link-qr-status", Static)
             status.update("⏳ Verifying 2FA password...")
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Failed to update 2FA verifying status", exc_info=True)
         # Run in thread to not block UI
         self.run_worker(self._complete_2fa_worker(tb, password), exclusive=False)
 
@@ -886,8 +886,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             try:
                 self.query_one("#link-qr-status", Static).update("✅ Device linked successfully!")
                 self.query_one("#link-qr-code", Static).update("\n\n✅ Linked!\n")
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to update linked status", exc_info=True)
             await _asyncio.sleep(2)
             self.dismiss(None)
         else:
@@ -896,8 +896,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 inp = self.query_one("#link-2fa-input", Input)
                 inp.value = ""
                 inp.focus()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to update wrong-password status", exc_info=True)
 
     def _on_go_back(self) -> None:
         """Go back from phone phase to picker phase."""

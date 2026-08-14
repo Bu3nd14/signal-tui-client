@@ -64,7 +64,7 @@ class TestMigrate:
 
     def test_migrate_creates_db(self, tmp_cache):
         """La migrazione crea messages.db con i messaggi."""
-        cache_dir, cache_file, db_file = tmp_cache
+        _, cache_file, db_file = tmp_cache
         _write_sample_json(cache_file)
 
         mig.migrate()
@@ -84,7 +84,7 @@ class TestMigrate:
 
     def test_migrate_backs_up_json(self, tmp_cache):
         """Il file JSON originale viene rinominato in .bak."""
-        cache_dir, cache_file, db_file = tmp_cache
+        cache_dir, cache_file, _ = tmp_cache
         _write_sample_json(cache_file)
 
         mig.migrate()
@@ -94,7 +94,7 @@ class TestMigrate:
 
     def test_migrate_no_json_is_noop(self, tmp_cache):
         """Se messages.json non esiste, la migrazione non fa nulla."""
-        cache_dir, cache_file, db_file = tmp_cache
+        cache_dir, _, db_file = tmp_cache
 
         mig.migrate()
 
@@ -103,7 +103,7 @@ class TestMigrate:
 
     def test_migrate_preserves_optional_fields(self, tmp_cache):
         """I campi opzionali (quote, attachment, msg_type) vengono salvati."""
-        cache_dir, cache_file, db_file = tmp_cache
+        _, cache_file, db_file = tmp_cache
         cache_file.write_text(json.dumps({
             "+391234567890": [
                 {"text": "img", "is_mine": False, "sender": "Mario",

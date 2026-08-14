@@ -18,6 +18,7 @@ Usage:
     python3 purge_whatsapp_cache.py
 """
 
+import logging
 import shutil
 import sqlite3
 import sys
@@ -26,16 +27,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from models import PROTOCOL_WHATSAPP
-from backends.whatsapp import WhatsAppRESTClient
 from backends.config import resolve_whatsapp_api_url
+from backends.whatsapp import WhatsAppRESTClient
+from models import PROTOCOL_WHATSAPP
+
+logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 DB_FILE = CACHE_DIR / "messages.db"
 
 # Si riusa il lock del backend per non corrompere un DB in uso dalla TUI.
 from backend import _DB_LOCK
-
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -69,7 +71,8 @@ def _whatsapp_online() -> bool:
         client = WhatsAppRESTClient(resolve_whatsapp_api_url())
         status = client.get_session_status()
         return status is not None
-    except Exception:
+    except Exception as _e:
+        logger.debug("WAHA reachability check failed", exc_info=True)
         return False
 
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,8 +26,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend import _process_typing
+from models import PROTOCOL_SIGNAL, ChatContact, contact_cache_key
 from signal_tui import SignalTUI
-from models import ChatContact, ChatEvent, contact_cache_key, PROTOCOL_SIGNAL
 
 
 def _typing_envelope(source: str, action: str) -> dict:

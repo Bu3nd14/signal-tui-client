@@ -4,7 +4,6 @@ Regression tests for emoji_picker.py — search, alias replacement, suggestions.
 
 from __future__ import annotations
 
-import pytest
 import sys
 from pathlib import Path
 
@@ -13,11 +12,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from emoji_picker import (
-    search_emoji,
+    _ALIAS_TO_EMOJI,
+    _EMOJI_TO_ALIAS,
     get_emoji_suggestions,
     replace_emoji_aliases,
-    _EMOJI_TO_ALIAS,
-    _ALIAS_TO_EMOJI,
+    search_emoji,
 )
 
 

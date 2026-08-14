@@ -5,7 +5,6 @@ Note: These tests verify logic only (no Textual widget rendering).
 
 from __future__ import annotations
 
-import pytest
 import sys
 from pathlib import Path
 
@@ -13,8 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from rich.text import Text as RichText
-from ui_components import MessageWidget, ImageWidget, DownloadLinkWidget
 
+from ui_components import DownloadLinkWidget, ImageWidget, MessageWidget
 
 
 class TestMessageWidget:

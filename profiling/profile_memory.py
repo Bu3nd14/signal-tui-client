@@ -144,7 +144,7 @@ with open(output_path, "w") as f:
 
     for i, stat in enumerate(top_stats[:50], 1):
         frame = stat.traceback[0]
-        f.write(f"  #{i}: {{stat.size / 1024:.1f}} KiB — {{frame.filename}}:{{frame.lineno}}\\n")
+        f.write(f"  #{{i}}: {{stat.size / 1024:.1f}} KiB — {{frame.filename}}:{{frame.lineno}}\\n")
         for line in stat.traceback[:3]:
             f.write(f"       {{line.filename}}:{{line.lineno}} — {{line}}...\\n")
         f.write("\\n")
@@ -160,7 +160,7 @@ with open(output_path, "w") as f:
     if project_stats:
         for i, stat in enumerate(project_stats[:30], 1):
             frame = stat.traceback[0]
-            f.write(f"  #{i}: {{stat.size / 1024:.1f}} KiB — {{frame.filename}}:{{frame.lineno}}\\n")
+            f.write(f"  #{{i}}: {{stat.size / 1024:.1f}} KiB — {{frame.filename}}:{{frame.lineno}}\\n")
             for line in stat.traceback[:3]:
                 f.write(f"       {{line.filename}}:{{line.lineno}} — {{line}}...\\n")
             f.write("\\n")

@@ -8,11 +8,9 @@ dedup, read receipts and unread counts.  No Textual dependency.
 
 import sqlite3
 import threading
-import time
 from pathlib import Path
 
 import backend as _backend
-
 
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 CACHE_FILE = CACHE_DIR / "messages.json"
@@ -235,8 +233,6 @@ def _prune_cache():
     with _DB_LOCK:
         conn = sqlite3.connect(_backend.DB_FILE)
         try:
-            now_ms = int(time.time() * 1000)
-            cutoff = now_ms - _backend.CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
             # Keep only the 200 most recent messages per contact; no time-based
             # pruning — WhatsApp re-downloads history from WAHA anyway, and
             # time-based deletion breaks the dedup cycle (old messages are

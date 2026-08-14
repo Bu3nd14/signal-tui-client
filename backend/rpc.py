@@ -7,14 +7,15 @@ attachment-path resolution.  No Textual dependency.
 """
 
 import json
+import logging
 import os
 import subprocess
 import urllib.request
 from pathlib import Path
-from typing import Optional
 
 import backend as _backend
 
+logger = logging.getLogger(__name__)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -75,13 +76,14 @@ def _is_daemon_running() -> bool:
         rpc = _backend.SignalRPCClient()
         test = rpc._call("listContacts")
         return "result" in test
-    except Exception:
+    except Exception as _e:
+        logger.debug("Daemon check failed, assuming not running", exc_info=True)
         return False
 
 
 def _run_subprocess(args: list[str]) -> str:
     """Run signal-cli via subprocess and return stdout."""
-    result = subprocess.run(
+    result = subprocess.run(  # noqa: PLW1510 — return code checked explicitly below
         [str(SIGNAL_CLI_PATH), "-u", USER_NUMBER] + args,
         capture_output=True,
         text=True,
@@ -114,7 +116,7 @@ def _send_subprocess(
 
 # ─── Attachment helpers ─────────────────────────────────────────────────────
 
-def get_attachment_path(attachment_id: str) -> Optional[Path]:
+def get_attachment_path(attachment_id: str) -> Path | None:
     """Resolve a signal-cli attachment ID to a local file path.
 
     Returns the Path if the file exists and is readable, or None if the
@@ -268,7 +270,7 @@ class SignalRPCClient:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 response_data = resp.read().decode("utf-8")
                 return json.loads(response_data)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             return {"error": str(e)}
 
     def list_contacts(self) -> list[dict]:
@@ -372,14 +374,14 @@ class SignalRPCClient:
                     if ":" in line:
                         field, _, value = line.partition(":")
                         # Trim a single leading space per spec
-                        if value.startswith(" "):
-                            value = value[1:]
+                        value = value.removeprefix(" ")
                         if field not in current_event:
                             current_event[field] = value
                         else:
                             current_event[field] += "\n" + value
-        except Exception:
+        except Exception as _e:
             # Connection closed, timeout, or error → caller will reconnect
+            logger.debug("SSE listen ended", exc_info=True)
             return
 
 

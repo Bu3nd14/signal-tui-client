@@ -10,8 +10,8 @@ TUI is gathered here so the UI only deals with normalized ``ChatContact`` /
 
 from __future__ import annotations
 
-import logging
 import asyncio
+import logging
 import queue
 import re
 import subprocess
@@ -19,9 +19,9 @@ import threading
 import time
 
 from models import (
+    PROTOCOL_SIGNAL,
     ChatContact,
     ChatEvent,
-    PROTOCOL_SIGNAL,
 )
 
 from .base import ChatBackend
@@ -34,24 +34,22 @@ logger.addHandler(_fh)
 logger.setLevel(logging.DEBUG)
 
 from backend import (
+    DAEMON_HTTP_PORT,
+    SIGNAL_CLI_PATH,
+    USER_NUMBER,
     Contact,
     SignalRPCClient,
     _add_message_to_cache,
+    _is_daemon_running,
     _load_cache,
-    _prune_cache,
     _mark_as_read,
-    _update_message_status,
     _process_receipt,
     _process_typing,
-    _is_daemon_running,
     _run_subprocess,
     _send_subprocess,
+    _update_message_status,
     get_attachment_path,
-    SIGNAL_CLI_PATH,
-    USER_NUMBER,
-    DAEMON_HTTP_PORT,
 )
-
 
 # Window (ms) within which an outgoing message echo is considered the same
 # logical message as the optimistic send, for de-duplication purposes.
@@ -135,8 +133,8 @@ class SignalBackend(ChatBackend):
                     if "result" in test:
                         self._use_daemon = True
                         break
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.debug("Daemon probe failed, retrying", exc_info=True)
                 time.sleep(1)
             else:
                 # Daemon not available in time → use subprocess fallback.
@@ -159,7 +157,7 @@ class SignalBackend(ChatBackend):
                 result = self._rpc._call("sendSyncRequest")
                 logger.info("SYNC-REQUEST: result=%s", 
                            "ok" if isinstance(result, dict) and "result" in result else str(result)[:100])
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.info("SYNC-REQUEST: exception=%s", e)
 
     async def disconnect(self) -> None:
@@ -198,9 +196,9 @@ class SignalBackend(ChatBackend):
             output = _run_subprocess(["listContacts"])
             contacts = self._parse_contacts_from_output(output)
             self._set_contacts(contacts)
-        except Exception:
+        except Exception as _e:
             # Swallow — the UI reports errors, not the backend.
-            pass
+            logger.debug("Contact subprocess load failed", exc_info=True)
 
     def _parse_contacts_from_output(self, output: str) -> list[ChatContact]:
         """Parse the output of ``signal-cli listContacts`` (subprocess fallback).
@@ -247,8 +245,7 @@ class SignalBackend(ChatBackend):
             ts = 0
             for m in msgs:
                 mts = m.get("timestamp") or 0
-                if mts > ts:
-                    ts = mts
+                ts = max(ts, mts)
             c.last_message_ts = ts
         self.contacts = contacts
         self._contacts_by_key = {c.cache_key: c for c in contacts}
@@ -581,7 +578,7 @@ class SignalBackend(ChatBackend):
         with a slightly different timestamp are still recognised as duplicates.
         """
         for msg in self.cache.get(contact_id, []):
-            if not msg.get("is_mine") == is_mine:
+            if msg.get("is_mine") != is_mine:
                 continue
             if msg.get("text") != text:
                 continue
@@ -693,7 +690,7 @@ class SignalBackend(ChatBackend):
                         logger.info("SSE: received %d events", len(events))
                 if envelope:
                     logger.info("SSE: envelope received")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.info("SSE: connection lost, retrying... (%s)", e)
             # Brief pause before reconnect — keep it short (1s)
             # so we don't miss pending messages from a fresh daemon
@@ -716,8 +713,8 @@ class SignalBackend(ChatBackend):
                 yield self._event_queue.get(timeout=0.5)
             except queue.Empty:
                 await asyncio.sleep(0)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Unexpected error in receive loop", exc_info=True)
 
     def poll_once(self) -> list[ChatEvent]:
         """Drain all pending events from the SSE queue without blocking.

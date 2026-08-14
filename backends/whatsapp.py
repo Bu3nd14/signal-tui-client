@@ -11,35 +11,37 @@ backend pattern so the TUI stays protocol-agnostic.
 
 from __future__ import annotations
 
+import logging
 import queue
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from models import (
+    PROTOCOL_WHATSAPP,
     ChatContact,
     ChatEvent,
-    PROTOCOL_WHATSAPP,
 )
 
 from .base import ChatBackend
 from .config import (
-    resolve_whatsapp_api_url,
-    get_whatsapp_session_name,
-    get_whatsapp_media_dir,
-    get_whatsapp_webhook_url,
     get_whatsapp_api_key,  # noqa: F401  re-export (whatsapp_rest reads it via backends.whatsapp)
+    get_whatsapp_media_dir,
+    get_whatsapp_session_name,
+    get_whatsapp_webhook_url,
+    resolve_whatsapp_api_url,
 )
-
-from .whatsapp_rest import WhatsAppRESTClient
 from .whatsapp_events import (
-    _jid_string,
+    _event_from_ack,  # noqa: F401  re-export for tests
     _event_from_message,
     _event_from_raw,
-    _event_from_ack,       # noqa: F401  re-export for tests
-    _event_from_receipt,   # noqa: F401  re-export for tests
-    _event_from_typing,    # noqa: F401  re-export for tests
+    _event_from_receipt,  # noqa: F401  re-export for tests
+    _event_from_typing,  # noqa: F401  re-export for tests
+    _jid_string,
 )
+from .whatsapp_rest import WhatsAppRESTClient
+
+logger = logging.getLogger(__name__)
 
 
 class WhatsAppBackend(ChatBackend):
@@ -269,8 +271,8 @@ class WhatsAppBackend(ChatBackend):
         self._wait_session_ready(timeout=40.0)
         try:
             self._load_contacts()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("WhatsApp contact load failed", exc_info=True)
         # Registra (o ri-registra) il webhook push per-sessione ora che la
         # sessione e` pronta: il solo WAHA_WEBHOOK_URL (env) non basta a far
         # emettere gli eventi a WAHA, serve la config webhooks sulla sessione.
@@ -305,8 +307,9 @@ class WhatsAppBackend(ChatBackend):
                     "starting", "loading", "syncing",
                 ):
                     return False  # unknown state, don't wait
-            except Exception:
+            except Exception as _e:
                 # WAHA unreachable — stop waiting
+                logger.debug("WAHA unreachable while waiting for session", exc_info=True)
                 return False
             time.sleep(0.5)
         return False
@@ -352,9 +355,9 @@ class WhatsAppBackend(ChatBackend):
                     }]
                 }
             })
-        except Exception:
+        except Exception as _e:
             # best-effort: non bloccare mai l'avvio
-            pass
+            logger.debug("WhatsApp webhook config failed", exc_info=True)
 
 
     async def disconnect(self) -> None:
@@ -513,8 +516,8 @@ class WhatsAppBackend(ChatBackend):
             targets.update(
                 jid for jid, unread, _ts in chats if unread > 0
             )
-        except Exception:
-            pass  # se /chats fallisce restiamo sulle sole chat-DB
+        except Exception as _e:  # se /chats fallisce restiamo sulle sole chat-DB
+            logger.debug("/chats discovery failed, staying on DB-only chats", exc_info=True)
         # Fetch parallelo: WAHA serve le richieste /api/messages concorrenti in
         # parallelo (verificato: 8 chat in ~7.6s totali vs ~34s sommati).  Ogni
         # worker tocca una chat diversa → nessuna contesa sullo stesso dato; le
@@ -522,8 +525,8 @@ class WhatsAppBackend(ChatBackend):
         def _fetch_one(jid: str) -> None:
             try:
                 self.fetch_history(jid, limit=limit)
-            except Exception:
-                pass  # best-effort: mai far fallire l'avvio per una singola chat
+            except Exception as _e:  # best-effort: mai far fallire l'avvio per una singola chat
+                logger.debug("History fetch failed for a single chat", exc_info=True)
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(_fetch_one, targets))
@@ -758,7 +761,7 @@ class WhatsAppBackend(ChatBackend):
         used as the primary identity (optimistic-send echo dedup).
         """
         for msg in self.cache.get(contact_id, []):
-            if not msg.get("is_mine") == is_mine:
+            if msg.get("is_mine") != is_mine:
                 continue
             if msg.get("text") != text:
                 continue
@@ -770,9 +773,8 @@ class WhatsAppBackend(ChatBackend):
             elif msg_id:
                 # Outgoing: id-based dedup first (echo), then text + window.
                 cached_id = msg.get("id")
-                if cached_id:
-                    if cached_id == msg_id:
-                        return msg
+                if cached_id and cached_id == msg_id:
+                    return msg
                 if abs(msg.get("timestamp", 0) - ts) <= _ECHO_MATCH_WINDOW_MS:
                     return msg
             elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:

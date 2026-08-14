@@ -13,23 +13,23 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import PROTOCOL_WHATSAPP, contact_cache_key
 from backends.whatsapp import (
     WhatsAppBackend,
     WhatsAppRESTClient,
-    _event_from_message,
-    _event_from_receipt,
     _event_from_ack,
-    _event_from_typing,
+    _event_from_message,
     _event_from_raw,
+    _event_from_receipt,
+    _event_from_typing,
 )
+from models import PROTOCOL_WHATSAPP, contact_cache_key
 
 
 def _msg(raw, contacts=None):
@@ -217,7 +217,6 @@ class TestWhatsAppRESTClient:
 
     def test_reset_session_uses_logout_then_returns(self):
         """reset_session invoca /api/sessions/logout e ne ritorna il risultato."""
-        import urllib.request
 
         client = WhatsAppRESTClient("http://api.test")
         seen = []
@@ -689,8 +688,8 @@ class TestWhatsAppEvents:
         })
         assert ev is not None
         assert ev.payload["msg_type"] == "image", (
-            "hasMedia image senza text key → msg_type deve essere 'image', got %r"
-            % ev.payload.get("msg_type")
+            "hasMedia image senza text key → msg_type deve essere 'image', "
+            f"got {ev.payload.get('msg_type')!r}"
         )
         assert ev.payload["attachment_id"] == "https://wa.to/img/no-text-photo.jpg"
         assert ev.payload["attachment_info"] == "Senza testo!"
@@ -838,22 +837,22 @@ class TestWhatsAppBackend:
         """When direct binary fails, fall back to get_download_url + fetch."""
         client = WhatsAppRESTClient("http://api.test")
         fake_bytes = b"media-data"
-        with patch.object(client, "_request_raw", return_value=None):
-            with patch.object(client, "get_download_url", return_value="https://s3.example.com/file"):
-                with patch("urllib.request.urlopen") as mock_urlopen:
-                    mock_resp = MagicMock()
-                    mock_resp.read.return_value = fake_bytes
-                    mock_resp.status = 200
-                    mock_urlopen.return_value.__enter__.return_value = mock_resp
-                    result = client.download_media("msg-abc")
+        with patch.object(client, "_request_raw", return_value=None), \
+             patch.object(client, "get_download_url", return_value="https://s3.example.com/file"), \
+             patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = fake_bytes
+            mock_resp.status = 200
+            mock_urlopen.return_value.__enter__.return_value = mock_resp
+            result = client.download_media("msg-abc")
         assert result == fake_bytes
 
     def test_download_media_returns_none_when_all_fail(self):
         """Both direct binary and legacy URL fail → None."""
         client = WhatsAppRESTClient("http://api.test")
-        with patch.object(client, "_request_raw", return_value=None):
-            with patch.object(client, "get_download_url", return_value=None):
-                assert client.download_media("msg-abc") is None
+        with patch.object(client, "_request_raw", return_value=None), \
+             patch.object(client, "get_download_url", return_value=None):
+            assert client.download_media("msg-abc") is None
 
     def test_download_media_direct_url(self):
         """When media_id looks like a URL, fetch it directly."""
@@ -1064,12 +1063,13 @@ class TestWhatsAppWebhook:
         assert ok is True
         events = backend.poll_once()
         assert len(events) == 1, (
-            "Expected 1 synthetic message event for image ack, got %d" % len(events)
+            f"Expected 1 synthetic message event for image ack, got {len(events)}"
         )
         ev = events[0]
         assert ev.type == "message"
         assert ev.payload["msg_type"] == "image", (
-            "Synthetic ack event msg_type should be 'image', got %r" % ev.payload.get("msg_type")
+            "Synthetic ack event msg_type should be 'image', "
+            f"got {ev.payload.get('msg_type')!r}"
         )
         assert ev.payload["attachment_id"] == "https://wa.to/img/echo-photo.jpg"
         assert ev.payload["attachment_info"] == "Guarda qua!"
@@ -1269,7 +1269,6 @@ class TestWAHAContract:
 
     def test_rest_paths_are_api_prefixed(self):
         """I path REST usano il prefisso /api come da contratto WAHA."""
-        import urllib.request
 
         client = WhatsAppRESTClient("http://api.test")
         seen = []
@@ -1597,7 +1596,9 @@ class TestSeedCacheFromDB:
     """
 
     def test_connect_sync_seeds_cache_from_db(self, tmp_path, monkeypatch):
-        import backend as backend_mod, time
+        import time
+
+        import backend as backend_mod
 
         # Isola il DB su un file temporaneo.
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
@@ -1635,7 +1636,9 @@ class TestSeedCacheFromDB:
         """Con la cache seminata dal DB, fetch_history non re-inserisce i
         messaggi già persistiti (il dedup di ingest_message ora funziona anche
         tra sessioni)."""
-        import backend as backend_mod, time
+        import time
+
+        import backend as backend_mod
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
 
@@ -1677,7 +1680,9 @@ class TestSeedCacheFromDB:
         stesso testo) veniva scartato -> la chat appariva "indietro" quando
         veniva aperta.
         """
-        import backend as backend_mod, time
+        import time
+
+        import backend as backend_mod
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
 
@@ -1826,6 +1831,7 @@ class TestSeedCacheFromDB:
         ``handle_webhook`` lo registra in ``_seen_msg_ids``.
         """
         import time
+
         import backend as backend_mod
         backend = _make_backend()
         cid = "391234567890@s.whatsapp.net"

@@ -3,8 +3,6 @@
 import logging
 import time
 
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -89,8 +87,8 @@ class PollingMixin:
                     if not self._polling_active:
                         return
                     time.sleep(0.1)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Poll worker iteration failed, continuing", exc_info=True)
             # Re-check before the next poll so an empty round still exits.
             if not self._polling_active:
                 return

@@ -7,11 +7,12 @@ backend's ``handle_webhook``.  No Textual dependency.
 
 import http.server
 import json
+import logging
 import os
 import socketserver
 import threading
 
-
+logger = logging.getLogger(__name__)
 
 # ─── WAHA webhook server (event-driven / push) ──────────────────────────────
 # WAHA Core invia i messaggi in ingresso al client tramite webhook (POST a
@@ -45,15 +46,16 @@ class _WebhookHTTPHandler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(raw or b"{}")
             except (json.JSONDecodeError, ValueError):
                 return self._wh_response(400)
-        except Exception:
+        except Exception as _e:
+            logger.debug("Failed to read webhook body", exc_info=True)
             return self._wh_response(400)
         # Forward to the WhatsApp backend (never raises into the handler).
         try:
             target = self.target
             if target is not None and isinstance(data, dict):
                 target(data)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Webhook target failed, still acking 200", exc_info=True)
         return self._wh_response(200)
 
     def _wh_response(self, code: int) -> None:
@@ -65,12 +67,11 @@ class _WebhookHTTPHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             self.wfile.flush()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Failed to send webhook response", exc_info=True)
 
     def log_message(self, format: str, *args) -> None:
         """Suppress default HTTP log output."""
-        pass
 
 
 def ensure_webhook_server(backend) -> int:

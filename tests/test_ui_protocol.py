@@ -7,16 +7,14 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import ChatContact, PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP, contact_cache_key
+from models import PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
 from signal_tui import SignalTUI
-from ui_components import MessageWidget, ContactListView, ContactListWidget
+from ui_components import ContactListView, ContactListWidget, MessageWidget
 
 
 def _signal(cid: str = "+391", name: str = "Mario") -> ChatContact:
@@ -593,7 +591,7 @@ class TestContactListSelect:
         # compose è un generatore: il ListView è il 2° elemento dopo il Label
         items = list(widget.compose())
         assert len(items) == 2
-        label, lv = items
+        _, lv = items
         assert isinstance(lv, ContactListView)
         assert lv.ALLOW_SELECT is False
         assert lv.id == "contact-list"
@@ -715,7 +713,7 @@ class TestContactListViewCrashFix:
         app = _make_app(_signal("+1", "A"), _whatsapp())
         fake = _FakeListView()
         clears = []
-        fake.clear = lambda: (clears.append(True), fake.items.clear()) or None
+        fake.clear = lambda: (clears.append(True), fake.items.clear())
         app.query_one = MagicMock(return_value=fake)
         app.selected_contact = None
 
@@ -734,7 +732,7 @@ class TestContactListViewCrashFix:
         app = _make_app(_signal("+1", "Vecchio"), _signal("+2", "Nuovo"))
         fake = _FakeListView()
         clears = []
-        fake.clear = lambda: (clears.append(True), fake.items.clear()) or None
+        fake.clear = lambda: (clears.append(True), fake.items.clear())
         app.query_one = MagicMock(return_value=fake)
         app.selected_contact = None
         app._protocol_filter = "all"
@@ -771,7 +769,7 @@ class TestSendOptimisticRouting:
     """📤 L'ottimista dell'invio va nel backend del contatto (non hardcoded Signal)."""
 
     def test_whatsapp_send_ingest_uses_whatsapp_backend(self):
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         app = _make_app()
         contact = ChatContact(id="16660245291231@lid", display_name="Pix",
@@ -972,9 +970,8 @@ class TestWhatsAppLoadRetry:
     (WAHA non pronto all'avvio), il worker riprova prima di mostrare "No history"."""
 
     def _make_app(self):
-        from unittest.mock import MagicMock, patch
+        from models import PROTOCOL_WHATSAPP, ChatContact
         from signal_tui import SignalTUI
-        from models import ChatContact, PROTOCOL_WHATSAPP
         app = SignalTUI()
         c = ChatContact(id="16660245291231@lid", display_name="Pix",
                         protocol=PROTOCOL_WHATSAPP)
@@ -1028,9 +1025,10 @@ class TestWhatsAppMountOrdering:
     duplicati e senza che l'ultimo messaggio compaia fuori posto."""
 
     def test_worker_mounts_in_cronological_order_no_duplicates(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
+
+        from models import PROTOCOL_WHATSAPP, ChatContact
         from signal_tui import SignalTUI
-        from models import ChatContact, PROTOCOL_WHATSAPP
         app = SignalTUI()
         c = ChatContact(id="15771304468671@lid", display_name="Giovanni",
                         protocol=PROTOCOL_WHATSAPP)

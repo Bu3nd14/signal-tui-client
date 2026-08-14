@@ -10,7 +10,6 @@ import os
 import sys
 import traceback
 
-
 if __name__ == "__main__":
     # When launched as a script (`python signal_tui.py`), also register this
     # module under its canonical name so that `import signal_tui` from within
@@ -18,6 +17,7 @@ if __name__ == "__main__":
     # script (which would cause a circular import through `tui.app`).
     sys.modules["signal_tui"] = sys.modules["__main__"]
 
+logger = logging.getLogger("signal_tui")
 
 LOCK_FILE = "/tmp/signal-tui.lock"
 
@@ -43,8 +43,9 @@ def _acquire_lock() -> bool:
         with open(LOCK_FILE, "w") as f:
             f.write(str(os.getpid()))
         return True
-    except Exception:
+    except Exception as _e:
         # If anything goes wrong, allow the app to start anyway
+        logger.debug("Lock acquisition failed, allowing startup", exc_info=True)
         return True
 
 def _release_lock():
@@ -55,8 +56,8 @@ def _release_lock():
                 old_pid = int(f.read().strip())
             if old_pid == os.getpid():
                 os.remove(LOCK_FILE)
-    except Exception:
-        pass
+    except Exception as _e:
+        logger.debug("Lock release failed", exc_info=True)
 
 # Global exception handler: salva le eccezioni non gestite su file
 # per debug, senza interferire con stderr usato da Textual per la TUI.
@@ -64,17 +65,17 @@ def _global_exception_handler(exc_type, exc_value, exc_traceback):
     try:
         with open("/tmp/signal-crash.log", "w") as f:
             traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
-    except Exception:
-        pass  # non vogliamo causare altri errori
+    except Exception as _e:
+        logger.debug("Failed to write crash log", exc_info=True)  # non vogliamo causare altri errori
     # Chiama comunque l'handler predefinito per vedere l'errore anche in console
     sys.__excepthook__(exc_type, exc_value, exc_traceback)
 
 sys.excepthook = _global_exception_handler
 
-from emoji_picker import replace_emoji_aliases  # noqa: F401 (re-exported for test patching)
-
+from emoji_picker import (
+    replace_emoji_aliases,  # noqa: F401 (re-exported for test patching)
+)
 from tui.app import SignalTUI
-
 
 logger = logging.getLogger("signal_tui")
 # Ensure LINK-* logs are written to a file (Textual may suppress stderr)

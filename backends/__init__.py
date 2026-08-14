@@ -14,4 +14,4 @@ from .signal import SignalBackend
 from .telegram import TelegramBackend
 from .whatsapp import WhatsAppBackend
 
-__all__ = ["ChatBackend", "BackendManager", "SignalBackend", "TelegramBackend", "WhatsAppBackend"]
+__all__ = ["BackendManager", "ChatBackend", "SignalBackend", "TelegramBackend", "WhatsAppBackend"]

@@ -4,15 +4,15 @@ import logging
 
 from textual.widgets import Input
 
+from contact_picker import ContactPickerScreen
+from device_link_screen import DeviceLinkPickerScreen
+from emoji_picker import (
+    EmojiCompletionWidget,
+    EmojiPickerScreen,
+)
 from models import (
     ChatContact,
 )
-from emoji_picker import (
-    EmojiPickerScreen,
-    EmojiCompletionWidget,
-)
-from contact_picker import ContactPickerScreen
-from device_link_screen import DeviceLinkPickerScreen
 
 logger = logging.getLogger("signal_tui")
 
@@ -98,7 +98,8 @@ class PickerMixin:
         try:
             completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
             return completion.has_class("-visible")
-        except Exception:
+        except Exception as _e:
+            logger.debug("Emoji completion not found", exc_info=True)
             return False
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -126,14 +127,15 @@ class PickerMixin:
         try:
             completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
             completion.hide_suggestions()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Failed to hide emoji completion", exc_info=True)
 
     def _insert_emoji_from_completion(self) -> None:
         """Replace the current :alias: with the selected emoji from completion."""
         try:
             completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
-        except Exception:
+        except Exception as _e:
+            logger.debug("Emoji completion not found", exc_info=True)
             return
 
         if not completion.selected_emoji:
@@ -161,8 +163,8 @@ class PickerMixin:
             try:
                 completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
                 completion.select_next()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to advance suggestion", exc_info=True)
 
     def action_prev_suggestion(self) -> None:
         """Ctrl+P: go to previous emoji suggestion.
@@ -173,6 +175,6 @@ class PickerMixin:
             try:
                 completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
                 completion.select_prev()
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to rewind suggestion", exc_info=True)
 

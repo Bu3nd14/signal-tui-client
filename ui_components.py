@@ -6,15 +6,15 @@ Contains reusable UI components based on Textual.
 import asyncio
 import logging
 from pathlib import Path
+from typing import ClassVar
 
 from rich.text import Text as RichText
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Label, ListView, ListItem, Input, Static, RichLog, Button
+from textual.widgets import Button, Input, Label, ListItem, ListView, RichLog, Static
 
 from emoji_picker import EmojiCompletionWidget
-
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +190,7 @@ class MessageWidget(Static):
         self._apply_protocol_accent()
 
 
-    _PROTOCOL_ACCENT = {
+    _PROTOCOL_ACCENT: ClassVar[dict[str, str]] = {
         "signal": "msg-signal",
         "whatsapp": "msg-whatsapp",
     }
@@ -426,10 +426,10 @@ class ImageModalScreen(ModalScreen):
         except (FileNotFoundError, ProcessLookupError):
             img.write("⚠️ catimg is not installed on this system.")
             return
-        except asyncio.TimeoutError:
+        except TimeoutError:
             img.write("⚠️ Image rendering timed out.")
             return
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             img.write(f"⚠️ Could not render image: {exc}")
             return
 

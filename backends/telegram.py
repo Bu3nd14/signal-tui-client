@@ -21,15 +21,15 @@ from pathlib import Path
 from typing import Any
 
 from models import (
+    PROTOCOL_TELEGRAM,
     ChatContact,
     ChatEvent,
-    PROTOCOL_TELEGRAM,
 )
 
 from .base import ChatBackend
 from .config import (
-    get_telegram_api_id,
     get_telegram_api_hash,
+    get_telegram_api_id,
     get_telegram_session_path,
 )
 
@@ -94,7 +94,6 @@ class TelegramBackend(ChatBackend):
 
     async def connect(self) -> None:
         """Not used — connection is sync (dedicated event loop)."""
-        pass
 
     async def disconnect(self) -> None:
         """Stop the Telethon event loop and disconnect."""
@@ -109,8 +108,8 @@ class TelegramBackend(ChatBackend):
                 asyncio.run_coroutine_threadsafe(
                     self._client.disconnect(), self._loop
                 ).result(timeout=5)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Telegram client disconnect failed", exc_info=True)
         if self._loop_thread is not None and self._loop_thread.is_alive():
             self._loop_thread.join(timeout=5)
         self._loop = None
@@ -140,8 +139,8 @@ class TelegramBackend(ChatBackend):
 
         try:
             self._loop.run_until_complete(self._client.connect())
-        except Exception as exc:
-            logger.exception("Telegram connect failed: %s", exc)
+        except Exception:
+            logger.exception("Telegram connect failed")
             self._connected = False
             return
 
@@ -157,8 +156,8 @@ class TelegramBackend(ChatBackend):
         self._connected = True
         try:
             self._loop.run_until_complete(self._load_contacts())
-        except Exception as exc:
-            logger.exception("Telegram _load_contacts failed: %s", exc)
+        except Exception:
+            logger.exception("Telegram _load_contacts failed")
             self.contacts = []
             self._contacts_by_id = {}
         logger.info("Telegram: loaded %d contacts", len(self.contacts))
@@ -203,9 +202,9 @@ class TelegramBackend(ChatBackend):
 
         Supports both real Telethon types and mock objects from tests.
         """
-        from telethon.tl.types import User as TelethonUser
-        from telethon.tl.types import Chat as TelethonChat
         from telethon.tl.types import Channel as TelethonChannel
+        from telethon.tl.types import Chat as TelethonChat
+        from telethon.tl.types import User as TelethonUser
 
         eid: int = entity.id
         name: str = ""
@@ -260,8 +259,8 @@ class TelegramBackend(ChatBackend):
 
         try:
             dialogs = await self._client.get_dialogs(limit=200)
-        except Exception as exc:
-            logger.exception("Telegram get_dialogs failed: %s", exc)
+        except Exception:
+            logger.exception("Telegram get_dialogs failed")
             self.contacts = []
             self._contacts_by_id = {}
             return
@@ -354,7 +353,6 @@ class TelegramBackend(ChatBackend):
 
     async def mark_read(self, contact_id: str) -> None:
         """Mark messages as read (Telethon handles this automatically)."""
-        pass
 
     def send_message_sync(
         self,
@@ -383,8 +381,8 @@ class TelegramBackend(ChatBackend):
         try:
             from backend import _mark_as_read
             _mark_as_read(contact_id, protocol=PROTOCOL_TELEGRAM)
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Telegram mark-read persistence failed", exc_info=True)
 
     # ─── Event reception ───────────────────────────────────────────────────
 
@@ -405,7 +403,8 @@ class TelegramBackend(ChatBackend):
         attachment_id: str | None = None
         if msg.photo or msg.document:
             try:
-                import tempfile, os
+                import os
+                import tempfile
                 media_dir = os.path.join(tempfile.gettempdir(), "telegram-media")
                 os.makedirs(media_dir, exist_ok=True)
                 path = await msg.download_media(file=media_dir)
@@ -424,7 +423,8 @@ class TelegramBackend(ChatBackend):
         """Convert a Telethon ``Message`` (or mock) into a ``ChatEvent``."""
         try:
             chat_id = str(msg.chat_id) if msg.chat_id else None
-        except Exception:
+        except Exception as _e:
+            logger.debug("Failed to read message chat_id", exc_info=True)
             chat_id = None
         if chat_id is None:
             return None
@@ -508,7 +508,7 @@ class TelegramBackend(ChatBackend):
 
     async def _handle_read_receipt(self, update: Any) -> None:
         """Handle ``UpdateReadHistoryOutbox`` — marks sent messages as read."""
-        from telethon.tl.types import PeerUser, PeerChat, PeerChannel
+        from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
         # Determine the peer's ID
         peer = update.peer
@@ -706,11 +706,9 @@ class TelegramBackend(ChatBackend):
             return False
         if self._connected:
             return False
-        # No session file → definitely needs pairing
-        if not Path(self._session_path).exists():
-            return True
-        # Session file exists → let _connect_sync verify it
-        return False
+        # No session file → definitely needs pairing; otherwise let
+        # _connect_sync verify the existing session.
+        return not Path(self._session_path).exists()
 
     def get_pairing_qr(self) -> str | None:
         """Start QR login, return the ``tg://login?token=...`` URL.
@@ -736,8 +734,8 @@ class TelegramBackend(ChatBackend):
         if self._loop is not None:
             try:
                 self._loop.call_soon_threadsafe(self._loop.stop)
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Failed to stop previous event loop", exc_info=True)
             self._loop.close()
             self._loop = None
 
@@ -752,7 +750,7 @@ class TelegramBackend(ChatBackend):
         try:
             loop.run_until_complete(client.connect())
         except Exception as exc:
-            logger.exception("Telegram QR connect failed: %s", exc)
+            logger.exception("Telegram QR connect failed")
             loop.close()
             self._loop = None
             self._client = None
@@ -769,7 +767,7 @@ class TelegramBackend(ChatBackend):
         try:
             qr_login = loop.run_until_complete(client.qr_login())
         except Exception as exc:
-            logger.exception("Telegram QR login start failed: %s", exc)
+            logger.exception("Telegram QR login start failed")
             loop.run_until_complete(client.disconnect())
             loop.close()
             self._loop = None
@@ -794,15 +792,15 @@ class TelegramBackend(ChatBackend):
                 return
             except TimeoutError:
                 logger.info("Telegram QR login: timeout (120s), will refresh")
-            except Exception as exc:
-                logger.exception("Telegram QR login wait failed: %s", exc)
+            except Exception:
+                logger.exception("Telegram QR login wait failed")
             finally:
                 # Only cleanup if not waiting for 2FA
                 if not self._needs_2fa:
                     try:
                         loop.run_until_complete(client.disconnect())
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        logger.debug("Telegram QR cleanup disconnect failed", exc_info=True)
                     loop.close()
 
         self._loop_thread = threading.Thread(
@@ -831,13 +829,13 @@ class TelegramBackend(ChatBackend):
             # Cleanup
             try:
                 self._loop.run_until_complete(self._client.disconnect())
-            except Exception:
-                pass
+            except Exception as _e:
+                logger.debug("Telegram 2FA cleanup disconnect failed", exc_info=True)
             self._loop.close()
             self._loop = None
             self._loop_thread = None
             return True
-        except Exception as exc:
-            logger.exception("Telegram 2FA sign_in failed: %s", exc)
+        except Exception:
+            logger.exception("Telegram 2FA sign_in failed")
             self._needs_2fa = False
             return False

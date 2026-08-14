@@ -5,11 +5,9 @@ All tests use in-memory / tmp_path to avoid touching real files or daemons.
 
 from __future__ import annotations
 
-import json
-import pytest
 from pathlib import Path
-from typing import Generator
 
+import pytest
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

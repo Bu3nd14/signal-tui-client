@@ -6,10 +6,11 @@ import time
 
 from textual.widgets import Input
 
+from emoji_picker import EmojiCompletionWidget
+from emoji_picker import replace_emoji_aliases as _replace_emoji_aliases
 from models import (
     PROTOCOL_TELEGRAM,
 )
-from emoji_picker import EmojiCompletionWidget, replace_emoji_aliases as _replace_emoji_aliases
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,8 @@ class SendMixin:
         try:
             completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
             completion.hide_suggestions()
-        except Exception:
-            pass
+        except Exception as _e:
+            logger.debug("Failed to hide emoji completion", exc_info=True)
 
         # Convert emoji aliases (e.g. :smile: → 😊)
         message = _resolve_emoji_replacer()(event.value.strip())
@@ -181,7 +182,7 @@ class SendMixin:
                          "sender": "You", "timestamp": int(time.time() * 1000)},
                         int(time.time() * 1000),
                     )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self.call_from_thread(
                 self._status,
                 f"❌ Send error: {e}", 0

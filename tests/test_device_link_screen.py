@@ -12,14 +12,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from device_link_screen import DeviceLinkPickerScreen, _PROTOCOL_ITEMS
+from device_link_screen import _PROTOCOL_ITEMS, DeviceLinkPickerScreen
 
 
 class TestDeviceLinkPickerScreen:
