@@ -408,6 +408,48 @@ class TestCacheDedup:
         assert backend.ingest_message("111", data2, 1000) is True
         assert len(backend.cache["111"]) == 2
 
+    def test_optimistic_echo_upgrades_id_and_persists_keeps_ts(self):
+        """🛡️ Regressione \"inviati Telegram doppi dopo Ctrl+L\": l'echo di un
+        invio ottimistico (id=None) deve attaccare l'id reale alla entry
+        esistente e PERSISTERLO in SQLite via ``_update_message_id``, SENZA
+        cambiare il timestamp ottimistico.  Prima l'upgrade restava solo in
+        memoria (id reale + ts server) mentre il DB tratteneva (id='', ts
+        client): al reload della cache (Ctrl+L) il merge per identità esatta
+        non trovava il match e raddoppiava il messaggio inviato.
+        """
+        backend = _make_backend()
+        with patch("backend._update_message_id") as mock_upd:
+            # 1) Invio ottimistico dalla TUI: nessun id, ts client.
+            added = backend.ingest_message(
+                "111",
+                {"text": "ciao", "is_mine": True, "sender": "You",
+                 "timestamp": 1000, "quote_text": None, "msg_type": "text",
+                 "attachment_info": None, "attachment_id": None},
+                1000,
+            )
+            assert added is True
+
+            # 2) Echo reale entro la finestra di dedup.
+            added_echo = backend.ingest_message(
+                "111",
+                {"id": "42", "text": "ciao", "is_mine": True, "sender": "You",
+                 "timestamp": 1500, "quote_text": None, "msg_type": "text",
+                 "attachment_info": None, "attachment_id": None},
+                1500,
+            )
+
+        # Non deve essere aggiunto come nuovo messaggio.
+        assert added_echo is False
+        cached = backend.cache["111"]
+        assert len(cached) == 1
+        # Id reale attaccato, timestamp ottimistico PRESERVATO (niente drift).
+        assert cached[0]["id"] == "42"
+        assert cached[0]["timestamp"] == 1000
+        # L'upgrade è stato persistito in SQLite (id reale, stesso ts client).
+        mock_upd.assert_called_once_with(
+            "111", "ciao", True, 1000, "42", protocol=PROTOCOL_TELEGRAM
+        )
+
 
 # ─── Thread boundary contract ─────────────────────────────────────────────
 

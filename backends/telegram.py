@@ -602,9 +602,9 @@ class TelegramBackend(ChatBackend):
 
         Returns True if the message was newly added, False if duplicate.
         """
-        from backend import _add_message_to_cache
+        from backend import _add_message_to_cache, _update_message_id
 
-        mid = data.get("id", "")
+        mid = data.get("id")
         if mid and mid in self._seen_msg_ids:
             return False
         if mid:
@@ -612,6 +612,11 @@ class TelegramBackend(ChatBackend):
 
         # Dedup by (contact, text, ts) within a small window.
         # If the existing entry has no id and the new one does, upgrade it.
+        # The optimistic timestamp is KEPT (not replaced with the echo's): the
+        # UI cache, the backend cache and SQLite must keep the SAME timestamp,
+        # otherwise the next backend-cache reload (e.g. Ctrl+L reconnect) seeds
+        # the old client ts and `_on_backend_ready` re-adds the sent message
+        # (exact-ts identity mismatch) → doubled "sent" messages in UI.
         text = data.get("text", "")
         for m in self.cache.get(contact_id, []):
             if (
@@ -620,7 +625,17 @@ class TelegramBackend(ChatBackend):
             ):
                 if mid and not m.get("id"):
                     m["id"] = mid
-                    m["timestamp"] = ts  # update to real timestamp
+                    try:
+                        _update_message_id(
+                            contact_id,
+                            text,
+                            bool(m.get("is_mine", False)),
+                            m.get("timestamp"),
+                            mid,
+                            protocol=PROTOCOL_TELEGRAM,
+                        )
+                    except Exception:
+                        logger.exception("Telegram: _update_message_id failed")
                 return False
 
         # Persist to SQLite (same pattern as Signal/WhatsApp backends)

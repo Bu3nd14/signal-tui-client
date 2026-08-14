@@ -207,10 +207,11 @@ def _update_message_id(
 ):
     """Attach a real message id to an existing (optimistic) row.
 
-    When the echo of an optimistic send arrives with its real WhatsApp id, the
-    row that was inserted optimistically (``msg_id IS NULL``) is updated in
-    place instead of inserting a duplicate.  Matching is by
-    ``(protocol, contact_number, text, is_mine)`` on the id-less row.
+    When the echo of an optimistic send arrives with its real id, the row that
+    was inserted optimistically (``msg_id IS NULL`` or the legacy ``msg_id = ''``
+    used by the Telegram backend) is updated in place instead of inserting a
+    duplicate.  Matching is by ``(protocol, contact_number, text, is_mine)`` on
+    the id-less row.
     """
     _init_db()
     with _DB_LOCK:
@@ -219,7 +220,7 @@ def _update_message_id(
             conn.execute(
                 "UPDATE messages SET msg_id = ?, timestamp = ? "
                 "WHERE protocol = ? AND contact_number = ? AND text = ? "
-                "AND is_mine = ? AND msg_id IS NULL",
+                "AND is_mine = ? AND (msg_id IS NULL OR msg_id = '')",
                 (msg_id, timestamp, protocol, contact_number, text, int(is_mine)),
             )
             conn.commit()
