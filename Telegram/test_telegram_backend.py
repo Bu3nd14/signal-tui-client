@@ -507,6 +507,29 @@ class TestDisconnect:
         backend = _make_backend()
         backend.disconnect_sync()  # no crash
 
+    def test_connect_sync_disconnects_previous_client_first(self):
+        """🛡️ Regressione \"niente messaggi live dopo Ctrl+L\": `_connect_sync`
+        deve smontare il client/loop precedente PRIMA di crearne uno nuovo.
+        Due TelegramClient concorrenti sulla stessa session corrompono lo
+        stato update e bloccano la ricezione dei messaggi live.
+        """
+        backend = _make_backend()
+        # Simula un client già connesso (es. avvio precedente o Ctrl+L).
+        backend._client = object()
+        backend._loop = MagicMock()
+        backend._loop_thread = MagicMock()
+        backend._running = True
+
+        with patch.object(backend, "disconnect_sync") as mock_disc, \
+             patch.object(backend, "_load_protocol_cache",
+                          side_effect=RuntimeError("stop early")):
+            with pytest.raises(RuntimeError):
+                backend._connect_sync()
+
+        # `disconnect_sync` è stato chiamato PRIMA di `_load_protocol_cache`
+        # (che solleva: se l'ordine fosse invertito non verrebbe mai chiamato).
+        mock_disc.assert_called_once()
+
 
 # ─── Protocol constant ────────────────────────────────────────────────────
 

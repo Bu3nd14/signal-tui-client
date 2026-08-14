@@ -123,6 +123,12 @@ class TelegramBackend(ChatBackend):
         """Start the Telethon client and event loop (blocking, called in worker)."""
         from telethon import TelegramClient, events
 
+        # Tear down any previous client/loop BEFORE creating a new one.  A
+        # reconnect (Ctrl+L) used to leave the old Telethon client running on
+        # the same session file: two concurrent clients corrupt the update
+        # state (pts/qts) and break live message delivery.
+        self.disconnect_sync()
+
         self.cache = self._load_protocol_cache()
 
         self._loop = asyncio.new_event_loop()
