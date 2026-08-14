@@ -537,7 +537,10 @@ class TelegramBackend(ChatBackend):
             try:
                 from backend import _update_message_status
                 for msg in updated:
-                    _update_message_status(msg["timestamp"], "read")
+                    _update_message_status(
+                        msg["timestamp"], "read",
+                        protocol=PROTOCOL_TELEGRAM, contact_number=contact_id,
+                    )
             except Exception:
                 logger.exception("Telegram: _update_message_status failed")
 
@@ -564,7 +567,8 @@ class TelegramBackend(ChatBackend):
         is_read = bool(envelope.get("is_read"))
         target = "read" if is_read else "delivered"
         updated: list[dict] = []
-        for msgs in self.cache.values():
+        to_persist: list[tuple[str, dict]] = []
+        for contact_id, msgs in self.cache.items():
             for msg in msgs:
                 if msg.get("is_mine") and str(msg.get("id", "")) in {str(i) for i in ids}:
                     old = msg.get("status", "sent")
@@ -572,10 +576,14 @@ class TelegramBackend(ChatBackend):
                     if old != target and rank.get(target, 0) > rank.get(old, 0):
                         msg["status"] = target
                         updated.append(msg)
-        if updated:
+                        to_persist.append((contact_id, msg))
+        if to_persist:
             from backend import _update_message_status
-            for msg in updated:
-                _update_message_status(msg["timestamp"], msg["status"])
+            for contact_id, msg in to_persist:
+                _update_message_status(
+                    msg["timestamp"], msg["status"],
+                    protocol=PROTOCOL_TELEGRAM, contact_number=contact_id,
+                )
         return updated
 
     # ─── poll_once (queue drain) ───────────────────────────────────────────

@@ -158,16 +158,34 @@ class TestUpdateMessageStatus:
     def test_update_status(self, tmp_db):
         """Lo status di un messaggio viene aggiornato per timestamp."""
         _add_message_to_cache("+391234567890", "Ciao!", True, "You", 1000)
-        _update_message_status(1000, "delivered")
+        _update_message_status(1000, "delivered", "signal", "+391234567890")
         loaded = _load_cache()
         assert loaded["+391234567890"][0]["status"] == "delivered"
 
     def test_update_status_no_match(self, tmp_db):
         """Timestamp inesistente → nessun errore, nessuna modifica."""
         _add_message_to_cache("+391234567890", "Ciao!", True, "You", 1000)
-        _update_message_status(9999, "delivered")
+        _update_message_status(9999, "delivered", "signal", "+391234567890")
         loaded = _load_cache()
         assert loaded["+391234567890"][0]["status"] == "sent"
+
+    def test_update_status_scoped_by_protocol(self, tmp_db):
+        """Stesso timestamp su protocolli diversi → aggiorna solo quello giusto."""
+        _add_message_to_cache("+391234567890", "Ciao!", True, "You", 1000, protocol="signal")
+        _add_message_to_cache("391234567890@c.us", "Ciao!", True, "You", 1000, protocol="whatsapp")
+        _update_message_status(1000, "delivered", "signal", "+391234567890")
+        loaded = _load_cache()
+        assert loaded["+391234567890"][0]["status"] == "delivered"
+        assert loaded["391234567890@c.us"][0]["status"] == "sent"
+
+    def test_update_status_scoped_by_contact(self, tmp_db):
+        """Stesso timestamp su contatti diversi (stesso protocollo) → aggiorna solo quello giusto."""
+        _add_message_to_cache("+391234567890", "Ciao!", True, "You", 1000, protocol="signal")
+        _add_message_to_cache("+399999999999", "Ciao!", True, "You", 1000, protocol="signal")
+        _update_message_status(1000, "delivered", "signal", "+391234567890")
+        loaded = _load_cache()
+        assert loaded["+391234567890"][0]["status"] == "delivered"
+        assert loaded["+399999999999"][0]["status"] == "sent"
 
 
 class TestProcessReceipt:

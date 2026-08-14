@@ -87,7 +87,7 @@ class TestUpdateMessageStatusPersistence:
     def test_update_status_persists(self, tmp_db):
         """_update_message_status() aggiorna lo status nel DB."""
         _add_message_to_cache("+391234567890", "Ciao!", True, "You", 1000)
-        _update_message_status(1000, "delivered")
+        _update_message_status(1000, "delivered", "signal", "+391234567890")
         loaded = _load_cache()
         assert loaded["+391234567890"][0]["status"] == "delivered"
 

@@ -298,15 +298,21 @@ def _dedup_messages() -> int:
             conn.close()
 
 
-def _update_message_status(timestamp: int, status: str):
-    """Update the status of a message in SQLite by timestamp."""
+def _update_message_status(timestamp: int, status: str, protocol: str, contact_number: str):
+    """Update a message status in SQLite, scoped per (protocol, contact, ts).
+
+    A bare ``timestamp`` match would update messages of OTHER protocols or
+    contacts sharing the same millisecond timestamp, so the update is always
+    scoped by ``protocol`` and ``contact_number``.
+    """
     _init_db()
     with _DB_LOCK:
         conn = sqlite3.connect(_backend.DB_FILE)
         try:
             conn.execute(
-                "UPDATE messages SET status = ? WHERE timestamp = ?",
-                (status, timestamp),
+                "UPDATE messages SET status = ? "
+                "WHERE protocol = ? AND contact_number = ? AND timestamp = ?",
+                (status, protocol, contact_number, timestamp),
             )
             conn.commit()
         finally:

@@ -639,9 +639,13 @@ class SignalBackend(ChatBackend):
         Returns the list of updated message dicts (for the UI) and persists
         the status changes to the SQLite DB.
         """
+        source = envelope.get("sourceNumber", "") or envelope.get("source", "")
         updated = _process_receipt(envelope, self.cache)
         for msg in updated:
-            _update_message_status(msg["timestamp"], msg["status"])
+            _update_message_status(
+                msg["timestamp"], msg["status"],
+                protocol=PROTOCOL_SIGNAL, contact_number=source,
+            )
         return updated
 
     # ─── Receive loop (SSE real-time) ───────────────────────────────────
