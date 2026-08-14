@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import queue
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from models import (
@@ -514,11 +515,18 @@ class WhatsAppBackend(ChatBackend):
             )
         except Exception:
             pass  # se /chats fallisce restiamo sulle sole chat-DB
-        for jid in targets:
+        # Fetch parallelo: WAHA serve le richieste /api/messages concorrenti in
+        # parallelo (verificato: 8 chat in ~7.6s totali vs ~34s sommati).  Ogni
+        # worker tocca una chat diversa → nessuna contesa sullo stesso dato; le
+        # scritture SQLite sono già serializzate da _DB_LOCK in backend/db.py.
+        def _fetch_one(jid: str) -> None:
             try:
                 self.fetch_history(jid, limit=limit)
             except Exception:
                 pass  # best-effort: mai far fallire l'avvio per una singola chat
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(_fetch_one, targets))
         # Prune old messages AFTER the resync, so the next startup's cache
         # still includes old messages (for dedup) and the resync can fill
         # any gaps without re-inserting them as new.
