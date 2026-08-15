@@ -1,5 +1,5 @@
 # =============================================================================
-# CI — Signal TUI Client (Fase 3: job di TEST)
+# CI — Signal TUI Client (Fase 4: job di LINT + TEST)
 #
 # Trigger : push su `master` + `pull_request` (le feature branch NON triggerano).
 # Matrice : Python 3.12 + 3.13 — runner ubuntu-latest.
@@ -7,8 +7,8 @@
 # Fonte di verità: `pyproject.toml` (flag pytest/coverage/ruff) e `Makefile`
 # (comandi condivisi locale/CI — decisione C). Il workflow resta "minimo".
 #
+# Il job `lint` gira per primo (fail-fast, `needs: lint` sul job `test`).
 # Predisposto per le fasi successive:
-#   - Fase 4 (lint)    : aggiungere un job `lint` → `make lint` + `make format-check`.
 #   - Fase 5 (coverage): cambiare `make test` → `make coverage` + step upload Codecov.
 # =============================================================================
 
@@ -33,9 +33,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout del repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"          # il lint non è sensibile alla versione
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Installa le dipendenze dev
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Lint (ruff check)
+        run: make lint
+
+      - name: Format check (ruff format)
+        run: make format-check
+
   test:
     name: Test · Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    needs: lint
     timeout-minutes: 10          # suite ~20s in locale; 10' assorbono runner lenti/install
     strategy:
       fail-fast: false           # isola i fallimenti per-versione: gira entrambe le gambe
@@ -65,6 +90,6 @@ jobs:
       # `make test` = `$(PYTHON) -m pytest` con `PYTHON ?= python`.
       # Dopo setup-python, `python` è il Python della matrice (nessun venv da attivare).
       # testpaths=["tests","Telegram"] in pyproject.toml raccoglie ENTRAMBE le root.
-      # Niente --cov / --cov-fail-under (Fase 5) né ruff (Fase 4).
+      # Niente --cov / --cov-fail-under (Fase 5); il ruff gira nel job `lint` a monte.
       - name: Esegui la suite di test
         run: make test
