@@ -1,15 +1,15 @@
 # =============================================================================
-# CI — Signal TUI Client (Fase 4: job di LINT + TEST)
+# CI — Signal TUI Client (Fase 5: LINT + TEST con coverage gate + upload Codecov)
 #
 # Trigger : push su `master` + `pull_request` (le feature branch NON triggerano).
 # Matrice : Python 3.12 + 3.13 — runner ubuntu-latest.
+#   · 3.12 (coverage) → `make coverage` (gate fail_under=52) + upload Codecov (OIDC)
+#   · 3.13 (test)     → `make test` (verifica cross-versione, senza overhead coverage)
 #
 # Fonte di verità: `pyproject.toml` (flag pytest/coverage/ruff) e `Makefile`
 # (comandi condivisi locale/CI — decisione C). Il workflow resta "minimo".
 #
 # Il job `lint` gira per primo (fail-fast, `needs: lint` sul job `test`).
-# Predisposto per le fasi successive:
-#   - Fase 5 (coverage): cambiare `make test` → `make coverage` + step upload Codecov.
 # =============================================================================
 
 name: CI
@@ -19,15 +19,13 @@ on:
     branches: [master]      # solo il trunk; push su feature branch = nessuna CI
   pull_request:             # ogni PR (aperta / pushata / riaperta) triggera la CI
 
-# Principio del privilegio minimo: per ora serve solo lettura (checkout).
-# Fase 5 (Codecov) usa un token dedicato in `secrets`, non GITHUB_TOKEN → nessun cambio.
+# Privilegio minimo: `contents: read` basta per il checkout.
+# L'upload Codecov (OIDC) richiede `id-token: write`, ma SOLO nel job `test`
+# (concesso a livello di job, non di workflow) — vedi sotto.
 permissions:
   contents: read
 
-# Evita run duplicate sullo stesso ref: un nuovo push annulla la run precedente
-# ancora in corso. La group è "workflow + ref":
-#   - push → refs/heads/master
-#   - PR   → refs/pull/<N>/merge   (una group distinta per ogni PR)
+# Evita run duplicate sullo stesso ref: un nuovo push annulla la run precedente.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -61,11 +59,22 @@ jobs:
     name: Test · Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     needs: lint
-    timeout-minutes: 10          # suite ~20s in locale; 10' assorbono runner lenti/install
+    timeout-minutes: 10
+    # `id-token: write` serve SOLO a codecov-action con use_oidc: true.
+    # Concesso a livello di JOB (non di workflow): il job `lint` non lo riceve.
+    # Deve ri-dichiarare `contents: read` perché a livello job i permessi SOSTITUISCONO
+    # quelli di workflow (non si sommano).
+    permissions:
+      contents: read
+      id-token: write
     strategy:
-      fail-fast: false           # isola i fallimenti per-versione: gira entrambe le gambe
+      fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        include:
+          - python-version: "3.12"
+            coverage: true     # gamba "canonica": gate coverage + upload Codecov
+          - python-version: "3.13"
+            coverage: false    # solo test: copre i bug cross-versione
 
     steps:
       - name: Checkout del repository
@@ -75,8 +84,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          # Cache pip su hash dei file di dipendenze: si invalida da sola
-          # quando requirements*.txt cambiano (entrambi concorrono alla chiave).
           cache: pip
           cache-dependency-path: |
             requirements.txt
@@ -87,9 +94,26 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
-      # `make test` = `$(PYTHON) -m pytest` con `PYTHON ?= python`.
-      # Dopo setup-python, `python` è il Python della matrice (nessun venv da attivare).
-      # testpaths=["tests","Telegram"] in pyproject.toml raccoglie ENTRAMBE le root.
-      # Niente --cov / --cov-fail-under (Fase 5); il ruff gira nel job `lint` a monte.
+      # Gamba coverage (3.12): `make coverage` = pytest --cov --cov-report=term-missing
+      # --cov-report=xml. Applica il gate `fail_under = 52` (pyproject.toml) e genera
+      # coverage.xml. Fallisce il job se la coverage scende sotto la baseline.
+      - name: Test con coverage e gate (soglia 52%)
+        if: matrix.coverage
+        run: make coverage
+
+      # Gamba solo-test (3.13): stessa suite, senza overhead di coverage.
       - name: Esegui la suite di test
+        if: ${{ ! matrix.coverage }}
         run: make test
+
+      # Upload del report su Codecov — NON bloccante (fail_ci_if_error: false).
+      # Autenticazione OIDC (nessun token): richiede GitHub App installata + repo attivato.
+      # `verbose: true` solo per il primo setup (debug auth); rimovibile a regime.
+      - name: Upload coverage a Codecov
+        if: matrix.coverage
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+          use_oidc: true
+          verbose: true
