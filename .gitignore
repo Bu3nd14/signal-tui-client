@@ -15,6 +15,7 @@ signal-tui-client.code-workspace
 profiling/output/
 MIGRATION_SQLITE_PLAN.md
 CI_Plan.md
+FASE6_PLAN.md
 whatsapp-data/
 .docker/
 
