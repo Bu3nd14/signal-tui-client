@@ -1,0 +1,70 @@
+# =============================================================================
+# CI — Signal TUI Client (Fase 3: job di TEST)
+#
+# Trigger : push su `master` + `pull_request` (le feature branch NON triggerano).
+# Matrice : Python 3.12 + 3.13 — runner ubuntu-latest.
+#
+# Fonte di verità: `pyproject.toml` (flag pytest/coverage/ruff) e `Makefile`
+# (comandi condivisi locale/CI — decisione C). Il workflow resta "minimo".
+#
+# Predisposto per le fasi successive:
+#   - Fase 4 (lint)    : aggiungere un job `lint` → `make lint` + `make format-check`.
+#   - Fase 5 (coverage): cambiare `make test` → `make coverage` + step upload Codecov.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [master]      # solo il trunk; push su feature branch = nessuna CI
+  pull_request:             # ogni PR (aperta / pushata / riaperta) triggera la CI
+
+# Principio del privilegio minimo: per ora serve solo lettura (checkout).
+# Fase 5 (Codecov) usa un token dedicato in `secrets`, non GITHUB_TOKEN → nessun cambio.
+permissions:
+  contents: read
+
+# Evita run duplicate sullo stesso ref: un nuovo push annulla la run precedente
+# ancora in corso. La group è "workflow + ref":
+#   - push → refs/heads/master
+#   - PR   → refs/pull/<N>/merge   (una group distinta per ogni PR)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test · Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10          # suite ~20s in locale; 10' assorbono runner lenti/install
+    strategy:
+      fail-fast: false           # isola i fallimenti per-versione: gira entrambe le gambe
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - name: Checkout del repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          # Cache pip su hash dei file di dipendenze: si invalida da sola
+          # quando requirements*.txt cambiano (entrambi concorrono alla chiave).
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Installa le dipendenze (runtime + dev)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+
+      # `make test` = `$(PYTHON) -m pytest` con `PYTHON ?= python`.
+      # Dopo setup-python, `python` è il Python della matrice (nessun venv da attivare).
+      # testpaths=["tests","Telegram"] in pyproject.toml raccoglie ENTRAMBE le root.
+      # Niente --cov / --cov-fail-under (Fase 5) né ruff (Fase 4).
+      - name: Esegui la suite di test
+        run: make test
