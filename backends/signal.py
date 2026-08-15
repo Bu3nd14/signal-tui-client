@@ -35,7 +35,6 @@ logger.setLevel(logging.DEBUG)
 
 from backend import (
     DAEMON_HTTP_PORT,
-    SIGNAL_CLI_PATH,
     USER_NUMBER,
     Contact,
     SignalRPCClient,
@@ -45,9 +44,11 @@ from backend import (
     _mark_as_read,
     _process_receipt,
     _process_typing,
+    _require_user_number,
     _run_subprocess,
     _send_subprocess,
     _update_message_status,
+    find_signal_cli,
     get_attachment_path,
 )
 
@@ -77,6 +78,7 @@ class SignalBackend(ChatBackend):
 
     def __init__(self, user_number: str = USER_NUMBER):
         self.user_number = user_number
+        # Con USER_NUMBER="" (non configurato) il default è stringa vuota: validato in _connect_sync.
         self._rpc = SignalRPCClient()
         self._use_daemon = False
         self.daemon_proc: subprocess.Popen | None = None
@@ -100,15 +102,19 @@ class SignalBackend(ChatBackend):
         await asyncio.to_thread(self._connect_sync)
 
     def _connect_sync(self) -> None:
+        # Errore chiaro SOLO quando il backend tenta davvero di connettersi.
+        if not self.user_number:
+            self.user_number = _require_user_number()   # RuntimeError canonico
         self.cache = self._load_protocol_cache()
 
         if _is_daemon_running():
             self._use_daemon = True
             self._load_contacts_rpc()
         else:
+            signal_cli = find_signal_cli()              # FileNotFoundError canonico
             self.daemon_proc = subprocess.Popen(
                 [
-                    str(SIGNAL_CLI_PATH),
+                    str(signal_cli),
                     "-u", self.user_number,
                     "daemon",
                     "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",

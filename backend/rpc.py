@@ -23,8 +23,20 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
 
+_NOT_CONFIGURED_MSG = (
+    "Signal phone number not configured.\n"
+    "Set the SIGNAL_USER_NUMBER environment variable or create a config.json file:\n"
+    '  echo \'{"user_number": "+1234567890"}\' > config.json'
+)
+
+
 def _get_user_number() -> str:
-    """Read phone number from environment variable or config.json."""
+    """Read phone number from environment variable or config.json.
+
+    Best-effort: returns ``""`` when not configured (does NOT raise).
+    Use :func:`_require_user_number` at the point of use to get the
+    canonical RuntimeError.
+    """
     num = os.environ.get("SIGNAL_USER_NUMBER")
     if num:
         return num
@@ -38,12 +50,18 @@ def _get_user_number() -> str:
                     return num
         except (json.JSONDecodeError, OSError):
             pass
-    raise RuntimeError(
-        "Signal phone number not configured.\n"
-        "Set the SIGNAL_USER_NUMBER environment variable or create a config.json file:\n"
-        '  echo \'{"user_number": "+1234567890"}\' > config.json'
-    )
-USER_NUMBER = _get_user_number()
+    return ""
+
+
+def _require_user_number() -> str:
+    """Return the configured user number, or raise the canonical RuntimeError."""
+    num = _get_user_number()
+    if not num:
+        raise RuntimeError(_NOT_CONFIGURED_MSG)
+    return num
+
+
+USER_NUMBER = _get_user_number()  # "" se non configurato, il numero altrimenti
 DAEMON_HTTP_PORT = 8080
 DAEMON_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/rpc"
 SSE_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/events"
@@ -51,23 +69,35 @@ SSE_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/events"
 SIGNAL_CLI_ATTACHMENTS_DIR = Path.home() / ".local" / "share" / "signal-cli" / "attachments"
 # ─── Signal CLI ──────────────────────────────────────────────────────────────
 
-def _find_signal_cli() -> Path:
-    """Find the signal-cli executable in the ./bin/ directory of the project."""
+def _find_signal_cli() -> Path | None:
+    """Find the signal-cli executable in ./bin/, or ``None`` if absent.
+
+    Non-raising: returns ``None`` when ./bin/ is missing or contains no
+    signal-cli-*/bin/signal-cli executable.  Use :func:`find_signal_cli`
+    at the point of use to get the canonical FileNotFoundError.
+    """
     bin_dir = PROJECT_DIR / "bin"
+    if not bin_dir.is_dir():          # evita il FileNotFoundError grezzo di iterdir()
+        return None
     for d in bin_dir.iterdir():
         if d.is_dir() and d.name.startswith("signal-cli-"):
             exe = d / "bin" / "signal-cli"
             if exe.exists() and exe.stat().st_mode & 0o111:
                 return exe
-    raise FileNotFoundError("signal-cli not found in ./bin/")
+    return None
 
 
-SIGNAL_CLI_PATH = _find_signal_cli()
+# Retro-compatibilità: Path se configurato, None se assente
+# (prima l'import sollevava FileNotFoundError).
+SIGNAL_CLI_PATH: Path | None = _find_signal_cli()
 
 
 def find_signal_cli() -> Path:
-    """Public utility function to find signal-cli."""
-    return _find_signal_cli()
+    """Return the signal-cli path, or raise the canonical FileNotFoundError."""
+    path = _find_signal_cli()
+    if path is None:
+        raise FileNotFoundError("signal-cli not found in ./bin/")
+    return path
 
 
 def _is_daemon_running() -> bool:
@@ -82,9 +112,15 @@ def _is_daemon_running() -> bool:
 
 
 def _run_subprocess(args: list[str]) -> str:
-    """Run signal-cli via subprocess and return stdout."""
+    """Run signal-cli via subprocess and return stdout.
+
+    Risolve binario e numero utente al momento dell'uso (non all'import):
+    FileNotFoundError / RuntimeError canonici se non configurati.
+    """
+    num = _require_user_number()   # prima il numero (stesso ordine dell'import attuale)
+    cli = find_signal_cli()        # poi il binario
     result = subprocess.run(  # noqa: PLW1510 — return code checked explicitly below
-        [str(SIGNAL_CLI_PATH), "-u", USER_NUMBER] + args,
+        [str(cli), "-u", num] + args,
         capture_output=True,
         text=True,
         timeout=60,
