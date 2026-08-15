@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
-**Data:** 2026-08-12
-**Git commit:** `f9b14dd` (master)
+**Data:** 2026-08-15
+**Git commit:** `30a2e8d` (master)
 **Python:** 3.12.3
-**Stato:** ✅ 468/468 test superati (396 main + 72 Telegram)
+**Stato:** ✅ 507/507 test superati (433 main + 74 Telegram)
 
 ---
 
@@ -11,31 +11,33 @@
 
 | Modulo | File | Test | Esito |
 |--------|------|------|-------|
-| WhatsApp Backend | `test_whatsapp_backend.py` | 101 | ✅ |
-| UI Protocol | `test_ui_protocol.py` | 44 | ✅ |
+| WhatsApp Backend | `test_whatsapp_backend.py` | 102 | ✅ |
+| UI Protocol | `test_ui_protocol.py` | 55 | ✅ |
 | Telegram Regression | `Telegram/test_regression.py` | 39 | ✅ |
 | Backends (Manager) | `test_backends.py` | 36 | ✅ |
-| Telegram Backend | `Telegram/test_telegram_backend.py` | 33 | ✅ |
+| Telegram Backend | `Telegram/test_telegram_backend.py` | 35 | ✅ |
 | Typing Indicator | `test_typing_indicator.py` | 29 | ✅ |
-| Cache (SQLite) | `test_backend_cache.py` | 18 | ✅ |
-| Script installazione | `test_install_script.py` | 17 | ✅ |
+| Device Link Screen | `test_device_link_screen.py` | 23 | ✅ |
+| Cache (SQLite) | `test_backend_cache.py` | 20 | ✅ |
+| Script installazione | `test_install_script.py` | 16 | ✅ |
+| Refresh Chat | `test_refresh_chat.py` | 16 | ✅ |
 | Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
-| Device Link Screen | `test_device_link_screen.py` | 18 | ✅ |
-| Refresh Chat | `test_refresh_chat.py` | 15 | ✅ |
 | WA Startup/Resync | `test_wa_startup_resync.py` | 15 | ✅ |
 | UI Components | `test_ui_components.py` | 14 | ✅ |
+| Backend Connect | `test_backend_connect.py` | 13 | ✅ |
 | RPC / Daemon | `test_backend_rpc.py` | 12 | ✅ |
 | Migrazione Protocollo | `test_migrate_protocol.py` | 11 | ✅ |
 | Cache Debounce | `test_cache_debounce.py` | 10 | ✅ |
 | Contact Picker | `test_contact_picker.py` | 9 | ✅ |
 | Invio messaggi | `test_backend_send.py` | 6 | ✅ |
 | Lock File | `test_signal_tui_lock.py` | 6 | ✅ |
+| Lazy Config (CI) | `test_backend_lazy_config.py` | 5 | ✅ |
 | Attachment | `test_backend_attachments.py` | 5 | ✅ |
 | QR ASCII | `test_qr_ascii.py` | 4 | ✅ |
 | Migrazione SQLite | `test_migrate_sqlite.py` | 4 | ✅ |
 | Contatti | `test_backend_contacts.py` | 4 | ✅ |
 | Docker Compose | `test_docker_compose_extra_hosts.py` | 2 | ✅ |
-| **Totale** | | **468** | **✅ 468/468** |
+| **Totale** | | **507** | **✅ 507/507** |
 
 ---
 
@@ -57,7 +59,7 @@
 - **`device_link_screen.py`**: QR Telegram nel picker (Ctrl+L) con password 2FA inline
 - **`signal_tui.py`**: `_on_backend_ready` merge atomico, `_connect_telegram` worker, filtro Ctrl+W a 4 protocolli
 - **CSS**: colore unificato `#0088cc` per tutti i protocolli, distinzione via emoji (📱📨💬)
-- **72 nuovi test** in `Telegram/`: 33 backend + 39 regressione
+- **74 nuovi test** in `Telegram/`: 35 backend + 39 regressione
 - **`PERF_ANALYSIS.md`**: aggiornato con pattern Telegram e stato attuale
 
 ### Lazy Contact Render (10 commit, `87f52c5..2ba5e05`)
@@ -66,7 +68,7 @@
 - **Merge path**: quando nuovi contatti arrivano (WhatsApp dopo Signal), solo i nuovi ListItem vengono creati — zero `clear()`, zero flash
 - **Early paint**: `_update_contacts_ui` chiamata subito dopo Signal, poi dopo WhatsApp — contatti visibili entro ~200ms
 - **System messages auto-dismiss**: i messaggi `is_info` si auto-cancellano dopo 3 secondi
-- **Test Telegram**: 72 test scritti (33 backend + 39 regressione) in `Telegram/`, in attesa del backend
+- **Test Telegram**: 74 test scritti (35 backend + 39 regressione) in `Telegram/`, in attesa del backend
 
 ### WhatsApp Image Support
 Aggiunti 14 test nel modulo `test_whatsapp_backend.py` per download e rendering immagini WhatsApp.
@@ -328,7 +330,15 @@ Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano
 
 
 ```bash
-./tests/run_regression_tests.sh
+# Test completi (tests/ + Telegram/) — richiede il venv attivo o PYTHON=...
+make test
+
+# Test con coverage + gate (soglia 52%) + report XML per Codecov
+make coverage
+
+# Lint (ruff check) e format check
+make lint
+make format-check
 ```
 
-Lo script crea un virtualenv `.venv-test/`, installa pytest e le dipendenze, esegue tutti i test e produce un report colorato. Exit code 0 = tutto ok.
+I comandi del `Makefile` usano la config condivisa in `pyproject.toml` (`testpaths = ["tests", "Telegram"]`), quindi raccolgono **entrambe** le radici di test. Lo script legacy `tests/run_regression_tests.sh` è stato sostituito dal Makefile (non copriva la suite `Telegram/`).

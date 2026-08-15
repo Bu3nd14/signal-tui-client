@@ -1,5 +1,7 @@
 # Signal / WhatsApp / Telegram TUI Client
 
+[![codecov](https://codecov.io/gh/Bu3nd14/signal-tui-client/graph/badge.svg)](https://codecov.io/gh/Bu3nd14/signal-tui-client)
+
 A terminal-based (TUI) multi-protocol client built with [Textual](https://textual.textualize.io/).
 
 - **Signal**: uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automatic
@@ -442,27 +444,31 @@ signal-tui-client/
 ├── migrate_cache_protocol.py# One-shot migration: add protocol field to cache
 ├── migrate_cache_status.py  # One-shot migration: add status field to cache
 ├── purge_whatsapp_cache.py  # Utility: purge WhatsApp messages from cache
-├── Telegram/                # Telegram test suite (72 tests)
-│   ├── test_telegram_backend.py  (33 tests)
+├── Telegram/                # Telegram test suite (74 tests)
+│   ├── test_telegram_backend.py  (35 tests)
 │   └── test_regression.py        (39 tests)
-├── tests/                   # Test suite (pytest, 396 tests)
+├── tests/                   # Test suite (pytest, 433 tests)
 │   ├── conftest.py
-│   ├── test_whatsapp_backend.py (101 tests)
-│   ├── test_ui_protocol.py      (44 tests)
+│   ├── test_whatsapp_backend.py (102 tests)
+│   ├── test_ui_protocol.py      (55 tests)
 │   ├── test_typing_indicator.py (29 tests)
-│   └── ... (20 test files total)
-│   └── run_regression_tests.sh
+│   ├── test_backend_lazy_config.py (5 tests)
+│   └── ... (24 test files total)
+│   └── run_regression_tests.sh  # legacy (superseded by Makefile)
 ├── profiling/               # Performance profiling tools (CPU, RAM, I/O)
 ├── scripts/                 # Helper scripts (start_whatsapp.sh)
 ├── docker-compose.yml       # WAHA (WhatsApp HTTP API) Docker container
 ├── .env.example             # Template for WAHA + Telegram credentials
 ├── .dockerignore            # Docker build exclusions
 ├── install.sh               # Automatic installation script
+├── Makefile                 # Shared commands: make test / lint / coverage / check
+├── pyproject.toml           # Config condivisa pytest / coverage / ruff
+├── .github/workflows/ci.yml # CI: lint + test (matrice 3.12/3.13) + coverage gate + Codecov
 ├── requirements.txt         # Python dependencies (textual, telethon, qrcode, ...)
-├── requirements-dev.txt     # Development dependencies (ruff)
+├── requirements-dev.txt     # Development dependencies (pytest, pytest-cov, coverage, ruff)
 ├── config.json              # Local configuration (not committed)
 ├── README.md                # This file
-├── TEST_REPORT.md           # Test report (last run: 468/468 ✅)
+├── TEST_REPORT.md           # Test report (last run: 507/507 ✅)
 ├── PERF_ANALYSIS.md         # Performance analysis (UI reactivity hotspots)
 ├── BUGS.md                  # Known bugs and limitations
 ├── bin/                     # signal-cli binaries (not committed)
