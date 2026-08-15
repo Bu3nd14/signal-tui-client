@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 
 class EventHandlingMixin:
-
     def _handle_event(self, event: ChatEvent) -> bool:
         """Dispatch a normalized ``ChatEvent`` from a backend poll worker.
 
@@ -60,7 +59,7 @@ class EventHandlingMixin:
                 existing = {c.cache_key for c in self.contacts}
                 if contact.cache_key not in existing:
                     self.contacts.append(contact)
-                    if hasattr(backend, 'contacts'):
+                    if hasattr(backend, "contacts"):
                         backend.contacts.append(contact)
                     self._contact_list_dirty = True
                     self._dirty_contact_keys.add(contact.cache_key)
@@ -75,7 +74,9 @@ class EventHandlingMixin:
         # ad ogni singolo messaggio.
         if isinstance(ts, int) and ts > (contact.last_message_ts or 0):
             contact.last_message_ts = ts
-            if cache_key != (self.selected_contact.cache_key if self.selected_contact else None):
+            if cache_key != (
+                self.selected_contact.cache_key if self.selected_contact else None
+            ):
                 self._contact_list_dirty = True
                 self._dirty_contact_keys.add(cache_key)
 
@@ -89,27 +90,35 @@ class EventHandlingMixin:
         if added:
             if cache_key not in self._cache:
                 self._cache[cache_key] = []
-            self._cache[cache_key].append({
-                "text": event.payload["text"],
-                "is_mine": is_mine,
-                "sender": event.payload.get("sender", ""),
-                "timestamp": ts,
-                "quote_text": event.payload.get("quote_text"),
-                "msg_type": event.payload.get("msg_type", "text"),
-                "attachment_info": event.payload.get("attachment_info"),
-                "attachment_id": event.payload.get("attachment_id"),
-                "read": is_mine,
-                "status": "sent" if is_mine else "read",
-            })
+            self._cache[cache_key].append(
+                {
+                    "text": event.payload["text"],
+                    "is_mine": is_mine,
+                    "sender": event.payload.get("sender", ""),
+                    "timestamp": ts,
+                    "quote_text": event.payload.get("quote_text"),
+                    "msg_type": event.payload.get("msg_type", "text"),
+                    "attachment_info": event.payload.get("attachment_info"),
+                    "attachment_id": event.payload.get("attachment_id"),
+                    "read": is_mine,
+                    "status": "sent" if is_mine else "read",
+                }
+            )
 
         # When a real message arrives, the sender stopped typing: move to the
         # mumbling (💭) state if they were typing.
         if cache_key in self._typing_contacts or cache_key in self._typing_mumbling:
             self._typing_contacts.pop(cache_key, None)
-            self._typing_mumbling[cache_key] = time.time() + self._TYPING_MUMBLING_DURATION
+            self._typing_mumbling[cache_key] = (
+                time.time() + self._TYPING_MUMBLING_DURATION
+            )
 
         # If it's the current contact, show it immediately; else bump unread.
-        if self.selected_contact and self.selected_contact.cache_key == cache_key and added:
+        if (
+            self.selected_contact
+            and self.selected_contact.cache_key == cache_key
+            and added
+        ):
             # Gate di visualizzazione LIVE: usa l'identità (protocol, key, ts,
             # testo) come _refresh_chat, NON il solo timestamp.  Due messaggi
             # WhatsApp distinti nello stesso secondo (stesso ts) devono essere
@@ -169,10 +178,12 @@ class EventHandlingMixin:
             updated = process(envelope)
         else:
             # Generic backend (WhatsApp) uses a message-ids receipt payload.
-            updated = process({
-                "message_ids": event.payload.get("message_ids", []),
-                "is_read": event.payload.get("is_read", False),
-            })
+            updated = process(
+                {
+                    "message_ids": event.payload.get("message_ids", []),
+                    "is_read": event.payload.get("is_read", False),
+                }
+            )
         if not updated:
             return False
 
@@ -189,7 +200,6 @@ class EventHandlingMixin:
         if self.selected_contact and self.selected_contact.id == event.contact_id:
             self.call_from_thread(self._update_message_widgets_status, updated)
         return True
-
 
     def _update_message_widgets_status(self, updated_messages: list[dict]) -> None:
         """Update the visual status of MessageWidget instances in the chat log.
@@ -290,7 +300,6 @@ class EventHandlingMixin:
             item._label_text = new_text
 
     def _contact_label(self, contact: ChatContact) -> str:
-
         """Build the contact list label.
 
         Format: ``{emoji} {name}`` + (if unread) `` *{N}`` + (if typing) `` ✍️``.

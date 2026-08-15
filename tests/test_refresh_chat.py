@@ -41,8 +41,12 @@ def _make_message(text: str, ts: int, is_mine: bool = False) -> dict:
     }
 
 
-def _make_image_message(text: str, ts: int, attachment_id: str = "img-001.jpg",
-                        attachment_info: str = "🖼️ Image") -> dict:
+def _make_image_message(
+    text: str,
+    ts: int,
+    attachment_id: str = "img-001.jpg",
+    attachment_info: str = "🖼️ Image",
+) -> dict:
     """Build a cached message dict with msg_type='image'."""
     return {
         "text": text,
@@ -76,7 +80,6 @@ class _FakeChatLog:
         self.children = []
 
 
-
 class TestRefreshChat:
     """🔄 Verifica che _refresh_chat non ri-aggiunga messaggi vecchi."""
 
@@ -84,8 +87,10 @@ class TestRefreshChat:
         """Build an app with a cache of *n_messages* for one contact."""
         app = SignalTUI()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario",
-            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "uuid-123"},
         )
         app.selected_contact = contact
         # Timestamps strictly increasing from 1..n
@@ -99,9 +104,7 @@ class TestRefreshChat:
     @staticmethod
     def _seen(contact: ChatContact, ts_list):
         """Build the protocol-aware seen-timestamp set for *ts_list*."""
-        return {
-            (PROTOCOL_SIGNAL, contact.cache_key, ts) for ts in ts_list
-        }
+        return {(PROTOCOL_SIGNAL, contact.cache_key, ts) for ts in ts_list}
 
     def test_refresh_chat_does_not_readd_old_messages(self):
         """Con >20 messaggi, _refresh_chat non deve ri-aggiungere i vecchi."""
@@ -145,9 +148,7 @@ class TestRefreshChat:
         }
 
         # A new message arrives while the picker is open (timestamp 26).
-        app._cache[contact.cache_key].append(
-            _make_message("nuovo", ts=26)
-        )
+        app._cache[contact.cache_key].append(_make_message("nuovo", ts=26))
 
         added: list[str] = []
 
@@ -156,8 +157,10 @@ class TestRefreshChat:
 
         fake_chat_log = _FakeChatLog()
 
-        with patch.object(app, "_add_message", side_effect=fake_add_message), \
-             patch.object(app, "query_one", return_value=fake_chat_log):
+        with (
+            patch.object(app, "_add_message", side_effect=fake_add_message),
+            patch.object(app, "query_one", return_value=fake_chat_log),
+        ):
             app._refresh_chat()
 
         # Only the new message should be added, not the old ones.
@@ -165,12 +168,15 @@ class TestRefreshChat:
         # The chat should have been scrolled to the end.
         assert fake_chat_log.scrolled
 
-
     def test_refresh_chat_no_selected_contact(self):
         """Senza contatto selezionato, _refresh_chat non fa nulla."""
         app = SignalTUI()
         app.selected_contact = None
-        app._cache = {contact_cache_key(PROTOCOL_SIGNAL, "+391234567890"): [_make_message("x", ts=1)]}
+        app._cache = {
+            contact_cache_key(PROTOCOL_SIGNAL, "+391234567890"): [
+                _make_message("x", ts=1)
+            ]
+        }
 
         with patch.object(app, "_add_message") as mock_add:
             app._refresh_chat()
@@ -189,14 +195,15 @@ class TestRefreshChat:
 
         fake_chat_log = _FakeChatLog()
 
-        with patch.object(app, "_add_message", side_effect=fake_add_message), \
-             patch.object(app, "query_one", return_value=fake_chat_log):
+        with (
+            patch.object(app, "_add_message", side_effect=fake_add_message),
+            patch.object(app, "query_one", return_value=fake_chat_log),
+        ):
             app._refresh_chat()
 
         # All 3 messages are newer than max_seen=0, so all are added.
         assert len(added) == 3
         assert fake_chat_log.scrolled
-
 
 
 class TestLoadWorkerStaleness:
@@ -205,8 +212,10 @@ class TestLoadWorkerStaleness:
     def _make_app(self, n_messages: int = 3) -> SignalTUI:
         app = SignalTUI()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario",
-            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "uuid-123"},
         )
         app.selected_contact = contact
         app._cache = {
@@ -226,11 +235,16 @@ class TestLoadWorkerStaleness:
             return MagicMock()
 
         fake_chat_log = MagicMock()
-        with patch.object(app, "_make_message_widget", side_effect=fake_make_widget), \
-             patch.object(app, "query_one", return_value=fake_chat_log), \
-             patch.object(app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)):
+        with (
+            patch.object(app, "_make_message_widget", side_effect=fake_make_widget),
+            patch.object(app, "query_one", return_value=fake_chat_log),
+            patch.object(
+                app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
+            ),
+        ):
             app._load_messages_worker()
         from collections import Counter
+
         counts = Counter(mounted)
         for m in ["msg-1", "msg-2", "msg-3"]:
             assert counts[m] == 1, f"{m} mounted {counts[m]} times"
@@ -247,6 +261,7 @@ class TestLoadWorkerStaleness:
         già rimosso — altrimenti li rimonterebbe doppi.
         """
         import threading
+
         app = self._make_app(n_messages=20)  # >20 to force a workable batch
         mounted: list[str] = []
 
@@ -261,9 +276,11 @@ class TestLoadWorkerStaleness:
         def slow_call(fn, *a, **k):
             fn(*a, **k)
 
-        with patch.object(app, "_make_message_widget", side_effect=fake_make_widget), \
-             patch.object(app, "query_one", return_value=fake_chat_log), \
-             patch.object(app, "call_from_thread", side_effect=slow_call):
+        with (
+            patch.object(app, "_make_message_widget", side_effect=fake_make_widget),
+            patch.object(app, "query_one", return_value=fake_chat_log),
+            patch.object(app, "call_from_thread", side_effect=slow_call),
+        ):
             # Selection #1: bump the reload token.
             app._chat_reload_token += 1
 
@@ -277,7 +294,9 @@ class TestLoadWorkerStaleness:
             # Selection #2: bump token + switch contact (invalidates worker #1).
             app._chat_reload_token += 1
             app.selected_contact = ChatContact(
-                id="+399999999999", display_name="Altro", protocol=PROTOCOL_SIGNAL,
+                id="+399999999999",
+                display_name="Altro",
+                protocol=PROTOCOL_SIGNAL,
             )
             th.join(5)
             assert not th.is_alive()
@@ -289,10 +308,10 @@ class TestLoadWorkerStaleness:
         # The important regression invariant: mounting after the newer selection
         # is prevented. We assert it never mounted more than once per msg.
         from collections import Counter
+
         counts = Counter(mounted)
         for m in counts:
             assert counts[m] <= 1, f"{m} mounted {counts[m]} times"
-
 
 
 class TestRenderDedup:
@@ -300,16 +319,38 @@ class TestRenderDedup:
 
     def _make_app(self) -> SignalTUI:
         app = SignalTUI()
-        c = ChatContact(id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL)
+        c = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
         app.selected_contact = c
-        app._cache = {c.cache_key: [
-            {"text": "old", "is_mine": False, "sender": "M", "timestamp": 100,
-             "quote_text": None, "msg_type": "text", "attachment_info": None,
-             "attachment_id": None, "read": False, "status": "read"},
-            {"text": "session", "is_mine": True, "sender": "You", "timestamp": 5000000000,
-             "quote_text": None, "msg_type": "text", "attachment_info": None,
-             "attachment_id": None, "read": True, "status": "sent"},
-        ]}
+        app._cache = {
+            c.cache_key: [
+                {
+                    "text": "old",
+                    "is_mine": False,
+                    "sender": "M",
+                    "timestamp": 100,
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                    "read": False,
+                    "status": "read",
+                },
+                {
+                    "text": "session",
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": 5000000000,
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                    "read": True,
+                    "status": "sent",
+                },
+            ]
+        }
         app._loaded_all = False
         return app
 
@@ -317,16 +358,23 @@ class TestRenderDedup:
         """Anche con _seen_timestamps svuotato, _refresh_chat non rimonta doppio."""
         app = self._make_app()
         fake_log = _FakeChatLog()
-        with patch.object(app, "query_one", return_value=fake_log), \
-             patch.object(app, "call_from_thread",
-                          side_effect=lambda fn, *a, **k: fn(*a, **k)):
+        with (
+            patch.object(app, "query_one", return_value=fake_log),
+            patch.object(
+                app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
+            ),
+        ):
             app._seen_timestamps.clear()
             app._load_messages_worker()
             # Simulate a refresh with a stale (cleared) seen set — the exact
             # situation that used to double the newest/session messages.
             app._seen_timestamps.clear()
             app._refresh_chat()
-        texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
+        texts = [
+            getattr(w, "_msg_text", None)
+            for w in fake_log.children
+            if hasattr(w, "_msg_text")
+        ]
         assert len(texts) == 2  # 'old' + 'session', each exactly once
         assert texts.count("old") == 1
         assert texts.count("session") == 1
@@ -336,15 +384,30 @@ class TestRenderDedup:
         app = self._make_app()
         fake_log = _FakeChatLog()
         with patch.object(app, "query_one", return_value=fake_log):
-            app._add_message("session", is_mine=True, timestamp=5000000000,
-                             sender="You", status="sent")
+            app._add_message(
+                "session",
+                is_mine=True,
+                timestamp=5000000000,
+                sender="You",
+                status="sent",
+            )
             # Same identity again -> skipped by render-dedup.
-            app._add_message("session", is_mine=True, timestamp=5000000000,
-                             sender="You", status="sent")
+            app._add_message(
+                "session",
+                is_mine=True,
+                timestamp=5000000000,
+                sender="You",
+                status="sent",
+            )
             # A different message mounts normally.
-            app._add_message("other", is_mine=False, timestamp=5000000001,
-                             sender="M", status="read")
-        texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
+            app._add_message(
+                "other", is_mine=False, timestamp=5000000001, sender="M", status="read"
+            )
+        texts = [
+            getattr(w, "_msg_text", None)
+            for w in fake_log.children
+            if hasattr(w, "_msg_text")
+        ]
         assert texts.count("session") == 1
         assert texts.count("other") == 1
 
@@ -372,8 +435,10 @@ class TestRenderDedup:
         def fake_add(text, *args, **kwargs):
             added.append(text)
 
-        with patch.object(app, "_add_message", side_effect=fake_add), \
-             patch.object(app, "query_one", return_value=fake_log):
+        with (
+            patch.object(app, "_add_message", side_effect=fake_add),
+            patch.object(app, "query_one", return_value=fake_log),
+        ):
             app._refresh_chat()
 
         # Entrambi devono essere mostrati: soprattutto l'ULTIMO.
@@ -397,7 +462,9 @@ class TestRenderDedupSameSecond:
 
     def _make_app(self) -> SignalTUI:
         app = SignalTUI()
-        c = ChatContact(id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL)
+        c = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
         app.selected_contact = c
         app._loaded_all = False
         return app
@@ -407,11 +474,17 @@ class TestRenderDedupSameSecond:
         app = self._make_app()
         fake_log = _FakeChatLog()
         with patch.object(app, "query_one", return_value=fake_log):
-            app._add_message("primo", is_mine=False, timestamp=5000,
-                             sender="M", status="read")
-            app._add_message("ULTIMO", is_mine=False, timestamp=5000,
-                             sender="M", status="read")
-        texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
+            app._add_message(
+                "primo", is_mine=False, timestamp=5000, sender="M", status="read"
+            )
+            app._add_message(
+                "ULTIMO", is_mine=False, timestamp=5000, sender="M", status="read"
+            )
+        texts = [
+            getattr(w, "_msg_text", None)
+            for w in fake_log.children
+            if hasattr(w, "_msg_text")
+        ]
         assert texts.count("primo") == 1
         assert texts.count("ULTIMO") == 1
 
@@ -420,11 +493,17 @@ class TestRenderDedupSameSecond:
         app = self._make_app()
         fake_log = _FakeChatLog()
         with patch.object(app, "query_one", return_value=fake_log):
-            app._add_message("ciao", is_mine=False, timestamp=5000,
-                             sender="M", status="read")
-            app._add_message("ciao", is_mine=False, timestamp=5000,
-                             sender="M", status="read")
-        texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
+            app._add_message(
+                "ciao", is_mine=False, timestamp=5000, sender="M", status="read"
+            )
+            app._add_message(
+                "ciao", is_mine=False, timestamp=5000, sender="M", status="read"
+            )
+        texts = [
+            getattr(w, "_msg_text", None)
+            for w in fake_log.children
+            if hasattr(w, "_msg_text")
+        ]
         assert texts.count("ciao") == 1
 
     def test_refresh_chat_shows_both_same_second_via_real_add(self):
@@ -441,7 +520,11 @@ class TestRenderDedupSameSecond:
         fake_log = _FakeChatLog()
         with patch.object(app, "query_one", return_value=fake_log):
             app._refresh_chat()
-        texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
+        texts = [
+            getattr(w, "_msg_text", None)
+            for w in fake_log.children
+            if hasattr(w, "_msg_text")
+        ]
         assert texts.count("primo") == 1
         assert texts.count("ULTIMO") == 1
 
@@ -454,12 +537,15 @@ class TestRenderDedupSameSecond:
         fetch_history REALE contro WAHA nei test (l'ambiente di test ha .env).
         """
         from unittest.mock import MagicMock
+
         app = SignalTUI()
         app.manager = MagicMock()
         app.manager.get.return_value = None
         from models import PROTOCOL_WHATSAPP
+
         contact = ChatContact(
-            id="19645297868955@lid", display_name="Giovanni",
+            id="19645297868955@lid",
+            display_name="Giovanni",
             protocol=PROTOCOL_WHATSAPP,
         )
         app.selected_contact = contact
@@ -492,10 +578,14 @@ class TestRenderDedupSameSecond:
             mounted.append(text)
             return MagicMock()
 
-        with patch.object(app, "query_one", return_value=fake_log), \
-             patch.object(app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
-             patch.object(app, "_make_message_widget", side_effect=fake_make_widget), \
-             patch.object(app, "_add_load_more_widget"):
+        with (
+            patch.object(app, "query_one", return_value=fake_log),
+            patch.object(
+                app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
+            ),
+            patch.object(app, "_make_message_widget", side_effect=fake_make_widget),
+            patch.object(app, "_add_load_more_widget"),
+        ):
             app._load_messages_worker()
 
         # L'ultimo messaggio per timestamp deve essere mostrato.
@@ -524,7 +614,11 @@ class TestRenderDedupSameSecond:
         fake_log = _FakeChatLog()
         with patch.object(app, "query_one", return_value=fake_log):
             app._refresh_chat()
-        texts = [getattr(w, "_msg_text", None) for w in fake_log.children if hasattr(w, "_msg_text")]
+        texts = [
+            getattr(w, "_msg_text", None)
+            for w in fake_log.children
+            if hasattr(w, "_msg_text")
+        ]
         # Nessun doppione: il messaggio non viene rimontato due volte.
         assert texts.count("Ok  ci sentiamo") <= 1
 
@@ -541,9 +635,7 @@ class TestRenderDedupSameSecond:
         app = self._make_wa_app()
         contact = app.selected_contact
         app._cache = {
-            contact.cache_key: [
-                _make_message(f"msg-{i}", ts=i) for i in range(1, 26)
-            ]
+            contact.cache_key: [_make_message(f"msg-{i}", ts=i) for i in range(1, 26)]
         }
         app._chat_reload_token = 1
         app._seen_timestamps = set()
@@ -554,14 +646,20 @@ class TestRenderDedupSameSecond:
         fake_log = _FakeChatLog()
         # _make_message_widget è patcheato per non montare widget reali, ma il banner
         # usa il VERO _add_load_more_widget (monta un Button in fake_log).
-        with patch.object(app, "query_one", return_value=fake_log), \
-             patch.object(app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
-             patch.object(app, "_make_message_widget", return_value=MagicMock()):
+        with (
+            patch.object(app, "query_one", return_value=fake_log),
+            patch.object(
+                app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
+            ),
+            patch.object(app, "_make_message_widget", return_value=MagicMock()),
+        ):
             app._load_messages_worker()
 
         # Il banner deve essere sopravvissuto allo _clear_chat: almeno un
         # widget con id "load-more-msg" presente nel log.
-        load_more = [w for w in fake_log.children if getattr(w, "id", None) == "load-more-msg"]
+        load_more = [
+            w for w in fake_log.children if getattr(w, "id", None) == "load-more-msg"
+        ]
         assert load_more, "Il banner 'load previous messages' non compare nel log"
 
     def test_image_messages_mount_from_cache(self):
@@ -589,10 +687,14 @@ class TestRenderDedupSameSecond:
 
         fake_log = _FakeChatLog()
 
-        with patch.object(app, "query_one", return_value=fake_log), \
-             patch.object(app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
-             patch.object(app, "_make_message_widget", return_value=MagicMock()), \
-             patch.object(app, "_add_load_more_widget"):
+        with (
+            patch.object(app, "query_one", return_value=fake_log),
+            patch.object(
+                app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
+            ),
+            patch.object(app, "_make_message_widget", return_value=MagicMock()),
+            patch.object(app, "_add_load_more_widget"),
+        ):
             app._load_messages_worker()
 
         # Estrae tutti gli ImageWidget montati nel fake_log
@@ -604,4 +706,3 @@ class TestRenderDedupSameSecond:
         # Il path non è risolto quando si carica da cache
         assert image_widgets[0].attachment_path is None
         assert image_widgets[0].attachment_id == "img-001.jpg"
-

@@ -51,6 +51,7 @@ _INCOMING_DEDUP_WINDOW_MS = 2000
 
 # ─── TelegramBackend ──────────────────────────────────────────────────────────
 
+
 class TelegramBackend(ChatBackend):
     """Telegram backend using Telethon with a dedicated asyncio event loop."""
 
@@ -134,7 +135,10 @@ class TelegramBackend(ChatBackend):
         asyncio.set_event_loop(self._loop)
 
         self._client = TelegramClient(
-            self._session_path, self._api_id, self._api_hash, loop=self._loop,
+            self._session_path,
+            self._api_id,
+            self._api_hash,
+            loop=self._loop,
         )
 
         try:
@@ -144,9 +148,7 @@ class TelegramBackend(ChatBackend):
             self._connected = False
             return
 
-        authorised = self._loop.run_until_complete(
-            self._client.is_user_authorized()
-        )
+        authorised = self._loop.run_until_complete(self._client.is_user_authorized())
 
         if not authorised:
             logger.info("Telegram: not authorised, waiting for QR pairing")
@@ -170,6 +172,7 @@ class TelegramBackend(ChatBackend):
         @self._client.on(events.Raw)
         async def _on_raw(update: Any) -> None:
             from telethon.tl.types import UpdateReadHistoryOutbox
+
             if isinstance(update, UpdateReadHistoryOutbox):
                 await self._handle_read_receipt(update)
             else:
@@ -365,6 +368,7 @@ class TelegramBackend(ChatBackend):
         """Synchronous send, for use from the TUI's sync callbacks."""
         if self._loop is None or self._client is None:
             raise RuntimeError("Telegram backend not connected")
+
         async def _send():
             try:
                 eid = int(contact_id)
@@ -373,6 +377,7 @@ class TelegramBackend(ChatBackend):
             entity = await self._client.get_input_entity(eid)
             msg = await self._client.send_message(entity, text)
             return str(msg.id)
+
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
         return future.result(timeout=30)
 
@@ -380,6 +385,7 @@ class TelegramBackend(ChatBackend):
         """Synchronous mark-read — persists read status to SQLite."""
         try:
             from backend import _mark_as_read
+
             _mark_as_read(contact_id, protocol=PROTOCOL_TELEGRAM)
         except Exception as _e:
             logger.debug("Telegram mark-read persistence failed", exc_info=True)
@@ -394,8 +400,11 @@ class TelegramBackend(ChatBackend):
     async def _handle_new_message(self, event: Any) -> None:
         """Telethon event handler: normalise and enqueue a new message."""
         msg = event.message
-        logger.info("Telegram: NewMessage event, msg_id=%s chat_id=%s", 
-                     getattr(msg, 'id', '?'), getattr(msg, 'chat_id', '?'))
+        logger.info(
+            "Telegram: NewMessage event, msg_id=%s chat_id=%s",
+            getattr(msg, "id", "?"),
+            getattr(msg, "chat_id", "?"),
+        )
         if msg is None:
             return
 
@@ -405,6 +414,7 @@ class TelegramBackend(ChatBackend):
             try:
                 import os
                 import tempfile
+
                 media_dir = os.path.join(tempfile.gettempdir(), "telegram-media")
                 os.makedirs(media_dir, exist_ok=True)
                 path = await msg.download_media(file=media_dir)
@@ -419,7 +429,9 @@ class TelegramBackend(ChatBackend):
             self._events.put(evt)
             logger.info("Telegram: enqueued event for chat %s", evt.contact_id)
 
-    def _message_to_chat_event(self, msg: Any, attachment_id: str | None = None) -> ChatEvent | None:
+    def _message_to_chat_event(
+        self, msg: Any, attachment_id: str | None = None
+    ) -> ChatEvent | None:
         """Convert a Telethon ``Message`` (or mock) into a ``ChatEvent``."""
         try:
             chat_id = str(msg.chat_id) if msg.chat_id else None
@@ -528,7 +540,12 @@ class TelegramBackend(ChatBackend):
         updated: list[dict] = []
         for msg in self.cache.get(contact_id, []):
             mid = msg.get("id")
-            if mid and int(mid) <= max_id and msg.get("is_mine") and msg.get("status") != "read":
+            if (
+                mid
+                and int(mid) <= max_id
+                and msg.get("is_mine")
+                and msg.get("status") != "read"
+            ):
                 msg["status"] = "read"
                 updated.append(msg)
 
@@ -536,22 +553,27 @@ class TelegramBackend(ChatBackend):
             # Persist to SQLite
             try:
                 from backend import _update_message_status
+
                 for msg in updated:
                     _update_message_status(
-                        msg["timestamp"], "read",
-                        protocol=PROTOCOL_TELEGRAM, contact_number=contact_id,
+                        msg["timestamp"],
+                        "read",
+                        protocol=PROTOCOL_TELEGRAM,
+                        contact_number=contact_id,
                     )
             except Exception:
                 logger.exception("Telegram: _update_message_status failed")
 
             # Enqueue receipt event for the TUI (matches generic pattern)
             message_ids = [msg.get("id") for msg in updated if msg.get("id")]
-            self._events.put(ChatEvent(
-                type="receipt",
-                protocol=PROTOCOL_TELEGRAM,
-                contact_id=contact_id,
-                payload={"message_ids": message_ids, "is_read": True},
-            ))
+            self._events.put(
+                ChatEvent(
+                    type="receipt",
+                    protocol=PROTOCOL_TELEGRAM,
+                    contact_id=contact_id,
+                    payload={"message_ids": message_ids, "is_read": True},
+                )
+            )
 
     # ─── poll_once (queue drain) ───────────────────────────────────────────
 
@@ -570,7 +592,9 @@ class TelegramBackend(ChatBackend):
         to_persist: list[tuple[str, dict]] = []
         for contact_id, msgs in self.cache.items():
             for msg in msgs:
-                if msg.get("is_mine") and str(msg.get("id", "")) in {str(i) for i in ids}:
+                if msg.get("is_mine") and str(msg.get("id", "")) in {
+                    str(i) for i in ids
+                }:
                     old = msg.get("status", "sent")
                     rank = {"sent": 0, "delivered": 1, "read": 2}
                     if old != target and rank.get(target, 0) > rank.get(old, 0):
@@ -579,10 +603,13 @@ class TelegramBackend(ChatBackend):
                         to_persist.append((contact_id, msg))
         if to_persist:
             from backend import _update_message_status
+
             for contact_id, msg in to_persist:
                 _update_message_status(
-                    msg["timestamp"], msg["status"],
-                    protocol=PROTOCOL_TELEGRAM, contact_number=contact_id,
+                    msg["timestamp"],
+                    msg["status"],
+                    protocol=PROTOCOL_TELEGRAM,
+                    contact_number=contact_id,
                 )
         return updated
 
@@ -604,14 +631,13 @@ class TelegramBackend(ChatBackend):
         """Load Telegram message cache from the shared SQLite database."""
         try:
             from backend import _load_cache as _load_sqlite_cache
+
             return _load_sqlite_cache(protocol=PROTOCOL_TELEGRAM)
         except Exception:
             logger.exception("Telegram: failed to load protocol cache")
             return {}
 
-    def ingest_message(
-        self, contact_id: str, data: dict, ts: int
-    ) -> bool:
+    def ingest_message(self, contact_id: str, data: dict, ts: int) -> bool:
         """Add a message to the in-memory cache AND SQLite with dedup.
 
         Returns True if the message was newly added, False if duplicate.
@@ -673,19 +699,21 @@ class TelegramBackend(ChatBackend):
         if contact_id not in self.cache:
             self.cache[contact_id] = []
 
-        self.cache[contact_id].append({
-            "id": mid,
-            "text": text,
-            "is_mine": data.get("is_mine", False),
-            "sender": data.get("sender", ""),
-            "timestamp": ts,
-            "quote_text": data.get("quote_text"),
-            "msg_type": data.get("msg_type", "text"),
-            "attachment_info": data.get("attachment_info"),
-            "attachment_id": data.get("attachment_id"),
-            "read": data.get("is_mine", False),  # incoming = unread
-            "status": "sent" if data.get("is_mine") else "read",
-        })
+        self.cache[contact_id].append(
+            {
+                "id": mid,
+                "text": text,
+                "is_mine": data.get("is_mine", False),
+                "sender": data.get("sender", ""),
+                "timestamp": ts,
+                "quote_text": data.get("quote_text"),
+                "msg_type": data.get("msg_type", "text"),
+                "attachment_info": data.get("attachment_info"),
+                "attachment_id": data.get("attachment_id"),
+                "read": data.get("is_mine", False),  # incoming = unread
+                "status": "sent" if data.get("is_mine") else "read",
+            }
+        )
 
         # Keep cache bounded
         if len(self.cache[contact_id]) > _MAX_CACHE_PER_CONTACT:
@@ -743,7 +771,10 @@ class TelegramBackend(ChatBackend):
         self._loop = loop
 
         client = TelegramClient(
-            self._session_path, self._api_id, self._api_hash, loop=loop,
+            self._session_path,
+            self._api_id,
+            self._api_hash,
+            loop=loop,
         )
         self._client = client
 
@@ -800,11 +831,15 @@ class TelegramBackend(ChatBackend):
                     try:
                         loop.run_until_complete(client.disconnect())
                     except Exception as _e:
-                        logger.debug("Telegram QR cleanup disconnect failed", exc_info=True)
+                        logger.debug(
+                            "Telegram QR cleanup disconnect failed", exc_info=True
+                        )
                     loop.close()
 
         self._loop_thread = threading.Thread(
-            target=_wait_thread, name="telegram-qr-wait", daemon=True,
+            target=_wait_thread,
+            name="telegram-qr-wait",
+            daemon=True,
         )
         self._loop_thread.start()
 

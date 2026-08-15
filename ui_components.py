@@ -94,8 +94,6 @@ class ChatAreaWidget(Vertical):
         )
 
 
-
-
 class MessageWidget(Static):
     """A clickable, focusable widget that displays a text message.
 
@@ -188,7 +186,6 @@ class MessageWidget(Static):
         self.can_focus = True
         self._apply_status_style()
         self._apply_protocol_accent()
-
 
     _PROTOCOL_ACCENT: ClassVar[dict[str, str]] = {
         "signal": "msg-signal",
@@ -299,7 +296,9 @@ class ImageWidget(Static):
     class ImageClicked(Message):
         """Posted when the user activates this image widget."""
 
-        def __init__(self, attachment_path: Path | None, attachment_id: str = "") -> None:
+        def __init__(
+            self, attachment_path: Path | None, attachment_id: str = ""
+        ) -> None:
             super().__init__()
             self.attachment_path = attachment_path
             self.attachment_id = attachment_id
@@ -331,7 +330,9 @@ class ImageWidget(Static):
     def on_click(self) -> None:
         """Mouse click → emit ``ImageClicked``."""
         if self.attachment_path or self.attachment_id:
-            self.post_message(self.ImageClicked(self.attachment_path, self.attachment_id))
+            self.post_message(
+                self.ImageClicked(self.attachment_path, self.attachment_id)
+            )
 
     def on_focus(self) -> None:
         """Visual feedback when focused."""
@@ -344,7 +345,9 @@ class ImageWidget(Static):
     def key_enter(self) -> None:
         """Enter key → emit ``ImageClicked``."""
         if self.attachment_path or self.attachment_id:
-            self.post_message(self.ImageClicked(self.attachment_path, self.attachment_id))
+            self.post_message(
+                self.ImageClicked(self.attachment_path, self.attachment_id)
+            )
 
 
 class ImageModalScreen(ModalScreen):
@@ -406,14 +409,13 @@ class ImageModalScreen(ModalScreen):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "catimg",
-                "-w", str(self._catimg_pixels),
+                "-w",
+                str(self._catimg_pixels),
                 str(self._attachment_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=30.0
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
 
             if proc.returncode != 0:
                 raise RuntimeError(

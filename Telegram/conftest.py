@@ -1,6 +1,7 @@
 """
 Telegram test fixtures — prevents SQLite contamination.
 """
+
 from unittest.mock import patch
 
 import pytest

@@ -38,14 +38,18 @@ from models import (
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
+
 def _signal_contact(cid="+391", name="Mario") -> ChatContact:
     return ChatContact(id=cid, display_name=name, protocol=PROTOCOL_SIGNAL)
+
 
 def _whatsapp_contact(cid="wa:1@s.whatsapp.net", name="Anna") -> ChatContact:
     return ChatContact(id=cid, display_name=name, protocol=PROTOCOL_WHATSAPP)
 
+
 def _telegram_contact(cid="123456789", name="Luigi") -> ChatContact:
     return ChatContact(id=cid, display_name=name, protocol=PROTOCOL_TELEGRAM)
+
 
 def _make_multi_manager() -> BackendManager:
     """Creates a BackendManager with all 3 backends registered."""
@@ -56,7 +60,7 @@ def _make_multi_manager() -> BackendManager:
     signal.contacts = [_signal_contact()]
     signal.cache = {}
     signal._events = queue.Queue()
-    signal._event_queue = signal._events   # alias per poll_once()
+    signal._event_queue = signal._events  # alias per poll_once()
 
     whatsapp = WhatsAppBackend.__new__(WhatsAppBackend)
     whatsapp.protocol = PROTOCOL_WHATSAPP
@@ -69,8 +73,8 @@ def _make_multi_manager() -> BackendManager:
     return manager, signal, whatsapp
 
 
-
 # ─── BackendManager multi-protocol routing ───────────────────────────────
+
 
 class TestMultiBackendRouting:
     """🗂️ 3 backends registrati: routing corretto per ogni protocollo."""
@@ -78,6 +82,7 @@ class TestMultiBackendRouting:
     def test_all_protocols_registered(self):
         manager, _, _ = _make_multi_manager()
         from backends.telegram import TelegramBackend
+
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
         telegram.contacts = [_telegram_contact()]
@@ -86,12 +91,15 @@ class TestMultiBackendRouting:
         manager.register(telegram)
 
         assert set(manager.protocols()) == {
-            PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP, PROTOCOL_TELEGRAM,
+            PROTOCOL_SIGNAL,
+            PROTOCOL_WHATSAPP,
+            PROTOCOL_TELEGRAM,
         }
 
     def test_list_contacts_merges_three_backends(self):
         manager, _, _ = _make_multi_manager()
         from backends.telegram import TelegramBackend
+
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
         telegram.contacts = [_telegram_contact()]
@@ -106,15 +114,24 @@ class TestMultiBackendRouting:
 
     def test_get_attachment_path_routes_to_correct_backend(self):
         manager, signal, whatsapp = _make_multi_manager()
-        signal.get_attachment_path = lambda aid: Path("/signal/file.jpg") if aid == "s1" else None
-        whatsapp.get_attachment_path = lambda aid: Path("/wa/file.jpg") if aid == "w1" else None
+        signal.get_attachment_path = lambda aid: (
+            Path("/signal/file.jpg") if aid == "s1" else None
+        )
+        whatsapp.get_attachment_path = lambda aid: (
+            Path("/wa/file.jpg") if aid == "w1" else None
+        )
 
-        assert manager.get_attachment_path(PROTOCOL_SIGNAL, "s1") == Path("/signal/file.jpg")
-        assert manager.get_attachment_path(PROTOCOL_WHATSAPP, "w1") == Path("/wa/file.jpg")
+        assert manager.get_attachment_path(PROTOCOL_SIGNAL, "s1") == Path(
+            "/signal/file.jpg"
+        )
+        assert manager.get_attachment_path(PROTOCOL_WHATSAPP, "w1") == Path(
+            "/wa/file.jpg"
+        )
         assert manager.get_attachment_path("nonexistent", "x") is None
 
     def test_send_message_routes_to_correct_backend(self):
         import asyncio
+
         manager, signal, whatsapp = _make_multi_manager()
         signal.send_message = AsyncMock(return_value="sig-ts")
         whatsapp.send_message = AsyncMock(return_value="wa-ts")
@@ -129,16 +146,23 @@ class TestMultiBackendRouting:
         assert result_sig == "sig-ts"
         assert result_wa == "wa-ts"
         signal.send_message.assert_called_once_with(
-            "+391", "ciao signal",
-            quote_timestamp=None, quote_author=None, quote_message=None,
+            "+391",
+            "ciao signal",
+            quote_timestamp=None,
+            quote_author=None,
+            quote_message=None,
         )
         whatsapp.send_message.assert_called_once_with(
-            "wa:1", "ciao wa",
-            quote_timestamp=None, quote_author=None, quote_message=None,
+            "wa:1",
+            "ciao wa",
+            quote_timestamp=None,
+            quote_author=None,
+            quote_message=None,
         )
 
     def test_send_message_unknown_protocol_still_raises(self):
         import asyncio
+
         manager, _, _ = _make_multi_manager()
         # Adding Telegram doesn't make unknown protocols valid
         with pytest.raises(KeyError):
@@ -146,6 +170,7 @@ class TestMultiBackendRouting:
 
     def test_mark_read_routes_to_correct_backend(self):
         import asyncio
+
         manager, signal, whatsapp = _make_multi_manager()
         signal.mark_read = AsyncMock()
         whatsapp.mark_read = AsyncMock()
@@ -159,14 +184,22 @@ class TestMultiBackendRouting:
     def test_poll_once_independent_per_backend(self):
         """Ogni backend ha la sua coda: poll_once non mischia eventi."""
         _, signal, whatsapp = _make_multi_manager()
-        signal._events.put(ChatEvent(
-            type="message", protocol=PROTOCOL_SIGNAL,
-            contact_id="+391", payload={"text": "sig"},
-        ))
-        whatsapp._events.put(ChatEvent(
-            type="message", protocol=PROTOCOL_WHATSAPP,
-            contact_id="wa:1", payload={"text": "wa"},
-        ))
+        signal._events.put(
+            ChatEvent(
+                type="message",
+                protocol=PROTOCOL_SIGNAL,
+                contact_id="+391",
+                payload={"text": "sig"},
+            )
+        )
+        whatsapp._events.put(
+            ChatEvent(
+                type="message",
+                protocol=PROTOCOL_WHATSAPP,
+                contact_id="wa:1",
+                payload={"text": "wa"},
+            )
+        )
 
         sig_events = signal.poll_once()
         wa_events = whatsapp.poll_once()
@@ -187,16 +220,22 @@ class TestMultiBackendRouting:
 
 # ─── Cache isolation across protocols ─────────────────────────────────────
 
+
 class TestCacheIsolation:
     """🗃️ I messaggi di protocolli diversi NON si mischiano nel cache."""
 
     def _data(self, contact_id, protocol, text="Hello", id_="1"):
         return {
-            "id": id_, "contact_id": contact_id,
-            "protocol": protocol, "text": text,
-            "is_mine": False, "sender": "X",
-            "timestamp": 1000, "quote_text": None,
-            "msg_type": "text", "attachment_info": None,
+            "id": id_,
+            "contact_id": contact_id,
+            "protocol": protocol,
+            "text": text,
+            "is_mine": False,
+            "sender": "X",
+            "timestamp": 1000,
+            "quote_text": None,
+            "msg_type": "text",
+            "attachment_info": None,
             "attachment_id": None,
         }
 
@@ -231,6 +270,7 @@ class TestCacheIsolation:
     def test_same_phone_different_protocol_different_cache_keys(self):
         """Stesso numero su Signal e Telegram → due cache key diverse."""
         from backends.telegram import TelegramBackend
+
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
         telegram.contacts = []
@@ -268,6 +308,7 @@ class TestCacheIsolation:
 
 # ─── Model constants integrity ───────────────────────────────────────────
 
+
 class TestModelConstants:
     """🧬 Aggiungere PROTOCOL_TELEGRAM non modifica le costanti esistenti."""
 
@@ -282,14 +323,17 @@ class TestModelConstants:
 
     def test_emoji_map_retains_signal(self):
         from models import PROTOCOL_EMOJI
+
         assert PROTOCOL_EMOJI[PROTOCOL_SIGNAL] == "📱"
 
     def test_emoji_map_retains_whatsapp(self):
         from models import PROTOCOL_EMOJI
+
         assert PROTOCOL_EMOJI[PROTOCOL_WHATSAPP] == "💬"
 
     def test_emoji_map_has_telegram(self):
         from models import PROTOCOL_EMOJI
+
         assert PROTOCOL_EMOJI[PROTOCOL_TELEGRAM] == "📨"
 
     def test_protocol_emoji_fallback_unchanged(self):
@@ -312,53 +356,75 @@ class TestModelConstants:
 
 # ─── Config isolation ────────────────────────────────────────────────────
 
+
 class TestConfigIsolation:
     """⚙️ telegram_enabled() non interferisce con whatsapp_enabled()."""
 
     def test_telegram_disabled_by_default(self):
         """Senza credenziali, telegram_enabled() è False."""
-        with patch.dict("os.environ", {}, clear=True), \
-             patch("backends.config._load_dotenv", return_value={}):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("backends.config._load_dotenv", return_value={}),
+        ):
             from backends.config import telegram_enabled
+
             assert telegram_enabled() is False
 
     def test_whatsapp_enabled_not_affected_by_telegram_config(self):
         """whatsapp_enabled() non è influenzato da variabili Telegram."""
-        with patch.dict("os.environ", {
-            "TELEGRAM_API_ID": "12345",
-            "TELEGRAM_API_HASH": "abc",
-        }, clear=True):
+        with patch.dict(
+            "os.environ",
+            {
+                "TELEGRAM_API_ID": "12345",
+                "TELEGRAM_API_HASH": "abc",
+            },
+            clear=True,
+        ):
             from backends.config import telegram_enabled, whatsapp_enabled
+
             with patch("backends.config._local_waha_reachable", return_value=False):
                 assert telegram_enabled() is True
                 assert whatsapp_enabled() is False
 
     def test_telegram_enabled_requires_both_credentials(self):
-        with patch.dict("os.environ", {"TELEGRAM_API_ID": "12345"}, clear=True), \
-             patch("backends.config._load_dotenv", return_value={}):
+        with (
+            patch.dict("os.environ", {"TELEGRAM_API_ID": "12345"}, clear=True),
+            patch("backends.config._load_dotenv", return_value={}),
+        ):
             from backends.config import telegram_enabled
+
             assert telegram_enabled() is False
 
-        with patch.dict("os.environ", {"TELEGRAM_API_HASH": "abc"}, clear=True), \
-             patch("backends.config._load_dotenv", return_value={}):
+        with (
+            patch.dict("os.environ", {"TELEGRAM_API_HASH": "abc"}, clear=True),
+            patch("backends.config._load_dotenv", return_value={}),
+        ):
             from backends.config import telegram_enabled
+
             assert telegram_enabled() is False
 
-        with patch.dict("os.environ", {
-            "TELEGRAM_API_ID": "12345",
-            "TELEGRAM_API_HASH": "abc",
-        }, clear=True):
+        with patch.dict(
+            "os.environ",
+            {
+                "TELEGRAM_API_ID": "12345",
+                "TELEGRAM_API_HASH": "abc",
+            },
+            clear=True,
+        ):
             from backends.config import telegram_enabled
+
             assert telegram_enabled() is True
 
     def test_session_path_uses_cache_dir(self):
         from backends.config import get_telegram_session_path
+
         path = get_telegram_session_path()
         assert path.name == "telegram.session"
         assert "signal-tui-client" in str(path)
 
 
 # ─── Protocol filter cycle with 4 protocols ──────────────────────────────
+
 
 class TestProtocolFilterFourWay:
     """🎛️ Il filtro Ctrl+W cicla su 4 protocolli senza rompere l'ordine."""
@@ -381,9 +447,12 @@ class TestProtocolFilterFourWay:
     def test_filtered_contacts_respects_telegram(self):
         """_filtered_contacts filtra per 'telegram' come per signal/whatsapp."""
         contacts = [
-            _signal_contact(), _whatsapp_contact(), _telegram_contact(),
+            _signal_contact(),
+            _whatsapp_contact(),
+            _telegram_contact(),
             _telegram_contact("999", "Paolo"),
         ]
+
         # Simula _filtered_contacts
         def filtered(protocol_filter):
             if protocol_filter == "all":
@@ -398,21 +467,31 @@ class TestProtocolFilterFourWay:
 
 # ─── Edge cases and unhappy paths ────────────────────────────────────────
 
+
 class TestEdgeCases:
     """⚠️ Casi limite: protocolli vuoti, doppia registrazione, shutdown."""
 
     def test_register_empty_protocol_still_rejected(self):
         """Registrare un backend con protocol='' deve ancora fallire."""
         manager = BackendManager()
+
         class _Bad(ChatBackend):
             protocol = ""
-            def __init__(self): pass
+
+            def __init__(self):
+                pass
+
             async def connect(self): ...
             async def disconnect(self): ...
-            async def list_contacts(self): return []
-            async def send_message(self, *a, **k): return ""
+            async def list_contacts(self):
+                return []
+
+            async def send_message(self, *a, **k):
+                return ""
+
             async def mark_read(self, *a): ...
             async def receive(self): ...
+
         with pytest.raises(ValueError, match="non-empty"):
             manager.register(_Bad())
 
@@ -420,6 +499,7 @@ class TestEdgeCases:
         """Registrare Telegram non modifica il riferimento WhatsApp."""
         manager, signal, whatsapp = _make_multi_manager()
         from backends.telegram import TelegramBackend
+
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
         telegram.contacts = []
@@ -438,6 +518,7 @@ class TestEdgeCases:
         signal._events = queue.Queue()
 
         from backends.telegram import TelegramBackend
+
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
         telegram.contacts = []
@@ -460,6 +541,7 @@ class TestEdgeCases:
     def test_disconnect_all_with_partial_failure(self):
         """disconnect_all non crasha se un backend fallisce la disconnessione."""
         import asyncio
+
         manager, signal, whatsapp = _make_multi_manager()
         signal.disconnect = AsyncMock(side_effect=RuntimeError("fail"))
         whatsapp.disconnect = AsyncMock()
@@ -471,6 +553,7 @@ class TestEdgeCases:
 
     def test_mark_read_unknown_protocol_still_raises(self):
         import asyncio
+
         manager, _, _ = _make_multi_manager()
         with pytest.raises(KeyError):
             asyncio.run(manager.mark_read("nope", "x"))
@@ -487,6 +570,7 @@ class TestEdgeCases:
             _signal_contact("+2", "Bob"),
         ]
         from backends.telegram import TelegramBackend
+
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
         telegram.contacts = [_telegram_contact()]
@@ -502,12 +586,14 @@ class TestEdgeCases:
     def test_whatsapp_specific_functionality_not_broken(self):
         """WhatsApp REST client e metodi non sono toccati da Telegram."""
         from backends.whatsapp import WhatsAppRESTClient
+
         client = WhatsAppRESTClient("http://test.local")
         assert client.base_url == "http://test.local"
         assert client.session_name is not None
 
     def test_filter_title_suffix_includes_telegram(self):
         """Il suffisso del titolo include Telegram."""
+
         def suffix(protocol_filter):
             if protocol_filter == "all":
                 return " - All"
@@ -520,10 +606,10 @@ class TestEdgeCases:
 
     def test_protocol_class_includes_telegram(self):
         """La classe CSS per Telegram è 'protocol-telegram'."""
+
         def protocol_class(contact):
             return f"protocol-{contact.protocol}"
 
         assert protocol_class(_signal_contact()) == "protocol-signal"
         assert protocol_class(_whatsapp_contact()) == "protocol-whatsapp"
         assert protocol_class(_telegram_contact()) == "protocol-telegram"
-

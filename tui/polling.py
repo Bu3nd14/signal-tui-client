@@ -7,7 +7,6 @@ logger = logging.getLogger(__name__)
 
 
 class PollingMixin:
-
     def _poll_worker(self):
         """Thread worker that polls the backend receive loop.
 
@@ -36,26 +35,34 @@ class PollingMixin:
                         if self._typing_contacts:
                             now = time.time()
                             expired = [
-                                key for key, started_at in self._typing_contacts.items()
+                                key
+                                for key, started_at in self._typing_contacts.items()
                                 if now - started_at > self._TYPING_TIMEOUT
                             ]
                             if expired:
                                 for key in expired:
                                     self._typing_contacts.pop(key, None)
-                                    self._typing_mumbling[key] = now + self._TYPING_MUMBLING_DURATION
-                                    self.call_from_thread(self._update_typing_label, key)
+                                    self._typing_mumbling[key] = (
+                                        now + self._TYPING_MUMBLING_DURATION
+                                    )
+                                    self.call_from_thread(
+                                        self._update_typing_label, key
+                                    )
 
                         # Mumbling expiry: once the mumbling window passes, remove it.
                         if self._typing_mumbling:
                             now = time.time()
                             expired = [
-                                key for key, expires_at in self._typing_mumbling.items()
+                                key
+                                for key, expires_at in self._typing_mumbling.items()
                                 if now >= expires_at
                             ]
                             if expired:
                                 for key in expired:
                                     self._typing_mumbling.pop(key, None)
-                                    self.call_from_thread(self._update_typing_label, key)
+                                    self.call_from_thread(
+                                        self._update_typing_label, key
+                                    )
 
                 # Flush differito della lista contatti: se durante il batch è
                 # arrivato qualcosa (messaggio/typing), esegue UN solo aggiornamento
@@ -80,7 +87,6 @@ class PollingMixin:
                     # invece di rifare il giro completo due volte.
                     self.call_from_thread(self._reorder_contact_list)
 
-
                 # Prompt-exit inner sleep.  This runs every cycle (even when no
                 # messages arrived) so the worker exits as soon as the user quits.
                 for _ in range(10):
@@ -92,5 +98,3 @@ class PollingMixin:
             # Re-check before the next poll so an empty round still exits.
             if not self._polling_active:
                 return
-
-

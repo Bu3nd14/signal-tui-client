@@ -62,8 +62,12 @@ class WhatsAppBackend(ChatBackend):
 
     protocol = PROTOCOL_WHATSAPP
 
-    def __init__(self, api_url: str | None = None, media_dir: str | None = None,
-                 session_name: str | None = None):
+    def __init__(
+        self,
+        api_url: str | None = None,
+        media_dir: str | None = None,
+        session_name: str | None = None,
+    ):
         self.api_url = (api_url or resolve_whatsapp_api_url()).rstrip("/")
         self.session_name = session_name or get_whatsapp_session_name()
         self.media_dir = media_dir or get_whatsapp_media_dir() or None
@@ -113,7 +117,9 @@ class WhatsAppBackend(ChatBackend):
         ack_msg_event = None
         evt_name = raw.get("event", "")
         if "ack" in str(evt_name).lower():
-            content = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
+            content = (
+                raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
+            )
             if content.get("fromMe") and content.get("id"):
                 # WAHA may nest remoteJid inside "key" (same envelope as
                 # /api/messages).  Without it group outgoing messages fail.
@@ -124,7 +130,9 @@ class WhatsAppBackend(ChatBackend):
                     or (content.get("key") or {}).get("remoteJid")
                 )
                 if ack_contact:
-                    ack_ts = int(content.get("timestamp") or 0) * 1000  # WAHA uses seconds, we use ms
+                    ack_ts = (
+                        int(content.get("timestamp") or 0) * 1000
+                    )  # WAHA uses seconds, we use ms
                     ack_text = content.get("body") or content.get("text") or ""
 
                     # ── Extract image/attachment metadata from ack payload ──
@@ -141,7 +149,10 @@ class WhatsAppBackend(ChatBackend):
                             mime = (media.get("mimetype") or "").lower()
                             if mime.startswith("image/"):
                                 ack_msg_type = "image"
-                            elif any(mime.startswith(p) for p in ("video/", "audio/", "application/")):
+                            elif any(
+                                mime.startswith(p)
+                                for p in ("video/", "audio/", "application/")
+                            ):
                                 ack_msg_type = "attachment"
                             ack_attachment_id = media.get("url") or content.get("id")
                             ack_attachment_info = (
@@ -152,15 +163,19 @@ class WhatsAppBackend(ChatBackend):
                                 or "Media"
                             )
 
-                    added_from_ack = self.ingest_message(ack_contact, {
-                        "id": content.get("id"),
-                        "text": ack_text,
-                        "is_mine": True,
-                        "sender": "You",
-                        "msg_type": ack_msg_type,
-                        "attachment_id": ack_attachment_id,
-                        "attachment_info": ack_attachment_info,
-                    }, ack_ts)
+                    added_from_ack = self.ingest_message(
+                        ack_contact,
+                        {
+                            "id": content.get("id"),
+                            "text": ack_text,
+                            "is_mine": True,
+                            "sender": "You",
+                            "msg_type": ack_msg_type,
+                            "attachment_id": ack_attachment_id,
+                            "attachment_info": ack_attachment_info,
+                        },
+                        ack_ts,
+                    )
                     if added_from_ack:
                         # Synthetic message event: lets _handle_message_event
                         # mirror the message into the UI cache and call
@@ -175,7 +190,9 @@ class WhatsAppBackend(ChatBackend):
                                 "sender": "You",
                                 "timestamp": ack_ts,
                                 "id": content.get("id"),
-                                "is_group": ack_contact.endswith("@g.us") if ack_contact else False,
+                                "is_group": ack_contact.endswith("@g.us")
+                                if ack_contact
+                                else False,
                                 "msg_type": ack_msg_type,
                                 "attachment_id": ack_attachment_id,
                                 "attachment_info": ack_attachment_info,
@@ -222,8 +239,13 @@ class WhatsAppBackend(ChatBackend):
         status = self._rest.get_session_status() or {}
         s = str(status.get("status") or "").lower()
         return s in (
-            "pending", "connecting", "unauthorized", "not_authenticated",
-            "unpaired", "scan_qr", "scan_qr_code",
+            "pending",
+            "connecting",
+            "unauthorized",
+            "not_authenticated",
+            "unpaired",
+            "scan_qr",
+            "scan_qr_code",
         )
 
     @property
@@ -240,7 +262,6 @@ class WhatsAppBackend(ChatBackend):
         if not self._rest:
             return None
         return self._rest.get_pairing_qr()
-
 
     # ─── Lifecycle ────────────────────────────────────────────────────
 
@@ -294,7 +315,7 @@ class WhatsAppBackend(ChatBackend):
                 status = self._rest.get_session_status() or {}
                 s = str(status.get("status") or "").lower()
                 # Dead states: no point waiting, exit immediately
-                if s in ('failed', 'stopped', 'stop', ''):
+                if s in ("failed", "stopped", "stop", ""):
                     return False
                 # Pronto: stato WORKING o qualsiasi stato "stabile" non di
                 # connessione/pairing (coerente con needs_pairing).
@@ -302,14 +323,23 @@ class WhatsAppBackend(ChatBackend):
                     return True
                 # Still in transient state — keep waiting
                 if s not in (
-                    "pending", "connecting", "unauthorized",
-                    "not_authenticated", "unpaired", "scan_qr", "scan_qr_code",
-                    "starting", "loading", "syncing",
+                    "pending",
+                    "connecting",
+                    "unauthorized",
+                    "not_authenticated",
+                    "unpaired",
+                    "scan_qr",
+                    "scan_qr_code",
+                    "starting",
+                    "loading",
+                    "syncing",
                 ):
                     return False  # unknown state, don't wait
             except Exception as _e:
                 # WAHA unreachable — stop waiting
-                logger.debug("WAHA unreachable while waiting for session", exc_info=True)
+                logger.debug(
+                    "WAHA unreachable while waiting for session", exc_info=True
+                )
                 return False
             time.sleep(0.5)
         return False
@@ -330,35 +360,38 @@ class WhatsAppBackend(ChatBackend):
         try:
             webhook = get_whatsapp_webhook_url()
             current = self._rest.get_session_status() or {}
-            configured = (current.get("config") or {})
-            urls = [
-                (w or {}).get("url")
-                for w in (configured.get("webhooks") or [])
-            ]
+            configured = current.get("config") or {}
+            urls = [(w or {}).get("url") for w in (configured.get("webhooks") or [])]
             desired_events = [
-                "message", "message.any", "message.ack", "message.ack.group",
+                "message",
+                "message.any",
+                "message.ack",
+                "message.ack.group",
             ]
             if webhook in urls:
                 # URL già registrato — controlla se anche gli eventi sono
                 # aggiornati (es. dopo un upgrade che ha aggiunto message.ack).
-                for w in (configured.get("webhooks") or []):
+                for w in configured.get("webhooks") or []:
                     if (w or {}).get("url") == webhook:
                         current_events = (w or {}).get("events") or []
                         if set(current_events) >= set(desired_events):
                             return  # già aggiornato: niente restart
                         break
-            self._rest.update_session_config({
-                "config": {
-                    "webhooks": [{
-                        "url": webhook,
-                        "events": desired_events,
-                    }]
+            self._rest.update_session_config(
+                {
+                    "config": {
+                        "webhooks": [
+                            {
+                                "url": webhook,
+                                "events": desired_events,
+                            }
+                        ]
+                    }
                 }
-            })
+            )
         except Exception as _e:
             # best-effort: non bloccare mai l'avvio
             logger.debug("WhatsApp webhook config failed", exc_info=True)
-
 
     async def disconnect(self) -> None:
         """Stop the WebSocket consumer and release resources."""
@@ -414,12 +447,14 @@ class WhatsAppBackend(ChatBackend):
                 continue
             name = c.get("name") or c.get("pushName") or c.get("notifyName") or ""
             last_ts = int(c.get("last_ts") or 0)
-            contacts.append(ChatContact(
-                id=jid,
-                display_name=name or jid,
-                protocol=PROTOCOL_WHATSAPP,
-                extras={"jid": jid, "last_message_ts": last_ts},
-            ))
+            contacts.append(
+                ChatContact(
+                    id=jid,
+                    display_name=name or jid,
+                    protocol=PROTOCOL_WHATSAPP,
+                    extras={"jid": jid, "last_message_ts": last_ts},
+                )
+            )
         self.contacts = contacts
         self._contacts_by_jid = {cc.id: cc for cc in contacts}
 
@@ -513,11 +548,12 @@ class WhatsAppBackend(ChatBackend):
             # chat non lette da ri-sincronizzare all'avvio.  La ricezione live è
             # comunque tutta su webhook (handle_webhook).
             chats = self._discover_active_chats()
-            targets.update(
-                jid for jid, unread, _ts in chats if unread > 0
-            )
+            targets.update(jid for jid, unread, _ts in chats if unread > 0)
         except Exception as _e:  # se /chats fallisce restiamo sulle sole chat-DB
-            logger.debug("/chats discovery failed, staying on DB-only chats", exc_info=True)
+            logger.debug(
+                "/chats discovery failed, staying on DB-only chats", exc_info=True
+            )
+
         # Fetch parallelo: WAHA serve le richieste /api/messages concorrenti in
         # parallelo (verificato: 8 chat in ~7.6s totali vs ~34s sommati).  Ogni
         # worker tocca una chat diversa → nessuna contesa sullo stesso dato; le
@@ -525,7 +561,9 @@ class WhatsAppBackend(ChatBackend):
         def _fetch_one(jid: str) -> None:
             try:
                 self.fetch_history(jid, limit=limit)
-            except Exception as _e:  # best-effort: mai far fallire l'avvio per una singola chat
+            except (
+                Exception
+            ) as _e:  # best-effort: mai far fallire l'avvio per una singola chat
                 logger.debug("History fetch failed for a single chat", exc_info=True)
 
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -534,6 +572,7 @@ class WhatsAppBackend(ChatBackend):
         # still includes old messages (for dedup) and the resync can fill
         # any gaps without re-inserting them as new.
         from backend import _prune_cache
+
         _prune_cache()
         return len(targets)
 
@@ -549,7 +588,8 @@ class WhatsAppBackend(ChatBackend):
     ) -> str:
         """Async send (interface contract); delegates to the sync path."""
         return self.send_message_sync(
-            contact_id, text,
+            contact_id,
+            text,
             quote_timestamp=quote_timestamp,
             quote_author=quote_author,
             quote_message=quote_message,
@@ -573,7 +613,8 @@ class WhatsAppBackend(ChatBackend):
         if not self._rest:
             raise RuntimeError("WhatsApp API is not configured")
         result = self._rest.send_message(
-            contact_id, text,
+            contact_id,
+            text,
             quote_timestamp=quote_timestamp,
             quote_author=quote_author,
             quote_message=quote_message,
@@ -588,6 +629,7 @@ class WhatsAppBackend(ChatBackend):
 
     async def _mark_read_thread(self, contact_id: str) -> None:
         import asyncio
+
         await asyncio.to_thread(self.mark_read_sync, contact_id)
 
     def mark_read_sync(self, contact_id: str) -> None:
@@ -595,6 +637,7 @@ class WhatsAppBackend(ChatBackend):
         if self._rest:
             self._rest.mark_read(contact_id)
         from backend import _mark_as_read
+
         _mark_as_read(contact_id, protocol=PROTOCOL_WHATSAPP)
 
     # ─── Attachments ──────────────────────────────────────────────────
@@ -610,6 +653,7 @@ class WhatsAppBackend(ChatBackend):
             base = Path(self.media_dir)
         else:
             from backend import CACHE_DIR
+
             base = CACHE_DIR / "whatsapp-media"
         base.mkdir(parents=True, exist_ok=True)
         return base
@@ -649,7 +693,6 @@ class WhatsAppBackend(ChatBackend):
             return None
 
         return candidate
-
 
     # ─── Incoming event ingestion ─────────────────────────────────────
     # La ricezione è interamente PUSH via webhook di WAHA Core:
@@ -692,6 +735,7 @@ class WhatsAppBackend(ChatBackend):
         consumer never busy-loops.
         """
         import asyncio
+
         while True:
             for event in self.poll_once():
                 yield event
@@ -709,6 +753,7 @@ class WhatsAppBackend(ChatBackend):
         sessions and makes persisted messages immediately available to the UI.
         """
         from backend import _load_cache
+
         return _load_cache(protocol=PROTOCOL_WHATSAPP)
 
     def _add_cached_message(self, contact_id: str, msg: dict) -> None:
@@ -747,9 +792,13 @@ class WhatsAppBackend(ChatBackend):
         if msgs:
             msgs.sort(key=self._msg_sort_key)
 
-
     def _message_already_cached(
-        self, contact_id: str, ts: int, is_mine: bool, text: str, msg_id: str | None = None
+        self,
+        contact_id: str,
+        ts: int,
+        is_mine: bool,
+        text: str,
+        msg_id: str | None = None,
     ) -> dict | None:
         """Return the cached message matching the same identity, or ``None``.
 
@@ -781,13 +830,13 @@ class WhatsAppBackend(ChatBackend):
                 return msg
         return None
 
-
     def ingest_message(self, contact_id: str, data: dict, ts: int) -> bool:
         """Save an incoming/outgoing message to the DB cache and in-memory cache.
 
         Returns ``True`` if newly added, ``False`` if it was a duplicate.
         """
         from backend import _add_message_to_cache, _update_message_id
+
         text = data["text"]
         is_mine = data["is_mine"]
         msg_id = data.get("id")
@@ -816,7 +865,6 @@ class WhatsAppBackend(ChatBackend):
                 )
             return False
 
-
         _add_message_to_cache(
             contact_id,
             text,
@@ -830,21 +878,23 @@ class WhatsAppBackend(ChatBackend):
             protocol=PROTOCOL_WHATSAPP,
             msg_id=msg_id,
         )
-        self._add_cached_message(contact_id, {
-            "id": msg_id,
-            "text": text,
-            "is_mine": is_mine,
-            "sender": data.get("sender", ""),
-            "timestamp": ts,
-            "quote_text": data.get("quote_text"),
-            "msg_type": data.get("msg_type", "text"),
-            "attachment_info": data.get("attachment_info"),
-            "attachment_id": data.get("attachment_id"),
-            "read": is_mine,
-            "status": "sent" if is_mine else "read",
-        })
+        self._add_cached_message(
+            contact_id,
+            {
+                "id": msg_id,
+                "text": text,
+                "is_mine": is_mine,
+                "sender": data.get("sender", ""),
+                "timestamp": ts,
+                "quote_text": data.get("quote_text"),
+                "msg_type": data.get("msg_type", "text"),
+                "attachment_info": data.get("attachment_info"),
+                "attachment_id": data.get("attachment_id"),
+                "read": is_mine,
+                "status": "sent" if is_mine else "read",
+            },
+        )
         return True
-
 
     def process_receipt(self, envelope: dict) -> list[dict]:
         """Handle a receipt batch against the in-memory cache.
@@ -862,7 +912,9 @@ class WhatsAppBackend(ChatBackend):
         to_persist: list[tuple[str, dict]] = []
         for contact_id, msgs in self.cache.items():
             for msg in msgs:
-                if msg.get("is_mine") and str(msg.get("id", "")) in {str(i) for i in ids}:
+                if msg.get("is_mine") and str(msg.get("id", "")) in {
+                    str(i) for i in ids
+                }:
                     old = msg.get("status", "sent")
                     rank = {"sent": 0, "delivered": 1, "read": 2}
                     if old != target and rank.get(target, 0) > rank.get(old, 0):
@@ -872,10 +924,13 @@ class WhatsAppBackend(ChatBackend):
         # Persist status changes to SQLite so they survive restarts.
         if to_persist:
             from backend import _update_message_status
+
             for contact_id, msg in to_persist:
                 _update_message_status(
-                    msg["timestamp"], msg["status"],
-                    protocol=PROTOCOL_WHATSAPP, contact_number=contact_id,
+                    msg["timestamp"],
+                    msg["status"],
+                    protocol=PROTOCOL_WHATSAPP,
+                    contact_number=contact_id,
                 )
         return updated
 
@@ -889,5 +944,3 @@ _SEND_DEDUP_WINDOW_MS = 5000
 # un'entry legacy (pre-fix, id=None) molto vecchia un messaggio mio
 # genuinamente nuovo (es. inviato da un altro client) con lo stesso testo.
 _ECHO_MATCH_WINDOW_MS = 600000  # 10 minuti
-
-

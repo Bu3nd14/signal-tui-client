@@ -18,7 +18,6 @@ DB_FILE = CACHE_DIR / "messages.db"
 CACHE_RETENTION_DAYS = 3
 
 
-
 # ─── Message cache (SQLite) ─────────────────────────────────────────────────
 
 # Lock to serialize concurrent SQLite writes (poll worker thread + UI thread).
@@ -64,7 +63,6 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_messages_contact "
         "ON messages(protocol, contact_number, timestamp)"
     )
-
 
 
 def _init_db():
@@ -132,23 +130,23 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
         contact = row["contact_number"]
         if contact not in cache:
             cache[contact] = []
-        cache[contact].append({
-            "id": row["msg_id"],
-            "text": row["text"],
-            "is_mine": bool(row["is_mine"]),
-            "sender": row["sender"],
-            "timestamp": row["timestamp"],
-            "quote_text": row["quote_text"],
-            "msg_type": row["msg_type"],
-            "attachment_info": row["attachment_info"],
-            "attachment_id": row["attachment_id"],
-            "read": bool(row["read"]),
-            "status": row["status"],
-            "protocol": row["protocol"],
-        })
+        cache[contact].append(
+            {
+                "id": row["msg_id"],
+                "text": row["text"],
+                "is_mine": bool(row["is_mine"]),
+                "sender": row["sender"],
+                "timestamp": row["timestamp"],
+                "quote_text": row["quote_text"],
+                "msg_type": row["msg_type"],
+                "attachment_info": row["attachment_info"],
+                "attachment_id": row["attachment_id"],
+                "read": bool(row["read"]),
+                "status": row["status"],
+                "protocol": row["protocol"],
+            }
+        )
     return cache
-
-
 
 
 def _add_message_to_cache(
@@ -183,16 +181,25 @@ def _add_message_to_cache(
                     quote_text, msg_type, attachment_info, attachment_id,
                     read, status, msg_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (protocol, contact_number, text, int(is_mine), sender, timestamp,
-                 quote_text, msg_type, attachment_info, attachment_id,
-                 int(is_mine),
-                 "sent" if is_mine else "read",
-                 msg_id),
+                (
+                    protocol,
+                    contact_number,
+                    text,
+                    int(is_mine),
+                    sender,
+                    timestamp,
+                    quote_text,
+                    msg_type,
+                    attachment_info,
+                    attachment_id,
+                    int(is_mine),
+                    "sent" if is_mine else "read",
+                    msg_id,
+                ),
             )
             conn.commit()
         finally:
             conn.close()
-
 
 
 def _update_message_id(
@@ -294,7 +301,9 @@ def _dedup_messages() -> int:
             conn.close()
 
 
-def _update_message_status(timestamp: int, status: str, protocol: str, contact_number: str):
+def _update_message_status(
+    timestamp: int, status: str, protocol: str, contact_number: str
+):
     """Update a message status in SQLite, scoped per (protocol, contact, ts).
 
     A bare ``timestamp`` match would update messages of OTHER protocols or

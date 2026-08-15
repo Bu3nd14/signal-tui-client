@@ -18,13 +18,13 @@ logger = logging.getLogger("signal_tui")
 
 
 class PickerMixin:
-
     def _is_emoji_picker_open(self) -> bool:
         """Check if the emoji picker modal screen is currently active."""
         return isinstance(self.screen, EmojiPickerScreen)
 
     def _open_emoji_picker(self) -> None:
         """Open the emoji picker modal."""
+
         def _on_emoji_selected(emoji_char: str | None) -> None:
             if emoji_char:
                 # Insert the selected emoji into the message input
@@ -49,6 +49,7 @@ class PickerMixin:
 
     def _open_contact_picker(self) -> None:
         """Open the contact search picker modal."""
+
         def _on_contact_selected(contact: ChatContact | None) -> None:
             if contact:
                 # Select the contact's chat (also highlights it in the left list).
@@ -63,8 +64,9 @@ class PickerMixin:
                 # messages that arrived while the picker was open.
                 self._refresh_chat()
 
-
-        self.push_screen(ContactPickerScreen(self._filtered_contacts()), _on_contact_selected)
+        self.push_screen(
+            ContactPickerScreen(self._filtered_contacts()), _on_contact_selected
+        )
 
     def action_open_contact_picker(self) -> None:
         """Action to open the contact picker (bound to Ctrl+S)."""
@@ -85,7 +87,6 @@ class PickerMixin:
             self._reconnect_touched_backends(screen._touched_protocols)
 
         self.push_screen(screen, _on_done)
-
 
     def action_open_device_link(self) -> None:
         """Action to open device link picker (bound to Ctrl+L)."""
@@ -114,12 +115,14 @@ class PickerMixin:
             last_colon = value.rfind(":")
             if last_colon >= 0:
                 # Check if there's a closing ':' after it
-                rest = value[last_colon + 1:]
+                rest = value[last_colon + 1 :]
                 # If no space after the colon, it might be an incomplete alias
                 if " " not in rest and "/" not in rest:
                     prefix = rest
                     # Try to show suggestions
-                    completion = self.query_one("#emoji-completion", EmojiCompletionWidget)
+                    completion = self.query_one(
+                        "#emoji-completion", EmojiCompletionWidget
+                    )
                     completion.show_suggestions(prefix)
                     return
 
@@ -177,4 +180,3 @@ class PickerMixin:
                 completion.select_prev()
             except Exception as _e:
                 logger.debug("Failed to rewind suggestion", exc_info=True)
-

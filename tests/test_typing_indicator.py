@@ -91,16 +91,21 @@ class TestSignalTUITyping:
     def _temp_db(self, tmp_path):
         """Isolate the SQLite cache for this test class."""
         import backend as backend_mod
+
         db_file = tmp_path / "messages.db"
-        with patch.object(backend_mod, "DB_FILE", db_file), \
-             patch.object(backend_mod, "CACHE_DIR", tmp_path):
+        with (
+            patch.object(backend_mod, "DB_FILE", db_file),
+            patch.object(backend_mod, "CACHE_DIR", tmp_path),
+        ):
             yield
 
     def _make_app(self) -> SignalTUI:
         app = SignalTUI()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario",
-            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "uuid-123"},
         )
         app.contacts = [contact]
         app.signal_backend.contacts = [contact]
@@ -134,7 +139,6 @@ class TestSignalTUITyping:
         # The contact moves to the mumbling state (💭)
         assert self._cache_key() in app._typing_mumbling
 
-
     def test_typing_envelope_not_saved_to_cache(self):
         """Un envelope di typing non deve finire nella cache messaggi."""
         app = self._make_app()
@@ -155,7 +159,6 @@ class TestSignalTUITyping:
         # The ✍️ indicator is gone, the contact moves to the mumbling state (💭).
         assert self._cache_key() not in app._typing_contacts
         assert self._cache_key() in app._typing_mumbling
-
 
     def test_message_from_non_typing_contact_no_mumbling(self):
         """Un messaggio da un contatto che NON stava scrivendo non crea
@@ -232,7 +235,8 @@ class TestSignalTUITyping:
             # Simulate the poll loop's timeout check
             now = 100.0
             expired = [
-                num for num, started_at in app._typing_contacts.items()
+                num
+                for num, started_at in app._typing_contacts.items()
                 if now - started_at > app._TYPING_TIMEOUT
             ]
             for num in expired:
@@ -249,7 +253,8 @@ class TestSignalTUITyping:
             # Simulate the poll loop's mumbling-expiry check
             now = 200.0
             expired = [
-                num for num, expires_at in app._typing_mumbling.items()
+                num
+                for num, expires_at in app._typing_mumbling.items()
                 if now >= expires_at
             ]
             for num in expired:
@@ -266,10 +271,14 @@ class TestSignalTUITyping:
 
     def _two_contacts(self, app):
         """Replace app.contacts with Anna + Mario, returning them."""
-        anna = ChatContact(id="+391111111111", display_name="Anna", protocol=PROTOCOL_SIGNAL)
+        anna = ChatContact(
+            id="+391111111111", display_name="Anna", protocol=PROTOCOL_SIGNAL
+        )
         mario = ChatContact(
-            id="+391234567890", display_name="Mario",
-            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "uuid-123"},
         )
         app.contacts = [mario, anna]
         app._unread_counts = {}
@@ -313,16 +322,19 @@ class TestSignalTUITyping:
         assert app.contacts[0].id == anna.id
         assert app.contacts[1].id == mario.id
 
-
     def test_sort_selected_typing_not_reordered(self):
         """Il contatto selezionato che sta scrivendo NON viene spostato in
         cima: resta nel suo posto alfabetico."""
         app = self._make_app()
         selected = ChatContact(
-            id="+391234567890", display_name="Mario",
-            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "uuid-123"},
         )
-        other = ChatContact(id="+391111111111", display_name="Anna", protocol=PROTOCOL_SIGNAL)
+        other = ChatContact(
+            id="+391111111111", display_name="Anna", protocol=PROTOCOL_SIGNAL
+        )
         app.contacts = [selected, other]
         app._unread_counts = {}
         app.selected_contact = selected
@@ -338,10 +350,14 @@ class TestSignalTUITyping:
         """Il contatto selezionato in stato mumbling NON viene spostato in cima."""
         app = self._make_app()
         selected = ChatContact(
-            id="+391234567890", display_name="Mario",
-            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "uuid-123"},
         )
-        other = ChatContact(id="+391111111111", display_name="Anna", protocol=PROTOCOL_SIGNAL)
+        other = ChatContact(
+            id="+391111111111", display_name="Anna", protocol=PROTOCOL_SIGNAL
+        )
         app.contacts = [selected, other]
         app._unread_counts = {}
         app.selected_contact = selected
@@ -378,8 +394,10 @@ class TestUpdateTypingLabel:
     def _make_app(self):
         app = SignalTUI()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario",
-            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "uuid-123"},
         )
         app.contacts = [contact]
         app.signal_backend.contacts = [contact]
@@ -391,18 +409,22 @@ class TestUpdateTypingLabel:
 
     def _render_one(self, app, cache_key, text):
         """Crea una lista finta con un solo item per il contatto."""
+
         class Label:
             def __init__(self):
                 self._refreshed = 0
+
             def update(self, t):
                 self._refreshed += 1
                 self._text = t
+
         class Item:
             def __init__(self, ck):
                 self._contact_id = ck
                 self._label_text = text
                 self._label = Label()
                 self.children = [self._label]
+
         class List:
             def __init__(self):
                 self.children = []
@@ -472,9 +494,7 @@ class TestUpdateTypingLabel:
 
     def test_noop_when_contact_unknown(self):
         app = self._make_app()
-        lst, sort_mock, render_mock = self._render_one(
-            app, "signal:+391234567890", "x"
-        )
+        lst, sort_mock, render_mock = self._render_one(app, "signal:+391234567890", "x")
         app._typing_contacts["signal:+0000"] = 100.0
         app._update_typing_label("signal:+0000")
         assert lst.children[0]._label._refreshed == 0

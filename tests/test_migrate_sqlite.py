@@ -31,32 +31,62 @@ def tmp_cache(tmp_path: Path):
     cache_dir.mkdir()
     cache_file = cache_dir / "messages.json"
     db_file = cache_dir / "messages.db"
-    with patch.object(mig, "CACHE_DIR", cache_dir), \
-         patch.object(mig, "CACHE_FILE", cache_file), \
-         patch.object(mig, "DB_FILE", db_file):
+    with (
+        patch.object(mig, "CACHE_DIR", cache_dir),
+        patch.object(mig, "CACHE_FILE", cache_file),
+        patch.object(mig, "DB_FILE", db_file),
+    ):
         yield cache_dir, cache_file, db_file
 
 
 def _write_sample_json(cache_file: Path):
     """Write a sample messages.json."""
-    cache_file.write_text(json.dumps({
-        "+391234567890": [
-            {"text": "Ciao!", "is_mine": False, "sender": "Mario",
-             "timestamp": 1000, "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None, "read": False,
-             "status": "read"},
-            {"text": "Come stai?", "is_mine": True, "sender": "You",
-             "timestamp": 1001, "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None, "read": True,
-             "status": "sent"},
-        ],
-        "+391111111111": [
-            {"text": "Messaggio", "is_mine": False, "sender": "Luigi",
-             "timestamp": 1002, "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None, "read": False,
-             "status": "read"},
-        ],
-    }))
+    cache_file.write_text(
+        json.dumps(
+            {
+                "+391234567890": [
+                    {
+                        "text": "Ciao!",
+                        "is_mine": False,
+                        "sender": "Mario",
+                        "timestamp": 1000,
+                        "quote_text": None,
+                        "msg_type": "text",
+                        "attachment_info": None,
+                        "attachment_id": None,
+                        "read": False,
+                        "status": "read",
+                    },
+                    {
+                        "text": "Come stai?",
+                        "is_mine": True,
+                        "sender": "You",
+                        "timestamp": 1001,
+                        "quote_text": None,
+                        "msg_type": "text",
+                        "attachment_info": None,
+                        "attachment_id": None,
+                        "read": True,
+                        "status": "sent",
+                    },
+                ],
+                "+391111111111": [
+                    {
+                        "text": "Messaggio",
+                        "is_mine": False,
+                        "sender": "Luigi",
+                        "timestamp": 1002,
+                        "quote_text": None,
+                        "msg_type": "text",
+                        "attachment_info": None,
+                        "attachment_id": None,
+                        "read": False,
+                        "status": "read",
+                    },
+                ],
+            }
+        )
+    )
 
 
 class TestMigrate:
@@ -104,14 +134,26 @@ class TestMigrate:
     def test_migrate_preserves_optional_fields(self, tmp_cache):
         """I campi opzionali (quote, attachment, msg_type) vengono salvati."""
         _, cache_file, db_file = tmp_cache
-        cache_file.write_text(json.dumps({
-            "+391234567890": [
-                {"text": "img", "is_mine": False, "sender": "Mario",
-                 "timestamp": 2000, "quote_text": "citazione",
-                 "msg_type": "image", "attachment_info": "photo.jpg",
-                 "attachment_id": "att-123", "read": False, "status": "read"},
-            ]
-        }))
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "+391234567890": [
+                        {
+                            "text": "img",
+                            "is_mine": False,
+                            "sender": "Mario",
+                            "timestamp": 2000,
+                            "quote_text": "citazione",
+                            "msg_type": "image",
+                            "attachment_info": "photo.jpg",
+                            "attachment_id": "att-123",
+                            "read": False,
+                            "status": "read",
+                        },
+                    ]
+                }
+            )
+        )
 
         mig.migrate()
 

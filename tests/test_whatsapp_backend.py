@@ -54,11 +54,14 @@ def _json_response(payload):
     return mock_urlopen
 
 
-def _make_backend(api_url: str = "http://api.test", media_dir: str = "") -> WhatsAppBackend:
+def _make_backend(
+    api_url: str = "http://api.test", media_dir: str = ""
+) -> WhatsAppBackend:
     return WhatsAppBackend(api_url=api_url, media_dir=media_dir)
 
 
 # ─── WhatsAppRESTClient ───────────────────────────────────────────────────────
+
 
 class TestWhatsAppRESTClient:
     """🔌 Client REST verso l'API Baileys."""
@@ -73,10 +76,12 @@ class TestWhatsAppRESTClient:
         def fake_urlopen(req, timeout=30):
             seen.append((req.method, req.full_url))
             resp = MagicMock()
-            resp.read.return_value = json.dumps([
-                {"id": "wa:39123@s.whatsapp.net", "name": "Mario"},
-                {"id": "wa:45678@s.whatsapp.net", "name": "Luigi"},
-            ]).encode("utf-8")
+            resp.read.return_value = json.dumps(
+                [
+                    {"id": "wa:39123@s.whatsapp.net", "name": "Mario"},
+                    {"id": "wa:45678@s.whatsapp.net", "name": "Luigi"},
+                ]
+            ).encode("utf-8")
             resp.status = 200
             ctx = MagicMock()
             ctx.__enter__.return_value = resp
@@ -94,9 +99,10 @@ class TestWhatsAppRESTClient:
         client = WhatsAppRESTClient("http://api.test")
         # list_contacts now uses /api/{session}/chats which returns a flat list
         # (opt/wa-link-profile refactoring removed /api/contacts fallback).
-        with patch("urllib.request.urlopen", _json_response(
-            [{"id": "wa:x@s.whatsapp.net", "name": "A"}]
-        )):
+        with patch(
+            "urllib.request.urlopen",
+            _json_response([{"id": "wa:x@s.whatsapp.net", "name": "A"}]),
+        ):
             contacts = client.list_contacts()
         assert len(contacts) == 1
 
@@ -110,10 +116,20 @@ class TestWhatsAppRESTClient:
             resp = MagicMock()
             resp.status = 200
             # chats endpoint: lista di chat/contatti
-            resp.read.return_value = json.dumps([
-                {"id": {"_serialized": "3112@c.us"}, "name": "Anna", "isGroup": False},
-                {"id": {"_serialized": "139153@lid"}, "pushName": "Bob", "isGroup": False},
-            ]).encode("utf-8")
+            resp.read.return_value = json.dumps(
+                [
+                    {
+                        "id": {"_serialized": "3112@c.us"},
+                        "name": "Anna",
+                        "isGroup": False,
+                    },
+                    {
+                        "id": {"_serialized": "139153@lid"},
+                        "pushName": "Bob",
+                        "isGroup": False,
+                    },
+                ]
+            ).encode("utf-8")
             ctx = MagicMock()
             ctx.__enter__.return_value = resp
             return ctx
@@ -138,14 +154,25 @@ class TestWhatsAppRESTClient:
                 resp.read.return_value = b'{"statusCode":500}'
             else:
                 # t in secondi (epoch) -> converto in ms; last_message.timestamp in ms.
-                resp.read.return_value = json.dumps([
-                    {"id": {"_serialized": "3112@c.us"}, "name": "Anna",
-                     "t": 1700000000},
-                    {"id": {"_serialized": "139153@lid"}, "pushName": "Bob",
-                     "last_message": {"timestamp": 1750000000000}},
-                    {"id": {"_serialized": "399@lid"}, "name": "Carla",
-                     "isGroup": False},   # nessun timestamp -> last_ts 0
-                ]).encode("utf-8")
+                resp.read.return_value = json.dumps(
+                    [
+                        {
+                            "id": {"_serialized": "3112@c.us"},
+                            "name": "Anna",
+                            "t": 1700000000,
+                        },
+                        {
+                            "id": {"_serialized": "139153@lid"},
+                            "pushName": "Bob",
+                            "last_message": {"timestamp": 1750000000000},
+                        },
+                        {
+                            "id": {"_serialized": "399@lid"},
+                            "name": "Carla",
+                            "isGroup": False,
+                        },  # nessun timestamp -> last_ts 0
+                    ]
+                ).encode("utf-8")
             ctx = MagicMock()
             ctx.__enter__.return_value = resp
             return ctx
@@ -154,18 +181,21 @@ class TestWhatsAppRESTClient:
             contacts = client.list_contacts()
 
         assert len(contacts) == 3
-        assert contacts[0]["last_ts"] == 1700000000000   # t in secondi * 1000
-        assert contacts[1]["last_ts"] == 1750000000000    # last_message.timestamp (ms)
-        assert contacts[2]["last_ts"] == 0                 # assente -> 0
+        assert contacts[0]["last_ts"] == 1700000000000  # t in secondi * 1000
+        assert contacts[1]["last_ts"] == 1750000000000  # last_message.timestamp (ms)
+        assert contacts[2]["last_ts"] == 0  # assente -> 0
 
     def test_get_pairing_qr_text_fallback(self):
         """QA testuale (WAHA vecchio): get_session_qr cade sul ramo JSON."""
         client = WhatsAppRESTClient("http://api.test")
         # _request_raw (PNG binario) non disponibile -> fallisce sul path JSON.
-        with patch.object(client, "_request_raw", return_value=None), \
-             patch("urllib.request.urlopen", _json_response(
-                 {"status": "pending", "qr": "2@ABC123"}
-             )):
+        with (
+            patch.object(client, "_request_raw", return_value=None),
+            patch(
+                "urllib.request.urlopen",
+                _json_response({"status": "pending", "qr": "2@ABC123"}),
+            ),
+        ):
             qr = client.get_pairing_qr()
         assert qr == "2@ABC123"
 
@@ -181,10 +211,13 @@ class TestWhatsAppRESTClient:
         """Se non c'è QR, get_pairing_qr avvia la sessione e riprova."""
         client = WhatsAppRESTClient("http://api.test")
         calls = []
-        with patch.object(client, "_request_raw", side_effect=[None, b"\x89PNG-img"]), \
-             patch.object(client, "start_session",
-                          side_effect=lambda: calls.append("start")), \
-             patch("urllib.request.urlopen", _json_response({})):
+        with (
+            patch.object(client, "_request_raw", side_effect=[None, b"\x89PNG-img"]),
+            patch.object(
+                client, "start_session", side_effect=lambda: calls.append("start")
+            ),
+            patch("urllib.request.urlopen", _json_response({})),
+        ):
             qr = client.get_pairing_qr()
         assert calls == ["start"]
         assert qr == b"\x89PNG-img"
@@ -193,11 +226,17 @@ class TestWhatsAppRESTClient:
         """get_fresh_pairing_qr abbatte la sessione (QR fresco) prima di ripartire."""
         client = WhatsAppRESTClient("http://api.test")
         calls = []
-        with patch.object(client, "reset_session",
-                          side_effect=lambda logout=True: calls.append("reset")), \
-             patch.object(client, "start_session",
-                          side_effect=lambda: calls.append("start")), \
-             patch.object(client, "get_session_qr", return_value=b"\x89PNG-fresh"):
+        with (
+            patch.object(
+                client,
+                "reset_session",
+                side_effect=lambda logout=True: calls.append("reset"),
+            ),
+            patch.object(
+                client, "start_session", side_effect=lambda: calls.append("start")
+            ),
+            patch.object(client, "get_session_qr", return_value=b"\x89PNG-fresh"),
+        ):
             qr = client.get_fresh_pairing_qr(reset=True)
         assert calls == ["reset", "start"]
         assert qr == b"\x89PNG-fresh"
@@ -206,11 +245,17 @@ class TestWhatsAppRESTClient:
         """Con reset=False get_fresh_pairing_qr riparte senza abbatte la sessione."""
         client = WhatsAppRESTClient("http://api.test")
         calls = []
-        with patch.object(client, "reset_session",
-                          side_effect=lambda logout=True: calls.append("reset")), \
-             patch.object(client, "start_session",
-                          side_effect=lambda: calls.append("start")), \
-             patch.object(client, "get_session_qr", return_value="2@fresh"):
+        with (
+            patch.object(
+                client,
+                "reset_session",
+                side_effect=lambda logout=True: calls.append("reset"),
+            ),
+            patch.object(
+                client, "start_session", side_effect=lambda: calls.append("start")
+            ),
+            patch.object(client, "get_session_qr", return_value="2@fresh"),
+        ):
             qr = client.get_fresh_pairing_qr(reset=False)
         assert calls == ["start"]
         assert qr == "2@fresh"
@@ -247,6 +292,7 @@ class TestWhatsAppRESTClient:
 
         def boom(*a, **k):
             import urllib.error
+
             raise urllib.error.URLError("refused")
 
         with patch("urllib.request.urlopen", boom):
@@ -256,6 +302,7 @@ class TestWhatsAppRESTClient:
     def test_request_sends_api_key_header(self):
         """Quando una key è configurata, _request la invia come X-Api-Key."""
         import backends.whatsapp as wh
+
         captured = {}
 
         def fake_urlopen(req, timeout=30):
@@ -267,8 +314,10 @@ class TestWhatsAppRESTClient:
             return ctx
 
         # whatsapp.py importa get_whatsapp_api_key nel proprio namespace.
-        with patch.object(wh, "get_whatsapp_api_key", return_value="secret-key-123"), \
-             patch("urllib.request.urlopen", fake_urlopen):
+        with (
+            patch.object(wh, "get_whatsapp_api_key", return_value="secret-key-123"),
+            patch("urllib.request.urlopen", fake_urlopen),
+        ):
             client = WhatsAppRESTClient("http://api.test")
             client.get_session_qr()
 
@@ -280,6 +329,7 @@ class TestWhatsAppRESTClient:
     def test_request_skips_api_key_header_when_unset(self):
         """Senza key, _request NON invia l'header X-Api-Key."""
         import backends.whatsapp as wh
+
         captured = {}
 
         def fake_urlopen(req, timeout=30):
@@ -290,8 +340,10 @@ class TestWhatsAppRESTClient:
             ctx.__enter__.return_value = resp
             return ctx
 
-        with patch.object(wh, "get_whatsapp_api_key", return_value=""), \
-             patch("urllib.request.urlopen", fake_urlopen):
+        with (
+            patch.object(wh, "get_whatsapp_api_key", return_value=""),
+            patch("urllib.request.urlopen", fake_urlopen),
+        ):
             client = WhatsAppRESTClient("http://api.test")
             client.get_session_qr()
 
@@ -299,8 +351,10 @@ class TestWhatsAppRESTClient:
 
     def test_http_401_returns_none_and_sets_last_status(self):
         """Un 401 (key assente/errata) torna None e registra last_status=401."""
+
         def fake_urlopen(*a, **k):
             import urllib.error
+
             raise urllib.error.HTTPError(
                 "http://api.test", 401, "Unauthorized", {}, None
             )
@@ -315,14 +369,21 @@ class TestWhatsAppRESTClient:
 
 # ─── Event normalization ──────────────────────────────────────────────────────
 
+
 class TestWhatsAppEvents:
     """📨 Normalizzazione dei WebSocket frame in ChatEvent."""
 
     def test_message_event(self):
-        ev = _msg({
-            "id": "m1", "from": "wa:39123@s.whatsapp.net", "timestamp": 1700000000,
-            "text": "ciao", "pushName": "Mario", "fromMe": False,
-        })
+        ev = _msg(
+            {
+                "id": "m1",
+                "from": "wa:39123@s.whatsapp.net",
+                "timestamp": 1700000000,
+                "text": "ciao",
+                "pushName": "Mario",
+                "fromMe": False,
+            }
+        )
         assert ev is not None
         assert ev.type == "message"
         assert ev.protocol == PROTOCOL_WHATSAPP
@@ -334,27 +395,33 @@ class TestWhatsAppEvents:
     def test_status_broadcast_is_ignored(self):
         """Gli status (storie) con JID status@broadcast non sono messaggi di
         chat: devono produrre ZERO eventi (niente ingestione in cache/DB)."""
-        events = _event_from_message({
-            "id": "false_status@broadcast_ABC",
-            "chatId": "status@broadcast",
-            "from": "191169011163167@lid",
-            "timestamp": 1700000000,
-            "body": "una storia",
-            "fromMe": False,
-        })
+        events = _event_from_message(
+            {
+                "id": "false_status@broadcast_ABC",
+                "chatId": "status@broadcast",
+                "from": "191169011163167@lid",
+                "timestamp": 1700000000,
+                "body": "una storia",
+                "fromMe": False,
+            }
+        )
         assert events == []
 
     def test_typing_event(self):
-        ev = _event_from_typing({"from": "wa:39123@s.whatsapp.net", "presence": "composing"})
+        ev = _event_from_typing(
+            {"from": "wa:39123@s.whatsapp.net", "presence": "composing"}
+        )
         assert ev is not None
         assert ev.type == "typing"
         assert ev.payload["action"] == "STARTED"
 
     def test_receipt_event(self):
-        ev = _event_from_receipt({
-            "from": "wa:39123@s.whatsapp.net",
-            "receipt": {"messageIds": ["m1"], "type": "read"},
-        })
+        ev = _event_from_receipt(
+            {
+                "from": "wa:39123@s.whatsapp.net",
+                "receipt": {"messageIds": ["m1"], "type": "read"},
+            }
+        )
         assert ev is not None
         assert ev.type == "receipt"
         assert ev.payload["message_ids"] == ["m1"]
@@ -364,16 +431,18 @@ class TestWhatsAppEvents:
 
     def test_ack_delivery_event(self):
         """message.ack with status=3 → receipt with is_read=False."""
-        ev = _event_from_ack({
-            "event": "message.ack",
-            "payload": {
-                "id": "msg_abc",
-                "from": "me@lid",
-                "to": "39123@s.whatsapp.net",
-                "fromMe": True,
-                "status": 3,
-            },
-        })
+        ev = _event_from_ack(
+            {
+                "event": "message.ack",
+                "payload": {
+                    "id": "msg_abc",
+                    "from": "me@lid",
+                    "to": "39123@s.whatsapp.net",
+                    "fromMe": True,
+                    "status": 3,
+                },
+            }
+        )
         assert ev is not None
         assert ev.type == "receipt"
         assert ev.protocol == PROTOCOL_WHATSAPP
@@ -383,16 +452,18 @@ class TestWhatsAppEvents:
 
     def test_ack_read_event(self):
         """message.ack with status=4 → receipt with is_read=True."""
-        ev = _event_from_ack({
-            "event": "message.ack",
-            "payload": {
-                "id": "msg_xyz",
-                "from": "me@lid",
-                "to": "39123@s.whatsapp.net",
-                "fromMe": True,
-                "status": 4,
-            },
-        })
+        ev = _event_from_ack(
+            {
+                "event": "message.ack",
+                "payload": {
+                    "id": "msg_xyz",
+                    "from": "me@lid",
+                    "to": "39123@s.whatsapp.net",
+                    "fromMe": True,
+                    "status": 4,
+                },
+            }
+        )
         assert ev is not None
         assert ev.type == "receipt"
         assert ev.payload["is_read"] is True
@@ -400,29 +471,33 @@ class TestWhatsAppEvents:
 
     def test_ack_server_ack_ignored(self):
         """message.ack with status=2 (SERVER_ACK) is ignored."""
-        ev = _event_from_ack({
-            "event": "message.ack",
-            "payload": {
-                "id": "msg_abc",
-                "from": "me@lid",
-                "to": "39123@s.whatsapp.net",
-                "fromMe": True,
-                "status": 2,
-            },
-        })
+        ev = _event_from_ack(
+            {
+                "event": "message.ack",
+                "payload": {
+                    "id": "msg_abc",
+                    "from": "me@lid",
+                    "to": "39123@s.whatsapp.net",
+                    "fromMe": True,
+                    "status": 2,
+                },
+            }
+        )
         assert ev is None
 
     def test_ack_not_mine_ignored(self):
         """message.ack from someone else (fromMe=False) is ignored."""
-        ev = _event_from_ack({
-            "event": "message.ack",
-            "payload": {
-                "id": "msg_abc",
-                "from": "39123@s.whatsapp.net",
-                "fromMe": False,
-                "status": 4,
-            },
-        })
+        ev = _event_from_ack(
+            {
+                "event": "message.ack",
+                "payload": {
+                    "id": "msg_abc",
+                    "from": "39123@s.whatsapp.net",
+                    "fromMe": False,
+                    "status": 4,
+                },
+            }
+        )
         assert ev is None
 
     def test_ack_no_chat_id_returns_none(self):
@@ -431,24 +506,31 @@ class TestWhatsAppEvents:
 
     def test_ack_no_msg_id_returns_none(self):
         """message.ack without id returns None."""
-        assert _event_from_ack({
-            "chatId": "39123@s.whatsapp.net",
-            "fromMe": True,
-            "status": 4,
-        }) is None
+        assert (
+            _event_from_ack(
+                {
+                    "chatId": "39123@s.whatsapp.net",
+                    "fromMe": True,
+                    "status": 4,
+                }
+            )
+            is None
+        )
 
     def test_ack_dispatch_via_raw(self):
         """_event_from_raw dispatches 'message.ack' to _event_from_ack."""
-        ev = _raw({
-            "event": "message.ack",
-            "payload": {
-                "id": "msg_1",
-                "from": "me@lid",
-                "to": "39123@s.whatsapp.net",
-                "fromMe": True,
-                "status": 4,
-            },
-        })
+        ev = _raw(
+            {
+                "event": "message.ack",
+                "payload": {
+                    "id": "msg_1",
+                    "from": "me@lid",
+                    "to": "39123@s.whatsapp.net",
+                    "fromMe": True,
+                    "status": 4,
+                },
+            }
+        )
         assert ev is not None
         assert ev.type == "receipt"
         assert ev.payload["is_read"] is True
@@ -456,37 +538,46 @@ class TestWhatsAppEvents:
 
     def test_ack_slash_variant_dispatch(self):
         """_event_from_raw dispatches 'message/ack' variant too."""
-        ev = _raw({
-            "event": "message/ack",
-            "payload": {
-                "id": "msg_1",
-                "from": "me@lid",
-                "to": "39123@s.whatsapp.net",
-                "fromMe": True,
-                "status": 3,
-            },
-        })
+        ev = _raw(
+            {
+                "event": "message/ack",
+                "payload": {
+                    "id": "msg_1",
+                    "from": "me@lid",
+                    "to": "39123@s.whatsapp.net",
+                    "fromMe": True,
+                    "status": 3,
+                },
+            }
+        )
         assert ev is not None
         assert ev.type == "receipt"
         assert ev.payload["is_read"] is False
         assert ev.contact_id == "39123@s.whatsapp.net"
 
     def test_dispatch_by_event_type(self):
-        raw = {"event": "messages.upsert", "from": "wa:1@s.whatsapp.net", "text": "hi", "timestamp": 1}
+        raw = {
+            "event": "messages.upsert",
+            "from": "wa:1@s.whatsapp.net",
+            "text": "hi",
+            "timestamp": 1,
+        }
         ev = _raw(raw)
         assert ev is not None and ev.type == "message"
 
     def test_group_message_extracts_sender_from_participant(self):
         """Un messaggio di gruppo (@g.us) estrae il mittente dal campo participant."""
-        ev = _msg({
-            "id": "g1",
-            "from": "123456789@g.us",
-            "timestamp": 1700000000,
-            "text": "ciao gruppo",
-            "fromMe": False,
-            "participant": "3912345678@c.us",
-            "pushName": "Mario",
-        })
+        ev = _msg(
+            {
+                "id": "g1",
+                "from": "123456789@g.us",
+                "timestamp": 1700000000,
+                "text": "ciao gruppo",
+                "fromMe": False,
+                "participant": "3912345678@c.us",
+                "pushName": "Mario",
+            }
+        )
         assert ev is not None
         assert ev.contact_id == "123456789@g.us"
         assert ev.payload["is_group"] is True
@@ -494,29 +585,33 @@ class TestWhatsAppEvents:
 
     def test_group_message_sender_falls_back_to_jid(self):
         """Senza pushName, il mittente del gruppo cade sul JID del participant."""
-        ev = _msg({
-            "id": "g2",
-            "from": "123456789@g.us",
-            "timestamp": 1700000000,
-            "text": "ciao",
-            "fromMe": False,
-            "participant": "3912345678@c.us",
-        })
+        ev = _msg(
+            {
+                "id": "g2",
+                "from": "123456789@g.us",
+                "timestamp": 1700000000,
+                "text": "ciao",
+                "fromMe": False,
+                "participant": "3912345678@c.us",
+            }
+        )
         assert ev is not None
         assert ev.payload["is_group"] is True
         assert ev.payload["sender"] == "3912345678@c.us"
 
     def test_group_message_sender_from_sender_field(self):
         """Il mittente del gruppo può essere nel campo 'sender'."""
-        ev = _msg({
-            "id": "g3",
-            "from": "123456789@g.us",
-            "timestamp": 1700000000,
-            "text": "ciao",
-            "fromMe": False,
-            "sender": "3912345678@c.us",
-            "notifyName": "Luigi",
-        })
+        ev = _msg(
+            {
+                "id": "g3",
+                "from": "123456789@g.us",
+                "timestamp": 1700000000,
+                "text": "ciao",
+                "fromMe": False,
+                "sender": "3912345678@c.us",
+                "notifyName": "Luigi",
+            }
+        )
         assert ev is not None
         assert ev.payload["is_group"] is True
         assert ev.payload["sender"] == "Luigi"  # notifyName come fallback
@@ -524,6 +619,7 @@ class TestWhatsAppEvents:
     def test_group_message_jid_resolved_to_contact_name(self):
         """Il JID del mittente viene risolto al nome del contatto tramite la rubrica."""
         from models import ChatContact
+
         contacts = {
             "220988985864200@c.us": ChatContact(
                 id="220988985864200@c.us",
@@ -531,14 +627,17 @@ class TestWhatsAppEvents:
                 protocol=PROTOCOL_WHATSAPP,
             ),
         }
-        ev = _msg({
-            "id": "g4",
-            "from": "123456789@g.us",
-            "timestamp": 1700000000,
-            "text": "ciao",
-            "fromMe": False,
-            "participant": "220988985864200@lid",
-        }, contacts)
+        ev = _msg(
+            {
+                "id": "g4",
+                "from": "123456789@g.us",
+                "timestamp": 1700000000,
+                "text": "ciao",
+                "fromMe": False,
+                "participant": "220988985864200@lid",
+            },
+            contacts,
+        )
         assert ev is not None
         assert ev.payload["is_group"] is True
         # Il JID @lid viene risolto al nome del contatto @c.us con lo stesso numero.
@@ -547,6 +646,7 @@ class TestWhatsAppEvents:
     def test_group_message_jid_exact_match(self):
         """Match esatto del JID nella rubrica."""
         from models import ChatContact
+
         contacts = {
             "220988985864200@lid": ChatContact(
                 id="220988985864200@lid",
@@ -554,61 +654,71 @@ class TestWhatsAppEvents:
                 protocol=PROTOCOL_WHATSAPP,
             ),
         }
-        ev = _msg({
-            "id": "g5",
-            "from": "123456789@g.us",
-            "timestamp": 1700000000,
-            "text": "ciao",
-            "fromMe": False,
-            "participant": "220988985864200@lid",
-        }, contacts)
+        ev = _msg(
+            {
+                "id": "g5",
+                "from": "123456789@g.us",
+                "timestamp": 1700000000,
+                "text": "ciao",
+                "fromMe": False,
+                "participant": "220988985864200@lid",
+            },
+            contacts,
+        )
         assert ev is not None
         assert ev.payload["sender"] == "Mario"
 
     def test_group_message_jid_not_in_contacts_keeps_jid(self):
         """Se il JID non è in rubrica, resta il JID come fallback."""
-        ev = _msg({
-            "id": "g6",
-            "from": "123456789@g.us",
-            "timestamp": 1700000000,
-            "text": "ciao",
-            "fromMe": False,
-            "participant": "999999999@lid",
-        }, {})
+        ev = _msg(
+            {
+                "id": "g6",
+                "from": "123456789@g.us",
+                "timestamp": 1700000000,
+                "text": "ciao",
+                "fromMe": False,
+                "participant": "999999999@lid",
+            },
+            {},
+        )
         assert ev is not None
         assert ev.payload["sender"] == "999999999@lid"
 
     def test_direct_message_not_group(self):
         """Un messaggio diretto (@c.us) non è un gruppo."""
-        ev = _msg({
-            "id": "d1",
-            "from": "3912345678@c.us",
-            "timestamp": 1700000000,
-            "text": "ciao",
-            "fromMe": False,
-            "pushName": "Mario",
-        })
+        ev = _msg(
+            {
+                "id": "d1",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "text": "ciao",
+                "fromMe": False,
+                "pushName": "Mario",
+            }
+        )
         assert ev is not None
         assert ev.payload["is_group"] is False
         assert ev.payload["sender"] == "Mario"
 
     def test_hasMedia_image(self):
         """WAHA image message via hasMedia/media fields."""
-        ev = _msg({
-            "id": "img1",
-            "from": "3912345678@c.us",
-            "timestamp": 1700000000,
-            "text": "",
-            "fromMe": False,
-            "pushName": "Mario",
-            "hasMedia": True,
-            "media": {
-                "mimetype": "image/jpeg",
-                "url": "https://wa.to/img/abc123.jpg",
-                "filename": "photo.jpg",
-                "caption": "Guarda!",
-            },
-        })
+        ev = _msg(
+            {
+                "id": "img1",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "text": "",
+                "fromMe": False,
+                "pushName": "Mario",
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "image/jpeg",
+                    "url": "https://wa.to/img/abc123.jpg",
+                    "filename": "photo.jpg",
+                    "caption": "Guarda!",
+                },
+            }
+        )
         assert ev is not None
         assert ev.payload["msg_type"] == "image"
         assert ev.payload["attachment_id"] == "https://wa.to/img/abc123.jpg"
@@ -616,19 +726,21 @@ class TestWhatsAppEvents:
 
     def test_hasMedia_video(self):
         """WAHA video message via hasMedia/media fields."""
-        ev = _msg({
-            "id": "vid1",
-            "from": "3912345678@c.us",
-            "timestamp": 1700000000,
-            "text": "",
-            "fromMe": False,
-            "pushName": "Mario",
-            "hasMedia": True,
-            "media": {
-                "mimetype": "video/mp4",
-                "url": "https://wa.to/vid/vid.mp4",
-            },
-        })
+        ev = _msg(
+            {
+                "id": "vid1",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "text": "",
+                "fromMe": False,
+                "pushName": "Mario",
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "video/mp4",
+                    "url": "https://wa.to/vid/vid.mp4",
+                },
+            }
+        )
         assert ev is not None
         assert ev.payload["msg_type"] == "attachment"
         assert ev.payload["attachment_id"] == "https://wa.to/vid/vid.mp4"
@@ -636,31 +748,35 @@ class TestWhatsAppEvents:
 
     def test_hasMedia_audio(self):
         """WAHA audio message via hasMedia/media fields."""
-        ev = _msg({
-            "id": "aud1",
-            "from": "3912345678@c.us",
-            "timestamp": 1700000000,
-            "fromMe": False,
-            "hasMedia": True,
-            "media": {
-                "mimetype": "audio/ogg",
-                "url": "https://wa.to/aud/audio.ogg",
-            },
-        })
+        ev = _msg(
+            {
+                "id": "aud1",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "audio/ogg",
+                    "url": "https://wa.to/aud/audio.ogg",
+                },
+            }
+        )
         assert ev is not None
         assert ev.payload["msg_type"] == "attachment"
 
     def test_hasMedia_no_media_dict(self):
         """hasMedia=true but media is not a dict → still text, no attachment."""
-        ev = _msg({
-            "id": "bad1",
-            "from": "3912345678@c.us",
-            "timestamp": 1700000000,
-            "text": "hello",
-            "fromMe": False,
-            "hasMedia": True,
-            "media": None,
-        })
+        ev = _msg(
+            {
+                "id": "bad1",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "text": "hello",
+                "fromMe": False,
+                "hasMedia": True,
+                "media": None,
+            }
+        )
         assert ev is not None
         assert ev.payload["msg_type"] == "text"
         assert ev.payload["attachment_id"] is None
@@ -672,20 +788,22 @@ class TestWhatsAppEvents:
         flat hasMedia/media), _event_from_message deve comunque estrarre
         msg_type=image e attachment_id.
         """
-        ev = _msg({
-            "id": "img_no_text",
-            "from": "3912345678@c.us",
-            "timestamp": 1700000000,
-            "fromMe": False,
-            "pushName": "Mario",
-            # NOTA: nessuna chiave 'text'!
-            "hasMedia": True,
-            "media": {
-                "mimetype": "image/jpeg",
-                "url": "https://wa.to/img/no-text-photo.jpg",
-                "caption": "Senza testo!",
-            },
-        })
+        ev = _msg(
+            {
+                "id": "img_no_text",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "pushName": "Mario",
+                # NOTA: nessuna chiave 'text'!
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "image/jpeg",
+                    "url": "https://wa.to/img/no-text-photo.jpg",
+                    "caption": "Senza testo!",
+                },
+            }
+        )
         assert ev is not None
         assert ev.payload["msg_type"] == "image", (
             "hasMedia image senza text key → msg_type deve essere 'image', "
@@ -703,23 +821,25 @@ class TestWhatsAppEvents:
         hasMedia/media PUO' non avere nessuna di queste chiavi.  Il fallback
         deve riconoscere anche hasMedia/media.
         """
-        ev = _raw({
-            # Simula un evento con nome non-standard (non 'message'):
-            "event": "unknown_event_type",
-            "payload": {
-                "id": "img_fallback",
-                "from": "3912345678@c.us",
-                "timestamp": 1700000000,
-                "fromMe": False,
-                "hasMedia": True,
-                "media": {
-                    "mimetype": "image/jpeg",
-                    "url": "https://wa.to/img/fallback.jpg",
-                    "caption": "Fallback test",
+        ev = _raw(
+            {
+                # Simula un evento con nome non-standard (non 'message'):
+                "event": "unknown_event_type",
+                "payload": {
+                    "id": "img_fallback",
+                    "from": "3912345678@c.us",
+                    "timestamp": 1700000000,
+                    "fromMe": False,
+                    "hasMedia": True,
+                    "media": {
+                        "mimetype": "image/jpeg",
+                        "url": "https://wa.to/img/fallback.jpg",
+                        "caption": "Fallback test",
+                    },
+                    # NOTA: nessuna chiave 'text', 'body', 'message', o 'attachments'
                 },
-                # NOTA: nessuna chiave 'text', 'body', 'message', o 'attachments'
-            },
-        })
+            }
+        )
         # Dovrebbe essere riconosciuto come messaggio immagine, non None.
         assert ev is not None, (
             "_event_from_raw returned None for hasMedia payload without text key"
@@ -730,37 +850,42 @@ class TestWhatsAppEvents:
 
     def test_event_from_raw_fallback_accepts_hasMedia_video_too(self):
         """Fallback con hasMedia video (senza text key) deve funzionare."""
-        ev = _raw({
-            "event": "strange_event",
-            "payload": {
-                "id": "vid_fallback",
-                "from": "3912345678@c.us",
-                "timestamp": 1700000000,
-                "fromMe": False,
-                "hasMedia": True,
-                "media": {
-                    "mimetype": "video/mp4",
-                    "url": "https://wa.to/vid/fallback.mp4",
+        ev = _raw(
+            {
+                "event": "strange_event",
+                "payload": {
+                    "id": "vid_fallback",
+                    "from": "3912345678@c.us",
+                    "timestamp": 1700000000,
+                    "fromMe": False,
+                    "hasMedia": True,
+                    "media": {
+                        "mimetype": "video/mp4",
+                        "url": "https://wa.to/vid/fallback.mp4",
+                    },
                 },
-            },
-        })
+            }
+        )
         assert ev is not None
         assert ev.payload["msg_type"] == "attachment"
         assert ev.payload["attachment_id"] == "https://wa.to/vid/fallback.mp4"
 
 
-
-
 # ─── WhatsAppBackend behaviour ────────────────────────────────────────────────
+
 
 class TestWhatsAppBackend:
     """📱 Comportamento del backend (contatti, invio, pairing, media)."""
 
     def test_list_contacts_from_rest(self):
         backend = _make_backend()
-        with patch.object(backend._rest, "list_contacts", return_value=[
-            {"id": "wa:39123@s.whatsapp.net", "name": "Mario"},
-        ]):
+        with patch.object(
+            backend._rest,
+            "list_contacts",
+            return_value=[
+                {"id": "wa:39123@s.whatsapp.net", "name": "Mario"},
+            ],
+        ):
             backend._load_contacts()
         assert len(backend.contacts) == 1
         assert backend.contacts[0].id == "wa:39123@s.whatsapp.net"
@@ -770,7 +895,9 @@ class TestWhatsAppBackend:
 
     def test_send_message_sync_calls_rest(self):
         backend = _make_backend()
-        with patch.object(backend._rest, "send_message", return_value={"id": "m"}) as mock_send:
+        with patch.object(
+            backend._rest, "send_message", return_value={"id": "m"}
+        ) as mock_send:
             ts = backend.send_message_sync("wa:1@s.whatsapp.net", "Ciao!")
         mock_send.assert_called_once()
         assert ts > 0
@@ -783,9 +910,13 @@ class TestWhatsAppBackend:
 
     def test_needs_pairing(self):
         backend = _make_backend()
-        with patch.object(backend._rest, "get_session_status", return_value={"status": "pending"}):
+        with patch.object(
+            backend._rest, "get_session_status", return_value={"status": "pending"}
+        ):
             assert backend.needs_pairing is True
-        with patch.object(backend._rest, "get_session_status", return_value={"status": "connected"}):
+        with patch.object(
+            backend._rest, "get_session_status", return_value={"status": "connected"}
+        ):
             assert backend.needs_pairing is False
 
     def test_get_attachment_path(self, tmp_path):
@@ -802,7 +933,9 @@ class TestWhatsAppBackend:
         media = tmp_path / "media"
         media.mkdir()
         backend = _make_backend(media_dir=str(media))
-        with patch.object(backend._rest, "download_media", return_value=b"downloaded") as mock_dl:
+        with patch.object(
+            backend._rest, "download_media", return_value=b"downloaded"
+        ) as mock_dl:
             p = backend.get_attachment_path("remote-media-1.jpg")
         mock_dl.assert_called_once_with("remote-media-1.jpg")
         assert p is not None and p.exists()
@@ -837,9 +970,13 @@ class TestWhatsAppBackend:
         """When direct binary fails, fall back to get_download_url + fetch."""
         client = WhatsAppRESTClient("http://api.test")
         fake_bytes = b"media-data"
-        with patch.object(client, "_request_raw", return_value=None), \
-             patch.object(client, "get_download_url", return_value="https://s3.example.com/file"), \
-             patch("urllib.request.urlopen") as mock_urlopen:
+        with (
+            patch.object(client, "_request_raw", return_value=None),
+            patch.object(
+                client, "get_download_url", return_value="https://s3.example.com/file"
+            ),
+            patch("urllib.request.urlopen") as mock_urlopen,
+        ):
             mock_resp = MagicMock()
             mock_resp.read.return_value = fake_bytes
             mock_resp.status = 200
@@ -850,8 +987,10 @@ class TestWhatsAppBackend:
     def test_download_media_returns_none_when_all_fail(self):
         """Both direct binary and legacy URL fail → None."""
         client = WhatsAppRESTClient("http://api.test")
-        with patch.object(client, "_request_raw", return_value=None), \
-             patch.object(client, "get_download_url", return_value=None):
+        with (
+            patch.object(client, "_request_raw", return_value=None),
+            patch.object(client, "get_download_url", return_value=None),
+        ):
             assert client.download_media("msg-abc") is None
 
     def test_download_media_direct_url(self):
@@ -884,7 +1023,9 @@ class TestWhatsAppBackend:
 
     def test_poll_once_drains_queue(self):
         backend = _make_backend()
-        ev = _msg({"id": "m1", "from": "wa:1@s.whatsapp.net", "text": "hi", "timestamp": 1})
+        ev = _msg(
+            {"id": "m1", "from": "wa:1@s.whatsapp.net", "text": "hi", "timestamp": 1}
+        )
         backend._enqueue_event(ev)
         events = backend.poll_once()
         assert len(events) == 1
@@ -894,9 +1035,18 @@ class TestWhatsAppBackend:
 
     def test_ingest_message_dedup(self):
         import backend as backend_mod
+
         backend = _make_backend()
-        data = {"text": "ciao", "is_mine": True, "sender": "You", "timestamp": 1000,
-                "quote_text": None, "msg_type": "text", "attachment_info": None, "attachment_id": None}
+        data = {
+            "text": "ciao",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": 1000,
+            "quote_text": None,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+        }
         with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
             assert backend.ingest_message("wa:1@s.whatsapp.net", data, 1000) is True
             assert backend.ingest_message("wa:1@s.whatsapp.net", data, 1050) is False
@@ -912,17 +1062,36 @@ class TestWhatsAppBackend:
         webhook e REST API di WAHA.  Messaggi oltre la finestra sono distinti.
         """
         import backend as backend_mod
+
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
-        data1 = {"id": "m1", "text": "ok", "is_mine": False, "sender": "M",
-                 "timestamp": 1000, "quote_text": None, "msg_type": "text",
-                 "attachment_info": None, "attachment_id": None}
-        data2 = {"id": "m2", "text": "ok", "is_mine": False, "sender": "M",
-                 "timestamp": 10000, "quote_text": None, "msg_type": "text",
-                 "attachment_info": None, "attachment_id": None}
+        data1 = {
+            "id": "m1",
+            "text": "ok",
+            "is_mine": False,
+            "sender": "M",
+            "timestamp": 1000,
+            "quote_text": None,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+        }
+        data2 = {
+            "id": "m2",
+            "text": "ok",
+            "is_mine": False,
+            "sender": "M",
+            "timestamp": 10000,
+            "quote_text": None,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+        }
         with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
             assert backend.ingest_message(cid, data1, 1000) is True
-            assert backend.ingest_message(cid, data2, 10000) is True  # fuori finestra fuzzy
+            assert (
+                backend.ingest_message(cid, data2, 10000) is True
+            )  # fuori finestra fuzzy
             assert mock_add.call_count == 2
         # Lo stesso id (stesso messaggio) resta deduplicato.
         with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
@@ -932,18 +1101,28 @@ class TestWhatsAppBackend:
     def test_ingest_message_dedup_falls_back_without_id(self):
         """Senza id, il dedup ricade su (is_mine, testo, timestamp) come prima."""
         import backend as backend_mod
+
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
-        data = {"text": "ciao", "is_mine": True, "sender": "You", "timestamp": 1000,
-                "quote_text": None, "msg_type": "text", "attachment_info": None, "attachment_id": None}
+        data = {
+            "text": "ciao",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": 1000,
+            "quote_text": None,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+        }
         with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
             assert backend.ingest_message(cid, data, 1000) is True
-            assert backend.ingest_message(cid, data, 1050) is False  # echo entro finestra
+            assert (
+                backend.ingest_message(cid, data, 1050) is False
+            )  # echo entro finestra
             mock_add.assert_called_once()
 
 
 class TestWhatsAppWebhook:
-
     """📥 Ricezione PUSH via webhook di WAHA (niente più polling).
 
     La ricezione live è interamente event-driven: WAHA Core fa POST a
@@ -960,6 +1139,7 @@ class TestWhatsAppWebhook:
     def test_handle_webhook_enqueues_message_event(self):
         """Un envelope message webhook viene normalizzato e accodato."""
         import time
+
         now = int(time.time())
         backend = self._backend()
         envelope = {
@@ -986,14 +1166,18 @@ class TestWhatsAppWebhook:
     def test_handle_webhook_deduplicates_retried_id(self):
         """Un retry di WAHA (stesso id) non viene accodato due volte."""
         import time
+
         now = int(time.time())
         backend = self._backend()
         envelope = {
             "session": "default",
             "event": "message",
             "payload": {
-                "id": "dup1", "from": "1@c.us", "fromMe": False,
-                "body": "stesso msg", "timestamp": now,
+                "id": "dup1",
+                "from": "1@c.us",
+                "fromMe": False,
+                "body": "stesso msg",
+                "timestamp": now,
             },
         }
         assert backend.handle_webhook(envelope) is True
@@ -1005,7 +1189,10 @@ class TestWhatsAppWebhook:
         """Eventi non-message (es. presence/typing fuori dalla registrazione)
         non generano errori; quelli message con envelope valido sì."""
         backend = self._backend()
-        assert backend.handle_webhook({"session": "default", "event": "message.ack"}) is False
+        assert (
+            backend.handle_webhook({"session": "default", "event": "message.ack"})
+            is False
+        )
         assert backend.handle_webhook("not-a-dict") is False
         assert backend.handle_webhook({}) is False
         assert backend.poll_once() == []
@@ -1013,14 +1200,17 @@ class TestWhatsAppWebhook:
     def test_handle_webhook_normalizes_from_message_nested_key(self):
         """L'id può essere annidato sotto key.id (come /api/messages)."""
         import time
+
         now = int(time.time())
         backend = self._backend()
         env = {
             "event": "message",
             "payload": {
                 "key": {"id": "KEY123", "remoteJid": "15771304468671@lid"},
-                "from": "1@c.us", "fromMe": True,
-                "body": "hello", "timestamp": now,
+                "from": "1@c.us",
+                "fromMe": True,
+                "body": "hello",
+                "timestamp": now,
             },
         }
         assert backend.handle_webhook(env) is True
@@ -1039,6 +1229,7 @@ class TestWhatsAppWebhook:
         vuoto senza banner [🖼️].
         """
         import time
+
         now = int(time.time())
         backend = self._backend()
         envelope = {
@@ -1077,6 +1268,7 @@ class TestWhatsAppWebhook:
     def test_handle_webhook_image_message_ack_without_hasMedia_is_plain(self):
         """message.ack senza hasMedia → synthetic event resta text (nessun crash)."""
         import time
+
         now = int(time.time())
         backend = self._backend()
         envelope = {
@@ -1118,7 +1310,6 @@ class TestWhatsAppWebhook:
             client.list_messages("X@lid", limit=1)
         assert seen_timeout and seen_timeout[0] == 30
 
-
     def test_list_messages_rest(self):
         """RESTClient.list_messages costruisce la GET corretta."""
         client = WhatsAppRESTClient("http://api.test")
@@ -1128,9 +1319,16 @@ class TestWhatsAppWebhook:
             seen.append((req.method, req.full_url))
             resp = MagicMock()
             resp.status = 200
-            resp.read.return_value = json.dumps([
-                {"id": "m1", "from": "1@c.us", "body": "hi", "timestamp": 1700000000},
-            ]).encode("utf-8")
+            resp.read.return_value = json.dumps(
+                [
+                    {
+                        "id": "m1",
+                        "from": "1@c.us",
+                        "body": "hi",
+                        "timestamp": 1700000000,
+                    },
+                ]
+            ).encode("utf-8")
             ctx = MagicMock()
             ctx.__enter__.return_value = resp
             return ctx
@@ -1144,22 +1342,38 @@ class TestWhatsAppWebhook:
     def test_fetch_history_normalizes_and_ingests(self):
         """fetch_history normalizza lo storico remoto e lo ingerisce nel cache."""
         import time
+
         now = int(time.time())
         backend = self._backend()  # _rest = MagicMock
         # WAHA ritorna i messaggi dal più recente in giù; li riordina e li ingerisce.
         backend._rest.list_messages.return_value = [
-            {"id": "m_new", "from": "393400716440@c.us", "fromMe": False,
-             "body": "più recente", "timestamp": now},
-            {"id": "m_my", "from": "19645297868955@lid", "fromMe": True,
-             "body": "il mio inviato", "timestamp": now - 50},
-            {"id": "m_old", "from": "393400716440@c.us", "fromMe": False,
-             "body": "più vecchio", "timestamp": now - 100},
+            {
+                "id": "m_new",
+                "from": "393400716440@c.us",
+                "fromMe": False,
+                "body": "più recente",
+                "timestamp": now,
+            },
+            {
+                "id": "m_my",
+                "from": "19645297868955@lid",
+                "fromMe": True,
+                "body": "il mio inviato",
+                "timestamp": now - 50,
+            },
+            {
+                "id": "m_old",
+                "from": "393400716440@c.us",
+                "fromMe": False,
+                "body": "più vecchio",
+                "timestamp": now - 100,
+            },
         ]
         # isola ingest_message (toccherebbe SQLite)
         ingested = []
-        backend.ingest_message = lambda cid, data, ts: ingested.append(
-            (cid, data.get("text"), data.get("is_mine"), ts)
-        ) or True
+        backend.ingest_message = lambda cid, data, ts: (
+            ingested.append((cid, data.get("text"), data.get("is_mine"), ts)) or True
+        )
         result = backend.fetch_history("15771304468671@lid", limit=20)
         # la versione REST è stata chiamata col jid e limit
         backend._rest.list_messages.assert_called_once_with(
@@ -1167,10 +1381,10 @@ class TestWhatsAppWebhook:
         )
         # i 3 messaggi sono stati ingeriti, inclusi i miei (is_mine=True)
         assert len(ingested) == 3
-        assert ingested[0][1] == "più vecchio"   # ordinato cronologico
+        assert ingested[0][1] == "più vecchio"  # ordinato cronologico
         assert ingested[1][1] == "il mio inviato"
         assert ingested[2][1] == "più recente"
-        assert ingested[1][2] is True            # il mio -> is_mine=True
+        assert ingested[1][2] is True  # il mio -> is_mine=True
         assert ingested[0][2] is False and ingested[2][2] is False
         # risultato ritornato non vuoto
         assert len(result) == 3
@@ -1178,69 +1392,107 @@ class TestWhatsAppWebhook:
 
 # ─── Optional configuration gating ────────────────────────────────────────────
 
+
 class TestWhatsAppConfigGating:
     """⚙️ WhatsApp backend è opzionale (non rompe la modalità solo-Signal)."""
 
     def test_disabled_when_no_api_url_and_no_local(self):
         from backends import config
-        with patch.object(config, "get_whatsapp_api_url", return_value=""), \
-             patch.object(config, "_local_waha_reachable", return_value=False):
+
+        with (
+            patch.object(config, "get_whatsapp_api_url", return_value=""),
+            patch.object(config, "_local_waha_reachable", return_value=False),
+        ):
             assert config.whatsapp_enabled() is False
 
     def test_enabled_with_api_url(self):
         from backends import config
-        with patch.object(config, "get_whatsapp_api_url", return_value="http://127.0.0.1:3000"):
+
+        with patch.object(
+            config, "get_whatsapp_api_url", return_value="http://127.0.0.1:3000"
+        ):
             assert config.whatsapp_enabled() is True
 
     def test_enabled_when_local_waha_detected(self):
         """Auto-detect: WAHA locale raggiungibile abilita il backend anche senza URL."""
         from backends import config
-        with patch.object(config, "get_whatsapp_api_url", return_value=""), \
-             patch.object(config, "_local_waha_reachable", return_value=True):
+
+        with (
+            patch.object(config, "get_whatsapp_api_url", return_value=""),
+            patch.object(config, "_local_waha_reachable", return_value=True),
+        ):
             assert config.whatsapp_enabled() is True
 
     def test_resolve_whatsapp_api_url_prefers_configured(self):
         from backends import config
-        with patch.object(config, "get_whatsapp_api_url", return_value="http://waha:9999"):
+
+        with patch.object(
+            config, "get_whatsapp_api_url", return_value="http://waha:9999"
+        ):
             assert config.resolve_whatsapp_api_url() == "http://waha:9999"
 
     def test_resolve_whatsapp_api_url_falls_back_to_local_port(self):
         from backends import config
-        with patch.object(config, "get_whatsapp_api_url", return_value=""), \
-             patch.object(config, "get_whatsapp_api_port", return_value=3005):
+
+        with (
+            patch.object(config, "get_whatsapp_api_url", return_value=""),
+            patch.object(config, "get_whatsapp_api_port", return_value=3005),
+        ):
             assert config.resolve_whatsapp_api_url() == "http://127.0.0.1:3005"
 
     def test_api_key_prefers_env_over_config_and_dotenv(self):
         from backends import config
-        with patch.dict(os.environ, {"WHATSAPP_API_KEY": "from-env"}), \
-             patch.object(config, "_load_config", return_value={"whatsapp_api_key": "from-cfg"}), \
-             patch.object(config, "_load_dotenv", return_value={"WAHA_API_KEY": "from-dotenv"}):
+
+        with (
+            patch.dict(os.environ, {"WHATSAPP_API_KEY": "from-env"}),
+            patch.object(
+                config, "_load_config", return_value={"whatsapp_api_key": "from-cfg"}
+            ),
+            patch.object(
+                config, "_load_dotenv", return_value={"WAHA_API_KEY": "from-dotenv"}
+            ),
+        ):
             assert config.get_whatsapp_api_key() == "from-env"
 
     def test_api_key_falls_back_to_config(self):
         from backends import config
-        with patch.dict(os.environ, {}, clear=True), \
-             patch.object(config, "_load_config", return_value={"whatsapp_api_key": "from-cfg"}), \
-             patch.object(config, "_load_dotenv", return_value={"WAHA_API_KEY": "from-dotenv"}):
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(
+                config, "_load_config", return_value={"whatsapp_api_key": "from-cfg"}
+            ),
+            patch.object(
+                config, "_load_dotenv", return_value={"WAHA_API_KEY": "from-dotenv"}
+            ),
+        ):
             assert config.get_whatsapp_api_key() == "from-cfg"
 
     def test_api_key_falls_back_to_dotenv_waha(self):
         from backends import config
-        with patch.dict(os.environ, {}, clear=True), \
-             patch.object(config, "_load_config", return_value={}), \
-             patch.object(config, "_load_dotenv", return_value={"WAHA_API_KEY": "from-dotenv"}):
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(config, "_load_config", return_value={}),
+            patch.object(
+                config, "_load_dotenv", return_value={"WAHA_API_KEY": "from-dotenv"}
+            ),
+        ):
             assert config.get_whatsapp_api_key() == "from-dotenv"
 
     def test_api_key_empty_when_nowhere(self):
         from backends import config
-        with patch.dict(os.environ, {}, clear=True), \
-             patch.object(config, "_load_config", return_value={}), \
-             patch.object(config, "_load_dotenv", return_value={}):
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(config, "_load_config", return_value={}),
+            patch.object(config, "_load_dotenv", return_value={}),
+        ):
             assert config.get_whatsapp_api_key() == ""
 
 
-
 # ─── WAHA (WhatsApp HTTP API) contract ────────────────────────────────────────
+
 
 class TestWAHAContract:
     """📨 Mapping degli endpoint reali di WAHA (devlikeapro/waha)."""
@@ -1284,8 +1536,8 @@ class TestWAHAContract:
         with patch("urllib.request.urlopen", fake_urlopen):
             client.list_contacts()
             client.send_message("wa:1@s.whatsapp.net", "ciao")
-            client.get_session_status()   # /api/sessions/{name}
-            client.get_session_qr()       # /api/{name}/auth/qr (PNG binario)
+            client.get_session_status()  # /api/sessions/{name}
+            client.get_session_qr()  # /api/{name}/auth/qr (PNG binario)
 
         assert any(m == "GET" and "/api/default/chats" in u for m, u in seen)
         assert any(m == "POST" and "/api/sendText" in u for m, u in seen)
@@ -1368,7 +1620,9 @@ class TestWAHAContract:
         """
         backend = _make_backend("http://api.test")
         backend._contacts_by_jid = {
-            "3912345678@c.us": MagicMock(display_name="Mario", id="3912345678@c.us", protocol=PROTOCOL_WHATSAPP),
+            "3912345678@c.us": MagicMock(
+                display_name="Mario", id="3912345678@c.us", protocol=PROTOCOL_WHATSAPP
+            ),
         }
 
         # Simula un webhook WAHA per un'immagine in arrivo.
@@ -1539,9 +1793,6 @@ class TestWAHAContract:
         assert ev.payload["msg_type"] == "image"
         assert ev.payload["attachment_id"] == "https://wa.to/media/no-text.jpg"
 
-
-
-
         envelope = {
             "event": "message.any",
             "session": "default",
@@ -1581,8 +1832,8 @@ class TestWAHAContract:
         assert cached[0]["attachment_id"] == "https://wa.to/media/img.png"
 
 
-
 # ─── Regression: seed cache from DB at startup ───────────────────────────────
+
 
 class TestSeedCacheFromDB:
     """Il backend WhatsApp deve caricare i messaggi persistiti dal DB all'avvio.
@@ -1606,12 +1857,20 @@ class TestSeedCacheFromDB:
         cid = "391234567890@s.whatsapp.net"
         ts = int(time.time() * 1000)
         backend_mod._add_message_to_cache(
-            cid, "Ok  ci sentiamo", False, "Giovanni", ts,
+            cid,
+            "Ok  ci sentiamo",
+            False,
+            "Giovanni",
+            ts,
             protocol=PROTOCOL_WHATSAPP,
         )
         # Un messaggio di un ALTRO protocollo non deve finire nella cache WhatsApp.
         backend_mod._add_message_to_cache(
-            "+391234567890", "msg signal", False, "Mario", ts + 1,
+            "+391234567890",
+            "msg signal",
+            False,
+            "Mario",
+            ts + 1,
             protocol="signal",
         )
 
@@ -1619,9 +1878,11 @@ class TestSeedCacheFromDB:
         # connect_sync tenta _load_contacts (REST): lo neutralizziamo per non
         # toccare la rete.  La ricezione è via webhook, quindi non c'è alcun
         # thread di polling/push da neutralizzare.
-        with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_wait_session_ready", return_value=True), \
-             patch.object(backend, "_configure_webhook"):
+        with (
+            patch.object(backend, "_load_contacts"),
+            patch.object(backend, "_wait_session_ready", return_value=True),
+            patch.object(backend, "_configure_webhook"),
+        ):
             backend.connect_sync()
 
         msgs = backend.cache.get(cid, [])
@@ -1645,22 +1906,35 @@ class TestSeedCacheFromDB:
         cid = "391234567890@s.whatsapp.net"
         ts = int(time.time() * 1000)
         backend_mod._add_message_to_cache(
-            cid, "Ok  ci sentiamo", False, "Giovanni", ts,
+            cid,
+            "Ok  ci sentiamo",
+            False,
+            "Giovanni",
+            ts,
             protocol=PROTOCOL_WHATSAPP,
         )
 
         backend = _make_backend("http://api.test")
-        with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_wait_session_ready", return_value=True), \
-             patch.object(backend, "_configure_webhook"):
+        with (
+            patch.object(backend, "_load_contacts"),
+            patch.object(backend, "_wait_session_ready", return_value=True),
+            patch.object(backend, "_configure_webhook"),
+        ):
             backend.connect_sync()
 
         # Simula fetch_history che riscarica lo stesso messaggio remoto.
         added = backend.ingest_message(
             cid,
-            {"id": "wa-msg-1", "text": "Ok  ci sentiamo", "is_mine": False,
-             "sender": "Giovanni", "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None},
+            {
+                "id": "wa-msg-1",
+                "text": "Ok  ci sentiamo",
+                "is_mine": False,
+                "sender": "Giovanni",
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            },
             ts,
         )
         assert added is False  # già in cache (dal DB) -> non duplicato
@@ -1669,7 +1943,9 @@ class TestSeedCacheFromDB:
         loaded = backend_mod._load_cache(protocol=PROTOCOL_WHATSAPP)
         assert len(loaded.get(cid, [])) == 1
 
-    def test_db_seeded_cache_keeps_distinct_same_second_with_ids(self, tmp_path, monkeypatch):
+    def test_db_seeded_cache_keeps_distinct_same_second_with_ids(
+        self, tmp_path, monkeypatch
+    ):
         """🛡️ Regressione "chat indietro": due messaggi DISTINTI con stesso testo
         E stesso secondo, uno persistito nel DB (con id), non devono essere fusi
         quando fetch_history li riscarica.
@@ -1690,18 +1966,30 @@ class TestSeedCacheFromDB:
         ts = int(time.time() * 1000)
         # Due messaggi distinti, stesso testo e stesso secondo, con id diversi.
         backend_mod._add_message_to_cache(
-            cid, "ok", False, "Giovanni", ts,
-            protocol=PROTOCOL_WHATSAPP, msg_id="wa-1",
+            cid,
+            "ok",
+            False,
+            "Giovanni",
+            ts,
+            protocol=PROTOCOL_WHATSAPP,
+            msg_id="wa-1",
         )
         backend_mod._add_message_to_cache(
-            cid, "ok", False, "Giovanni", ts,
-            protocol=PROTOCOL_WHATSAPP, msg_id="wa-2",
+            cid,
+            "ok",
+            False,
+            "Giovanni",
+            ts,
+            protocol=PROTOCOL_WHATSAPP,
+            msg_id="wa-2",
         )
 
         backend = _make_backend("http://api.test")
-        with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_wait_session_ready", return_value=True), \
-             patch.object(backend, "_configure_webhook"):
+        with (
+            patch.object(backend, "_load_contacts"),
+            patch.object(backend, "_wait_session_ready", return_value=True),
+            patch.object(backend, "_configure_webhook"),
+        ):
             backend.connect_sync()
 
         # La cache seminata dal DB deve contenere ENTRAMBI i messaggi (con id).
@@ -1713,16 +2001,30 @@ class TestSeedCacheFromDB:
         # scartato come falso duplicato.
         added1 = backend.ingest_message(
             cid,
-            {"id": "wa-1", "text": "ok", "is_mine": False, "sender": "Giovanni",
-             "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None},
+            {
+                "id": "wa-1",
+                "text": "ok",
+                "is_mine": False,
+                "sender": "Giovanni",
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            },
             ts,
         )
         added2 = backend.ingest_message(
             cid,
-            {"id": "wa-2", "text": "ok", "is_mine": False, "sender": "Giovanni",
-             "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None},
+            {
+                "id": "wa-2",
+                "text": "ok",
+                "is_mine": False,
+                "sender": "Giovanni",
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            },
             ts,
         )
         assert added1 is False  # già in cache (stesso id) -> dedup corretto
@@ -1743,18 +2045,27 @@ class TestSeedCacheFromDB:
 
         cid = "391234567890@s.whatsapp.net"
         backend = _make_backend("http://api.test")
-        with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_wait_session_ready", return_value=True), \
-             patch.object(backend, "_configure_webhook"):
+        with (
+            patch.object(backend, "_load_contacts"),
+            patch.object(backend, "_wait_session_ready", return_value=True),
+            patch.object(backend, "_configure_webhook"),
+        ):
             backend.connect_sync()
 
         # 1) Invio ottimistico dalla TUI: id sconosciuto (None), ts client.
         ts_opt = 1700000000000
         added = backend.ingest_message(
             cid,
-            {"id": None, "text": "ciao", "is_mine": True, "sender": "You",
-             "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None},
+            {
+                "id": None,
+                "text": "ciao",
+                "is_mine": True,
+                "sender": "You",
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            },
             ts_opt,
         )
         assert added is True
@@ -1763,9 +2074,16 @@ class TestSeedCacheFromDB:
         ts_echo = ts_opt + 60000  # 60s dopo -> fuori dalla finestra di dedup
         added_echo = backend.ingest_message(
             cid,
-            {"id": "wa-echo-1", "text": "ciao", "is_mine": True, "sender": "You",
-             "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None},
+            {
+                "id": "wa-echo-1",
+                "text": "ciao",
+                "is_mine": True,
+                "sender": "You",
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            },
             ts_echo,
         )
         # Non deve essere aggiunto come nuovo messaggio.
@@ -1795,22 +2113,38 @@ class TestSeedCacheFromDB:
         temporale (``_ECHO_MATCH_WINDOW_MS``).
         """
         import backend as backend_mod
+
         backend = _make_backend()
         cid = "391234567890@s.whatsapp.net"
         # Entry legacy SENT senza id, molto vecchia (es. 1 giorno fa).
-        backend.cache[cid] = [{
-            "id": None, "text": "ciao", "is_mine": True, "sender": "You",
-            "timestamp": 1700000000000, "quote_text": None, "msg_type": "text",
-            "attachment_info": None, "attachment_id": None,
-        }]
+        backend.cache[cid] = [
+            {
+                "id": None,
+                "text": "ciao",
+                "is_mine": True,
+                "sender": "You",
+                "timestamp": 1700000000000,
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            }
+        ]
         # Messaggio mio NUOVO (da un altro client) con lo stesso testo, id reale.
         ts_new = 1700000000000 + 24 * 3600 * 1000  # 1 giorno dopo
         with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
             added = backend.ingest_message(
                 cid,
-                {"id": "wa-new-1", "text": "ciao", "is_mine": True, "sender": "You",
-                 "quote_text": None, "msg_type": "text",
-                 "attachment_info": None, "attachment_id": None},
+                {
+                    "id": "wa-new-1",
+                    "text": "ciao",
+                    "is_mine": True,
+                    "sender": "You",
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                },
                 ts_new,
             )
         # Deve essere aggiunto come messaggio NUOVO (non scartato come echo).
@@ -1833,6 +2167,7 @@ class TestSeedCacheFromDB:
         import time
 
         import backend as backend_mod
+
         backend = _make_backend()
         cid = "391234567890@s.whatsapp.net"
         ts_echo = int(time.time() * 1000)  # timestamp recenti
@@ -1858,17 +2193,32 @@ class TestSeedCacheFromDB:
         assert "wa-echo-nested" in backend._seen_msg_ids
         # Prima: entry ottimistica senza id, poi ingest dello stesso echo:
         # il dedup per id in ingest_message NON deve creare un duplicato.
-        backend.cache[cid] = [{
-            "id": None, "text": "ciao", "is_mine": True, "sender": "You",
-            "timestamp": ts_echo, "quote_text": None, "msg_type": "text",
-            "attachment_info": None, "attachment_id": None,
-        }]
+        backend.cache[cid] = [
+            {
+                "id": None,
+                "text": "ciao",
+                "is_mine": True,
+                "sender": "You",
+                "timestamp": ts_echo,
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            }
+        ]
         with patch.object(backend_mod, "_update_message_id") as mock_upd:
             added = backend.ingest_message(
                 cid,
-                {"id": "wa-echo-nested", "text": "ciao", "is_mine": True,
-                 "sender": "You", "quote_text": None, "msg_type": "text",
-                 "attachment_info": None, "attachment_id": None},
+                {
+                    "id": "wa-echo-nested",
+                    "text": "ciao",
+                    "is_mine": True,
+                    "sender": "You",
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                },
                 ts_echo + 60000,
             )
         assert added is False  # duplicato (echo) -> non aggiunto
@@ -1877,7 +2227,6 @@ class TestSeedCacheFromDB:
         assert backend.cache[cid][0]["id"] == "wa-echo-nested"
         assert backend.cache[cid][0]["timestamp"] >= ts_echo
         mock_upd.assert_called_once()
-
 
     def test_load_contacts_single_call(self):
         """_load_contacts fa una singola chiamata a list_contacts() (refactoring opt/wa-link-profile)."""
@@ -1888,6 +2237,7 @@ class TestSeedCacheFromDB:
         assert len(backend.contacts) == 1
         assert backend.contacts[0].id == "wa:1@s.whatsapp.net"
         assert mock.call_count == 1
+
     def test_load_contacts_stays_empty_after_single_call(self):
         """Se list_contacts restituisce vuoto, 0 contatti (best-effort, nessuna eccezione)."""
         backend = _make_backend()
@@ -1898,6 +2248,7 @@ class TestSeedCacheFromDB:
 
 
 # ─── Webhook self-registration (PUT session config) ───────────────────────────
+
 
 class TestWhatsAppWebhookRegistration:
     """Il backend registra il webhook push sulla sessione WAHA (PUT config).
@@ -1921,9 +2272,13 @@ class TestWhatsAppWebhookRegistration:
             return ctx
 
         with patch("urllib.request.urlopen", fake_urlopen):
-            client.update_session_config({
-                "config": {"webhooks": [{"url": "http://x/webhook", "events": ["message"]}]}
-            })
+            client.update_session_config(
+                {
+                    "config": {
+                        "webhooks": [{"url": "http://x/webhook", "events": ["message"]}]
+                    }
+                }
+            )
 
         assert len(seen) == 1
         method, url, payload = seen[0]
@@ -1934,24 +2289,57 @@ class TestWhatsAppWebhookRegistration:
 
     def test_configure_webhook_registers_when_missing(self):
         import backends.whatsapp as wa_mod
+
         backend = _make_backend()
         webhook = "http://host.docker.internal:8090/webhook"
         # La sessione non ha ancora il webhook -> va eseguito il PUT.
-        with patch.object(backend._rest, "get_session_status", return_value={"config": {}}),              patch.object(backend._rest, "update_session_config") as mock_put,              patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook):
+        with (
+            patch.object(
+                backend._rest, "get_session_status", return_value={"config": {}}
+            ),
+            patch.object(backend._rest, "update_session_config") as mock_put,
+            patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook),
+        ):
             backend._configure_webhook()
         mock_put.assert_called_once()
         call_config = mock_put.call_args[0][0]
         assert call_config["config"]["webhooks"][0]["url"] == webhook
-        assert call_config["config"]["webhooks"][0]["events"] == ["message", "message.any", "message.ack", "message.ack.group"]
+        assert call_config["config"]["webhooks"][0]["events"] == [
+            "message",
+            "message.any",
+            "message.ack",
+            "message.ack.group",
+        ]
 
     def test_configure_webhook_skips_when_already_registered(self):
         import backends.whatsapp as wa_mod
+
         backend = _make_backend()
         webhook = "http://host.docker.internal:8088/webhook"
         # Config già aggiornata con entrambi gli eventi → nessun PUT.
-        with patch.object(backend._rest, "get_session_status", return_value={
-            "config": {"webhooks": [{"url": webhook, "events": ["message", "message.any", "message.ack", "message.ack.group"]}]}
-        }),              patch.object(backend._rest, "update_session_config") as mock_put,              patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook):
+        with (
+            patch.object(
+                backend._rest,
+                "get_session_status",
+                return_value={
+                    "config": {
+                        "webhooks": [
+                            {
+                                "url": webhook,
+                                "events": [
+                                    "message",
+                                    "message.any",
+                                    "message.ack",
+                                    "message.ack.group",
+                                ],
+                            }
+                        ]
+                    }
+                },
+            ),
+            patch.object(backend._rest, "update_session_config") as mock_put,
+            patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook),
+        ):
             backend._configure_webhook()
         # Gia' configurato con tutti gli eventi → nessun PUT.
         mock_put.assert_not_called()
@@ -1959,36 +2347,64 @@ class TestWhatsAppWebhookRegistration:
     def test_configure_webhook_updates_when_events_outdated(self):
         """Se l'URL c'è ma manca message.ack, esegue comunque il PUT."""
         import backends.whatsapp as wa_mod
+
         backend = _make_backend()
         webhook = "http://host.docker.internal:8088/webhook"
-        with patch.object(backend._rest, "get_session_status", return_value={
-            "config": {"webhooks": [{"url": webhook, "events": ["message"]}]}
-        }),              patch.object(backend._rest, "update_session_config") as mock_put,              patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook):
+        with (
+            patch.object(
+                backend._rest,
+                "get_session_status",
+                return_value={
+                    "config": {"webhooks": [{"url": webhook, "events": ["message"]}]}
+                },
+            ),
+            patch.object(backend._rest, "update_session_config") as mock_put,
+            patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook),
+        ):
             backend._configure_webhook()
         # Config vecchia (solo message) → PUT con entrambi gli eventi.
         mock_put.assert_called_once()
         call_config = mock_put.call_args[0][0]
-        assert call_config["config"]["webhooks"][0]["events"] == ["message", "message.any", "message.ack", "message.ack.group"]
+        assert call_config["config"]["webhooks"][0]["events"] == [
+            "message",
+            "message.any",
+            "message.ack",
+            "message.ack.group",
+        ]
 
     def test_configure_webhook_never_raises_on_error(self):
         import backends.whatsapp as wa_mod
+
         backend = _make_backend()
-        with patch.object(backend._rest, "get_session_status", side_effect=RuntimeError("boom")),              patch.object(backend._rest, "update_session_config") as mock_put,              patch.object(wa_mod, "get_whatsapp_webhook_url", return_value="http://x/webhook"):
+        with (
+            patch.object(
+                backend._rest, "get_session_status", side_effect=RuntimeError("boom")
+            ),
+            patch.object(backend._rest, "update_session_config") as mock_put,
+            patch.object(
+                wa_mod, "get_whatsapp_webhook_url", return_value="http://x/webhook"
+            ),
+        ):
             backend._configure_webhook()  # non deve sollevare
         mock_put.assert_not_called()
 
     def test_configure_webhook_noop_without_rest(self):
         import backends.whatsapp as wa_mod
+
         backend = _make_backend()
         backend._rest = None
-        with patch.object(wa_mod, "get_whatsapp_webhook_url", return_value="http://x/webhook"):
+        with patch.object(
+            wa_mod, "get_whatsapp_webhook_url", return_value="http://x/webhook"
+        ):
             backend._configure_webhook()  # nessuna eccezione
 
     def test_init_registers_webhook_from_connect_sync(self):
         """connect_sync delega la registrazione a _configure_webhook."""
         backend = _make_backend("http://api.test")
-        with patch.object(backend, "_load_contacts"), \
-             patch.object(backend, "_wait_session_ready", return_value=True), \
-             patch.object(backend, "_configure_webhook") as mock_cfg:
+        with (
+            patch.object(backend, "_load_contacts"),
+            patch.object(backend, "_wait_session_ready", return_value=True),
+            patch.object(backend, "_configure_webhook") as mock_cfg,
+        ):
             backend.connect_sync()
         mock_cfg.assert_called_once()

@@ -18,7 +18,6 @@ logger = logging.getLogger("signal_tui")
 
 
 class BackendConnectMixin:
-
     def _mark_backend_connecting(self, proto: str) -> None:
         """UI thread: un backend ha avviato la connessione (in attesa di report)."""
         self._pending_backends.add(proto)
@@ -32,7 +31,11 @@ class BackendConnectMixin:
         primo — e finisce sul contatto in cima alla lista finale.
         """
         self._pending_backends.discard(proto)
-        if not self._pending_backends and self.selected_contact is None and self.contacts:
+        if (
+            not self._pending_backends
+            and self.selected_contact is None
+            and self.contacts
+        ):
             self._select_contact(self.contacts[0])
 
     def _on_backend_ready(self, backend: ChatBackend) -> None:
@@ -129,33 +132,23 @@ class BackendConnectMixin:
             self._mark_backend_connecting, self.signal_backend.protocol
         )
         try:
-            self.call_from_thread(
-                self._status, "⏳ Signal: avvio daemon...", 0
-            )
+            self.call_from_thread(self._status, "⏳ Signal: avvio daemon...", 0)
             sb = self.signal_backend
             logger.info("LINK-SIG: start, daemon_proc=%s", sb.daemon_proc is not None)
             sb._connect_sync()
             logger.info("LINK-SIG: connect_sync done, use_daemon=%s", sb._use_daemon)
             self.call_from_thread(self._on_backend_ready, sb)
-            self.call_from_thread(
-                self._status, "💡 Select a contact to view chat"
-            )
+            self.call_from_thread(self._status, "💡 Select a contact to view chat")
             if sb._use_daemon:
-                self.call_from_thread(
-                    self._status, "✅ Signal: daemon attivo"
-                )
+                self.call_from_thread(self._status, "✅ Signal: daemon attivo")
             else:
                 self.call_from_thread(
                     self._status, "⚠️ Signal: daemon non disponibile (subprocess)", 0
                 )
         except Exception as e:
             logger.exception("LINK-SIG: failed")
-            self.call_from_thread(
-                self._status, f"❌ Signal: errore — {e}", 0
-            )
-            self.call_from_thread(
-                self._mark_backend_done, self.signal_backend.protocol
-            )
+            self.call_from_thread(self._status, f"❌ Signal: errore — {e}", 0)
+            self.call_from_thread(self._mark_backend_done, self.signal_backend.protocol)
 
     def _connect_whatsapp(self) -> None:
         """Worker thread: avvia WhatsApp, mostra contatti subito, sync cronologia dopo."""
@@ -169,9 +162,7 @@ class BackendConnectMixin:
         try:
             logger.info("LINK-WA: start")
             if self.whatsapp_backend.needs_pairing:
-                self.call_from_thread(
-                    self._status, "⏳ WAHA: attesa pairing...", 0
-                )
+                self.call_from_thread(self._status, "⏳ WAHA: attesa pairing...", 0)
             self.whatsapp_backend.connect_sync()
             n = len(self.whatsapp_backend.contacts)
             logger.info("LINK-WA: connect_sync done, wa_contacts=%d", n)
@@ -194,9 +185,7 @@ class BackendConnectMixin:
                 self.run_worker(self._poll_wa_contacts, thread=True)
         except Exception as exc:
             logger.exception("LINK-WA: failed")
-            self.call_from_thread(
-                self._status, f"❌ WAHA: non disponibile — {exc}", 0
-            )
+            self.call_from_thread(self._status, f"❌ WAHA: non disponibile — {exc}", 0)
             self.call_from_thread(
                 self._mark_backend_done, self.whatsapp_backend.protocol
             )
@@ -215,17 +204,21 @@ class BackendConnectMixin:
             if n > 0:
                 logger.info(
                     "LINK-WA: contacts synced after %d polls, wa_contacts=%d",
-                    poll_count, n,
+                    poll_count,
+                    n,
                 )
                 self.call_from_thread(
-                    self._status, f"📥 WAHA: {n} contatti caricati",
+                    self._status,
+                    f"📥 WAHA: {n} contatti caricati",
                 )
                 break
             logger.info("LINK-WA: waiting (poll=%d)", poll_count)
         else:
             logger.warning("LINK-WA: timeout after 2 min")
             self.call_from_thread(
-                self._status, "⚠️ WAHA: timeout contatti", 0,
+                self._status,
+                "⚠️ WAHA: timeout contatti",
+                0,
             )
             self.call_from_thread(
                 self._mark_backend_done, self.whatsapp_backend.protocol
@@ -241,7 +234,6 @@ class BackendConnectMixin:
         logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
         self._wa_connecting = False
 
-
     def _connect_telegram(self) -> None:
         """Worker thread: connette Telegram, poi merge nel UI thread."""
         if self._tg_connecting:
@@ -252,13 +244,21 @@ class BackendConnectMixin:
             self.call_from_thread(
                 self._mark_backend_connecting, self.telegram_backend.protocol
             )
-            logger.info("LINK-TG: start, needs_pairing=%s", self.telegram_backend.needs_pairing)
+            logger.info(
+                "LINK-TG: start, needs_pairing=%s", self.telegram_backend.needs_pairing
+            )
             self.call_from_thread(self._status, "⏳ Telegram: connecting...", 0)
             self.telegram_backend._connect_sync()
             n = len(self.telegram_backend.contacts)
-            logger.info("LINK-TG: connect_sync done, contacts=%d, connected=%s", n, self.telegram_backend._connected)
+            logger.info(
+                "LINK-TG: connect_sync done, contacts=%d, connected=%s",
+                n,
+                self.telegram_backend._connected,
+            )
             if n > 0:
-                self.call_from_thread(self._status, "⏳ Telegram: sync cronologia...", 0)
+                self.call_from_thread(
+                    self._status, "⏳ Telegram: sync cronologia...", 0
+                )
                 fetched = self.telegram_backend.fetch_recent_history(limit=20)
                 logger.info("LINK-TG: history synced, %d messages", fetched)
             self.call_from_thread(self._on_backend_ready, self.telegram_backend)
@@ -299,9 +299,10 @@ class BackendConnectMixin:
         if n:
             try:
                 self.call_from_thread(
-                    self._status,
-                    f"✅ WAHA: cronologia sincronizzata per {n} chat"
+                    self._status, f"✅ WAHA: cronologia sincronizzata per {n} chat"
                 )
             except Exception as _e:
-                logger.debug("Status report failed", exc_info=True)  # il report è solo informativo
+                logger.debug(
+                    "Status report failed", exc_info=True
+                )  # il report è solo informativo
         return n

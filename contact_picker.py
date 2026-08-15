@@ -27,7 +27,10 @@ logger = logging.getLogger(__name__)
 
 # ─── Search helper ───────────────────────────────────────────────────────────
 
-def search_contacts(contacts: list[ChatContact], query: str, max_results: int = 50) -> list[ChatContact]:
+
+def search_contacts(
+    contacts: list[ChatContact], query: str, max_results: int = 50
+) -> list[ChatContact]:
     """Filter *contacts* by *query* (case-insensitive) on name or id.
 
     A contact matches if the query is a substring of its display name or its
@@ -64,6 +67,7 @@ def search_contacts(contacts: list[ChatContact], query: str, max_results: int = 
 
 
 # ─── Contact Picker Screen ───────────────────────────────────────────────────
+
 
 class ContactPickerScreen(ModalScreen[ChatContact]):
     """Modal screen to search and select a contact.
@@ -161,7 +165,6 @@ class ContactPickerScreen(ModalScreen[ChatContact]):
                 id="contact-picker-footer",
             )
 
-
     def on_mount(self) -> None:
         """Render the initial (unfiltered) list and focus the search input."""
         self._render_results(self._all_contacts)
@@ -212,4 +215,3 @@ class ContactPickerScreen(ModalScreen[ChatContact]):
         index = results_list.index
         if index is not None and 0 <= index < len(self._results):
             self.dismiss(self._results[index])
-

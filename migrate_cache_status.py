@@ -48,7 +48,7 @@ def main() -> None:
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=2)
 
-    print(f"✅ Migrated {total_migrated} message(s): added \"status\": \"read\".")
+    print(f'✅ Migrated {total_migrated} message(s): added "status": "read".')
     print("   You can now start the Signal TUI client.")
 
 

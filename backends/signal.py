@@ -104,21 +104,24 @@ class SignalBackend(ChatBackend):
     def _connect_sync(self) -> None:
         # Errore chiaro SOLO quando il backend tenta davvero di connettersi.
         if not self.user_number:
-            self.user_number = _require_user_number()   # RuntimeError canonico
+            self.user_number = _require_user_number()  # RuntimeError canonico
         self.cache = self._load_protocol_cache()
 
         if _is_daemon_running():
             self._use_daemon = True
             self._load_contacts_rpc()
         else:
-            signal_cli = find_signal_cli()              # FileNotFoundError canonico
+            signal_cli = find_signal_cli()  # FileNotFoundError canonico
             self.daemon_proc = subprocess.Popen(
                 [
                     str(signal_cli),
-                    "-u", self.user_number,
+                    "-u",
+                    self.user_number,
                     "daemon",
-                    "--http", f"127.0.0.1:{DAEMON_HTTP_PORT}",
-                    "--receive-mode", "on-connection",
+                    "--http",
+                    f"127.0.0.1:{DAEMON_HTTP_PORT}",
+                    "--receive-mode",
+                    "on-connection",
                     "--no-receive-stdout",
                 ],
                 stdout=subprocess.DEVNULL,
@@ -161,8 +164,12 @@ class SignalBackend(ChatBackend):
             # pipeline.  Best-effort, never blocks startup.
             try:
                 result = self._rpc._call("sendSyncRequest")
-                logger.info("SYNC-REQUEST: result=%s", 
-                           "ok" if isinstance(result, dict) and "result" in result else str(result)[:100])
+                logger.info(
+                    "SYNC-REQUEST: result=%s",
+                    "ok"
+                    if isinstance(result, dict) and "result" in result
+                    else str(result)[:100],
+                )
             except Exception as e:  # noqa: BLE001
                 logger.info("SYNC-REQUEST: exception=%s", e)
 
@@ -258,6 +265,7 @@ class SignalBackend(ChatBackend):
 
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
+
     # ─── Cache ────────────────────────────────────────────────────────
     # NOTE: ``self.cache`` is keyed by the *raw* contact id (e.g. the phone
     # number) so it is compatible with ``backend._process_receipt`` and
@@ -286,7 +294,11 @@ class SignalBackend(ChatBackend):
         """Send *text* to *contact_id*; returns the client timestamp (ms)."""
         return await asyncio.to_thread(
             self._send_message_sync,
-            contact_id, text, quote_timestamp, quote_author, quote_message,
+            contact_id,
+            text,
+            quote_timestamp,
+            quote_author,
+            quote_message,
         )
 
     def _send_message_sync(
@@ -397,7 +409,9 @@ class SignalBackend(ChatBackend):
         source_name = envelope.get("sourceName", "")
         source_number = envelope.get("sourceNumber", "") or envelope.get("source", "")
 
-        def _classify_attachments(attachments: list) -> list[tuple[str, str, str | None]]:
+        def _classify_attachments(
+            attachments: list,
+        ) -> list[tuple[str, str, str | None]]:
             """Classify every attachment in *attachments*, returning one
             ``(msg_type, info, att_id)`` tuple for each element."""
             result: list[tuple[str, str, str | None]] = []
@@ -429,8 +443,13 @@ class SignalBackend(ChatBackend):
                 return ("sticker", f"Sticker #{sticker_id} (pack:{pack_id[:8]}…)")
             return ("sticker", f"Sticker #{sticker_id}")
 
-        def _build_msg_dicts(sender: str, text: str, is_mine: bool,
-                             quote_text: str | None, attachments: list) -> list[dict]:
+        def _build_msg_dicts(
+            sender: str,
+            text: str,
+            is_mine: bool,
+            quote_text: str | None,
+            attachments: list,
+        ) -> list[dict]:
             """Build one dict per classified attachment, or a single text dict."""
             classified = _classify_attachments(attachments)
             if classified:
@@ -449,18 +468,30 @@ class SignalBackend(ChatBackend):
                             msg_text = f"{label}: {fname}"
                         else:
                             msg_text = label
-                    msgs.append({
-                        "sender": sender, "text": msg_text, "is_mine": is_mine,
-                        "quote_text": quote_text, "msg_type": msg_type,
-                        "attachment_info": att_info, "attachment_id": att_id,
-                    })
+                    msgs.append(
+                        {
+                            "sender": sender,
+                            "text": msg_text,
+                            "is_mine": is_mine,
+                            "quote_text": quote_text,
+                            "msg_type": msg_type,
+                            "attachment_info": att_info,
+                            "attachment_id": att_id,
+                        }
+                    )
                 return msgs
             # No attachments: pure text message.
-            return [{
-                "sender": sender, "text": text, "is_mine": is_mine,
-                "quote_text": quote_text, "msg_type": "text",
-                "attachment_info": None, "attachment_id": None,
-            }]
+            return [
+                {
+                    "sender": sender,
+                    "text": text,
+                    "is_mine": is_mine,
+                    "quote_text": quote_text,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                }
+            ]
 
         data_msg = envelope.get("dataMessage", {})
         if data_msg:
@@ -474,14 +505,21 @@ class SignalBackend(ChatBackend):
                 msg_type, att_info = sticker_data
                 if not text:
                     text = att_info or "🎨 Sticker"
-                return [{
-                    "sender": sender, "text": text, "is_mine": False,
-                    "quote_text": quote_text, "msg_type": msg_type,
-                    "attachment_info": att_info,
-                }]
+                return [
+                    {
+                        "sender": sender,
+                        "text": text,
+                        "is_mine": False,
+                        "quote_text": quote_text,
+                        "msg_type": msg_type,
+                        "attachment_info": att_info,
+                    }
+                ]
 
             return _build_msg_dicts(
-                sender, text, is_mine=False,
+                sender,
+                text,
+                is_mine=False,
                 quote_text=quote_text,
                 attachments=data_msg.get("attachments", []),
             )
@@ -499,14 +537,21 @@ class SignalBackend(ChatBackend):
                 msg_type, att_info = sticker_data
                 if not text:
                     text = att_info or "🎨 Sticker"
-                return [{
-                    "sender": sender, "text": text, "is_mine": True,
-                    "quote_text": quote_text, "msg_type": msg_type,
-                    "attachment_info": att_info,
-                }]
+                return [
+                    {
+                        "sender": sender,
+                        "text": text,
+                        "is_mine": True,
+                        "quote_text": quote_text,
+                        "msg_type": msg_type,
+                        "attachment_info": att_info,
+                    }
+                ]
 
             return _build_msg_dicts(
-                sender, text, is_mine=True,
+                sender,
+                text,
+                is_mine=True,
                 quote_text=quote_text,
                 attachments=sent.get("attachments", []),
             )
@@ -534,20 +579,27 @@ class SignalBackend(ChatBackend):
         typing = _process_typing(envelope)
         if typing is not None:
             source, action = typing
-            return [ChatEvent(
-                type="typing", protocol=self.protocol,
-                contact_id=source, payload={"action": action},
-            )]
+            return [
+                ChatEvent(
+                    type="typing",
+                    protocol=self.protocol,
+                    contact_id=source,
+                    payload={"action": action},
+                )
+            ]
 
         # Receipt message
         if "receiptMessage" in envelope:
             receipt = envelope.get("receiptMessage", {})
             source = envelope.get("sourceNumber", "") or envelope.get("source", "")
-            return [ChatEvent(
-                type="receipt", protocol=self.protocol,
-                contact_id=source,
-                payload={"receipt": receipt},
-            )]
+            return [
+                ChatEvent(
+                    type="receipt",
+                    protocol=self.protocol,
+                    contact_id=source,
+                    payload={"receipt": receipt},
+                )
+            ]
 
         # Real message
         contact = self._identify_contact_for_envelope(envelope)
@@ -559,11 +611,14 @@ class SignalBackend(ChatBackend):
         ts = self._get_message_timestamp(envelope)
         events: list[ChatEvent] = []
         for data in data_list:
-            events.append(ChatEvent(
-                type="message", protocol=self.protocol,
-                contact_id=contact.id,
-                payload={**data, "timestamp": ts, "contact": contact},
-            ))
+            events.append(
+                ChatEvent(
+                    type="message",
+                    protocol=self.protocol,
+                    contact_id=contact.id,
+                    payload={**data, "timestamp": ts, "contact": contact},
+                )
+            )
         return events
 
     # ─── Incoming message ingestion ───────────────────────────────────
@@ -622,18 +677,21 @@ class SignalBackend(ChatBackend):
             attachment_info=data["attachment_info"],
             attachment_id=data.get("attachment_id"),
         )
-        self._add_cached_message(contact_id, {
-            "text": text,
-            "is_mine": is_mine,
-            "sender": data["sender"],
-            "timestamp": ts,
-            "quote_text": data["quote_text"],
-            "msg_type": data["msg_type"],
-            "attachment_info": data["attachment_info"],
-            "attachment_id": data.get("attachment_id"),
-            "read": is_mine,
-            "status": "sent" if is_mine else "read",
-        })
+        self._add_cached_message(
+            contact_id,
+            {
+                "text": text,
+                "is_mine": is_mine,
+                "sender": data["sender"],
+                "timestamp": ts,
+                "quote_text": data["quote_text"],
+                "msg_type": data["msg_type"],
+                "attachment_info": data["attachment_info"],
+                "attachment_id": data.get("attachment_id"),
+                "read": is_mine,
+                "status": "sent" if is_mine else "read",
+            },
+        )
         return True
 
     def process_receipt(self, envelope: dict) -> list[dict]:
@@ -646,8 +704,10 @@ class SignalBackend(ChatBackend):
         updated = _process_receipt(envelope, self.cache)
         for msg in updated:
             _update_message_status(
-                msg["timestamp"], msg["status"],
-                protocol=PROTOCOL_SIGNAL, contact_number=source,
+                msg["timestamp"],
+                msg["status"],
+                protocol=PROTOCOL_SIGNAL,
+                contact_number=source,
             )
         return updated
 
@@ -659,7 +719,9 @@ class SignalBackend(ChatBackend):
             return
         self._polling_active = True
         self._sse_thread = threading.Thread(
-            target=self._sse_listener, name="signal-sse", daemon=True,
+            target=self._sse_listener,
+            name="signal-sse",
+            daemon=True,
         )
         self._sse_thread.start()
 
@@ -686,9 +748,7 @@ class SignalBackend(ChatBackend):
                 for envelope in self._rpc.listen_events(self.user_number):
                     if not self._polling_active:
                         return
-                    events = self.envelope_to_event(
-                        envelope.get("envelope", {})
-                    )
+                    events = self.envelope_to_event(envelope.get("envelope", {}))
                     for event in events:
                         if event is not None:
                             self._event_queue.put(event)
@@ -724,7 +784,7 @@ class SignalBackend(ChatBackend):
 
     def poll_once(self) -> list[ChatEvent]:
         """Drain all pending events from the SSE queue without blocking.
-        
+
         Called by the poll worker thread.
 
         Called by the ``_poll_worker`` thread in ``signal_tui.py``.
@@ -738,4 +798,3 @@ class SignalBackend(ChatBackend):
             except queue.Empty:
                 break
         return events
-

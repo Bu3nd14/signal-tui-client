@@ -23,7 +23,9 @@ class TestSignalRPCClient:
 
         with patch("urllib.request.urlopen") as mock_urlopen:
             mock_response = MagicMock()
-            mock_response.read.return_value = b'{"jsonrpc":"2.0","id":1,"result":["ok"]}'
+            mock_response.read.return_value = (
+                b'{"jsonrpc":"2.0","id":1,"result":["ok"]}'
+            )
             mock_urlopen.return_value.__enter__.return_value = mock_response
 
             result = client._call("listContacts")
@@ -64,9 +66,7 @@ class TestSignalRPCClient:
         client = SignalRPCClient("http://localhost:9999")
 
         with patch.object(client, "_call") as mock_call:
-            mock_call.return_value = {
-                "result": [{"envelope": {"source": "+39"}}]
-            }
+            mock_call.return_value = {"result": [{"envelope": {"source": "+39"}}]}
             messages = client.receive()
         assert len(messages) == 1
         assert messages[0]["envelope"]["source"] == "+39"
@@ -88,12 +88,7 @@ class TestSignalSSE:
         """An SSE stream with one event → yields the parsed envelope."""
         client = SignalRPCClient(SSE_URL)
         # Simulated SSE stream: event line, data line (single JSON object), blank terminator, keep-alive
-        sse_body = (
-            b'event:receive\n'
-            b'data:{"envelope":{"source":"+39"}}\n'
-            b'\n'
-            b':keep-alive\n'
-        )
+        sse_body = b'event:receive\ndata:{"envelope":{"source":"+39"}}\n\n:keep-alive\n'
 
         with patch("urllib.request.urlopen") as mock_urlopen:
             mock_resp = MagicMock()
@@ -108,11 +103,11 @@ class TestSignalSSE:
         """SSE comments (keep-alive) are ignored."""
         client = SignalRPCClient(SSE_URL)
         sse_body = (
-            b':\n'                     # keep-alive
-            b':\n'                     # keep-alive
-            b'event:receive\n'
+            b":\n"  # keep-alive
+            b":\n"  # keep-alive
+            b"event:receive\n"
             b'data:{"envelope":{"source":"+39"}}\n'
-            b'\n'
+            b"\n"
         )
 
         with patch("urllib.request.urlopen") as mock_urlopen:
@@ -136,12 +131,12 @@ class TestSignalSSE:
         """Malformed SSE data → event is skipped gracefully."""
         client = SignalRPCClient(SSE_URL)
         sse_body = (
-            b'event:receive\n'
-            b'data:not-valid-json\n'
-            b'\n'
-            b'event:receive\n'
+            b"event:receive\n"
+            b"data:not-valid-json\n"
+            b"\n"
+            b"event:receive\n"
             b'data:{"envelope":{"source":"+39"}}\n'
-            b'\n'
+            b"\n"
         )
 
         with patch("urllib.request.urlopen") as mock_urlopen:

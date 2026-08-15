@@ -33,8 +33,9 @@ class WhatsAppRESTClient:
         # HTTP status of the most recent _request (0 if never attempted).
         self.last_status: int = 0
 
-    def _request(self, method: str, path: str, payload: dict | None = None,
-                 timeout: int = 30) -> dict | None:
+    def _request(
+        self, method: str, path: str, payload: dict | None = None, timeout: int = 30
+    ) -> dict | None:
         """Execute an HTTP request and return the JSON body.
 
         When a WAHA API key is configured, it is sent as the ``X-Api-Key``
@@ -99,7 +100,9 @@ class WhatsAppRESTClient:
     def create_session(self) -> dict | None:
         """Create the session and return the response (may include a QR)."""
         return self._request(
-            "POST", "/api/sessions", {"name": self.session_name, "session": self.session_name}
+            "POST",
+            "/api/sessions",
+            {"name": self.session_name, "session": self.session_name},
         )
 
     def get_session_status(self) -> dict | None:
@@ -115,15 +118,17 @@ class WhatsAppRESTClient:
         {webhooks: [{url: ..., events: [message, message.ack]}]}.  Returns the updated
         session dict, or None on error (callers treat it as best-effort).
         """
-        return self._request(
-            "PUT", f"/api/sessions/{self.session_name}", config
-        )
+        return self._request("PUT", f"/api/sessions/{self.session_name}", config)
 
     def start_session(self) -> dict | None:
         """Create (if needed) and start the session via WAHA ``/api/sessions/start``."""
-        return self._request("POST", "/api/sessions/start", {
-            "name": self.session_name,
-        })
+        return self._request(
+            "POST",
+            "/api/sessions/start",
+            {
+                "name": self.session_name,
+            },
+        )
 
     def reset_session(self, logout: bool = True) -> dict | None:
         """Force a clean pairing state so the next QR is guaranteed fresh and valid.
@@ -135,7 +140,9 @@ class WhatsAppRESTClient:
         linked device), falling back to ``/api/sessions/stop``.
         """
         if logout:
-            result = self._request("POST", "/api/sessions/logout", {"name": self.session_name})
+            result = self._request(
+                "POST", "/api/sessions/logout", {"name": self.session_name}
+            )
             if result is not None or self.last_status in (200, 201, 204):
                 return result
         return self._request("POST", "/api/sessions/stop", {"name": self.session_name})
@@ -207,7 +214,9 @@ class WhatsAppRESTClient:
         """
         timeout = 5
         chats = self._request(
-            "GET", f"/api/{self.session_name}/chats", timeout=timeout,
+            "GET",
+            f"/api/{self.session_name}/chats",
+            timeout=timeout,
         )
         if not chats or not isinstance(chats, list):
             return None if chats is None else []
@@ -234,13 +243,15 @@ class WhatsAppRESTClient:
                     if isinstance(ts, (int, float)):
                         last_ts = int(ts * 1000) if ts < 10**12 else int(ts)
             if cid:
-                out.append({
-                    "id": cid,
-                    "name": name or cid,
-                    "isGroup": bool(chat.get("isGroup")),
-                    "last_ts": last_ts,
-                    "unread": int(chat.get("unreadCount") or 0),
-                })
+                out.append(
+                    {
+                        "id": cid,
+                        "name": name or cid,
+                        "isGroup": bool(chat.get("isGroup")),
+                        "last_ts": last_ts,
+                        "unread": int(chat.get("unreadCount") or 0),
+                    }
+                )
         return out
 
     @staticmethod
@@ -253,13 +264,16 @@ class WhatsAppRESTClient:
         data = result.get("data") or result.get("contacts") or []
         return data if isinstance(data, list) else []
 
-
     # ── Messaging ─────────────────────────────────────────────────────
 
-    def send_message(self, to: str, text: str,
-                     quote_timestamp: int | None = None,
-                     quote_author: str | None = None,
-                     quote_message: str | None = None) -> dict | None:
+    def send_message(
+        self,
+        to: str,
+        text: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+    ) -> dict | None:
         """Send a message via WAHA ``/api/sendText``.
 
         Returns the API response or ``None`` on error.
@@ -301,9 +315,13 @@ class WhatsAppRESTClient:
 
         Returns ``None`` (treated as non-fatal) if the endpoint is unavailable.
         """
-        return self._request("POST", f"/api/chats/{contact_id}/read", {
-            "session": self.session_name,
-        })
+        return self._request(
+            "POST",
+            f"/api/chats/{contact_id}/read",
+            {
+                "session": self.session_name,
+            },
+        )
 
     # ── Attachments ───────────────────────────────────────────────────
 
@@ -351,15 +369,15 @@ class WhatsAppRESTClient:
                     safe_path += "?" + parsed.query
                 safe_url = parsed.scheme + "://" + host + safe_path
             except Exception as _e:
-                logger.debug("Failed to rewrite media URL, using original", exc_info=True)
+                logger.debug(
+                    "Failed to rewrite media URL, using original", exc_info=True
+                )
                 safe_url = media_id_or_url
             try:
                 headers = {"Accept": "*/*"}
                 if self.api_key:
                     headers["X-Api-Key"] = self.api_key
-                req = urllib.request.Request(
-                    safe_url, headers=headers, method="GET"
-                )
+                req = urllib.request.Request(safe_url, headers=headers, method="GET")
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     self.last_status = getattr(resp, "status", 200)
                     data = resp.read()

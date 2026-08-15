@@ -109,8 +109,8 @@ Tre worker thread (`_connect_signal`, `_connect_whatsapp`, `_poll_wa_contacts`) 
 
 ```python
 # signal_tui.py righe 1047-1055 — ESEGUITO NEL WORKER THREAD
-self._cache = {}                              # ❌ azzera tutto
-for b in self.manager.all():                  # ❌ rilegge tutti i backend
+self._cache = {}  # ❌ azzera tutto
+for b in self.manager.all():  # ❌ rilegge tutti i backend
     self._cache[...] = list(msgs)
 self.contacts = self.manager.list_contacts()  # ❌ sostituisce lista intera
 ```
@@ -287,6 +287,7 @@ Fonti di configurazione (in ordine di priorità):
 ```python
 # ─── Telegram configuration ────────────────────────────────────────────
 
+
 def get_telegram_api_id() -> int:
     """Legge TELEGRAM_API_ID da env, config.json, o .env."""
     raw = os.environ.get("TELEGRAM_API_ID", "")
@@ -302,6 +303,7 @@ def get_telegram_api_id() -> int:
     except (ValueError, TypeError):
         return 0
 
+
 def get_telegram_api_hash() -> str:
     """Legge TELEGRAM_API_HASH da env, config.json, o .env."""
     env = os.environ.get("TELEGRAM_API_HASH", "").strip()
@@ -310,10 +312,13 @@ def get_telegram_api_hash() -> str:
     cfg = _load_config()
     return str(cfg.get("telegram_api_hash", "")).strip()
 
+
 def get_telegram_session_path() -> str:
     """Percorso del file .session di Telethon."""
     from backend import CACHE_DIR
+
     return str(Path(CACHE_DIR) / "telegram.session")
+
 
 def telegram_enabled() -> bool:
     """Ritorna True se le credenziali Telegram sono configurate."""
@@ -476,7 +481,8 @@ def _connect_sync(self) -> None:
     asyncio.set_event_loop(self._loop)
 
     self._client = TelegramClient(
-        self._session_path, self._api_id, self._api_hash, loop=self._loop)
+        self._session_path, self._api_id, self._api_hash, loop=self._loop
+    )
     self._loop.run_until_complete(self._client.connect())
 
     if not self._loop.run_until_complete(self._client.is_user_authorized()):
@@ -486,13 +492,15 @@ def _connect_sync(self) -> None:
     self._loop.run_until_complete(self._load_contacts())
 
     from telethon import events
+
     @self._client.on(events.NewMessage)
     async def handler(event):
         await self._on_new_message(event)
 
     self._polling_active = True
     self._telegram_thread = threading.Thread(
-        target=self._telegram_event_loop, name="telegram-loop", daemon=True)
+        target=self._telegram_event_loop, name="telegram-loop", daemon=True
+    )
     self._telegram_thread.start()
 ```
 
@@ -507,14 +515,14 @@ async def get_pairing_qr(self) -> str | None:
     l'utente scansiona il QR.
     """
     if self._client is None:
-        self._client = TelegramClient(
-            self._session_path, self._api_id, self._api_hash)
+        self._client = TelegramClient(self._session_path, self._api_id, self._api_hash)
         await self._client.connect()
 
     try:
         result = await self._client.qr_login()
-        if hasattr(result, 'token'):
+        if hasattr(result, "token"):
             import base64
+
             token_b64 = base64.urlsafe_b64encode(result.token).decode().rstrip("=")
             return f"tg://login?token={token_b64}"
         return None
@@ -539,6 +547,7 @@ def poll_once(self) -> list[ChatEvent]:
             break
     return events
 
+
 async def _on_new_message(self, event) -> None:
     """Normalizza un evento NewMessage Telethon in ChatEvent."""
     msg = event.message
@@ -550,16 +559,23 @@ async def _on_new_message(self, event) -> None:
         "id": str(msg.id),
         "text": msg.text or "",
         "is_mine": msg.out,
-        "sender": "You" if msg.out else (getattr(msg.sender, 'first_name', None) or display_name),
+        "sender": "You"
+        if msg.out
+        else (getattr(msg.sender, "first_name", None) or display_name),
         "timestamp": int(msg.date.timestamp() * 1000),
         "is_group": contact_id.startswith("-"),
         "msg_type": "text",
         "attachment_info": None,
         "attachment_id": None,
     }
-    self._event_queue.put(ChatEvent(
-        type="message", protocol=PROTOCOL_TELEGRAM,
-        contact_id=contact_id, payload=payload))
+    self._event_queue.put(
+        ChatEvent(
+            type="message",
+            protocol=PROTOCOL_TELEGRAM,
+            contact_id=contact_id,
+            payload=payload,
+        )
+    )
 ```
 
 ---
@@ -809,6 +825,7 @@ async def _get_telegram_qr_link(self) -> str:
         raise RuntimeError("Telegram backend not available")
 
     import asyncio as _asyncio
+
     def _run():
         loop = _asyncio.new_event_loop()
         _asyncio.set_event_loop(loop)
@@ -846,6 +863,7 @@ async def _check_telegram_done(self) -> bool:
     scaduto (30s), refresh automatico: rigenera il QR.
     """
     import asyncio as _asyncio
+
     app = self.app
     tb = getattr(app, "telegram_backend", None)
     if tb is None:
@@ -911,7 +929,10 @@ import sys, asyncio, base64
 _ensure_venv()
 
 from backends.config import (
-    get_telegram_api_id, get_telegram_api_hash, get_telegram_session_path)
+    get_telegram_api_id,
+    get_telegram_api_hash,
+    get_telegram_session_path,
+)
 from qr_utils import print_qr_code
 from telethon import TelegramClient
 

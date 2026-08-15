@@ -62,8 +62,10 @@ Serve una fixture `app_for_test` che:
 @pytest.fixture
 def app_for_test():
     """Crea un SignalTUI con backend mockati per test TUI."""
-    with patch("signal_tui.SignalBackend") as mock_sb, \
-         patch("signal_tui.whatsapp_enabled", return_value=False):
+    with (
+        patch("signal_tui.SignalBackend") as mock_sb,
+        patch("signal_tui.whatsapp_enabled", return_value=False),
+    ):
         app = SignalTUI()
         app.contacts = [
             ChatContact(id="+391234567890", display_name="Mario", protocol="signal"),

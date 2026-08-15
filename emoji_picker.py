@@ -50,9 +50,11 @@ for char, data in emoji.EMOJI_DATA.items():
 
 def replace_emoji_aliases(text: str) -> str:
     """Replace ``:emoji_name:`` patterns in *text* with actual emoji characters."""
+
     def _replacer(m: re.Match) -> str:
         name = m.group(1).lower()
         return _ALIAS_TO_EMOJI.get(name, m.group(0))
+
     return EMOJI_ALIAS_RE.sub(_replacer, text)
 
 
@@ -119,6 +121,7 @@ def _get_categories() -> list[tuple[str, str, list[str]]]:
 
 
 # ─── Emoji width normalisation ────────────────────────────────────────────────
+
 
 def _normalize_emoji_width(char: str) -> str:
     """Ensure an emoji character occupies exactly 2 terminal columns.
@@ -591,7 +594,9 @@ class EmojiCompletionWidget(Vertical):
             classes = "emoji-suggestion"
             if i == self._selected_index:
                 classes += " emoji-suggestion-selected"
-            w = _SuggestionWidget(f"{marker} {emoji_display}  :{alias}:", classes=classes)
+            w = _SuggestionWidget(
+                f"{marker} {emoji_display}  :{alias}:", classes=classes
+            )
             w.emoji_char = char
             w.completion_widget = self
             self.mount(w)
@@ -653,7 +658,7 @@ class EmojiCompletionWidget(Vertical):
 
     def _select_and_insert(self, emoji_char: str) -> None:
         """Insert an emoji into the message input and hide suggestions.
-        
+
         Called when the user clicks a suggestion or presses Enter.
         """
         # Walk up to the app and insert the emoji into the message input

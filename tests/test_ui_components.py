@@ -86,9 +86,6 @@ class TestMessageWidget:
         assert "<Mario:>" in str(content)
         assert "Ciao gruppo!" in str(content)
 
-
-
-
     def test_sender_color_none_no_prefix(self):
         """Senza sender_color, il testo resta invariato (nessun prefisso)."""
         w = MessageWidget(
@@ -115,7 +112,6 @@ class TestMessageWidget:
         rendered = str(w.render())
         assert "<:>" not in rendered
         assert "Ciao!" in rendered
-
 
 
 class TestImageWidget:

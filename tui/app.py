@@ -123,7 +123,7 @@ class SignalTUI(
         #: Se in un batch hanno scritto più di questo numero di chat distinte,
         #: il flush ricade sull'update unread "full" (conservativo).
         self._CONTACT_UPDATE_BATCH_MAX = 4
-        self._cache: dict[str, list[dict]] = {}   # keyed by contact_cache_key
+        self._cache: dict[str, list[dict]] = {}  # keyed by contact_cache_key
         self._loaded_all = False
         # Incremented on every contact selection; a load worker checks it to
         # detect a stale reload after a newer _clear_chat (prevents duplicates).
@@ -138,11 +138,17 @@ class SignalTUI(
 
         self._reply_to: dict | None = None  # message being replied to
         self._download_mode = False  # Ctrl+D download mode active
-        self._typing_contacts: dict[str, float] = {}  # contact cache_key → time of last typing STARTED
+        self._typing_contacts: dict[
+            str, float
+        ] = {}  # contact cache_key → time of last typing STARTED
 
-        self._typing_mumbling: dict[str, float] = {}  # contact cache_key → mumbling expiry
+        self._typing_mumbling: dict[
+            str, float
+        ] = {}  # contact cache_key → mumbling expiry
         self._TYPING_TIMEOUT = 10.0  # seconds before a typing indicator auto-expires
-        self._TYPING_MUMBLING_DURATION = 60.0  # seconds a contact stays with 💭 after stopping typing
+        self._TYPING_MUMBLING_DURATION = (
+            60.0  # seconds a contact stays with 💭 after stopping typing
+        )
 
         # cache_key → ListItem: O(1) lookup for _update_typing_label
         self._contact_widgets: dict[str, ListItem] = {}
@@ -200,7 +206,10 @@ class SignalTUI(
             and self.whatsapp_backend.is_working
         ):
             self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
-        if self.telegram_backend is not None and not self.telegram_backend.needs_pairing:
+        if (
+            self.telegram_backend is not None
+            and not self.telegram_backend.needs_pairing
+        ):
             self.run_worker(self._connect_telegram, exclusive=False, thread=True)
 
     def action_quit(self):

@@ -38,7 +38,9 @@ def test_import_clean_without_config_in_ci_environment(tmp_path: Path) -> None:
         ignore=shutil.ignore_patterns("__pycache__"),
     )
 
-    code = "import backend.rpc as r; print(repr(r.USER_NUMBER), repr(r.SIGNAL_CLI_PATH))"
+    code = (
+        "import backend.rpc as r; print(repr(r.USER_NUMBER), repr(r.SIGNAL_CLI_PATH))"
+    )
     env = {k: v for k, v in os.environ.items() if k != "SIGNAL_USER_NUMBER"}
     env["PYTHONPATH"] = str(tmp_path)
 

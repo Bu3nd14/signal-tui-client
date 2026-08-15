@@ -5,6 +5,7 @@ Used by:
 - ``link_account.py`` / ``link_whatsapp.py`` (standalone CLI scripts)
 - ``device_link_screen.py`` (TUI linking flow)
 """
+
 from __future__ import annotations
 
 import struct
@@ -83,9 +84,9 @@ def _decode_png_luminance(png_bytes: bytes) -> tuple[int, int, bytes]:
     idat = b""
     meta = None
     while pos < len(png_bytes):
-        (ln,) = struct.unpack(">I", png_bytes[pos:pos + 4])
-        ctype = png_bytes[pos + 4:pos + 8].decode("ascii")
-        cdata = png_bytes[pos + 8:pos + 8 + ln]
+        (ln,) = struct.unpack(">I", png_bytes[pos : pos + 4])
+        ctype = png_bytes[pos + 4 : pos + 8].decode("ascii")
+        cdata = png_bytes[pos + 8 : pos + 8 + ln]
         if ctype == "IHDR":
             w, h, bd, ctyp, _ci, _cf, _cint = struct.unpack(">IIBBBBB", cdata[:13])
             meta = (w, h, bd, ctyp)
@@ -102,7 +103,7 @@ def _decode_png_luminance(png_bytes: bytes) -> tuple[int, int, bytes]:
     prev = bytearray(plen)
     for y in range(h):
         f = raw[y * (plen + 1)]
-        row = bytearray(raw[y * (plen + 1) + 1:(y + 1) * (plen + 1)])
+        row = bytearray(raw[y * (plen + 1) + 1 : (y + 1) * (plen + 1)])
         for x in range(plen):
             a = row[x - bpp] if x >= bpp else 0
             b = prev[x]
@@ -121,7 +122,7 @@ def _decode_png_luminance(png_bytes: bytes) -> tuple[int, int, bytes]:
             else:
                 v = row[x]
             row[x] = v & 255
-        out[y * plen:(y + 1) * plen] = row
+        out[y * plen : (y + 1) * plen] = row
         prev = row
 
     lum = bytearray(w * h)
@@ -192,8 +193,7 @@ def _qr_simple(lum: bytes, w: int, h: int) -> str:
     rows = []
     for y in range(0, h, step):
         line = "".join(
-            "██" if lum[y * w + x] < 128 else "  "
-            for x in range(0, w, step)
+            "██" if lum[y * w + x] < 128 else "  " for x in range(0, w, step)
         )
         rows.append(line)
     return "\n".join(rows)

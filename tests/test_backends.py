@@ -29,6 +29,7 @@ from models import (
 
 # ─── ChatBackend ABC ─────────────────────────────────────────────────────────
 
+
 class TestChatBackendABC:
     """🧱 ChatBackend deve essere astratto e con protocollo obbligatorio."""
 
@@ -47,21 +48,29 @@ class TestChatBackendABC:
 
         class _NoProtocol(ChatBackend):
             protocol = ""
+
             def __init__(self):
                 self.contacts = []
+
             async def connect(self): ...
             async def disconnect(self): ...
-            async def list_contacts(self): return []
-            async def send_message(self, *a, **k): return ""
+            async def list_contacts(self):
+                return []
+
+            async def send_message(self, *a, **k):
+                return ""
+
             async def mark_read(self, *a): ...
             async def receive(self): ...
-            def get_attachment_path(self, *a): return None
+            def get_attachment_path(self, *a):
+                return None
 
         with pytest.raises(ValueError):
             manager.register(_NoProtocol())
 
 
 # ─── SignalBackend ───────────────────────────────────────────────────────────
+
 
 class TestSignalBackend:
     """📱 Conversione contatti ed eventi nel backend Signal."""
@@ -72,6 +81,7 @@ class TestSignalBackend:
     def test_to_chat_contact(self):
         """Contact legacy → ChatContact con protocol='signal'."""
         from backend import Contact
+
         backend = SignalBackend()
         cc = backend._to_chat_contact(
             Contact(number="+391234567890", name="Mario", aci="uuid-123")
@@ -87,9 +97,12 @@ class TestSignalBackend:
         from unittest.mock import patch
 
         import backend as backend_mod
+
         db_file = tmp_path / "messages.db"
-        with patch.object(backend_mod, "DB_FILE", db_file), \
-             patch.object(backend_mod, "CACHE_DIR", tmp_path):
+        with (
+            patch.object(backend_mod, "DB_FILE", db_file),
+            patch.object(backend_mod, "CACHE_DIR", tmp_path),
+        ):
             backend_mod._add_message_to_cache(
                 "+391234567890", "Ciao!", False, "Mario", 1000
             )
@@ -135,8 +148,12 @@ class TestSignalBackend:
             "+391111111111": [],  # nessun messaggio -> 0
         }
         contacts = [
-            ChatContact(id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL),
-            ChatContact(id="+391111111111", display_name="Luigi", protocol=PROTOCOL_SIGNAL),
+            ChatContact(
+                id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+            ),
+            ChatContact(
+                id="+391111111111", display_name="Luigi", protocol=PROTOCOL_SIGNAL
+            ),
         ]
         backend._set_contacts(contacts)
         assert contacts[0].last_message_ts == 7777
@@ -146,9 +163,17 @@ class TestSignalBackend:
         """_set_contacts filtra il contatto di sistema 'status@broadcast'."""
         backend = SignalBackend()
         contacts = [
-            ChatContact(id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL),
-            ChatContact(id="status@broadcast", display_name="status@broadcast", protocol=PROTOCOL_SIGNAL),
-            ChatContact(id="+391111111111", display_name="Luigi", protocol=PROTOCOL_SIGNAL),
+            ChatContact(
+                id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+            ),
+            ChatContact(
+                id="status@broadcast",
+                display_name="status@broadcast",
+                protocol=PROTOCOL_SIGNAL,
+            ),
+            ChatContact(
+                id="+391111111111", display_name="Luigi", protocol=PROTOCOL_SIGNAL
+            ),
         ]
         backend._set_contacts(contacts)
         assert len(backend.contacts) == 2
@@ -159,8 +184,10 @@ class TestSignalBackend:
         """Un envelope di messaggio produce un ChatEvent type='message'."""
         backend = SignalBackend()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario",
-            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "uuid-123"},
         )
         backend._set_contacts([contact])
         envelope = {
@@ -196,8 +223,10 @@ class TestSignalBackend:
         """
         backend = SignalBackend()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario",
-            protocol=PROTOCOL_SIGNAL, extras={"aci": "uuid-123"},
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "uuid-123"},
         )
         backend._set_contacts([contact])
         # Envelope con syncMessage.sentMessage dove NESSUN contatto matcha
@@ -208,7 +237,7 @@ class TestSignalBackend:
             "sourceNumber": "+391234567890",
             "syncMessage": {
                 "sentMessage": {
-                    "destination": "+399999999999",    # sconosciuto
+                    "destination": "+399999999999",  # sconosciuto
                     "destinationNumber": "+399999999999",
                 }
             },
@@ -248,7 +277,9 @@ class TestSignalBackend:
         """Un envelope con una foto → 1 evento (backward compat)."""
         backend = SignalBackend()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
         )
         backend._set_contacts([contact])
         envelope = {
@@ -259,11 +290,13 @@ class TestSignalBackend:
             "dataMessage": {
                 "message": "guarda!",
                 "timestamp": 2000,
-                "attachments": [{
-                    "contentType": "image/jpeg",
-                    "filename": "photo.jpg",
-                    "id": "att-001",
-                }],
+                "attachments": [
+                    {
+                        "contentType": "image/jpeg",
+                        "filename": "photo.jpg",
+                        "id": "att-001",
+                    }
+                ],
             },
         }
         events = backend.envelope_to_event(envelope)
@@ -278,7 +311,9 @@ class TestSignalBackend:
         """3 foto → 3 ChatEvent, ognuno msg_type='image'."""
         backend = SignalBackend()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
         )
         backend._set_contacts([contact])
         envelope = {
@@ -306,7 +341,9 @@ class TestSignalBackend:
         """1 image + 1 video + 1 audio → 3 eventi con tipi corretti."""
         backend = SignalBackend()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
         )
         backend._set_contacts([contact])
         envelope = {
@@ -334,7 +371,9 @@ class TestSignalBackend:
         """Testo + 2 foto → primo evento ha il testo, secondo no."""
         backend = SignalBackend()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
         )
         backend._set_contacts([contact])
         envelope = {
@@ -360,7 +399,9 @@ class TestSignalBackend:
         """Solo testo, nessun attachment → 1 evento."""
         backend = SignalBackend()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
         )
         backend._set_contacts([contact])
         envelope = {
@@ -378,7 +419,9 @@ class TestSignalBackend:
         """syncMessage.sentMessage con 2 foto → 2 eventi is_mine=True."""
         backend = SignalBackend()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
         )
         backend._set_contacts([contact])
         envelope = {
@@ -408,7 +451,9 @@ class TestSignalBackend:
         """Envelope senza dataMessage né syncMessage → lista vuota."""
         backend = SignalBackend()
         contact = ChatContact(
-            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL,
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
         )
         backend._set_contacts([contact])
         envelope = {
@@ -418,7 +463,9 @@ class TestSignalBackend:
         }
         assert backend.envelope_to_event(envelope) == []
 
+
 # ─── BackendManager ──────────────────────────────────────────────────────────
+
 
 class TestBackendManager:
     """🗂️ Registro e operazioni unificate del manager."""
@@ -452,6 +499,7 @@ class TestBackendManager:
         manager.register(backend)
 
         from unittest.mock import AsyncMock
+
         backend.send_message = AsyncMock(return_value="1234")
 
         result = asyncio.run(
@@ -459,8 +507,11 @@ class TestBackendManager:
         )
         assert result == "1234"
         backend.send_message.assert_called_once_with(
-            "+391234567890", "ciao",
-            quote_timestamp=None, quote_author=None, quote_message=None,
+            "+391234567890",
+            "ciao",
+            quote_timestamp=None,
+            quote_author=None,
+            quote_message=None,
         )
 
     def test_send_message_unknown_protocol_raises(self):
@@ -469,8 +520,8 @@ class TestBackendManager:
             asyncio.run(manager.send_message("nope", "x", "ciao"))
 
 
-
 # ─── Send path regression (message actually sent) ─────────────────────────────
+
 
 class TestSendMsgSync:
     """📤 send_message_sync esegue davvero l'invio (regression P1)."""
@@ -513,6 +564,7 @@ class TestSendMsgSync:
 
 # ─── Ingest dedup (no doubled messages) ───────────────────────────────────────
 
+
 class TestIngestDedup:
     """📚 ingest_message non duplica messaggi con la stessa identità."""
 
@@ -525,9 +577,14 @@ class TestIngestDedup:
         """
         backend = SignalBackend()
         data = {
-            "text": "Ciao!", "is_mine": True, "sender": "You",
-            "timestamp": 1000, "quote_text": None, "msg_type": "text",
-            "attachment_info": None, "attachment_id": None,
+            "text": "Ciao!",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": 1000,
+            "quote_text": None,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
         }
         assert backend.ingest_message("+391234567890", data, 1000) is True
         assert backend.ingest_message("+391234567890", data, 1000) is False
@@ -536,10 +593,19 @@ class TestIngestDedup:
     def test_distinct_messages_both_kept(self):
         """Messaggi diversi (text o ts diversi) vengono entrambi conservati."""
         backend = SignalBackend()
+
         def d(text, ts):
-            return {"text": text, "is_mine": True, "sender": "You", "timestamp": ts,
-                    "quote_text": None, "msg_type": "text",
-                    "attachment_info": None, "attachment_id": None}
+            return {
+                "text": text,
+                "is_mine": True,
+                "sender": "You",
+                "timestamp": ts,
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            }
+
         backend.ingest_message("+391234567890", d("a", 1000), 1000)
         backend.ingest_message("+391234567890", d("b", 1001), 1001)
         assert len(backend.cache["+391234567890"]) == 2
@@ -548,9 +614,14 @@ class TestIngestDedup:
         """Deterministiche: l'ingest ottimistico + sync-envelope non duplicano."""
         backend = SignalBackend()
         data = {
-            "text": "Ciao!", "is_mine": True, "sender": "You",
-            "timestamp": 2000, "quote_text": None, "msg_type": "text",
-            "attachment_info": None, "attachment_id": None,
+            "text": "Ciao!",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": 2000,
+            "quote_text": None,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
         }
         backend.ingest_message("+391234567890", data, 2000)
         # Same identity arrives again (e.g. sync sent-envelope).
@@ -558,8 +629,6 @@ class TestIngestDedup:
         # Incoming counterpart (same text, different is_mine) is NOT a duplicate.
         backend.ingest_message("+391234567890", dict(data, is_mine=False), 2000)
         assert len(backend.cache["+391234567890"]) == 2  # sent + received
-
-
 
     def test_outgoing_echo_with_different_ts_not_duplicated(self):
         """L'echo di un messaggio inviato con timestamp diverso NON raddoppia.
@@ -571,19 +640,36 @@ class TestIngestDedup:
         backend = SignalBackend()
         backend.ingest_message(
             "+391234567890",
-            {"text": "ciao", "is_mine": True, "sender": "You", "timestamp": 5000000,
-             "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None},
+            {
+                "text": "ciao",
+                "is_mine": True,
+                "sender": "You",
+                "timestamp": 5000000,
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            },
             5000000,
         )
         # Echo with a *different* (later) timestamp within the window.
-        assert backend.ingest_message(
-            "+391234567890",
-            {"text": "ciao", "is_mine": True, "sender": "You", "timestamp": 5002000,
-             "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None},
-            5002000,
-        ) is False
+        assert (
+            backend.ingest_message(
+                "+391234567890",
+                {
+                    "text": "ciao",
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": 5002000,
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                },
+                5002000,
+            )
+            is False
+        )
         assert len(backend.cache["+391234567890"]) == 1
 
     def test_full_pipeline_multi_attachment_to_cache_and_db(self, tmp_path):
@@ -600,14 +686,17 @@ class TestIngestDedup:
         TEST_CONTACT = "+399999999999"
         db_file = tmp_path / "messages.db"
 
-        with patch.object(backend_mod, "DB_FILE", db_file), \
-             patch.object(backend_mod, "CACHE_DIR", tmp_path):
+        with (
+            patch.object(backend_mod, "DB_FILE", db_file),
+            patch.object(backend_mod, "CACHE_DIR", tmp_path),
+        ):
             # Inizializza DB vergine
             backend_mod._init_db()
 
             backend = SignalBackend()
             contact = ChatContact(
-                id=TEST_CONTACT, display_name="Test",
+                id=TEST_CONTACT,
+                display_name="Test",
                 protocol=PROTOCOL_SIGNAL,
             )
             backend._set_contacts([contact])
@@ -624,7 +713,7 @@ class TestIngestDedup:
                     "attachments": [
                         {"contentType": "image/jpeg", "id": "photo-1.jpg"},
                         {"contentType": "image/jpeg", "id": "photo-2.jpg"},
-                        {"contentType": "image/png",  "id": "photo-3.png"},
+                        {"contentType": "image/png", "id": "photo-3.png"},
                         {"contentType": "image/webp", "id": "photo-4.webp"},
                         {"contentType": "image/jpeg", "id": "photo-5.jpg"},
                         {"contentType": "image/jpeg", "id": "photo-6.jpg"},
@@ -634,15 +723,14 @@ class TestIngestDedup:
 
             # Step 1: envelope → eventi
             events = backend.envelope_to_event(envelope)
-            assert len(events) == 6, (
-                f"Expected 6 events, got {len(events)}"
-            )
+            assert len(events) == 6, f"Expected 6 events, got {len(events)}"
 
             # Step 2: ogni evento → ingest_message
             for ev in events:
                 assert ev.type == "message"
                 added = backend.ingest_message(
-                    TEST_CONTACT, ev.payload,
+                    TEST_CONTACT,
+                    ev.payload,
                     ev.payload["timestamp"],
                 )
                 assert added is True, (
@@ -658,8 +746,12 @@ class TestIngestDedup:
             )
             cached_ids = {m["attachment_id"] for m in cached}
             expected_ids = {
-                "photo-1.jpg", "photo-2.jpg", "photo-3.png",
-                "photo-4.webp", "photo-5.jpg", "photo-6.jpg",
+                "photo-1.jpg",
+                "photo-2.jpg",
+                "photo-3.png",
+                "photo-4.webp",
+                "photo-5.jpg",
+                "photo-6.jpg",
             }
             assert cached_ids == expected_ids, (
                 f"Attachment ID mismatch: {cached_ids} != {expected_ids}"
@@ -667,13 +759,9 @@ class TestIngestDedup:
 
             # Step 4: verifica DB
             loaded = backend_mod._load_cache()
-            assert TEST_CONTACT in loaded, (
-                f"Contact {TEST_CONTACT} not found in DB"
-            )
+            assert TEST_CONTACT in loaded, f"Contact {TEST_CONTACT} not found in DB"
             db_msgs = loaded[TEST_CONTACT]
-            assert len(db_msgs) == 6, (
-                f"Expected 6 in DB, got {len(db_msgs)}"
-            )
+            assert len(db_msgs) == 6, f"Expected 6 in DB, got {len(db_msgs)}"
             db_ids = {m["attachment_id"] for m in db_msgs}
             assert db_ids == expected_ids, (
                 f"DB attachment IDs mismatch: {db_ids} != {expected_ids}"
@@ -694,12 +782,22 @@ class TestIngestDedup:
     def test_outgoing_same_text_far_apart_is_distinct(self):
         """Due invii con lo stesso testo molto distanti NON vengono fusi."""
         backend = SignalBackend()
+
         def out(ts):
-            return {"text": "ok", "is_mine": True, "sender": "You", "timestamp": ts,
-                    "quote_text": None, "msg_type": "text",
-                    "attachment_info": None, "attachment_id": None}
+            return {
+                "text": "ok",
+                "is_mine": True,
+                "sender": "You",
+                "timestamp": ts,
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            }
+
         backend.ingest_message("+391234567890", out(10_000), 10_000)
         # Far outside the dedup window → a genuinely different message.
-        assert backend.ingest_message("+391234567890", out(1_000_000), 1_000_000) is True
+        assert (
+            backend.ingest_message("+391234567890", out(1_000_000), 1_000_000) is True
+        )
         assert len(backend.cache["+391234567890"]) == 2
-

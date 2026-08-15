@@ -36,8 +36,7 @@ from signal_tui import SignalTUI
 def tmp_db(tmp_path: Path):
     """Point backend at a temporary SQLite DB and reset it between tests."""
     db_file = tmp_path / "messages.db"
-    with patch("backend.DB_FILE", db_file), \
-         patch("backend.CACHE_DIR", tmp_path):
+    with patch("backend.DB_FILE", db_file), patch("backend.CACHE_DIR", tmp_path):
         yield db_file
 
 
@@ -180,9 +179,20 @@ class TestIncrementalUnreadBadges:
         app = self._make_app()
 
         # Patch _sort_contacts and query_one to avoid UI interaction
-        with patch.object(app, "_sort_contacts") as mock_sort, \
-             patch.object(app, "query_one") as mock_query:
-            mock_list = type("FakeList", (), {"clear": lambda self: None, "append": lambda self, x: None, "index": 0, "children": []})()
+        with (
+            patch.object(app, "_sort_contacts") as mock_sort,
+            patch.object(app, "query_one") as mock_query,
+        ):
+            mock_list = type(
+                "FakeList",
+                (),
+                {
+                    "clear": lambda self: None,
+                    "append": lambda self, x: None,
+                    "index": 0,
+                    "children": [],
+                },
+            )()
             mock_query.return_value = mock_list
 
             app._update_unread_badges(contact_cache_key(PROTOCOL_SIGNAL, "+391"))
@@ -199,8 +209,10 @@ class TestIncrementalUnreadBadges:
             contact_cache_key(PROTOCOL_SIGNAL, "+392"): 1,
         }
 
-        with patch.object(app, "_sort_contacts") as mock_sort, \
-             patch.object(app, "query_one") as mock_query:
+        with (
+            patch.object(app, "_sort_contacts") as mock_sort,
+            patch.object(app, "query_one") as mock_query,
+        ):
             app._update_unread_badges(contact_cache_key(PROTOCOL_SIGNAL, "+391"))
 
             # No change → no re-sort, no rebuild
@@ -211,9 +223,20 @@ class TestIncrementalUnreadBadges:
         """Senza cache_key, calcola per tutti i contatti."""
         app = self._make_app()
 
-        with patch.object(app, "_sort_contacts") as mock_sort, \
-             patch.object(app, "query_one") as mock_query:
-            mock_list = type("FakeList", (), {"clear": lambda self: None, "append": lambda self, x: None, "index": 0, "children": []})()
+        with (
+            patch.object(app, "_sort_contacts") as mock_sort,
+            patch.object(app, "query_one") as mock_query,
+        ):
+            mock_list = type(
+                "FakeList",
+                (),
+                {
+                    "clear": lambda self: None,
+                    "append": lambda self, x: None,
+                    "index": 0,
+                    "children": [],
+                },
+            )()
             mock_query.return_value = mock_list
 
             app._update_unread_badges()

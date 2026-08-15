@@ -33,7 +33,9 @@ def _make_app() -> SignalTUI:
     return app
 
 
-def _make_backend(contacts: list[ChatContact], protocol: str = PROTOCOL_SIGNAL) -> MagicMock:
+def _make_backend(
+    contacts: list[ChatContact], protocol: str = PROTOCOL_SIGNAL
+) -> MagicMock:
     backend = MagicMock()
     backend.protocol = protocol
     backend.cache = {}
@@ -91,7 +93,6 @@ class TestBackendReadyAutoSelect:
         assert app._pending_backends == {"signal", "whatsapp"}
 
 
-
 class TestTelegramConnectGuard:
     """🛡️ _connect_telegram non deve avviare due worker in parallelo.
 
@@ -133,7 +134,6 @@ class TestTelegramConnectGuard:
         assert app._tg_connecting is False
 
 
-
 class TestReconnectTouchedBackends:
     """🎯 _reconnect_touched_backends riconnette solo i backend toccati."""
 
@@ -157,26 +157,33 @@ class TestReconnectTouchedBackends:
         app = self._make_app()
         app._reconnect_touched_backends({"telegram"})
         app.run_worker.assert_called_once_with(
-            app._connect_telegram, exclusive=False, thread=True)
+            app._connect_telegram, exclusive=False, thread=True
+        )
 
     def test_signal_only(self):
         app = self._make_app()
         app._reconnect_touched_backends({"signal"})
         app.run_worker.assert_called_once_with(
-            app._connect_signal, exclusive=False, thread=True)
+            app._connect_signal, exclusive=False, thread=True
+        )
 
     def test_whatsapp_only(self):
         app = self._make_app()
         app._reconnect_touched_backends({"whatsapp"})
         app.run_worker.assert_called_once_with(
-            app._connect_whatsapp, exclusive=False, thread=True)
+            app._connect_whatsapp, exclusive=False, thread=True
+        )
 
     def test_multiple(self):
         app = self._make_app()
         app._reconnect_touched_backends({"signal", "telegram"})
         assert app.run_worker.call_count == 2
-        app.run_worker.assert_any_call(app._connect_signal, exclusive=False, thread=True)
-        app.run_worker.assert_any_call(app._connect_telegram, exclusive=False, thread=True)
+        app.run_worker.assert_any_call(
+            app._connect_signal, exclusive=False, thread=True
+        )
+        app.run_worker.assert_any_call(
+            app._connect_telegram, exclusive=False, thread=True
+        )
 
     def test_missing_backend_skipped(self):
         app = self._make_app()

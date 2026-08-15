@@ -9,6 +9,7 @@ Provides:
      this is only shown for Signal when the number is unknown)
   3. **QR**      — QR code display + status message + cancel button
 """
+
 from __future__ import annotations
 
 import logging
@@ -47,6 +48,7 @@ _DEFAULT_SIGNAL_DEVICE_NAME = "Signal-TUI-Client"
 
 
 # ─── Screen ────────────────────────────────────────────────────────────────────
+
 
 class DeviceLinkPickerScreen(ModalScreen[None]):
     """Modal screen to link a new device (Signal / WhatsApp).
@@ -268,10 +270,14 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
     def _show_phase(self, phase: str) -> None:
         """Show only the given phase container, hide the others."""
         self._phase = phase
-        for pid in ("link-picker-container", "link-phone-container", "link-qr-container"):
+        for pid in (
+            "link-picker-container",
+            "link-phone-container",
+            "link-qr-container",
+        ):
             try:
                 c = self.query_one(f"#{pid}", Vertical)
-                c.display = (pid == f"link-{phase}-container")
+                c.display = pid == f"link-{phase}-container"
             except Exception as _e:
                 logger.debug("Failed to toggle phase container", exc_info=True)
 
@@ -298,10 +304,12 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             li = ListItem(label, disabled=item["disabled"])
             lv.append(li)
 
-        container.mount(Static(
-            "↑/↓ navigate · Enter select · Esc close",
-            id="link-picker-footer",
-        ))
+        container.mount(
+            Static(
+                "↑/↓ navigate · Enter select · Esc close",
+                id="link-picker-footer",
+            )
+        )
 
     def _populate_phone_phase(self) -> None:
         """Fill the phone container (once)."""
@@ -319,26 +327,34 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         container = self.query_one("#link-phone-container", Vertical)
         container.mount(Static("📱 Device Info", id="link-phone-title"))
 
-        container.mount(Input(
-            placeholder="+39 123 456 7890",
-            value=self._signal_number,
-            id="link-phone-input",
-        ))
-        container.mount(Input(
-            placeholder="Device name",
-            value=self._device_name,
-            id="link-device-input",
-        ))
+        container.mount(
+            Input(
+                placeholder="+39 123 456 7890",
+                value=self._signal_number,
+                id="link-phone-input",
+            )
+        )
+        container.mount(
+            Input(
+                placeholder="Device name",
+                value=self._device_name,
+                id="link-device-input",
+            )
+        )
 
         btn_row = Center(id="link-phone-buttons")
         container.mount(btn_row)
-        btn_row.mount(Button("Start Linking ▶", id="link-phone-start", variant="success"))
+        btn_row.mount(
+            Button("Start Linking ▶", id="link-phone-start", variant="success")
+        )
         btn_row.mount(Button("Back", id="link-phone-back"))
 
-        container.mount(Static(
-            "Esc back · Enter to confirm",
-            id="link-picker-footer",
-        ))
+        container.mount(
+            Static(
+                "Esc back · Enter to confirm",
+                id="link-picker-footer",
+            )
+        )
 
     def _populate_qr_phase(self, qr_ascii: str, phone: str) -> None:
         """Fill the QR container (clears and rebuilds each time)."""
@@ -350,18 +366,18 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             info = f"📱 {phone}  ·  🖥 {self._device_name}"
             container.mount(Static(info, id="link-qr-info"))
         container.mount(Static(qr_ascii, id="link-qr-code"))
-        container.mount(Static(
-            "⏳ Waiting for scan from phone...",
-            id="link-qr-status",
-        ))
+        container.mount(
+            Static(
+                "⏳ Waiting for scan from phone...",
+                id="link-qr-status",
+            )
+        )
 
         btn_row = Center(id="link-qr-buttons")
         container.mount(btn_row)
         btn_row.mount(Button("Cancel", id="link-qr-cancel", variant="error"))
 
         container.mount(Static("Esc to cancel", id="link-picker-footer"))
-
-
 
     # ── Phase transitions ──────────────────────────────────────────────────
 
@@ -390,6 +406,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         Both timeout after 5 minutes.
         """
         import asyncio as _asyncio
+
         deadline = time.time() + 300  # 5 min timeout
         proto = self._selected_protocol
 
@@ -442,6 +459,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
     async def _check_whatsapp_done(self) -> bool:
         """Check WAHA session status; refresh QR if expired."""
         import asyncio as _asyncio
+
         app = self.app
         wa = getattr(app, "whatsapp_backend", None)
         if wa is None or wa._rest is None:
@@ -537,6 +555,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
     async def _get_whatsapp_qr_fresh(self) -> str:
         """Get a fresh WhatsApp QR (resets session, unlike _get_whatsapp_qr)."""
         import asyncio as _asyncio
+
         app = self.app
         wa = getattr(app, "whatsapp_backend", None)
         if wa is None or wa._rest is None:
@@ -546,6 +565,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             qr = wa._rest.get_fresh_pairing_qr(reset=False)
             if isinstance(qr, bytes):
                 from qr_utils import qr_png_to_ascii
+
                 return qr_png_to_ascii(qr)
             elif isinstance(qr, str):
                 return qr
@@ -637,7 +657,9 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         def _run() -> str:
             args = [
                 str(find_signal_cli()),
-                "link", "-n", self._device_name,
+                "link",
+                "-n",
+                self._device_name,
             ]
             logger.info("Starting signal-cli link: %s", args)
             proc = subprocess.Popen(
@@ -698,6 +720,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 qr = wa._rest.get_fresh_pairing_qr(reset=True)
                 if isinstance(qr, bytes):
                     from qr_utils import qr_png_to_ascii
+
                     return qr_png_to_ascii(qr)
                 elif isinstance(qr, str):
                     return qr
@@ -707,6 +730,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             qr = wa._rest.get_pairing_qr()
             if isinstance(qr, bytes):
                 from qr_utils import qr_png_to_ascii
+
                 return qr_png_to_ascii(qr)
             elif isinstance(qr, str):
                 return qr
@@ -715,6 +739,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             qr = wa._rest.get_fresh_pairing_qr(reset=False)
             if isinstance(qr, bytes):
                 from qr_utils import qr_png_to_ascii
+
                 return qr_png_to_ascii(qr)
             elif isinstance(qr, str):
                 return qr
@@ -781,6 +806,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 logger.debug("Failed to terminate link subprocess", exc_info=True)
         self._linking_proc = None
         super().dismiss(result)
+
     # ── Event handlers ─────────────────────────────────────────────────────
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -832,7 +858,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
     def _select_protocol(self, index: int) -> None:
         """Handle protocol selection from the picker list."""
         filtered = [
-            item for item in _PROTOCOL_ITEMS
+            item
+            for item in _PROTOCOL_ITEMS
             if not (item["id"] == "whatsapp" and not self._has_whatsapp)
         ]
         if index < 0 or index >= len(filtered):
@@ -884,7 +911,9 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         success = await _asyncio.to_thread(_run)
         if success:
             try:
-                self.query_one("#link-qr-status", Static).update("✅ Device linked successfully!")
+                self.query_one("#link-qr-status", Static).update(
+                    "✅ Device linked successfully!"
+                )
                 self.query_one("#link-qr-code", Static).update("\n\n✅ Linked!\n")
             except Exception as _e:
                 logger.debug("Failed to update linked status", exc_info=True)
@@ -892,7 +921,9 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             self.dismiss(None)
         else:
             try:
-                self.query_one("#link-qr-status", Static).update("❌ Wrong password — try again")
+                self.query_one("#link-qr-status", Static).update(
+                    "❌ Wrong password — try again"
+                )
                 inp = self.query_one("#link-2fa-input", Input)
                 inp.value = ""
                 inp.focus()

@@ -134,6 +134,7 @@ class TestProtocolFilter:
                 self._contact_id = cid
                 self.display = display
                 self.children = [MagicMock()]
+
         items = [
             _Item(app.contacts[0].cache_key),
             _Item(app.contacts[1].cache_key),
@@ -175,6 +176,7 @@ class TestProtocolFilter:
                 self._contact_id = cid
                 self.display = True
                 self.children = [MagicMock()]  # con update attivo
+
         fake_list = MagicMock()
         fake_list.index = 0
         first = _Item(app.contacts[0].cache_key)
@@ -209,6 +211,7 @@ class TestProtocolFilter:
                 self._contact_id = cid
                 self.display = True
                 self.children = [MagicMock()]
+
         items = [_Item(c.cache_key) for c in app.contacts]
         # WhatsApp è nascosto sotto il filtro signal.
         items[1].display = False
@@ -244,6 +247,7 @@ class TestProtocolFilter:
             def __init__(self, cid):
                 self._contact_id = cid
                 self.display = True
+
         items = [_Item(c.cache_key) for c in app.contacts]
         fake = MagicMock()
         fake.children = items
@@ -254,9 +258,9 @@ class TestProtocolFilter:
 
         # Luigi (visibile) resta evidenziato alla posizione reale 2.
         assert fake.index == 2
-        assert items[0].display is True   # Mario (signal)
+        assert items[0].display is True  # Mario (signal)
         assert items[1].display is False  # Anna (whatsapp, nascosta)
-        assert items[2].display is True   # Luigi (signal)
+        assert items[2].display is True  # Luigi (signal)
 
     def test_apply_contact_visibility_clears_stale_highlight_after_reorder(self):
         """Dopo un riordino in-place (``move_child``) la riga evidenziata può
@@ -327,7 +331,7 @@ class TestProtocolFilter:
 
         assert fake_list.index == 1
         assert first.highlighted is False  # lo stantio viene ripulito
-        assert item.highlighted is True    # solo il selezionato resta evidenziato
+        assert item.highlighted is True  # solo il selezionato resta evidenziato
 
     def test_reorder_keeps_all_contacts_in_dom_with_filter(self):
         """Anche con filtro attivo, il re-render mantiene TUTTI i contatti nel
@@ -343,11 +347,12 @@ class TestProtocolFilter:
 
         # Tutti e 3 i contatti restano nel DOM (nessuno perso dal filtro).
         assert len(fake.items) == 3
-        assert {it._contact_id for it in fake.items} == {c.cache_key for c in app.contacts}
+        assert {it._contact_id for it in fake.items} == {
+            c.cache_key for c in app.contacts
+        }
         # Il contatto WhatsApp è nel DOM ma nascosto (display=False).
         wa_item = next(it for it in fake.items if it._contact_id == wa.cache_key)
         assert wa_item.display is False
-
 
     def test_filter_render_applies_to_view(self):
         """Il filtro aggiorna dinamicamente la ListView (senza reload DB)."""
@@ -389,8 +394,10 @@ class TestProtocolFilter:
         app._protocol_filter = "whatsapp"
         # Patcha push_screen per ispezionare la ContactPickerScreen creata.
         captured = {}
+
         def fake_push(screen, cb):
             captured["contacts"] = screen._all_contacts
+
         app.push_screen = fake_push
         app._open_contact_picker()
         # Solo i contatti whatsapp (1) devono passare al picker, non i signal.
@@ -404,6 +411,7 @@ class TestProtocolFilter:
         chat_title = MagicMock()
         chat_log = MagicMock()
         list_view = MagicMock()
+
         def fake_q(selector, *_a, **_k):
             if selector == "#ContactsTitle":
                 return title
@@ -412,6 +420,7 @@ class TestProtocolFilter:
             if selector == "#chat-log":
                 return chat_log
             return list_view
+
         app.query_one = fake_q
         app._filtered_contacts = lambda: app.contacts  # tutti
 
@@ -430,6 +439,7 @@ class TestProtocolFilter:
         chat_title = MagicMock()
         chat_log = MagicMock()
         contact_list = MagicMock()
+
         def fake_q(selector, *_a, **_k):
             if selector == "#ContactsTitle":
                 return title
@@ -440,12 +450,15 @@ class TestProtocolFilter:
             if selector == "#contact-list":
                 return contact_list
             return title
+
         app.query_one = fake_q
         app._filtered_contacts = lambda: app.contacts
 
         app._protocol_filter = "whatsapp"
         app._apply_contact_filter()
-        chat_log.remove_class.assert_called_with("chat-filter-signal", "chat-filter-whatsapp", "chat-filter-telegram")
+        chat_log.remove_class.assert_called_with(
+            "chat-filter-signal", "chat-filter-whatsapp", "chat-filter-telegram"
+        )
         chat_log.add_class.assert_called_with("chat-filter-whatsapp")
         contact_list.add_class.assert_called_with("chat-filter-whatsapp")
         chat_title.add_class.assert_called_with("chat-filter-whatsapp")
@@ -461,7 +474,9 @@ class TestMessageAccent:
         assert not w.has_class("msg-whatsapp")
 
     def test_whatsapp_accent_class(self):
-        w = MessageWidget("ciao", timestamp=1, sender="Anna", protocol=PROTOCOL_WHATSAPP)
+        w = MessageWidget(
+            "ciao", timestamp=1, sender="Anna", protocol=PROTOCOL_WHATSAPP
+        )
         assert w.has_class("msg-whatsapp")
 
     def test_no_protocol_no_accent(self):
@@ -522,7 +537,9 @@ class TestContactSorting:
 
     def test_unnamed_with_messages_follows_date(self):
         # Un "solo numero" CON messaggio segue l'ordinamento per data (NON in coda).
-        unnamed_recent = ChatContact(id="+9", display_name="+9", protocol=PROTOCOL_SIGNAL)
+        unnamed_recent = ChatContact(
+            id="+9", display_name="+9", protocol=PROTOCOL_SIGNAL
+        )
         unnamed_recent.last_message_ts = 9000
         named_old = self._contact("+1", "Mario", ts=1000)
         app = _make_app(named_old, unnamed_recent)
@@ -530,10 +547,10 @@ class TestContactSorting:
         assert [c.id for c in app.contacts] == ["+9", "+1"]
 
     def test_full_mix(self):
-        a = self._contact("+1", "Anna", ts=1000)          # con messaggio, primo gruppo
-        d = self._contact("+4", "Dario", ts=9999)         # con messaggio più recente
-        b = self._contact("+2", "Bruno")                  # senza, con nome (alpha)
-        c = self._contact("+3", "Carlo")                  # senza, con nome (alpha)
+        a = self._contact("+1", "Anna", ts=1000)  # con messaggio, primo gruppo
+        d = self._contact("+4", "Dario", ts=9999)  # con messaggio più recente
+        b = self._contact("+2", "Bruno")  # senza, con nome (alpha)
+        c = self._contact("+3", "Carlo")  # senza, con nome (alpha)
         u1 = ChatContact(id="+5", display_name="+5", protocol=PROTOCOL_SIGNAL)
         u2 = ChatContact(id="+6", display_name="+6", protocol=PROTOCOL_WHATSAPP)
         app = _make_app(a, u2, b, d, c, u1)
@@ -546,7 +563,7 @@ class TestContactSorting:
             "signal:+1": [
                 {"timestamp": 1111},
                 {"timestamp": 2222},
-                {"timestamp": 111},   # fuori ordine: dev'essere ignorato
+                {"timestamp": 111},  # fuori ordine: dev'essere ignorato
             ],
             "signal:+2": [{"timestamp": 3333}],
         }
@@ -600,6 +617,7 @@ class TestContactListSelect:
         """ContactListView resta una ListView: query_one(..., ListView) e
         la selezione di riga continuano a funzionare."""
         from textual.widgets import ListView
+
         assert issubclass(ContactListView, ListView)
 
 
@@ -609,8 +627,9 @@ class TestWhatsAppHistoryLoad:
 
     def test_load_messages_worker_fetches_history_for_empty_whatsapp_cache(self):
         app = _make_app()
-        c = ChatContact(id="16660245291231@lid", display_name="Pix Tim",
-                        protocol=PROTOCOL_WHATSAPP)
+        c = ChatContact(
+            id="16660245291231@lid", display_name="Pix Tim", protocol=PROTOCOL_WHATSAPP
+        )
         app.contacts = [c]
         app.selected_contact = c
         app._chat_reload_token = 1
@@ -634,9 +653,7 @@ class TestWhatsAppHistoryLoad:
         # evita operazioni su widget reali; call_from_thread esegue sincronico
         app._make_message_widget = MagicMock()
         app._add_load_more_widget = MagicMock()
-        app.call_from_thread = MagicMock(
-            side_effect=lambda fn, *a, **k: fn(*a, **k)
-        )
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
         app.query_one = MagicMock()
 
         app._load_messages_worker()
@@ -653,15 +670,18 @@ class TestWhatsAppHistoryLoad:
         """Con cache già popolato, lo storico remoto viene comunque riscaricato
         (per recuperare anche i messaggi inviati da un altro client)."""
         app = _make_app()
-        c = ChatContact(id="16660245291231@lid", display_name="Pix Tim",
-                        protocol=PROTOCOL_WHATSAPP)
+        c = ChatContact(
+            id="16660245291231@lid", display_name="Pix Tim", protocol=PROTOCOL_WHATSAPP
+        )
         app.contacts = [c]
         app.selected_contact = c
         app._chat_reload_token = 1
         # cache UI già popolato (es. da live/send della TUI)
-        app._cache = {c.cache_key: [
-            {"text": "esistente", "is_mine": False, "read": True, "timestamp": 1},
-        ]}
+        app._cache = {
+            c.cache_key: [
+                {"text": "esistente", "is_mine": False, "read": True, "timestamp": 1},
+            ]
+        }
         app._seen_timestamps = set()
         app._loaded_all = False
 
@@ -669,7 +689,12 @@ class TestWhatsAppHistoryLoad:
         backend.cache = {
             c.id: [
                 {"text": "esistente", "is_mine": False, "read": True, "timestamp": 1},
-                {"text": "da altro client", "is_mine": True, "read": True, "timestamp": 2},
+                {
+                    "text": "da altro client",
+                    "is_mine": True,
+                    "read": True,
+                    "timestamp": 2,
+                },
             ]
         }
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
@@ -678,9 +703,7 @@ class TestWhatsAppHistoryLoad:
 
         app._add_message = MagicMock()
         app._add_load_more_widget = MagicMock()
-        app.call_from_thread = MagicMock(
-            side_effect=lambda fn, *a, **k: fn(*a, **k)
-        )
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
         app.query_one = MagicMock()
 
         app._load_messages_worker()
@@ -699,6 +722,7 @@ class TestContactListViewCrashFix:
     def test_click_on_removed_item_does_not_crash(self):
         """Un click su un ListItem ormai non più figlio non deve lanciare."""
         from textual.widgets import ListItem
+
         lv = ContactListView()
         stale = ListItem()
         ev = MagicMock()
@@ -764,7 +788,6 @@ class TestContactListViewCrashFix:
         assert set(fake.items) == set(objs_before)  # stessi oggetti, nessun nuovo
 
 
-
 class TestSendOptimisticRouting:
     """📤 L'ottimista dell'invio va nel backend del contatto (non hardcoded Signal)."""
 
@@ -772,8 +795,9 @@ class TestSendOptimisticRouting:
         from unittest.mock import MagicMock, patch
 
         app = _make_app()
-        contact = ChatContact(id="16660245291231@lid", display_name="Pix",
-                              protocol=PROTOCOL_WHATSAPP)
+        contact = ChatContact(
+            id="16660245291231@lid", display_name="Pix", protocol=PROTOCOL_WHATSAPP
+        )
         app.selected_contact = contact
         app._reply_to = None
         app._cache = {}
@@ -798,6 +822,7 @@ class TestSendOptimisticRouting:
         event.value = "ciao"
 
         import signal_tui as stui
+
         with patch.object(stui, "replace_emoji_aliases", side_effect=lambda x: x):
             app.on_input_submitted(event)
 
@@ -860,7 +885,9 @@ class TestContactListFlush:
 
         # ricalcolo dati INCREMENTALE: chiamato con il cache_key, senza render.
         assert len(recomputes) == 1
-        assert recomputes[0][1] == (key,), f"atteso argomento incrementale {key!r}, avuto {recomputes[0][1]}"
+        assert recomputes[0][1] == (key,), (
+            f"atteso argomento incrementale {key!r}, avuto {recomputes[0][1]}"
+        )
         # il vecchio percorso "sort+render interni" è scomparso.
         assert direct_render == []
         # UN solo render a fine batch (niente doppio sort/render).
@@ -878,7 +905,9 @@ class TestContactListFlush:
         recomputes = [c for c in calls if c[0].__name__ == "_recompute_unread"]
         # ricalcolo dati completo, invocato SENZA argomento.
         assert len(recomputes) == 1
-        assert recomputes[0][1] == (), f"atteso ricalcolo full (no argomenti), avuto {recomputes[0][1]}"
+        assert recomputes[0][1] == (), (
+            f"atteso ricalcolo full (no argomenti), avuto {recomputes[0][1]}"
+        )
         # _reorder_contact_list continua a essere chiamato (render unico).
         reorders = [c for c in calls if c[0].__name__ == "_reorder_contact_list"]
         assert len(reorders) == 1
@@ -897,7 +926,6 @@ class TestContactListFlush:
         reorders = [c for c in calls if c[0].__name__ == "_reorder_contact_list"]
         assert len(reorders) == 1
 
-
     def test_message_for_other_contact_populates_dirty_keys(self):
         """_handle_message_event per una chat non aperta registra il cache_key
         nel set (così il flush usa la via incrementale)."""
@@ -908,7 +936,9 @@ class TestContactListFlush:
 
         backend = MagicMock()
         backend.ingest_message.return_value = True
-        backend._identify_contact.return_value = self._whatsapp_contact("wa:1@s.whatsapp.net", "Anna")
+        backend._identify_contact.return_value = self._whatsapp_contact(
+            "wa:1@s.whatsapp.net", "Anna"
+        )
         app.manager = MagicMock()
         app.manager.get.return_value = backend
 
@@ -932,7 +962,10 @@ class TestContactListFlush:
 
         assert handled is True
         assert app._contact_list_dirty is True
-        assert contact_cache_key(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net") in app._dirty_contact_keys
+        assert (
+            contact_cache_key(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net")
+            in app._dirty_contact_keys
+        )
 
     @staticmethod
     def _whatsapp_contact(cid, name):
@@ -972,9 +1005,11 @@ class TestWhatsAppLoadRetry:
     def _make_app(self):
         from models import PROTOCOL_WHATSAPP, ChatContact
         from signal_tui import SignalTUI
+
         app = SignalTUI()
-        c = ChatContact(id="16660245291231@lid", display_name="Pix",
-                        protocol=PROTOCOL_WHATSAPP)
+        c = ChatContact(
+            id="16660245291231@lid", display_name="Pix", protocol=PROTOCOL_WHATSAPP
+        )
         app.contacts = [c]
         app.selected_contact = c
         app._chat_reload_token = 1
@@ -987,20 +1022,26 @@ class TestWhatsAppLoadRetry:
 
     def test_worker_retries_when_fetch_returns_empty_first(self):
         from unittest.mock import MagicMock, patch
+
         app = self._make_app()
         c = app.selected_contact
 
         backend = MagicMock()
         # la prima fetch lascia la cache vuota; la seconda la riempie
         calls = {"n": 0}
+
         def fake_fetch(cid, limit=50):
             calls["n"] += 1
             if calls["n"] == 1:
                 backend.cache = {}
                 return []
-            backend.cache = {c.id: [{"text": "ciao", "is_mine": False,
-                                     "read": False, "timestamp": 1}]}
+            backend.cache = {
+                c.id: [
+                    {"text": "ciao", "is_mine": False, "read": False, "timestamp": 1}
+                ]
+            }
             return backend.cache[c.id]
+
         backend.fetch_history = MagicMock(side_effect=fake_fetch)
         app.manager = MagicMock()
         app.manager.get.return_value = backend
@@ -1029,9 +1070,11 @@ class TestWhatsAppMountOrdering:
 
         from models import PROTOCOL_WHATSAPP, ChatContact
         from signal_tui import SignalTUI
+
         app = SignalTUI()
-        c = ChatContact(id="15771304468671@lid", display_name="Giovanni",
-                        protocol=PROTOCOL_WHATSAPP)
+        c = ChatContact(
+            id="15771304468671@lid", display_name="Giovanni", protocol=PROTOCOL_WHATSAPP
+        )
         app.contacts = [c]
         app.selected_contact = c
         app._chat_reload_token = 1
@@ -1046,7 +1089,12 @@ class TestWhatsAppMountOrdering:
         # NON è l'ultimo elemento dell'array.
         backend.cache = {
             c.id: [
-                {"text": "Ok  ci sentiamo", "is_mine": False, "read": False, "timestamp": 3000},
+                {
+                    "text": "Ok  ci sentiamo",
+                    "is_mine": False,
+                    "read": False,
+                    "timestamp": 3000,
+                },
                 {"text": "vecchio", "is_mine": False, "read": False, "timestamp": 1000},
                 {"text": "medio", "is_mine": False, "read": False, "timestamp": 2000},
             ]
@@ -1060,9 +1108,11 @@ class TestWhatsAppMountOrdering:
 
         # registra l'ordine dei mounting per testo
         mounted = []
+
         def fake_make_widget(text, *a, **k):
             mounted.append(text)
             return MagicMock()
+
         app._make_message_widget = MagicMock(side_effect=fake_make_widget)
 
         app._load_messages_worker()
@@ -1083,9 +1133,11 @@ class TestWhatsAppRenderFirst:
 
         from models import PROTOCOL_WHATSAPP, ChatContact
         from signal_tui import SignalTUI
+
         app = SignalTUI()
-        c = ChatContact(id="16660245291231@lid", display_name="Pix",
-                        protocol=PROTOCOL_WHATSAPP)
+        c = ChatContact(
+            id="16660245291231@lid", display_name="Pix", protocol=PROTOCOL_WHATSAPP
+        )
         app.contacts = [c]
         app.selected_contact = c
         app._chat_reload_token = 1
@@ -1103,20 +1155,29 @@ class TestWhatsAppRenderFirst:
 
         app._add_load_more_widget = MagicMock()
         app._clear_chat = MagicMock()
-        app.call_from_thread = MagicMock(
-            side_effect=lambda fn, *a, **k: fn(*a, **k)
-        )
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
         app.query_one = MagicMock()
         return app
 
     def test_renders_cache_before_fetch_then_appends_new(self):
         from unittest.mock import MagicMock
+
         app = self._make_app(
-            cache_msgs=[{"text": "gia in cache", "is_mine": False,
-                         "read": True, "timestamp": 1000}],
+            cache_msgs=[
+                {
+                    "text": "gia in cache",
+                    "is_mine": False,
+                    "read": True,
+                    "timestamp": 1000,
+                }
+            ],
             backend_msgs=[
-                {"text": "gia in cache", "is_mine": False, "read": True,
-                 "timestamp": 1000},
+                {
+                    "text": "gia in cache",
+                    "is_mine": False,
+                    "read": True,
+                    "timestamp": 1000,
+                },
                 {"text": "nuovo", "is_mine": True, "read": True, "timestamp": 2000},
             ],
         )
@@ -1124,9 +1185,11 @@ class TestWhatsAppRenderFirst:
         c = app.selected_contact
 
         order = []
+
         def fake_make_widget(text, *a, **k):
             order.append(text)
             return MagicMock()
+
         app._make_message_widget = MagicMock(side_effect=fake_make_widget)
         fetch = app.manager.get.return_value.fetch_history
 
@@ -1141,11 +1204,14 @@ class TestWhatsAppRenderFirst:
 
     def test_no_remount_when_fetch_adds_nothing(self):
         from unittest.mock import MagicMock
+
         app = self._make_app(
-            cache_msgs=[{"text": "solo", "is_mine": False, "read": True,
-                         "timestamp": 1000}],
-            backend_msgs=[{"text": "solo", "is_mine": False, "read": True,
-                           "timestamp": 1000}],
+            cache_msgs=[
+                {"text": "solo", "is_mine": False, "read": True, "timestamp": 1000}
+            ],
+            backend_msgs=[
+                {"text": "solo", "is_mine": False, "read": True, "timestamp": 1000}
+            ],
         )
         app._make_message_widget = MagicMock(return_value=MagicMock())
 
@@ -1157,20 +1223,22 @@ class TestWhatsAppRenderFirst:
 
     def test_older_gapfill_rerenders_in_correct_order(self):
         from unittest.mock import MagicMock
+
         app = self._make_app(
-            cache_msgs=[{"text": "recente", "is_mine": False, "read": True,
-                         "timestamp": 2000}],
+            cache_msgs=[
+                {"text": "recente", "is_mine": False, "read": True, "timestamp": 2000}
+            ],
             backend_msgs=[
-                {"text": "vecchio", "is_mine": False, "read": True,
-                 "timestamp": 1000},
-                {"text": "recente", "is_mine": False, "read": True,
-                 "timestamp": 2000},
+                {"text": "vecchio", "is_mine": False, "read": True, "timestamp": 1000},
+                {"text": "recente", "is_mine": False, "read": True, "timestamp": 2000},
             ],
         )
         mounted = []
+
         def fake_make_widget(text, *a, **k):
             mounted.append(text)
             return MagicMock()
+
         app._make_message_widget = MagicMock(side_effect=fake_make_widget)
 
         app._load_messages_worker()
@@ -1183,9 +1251,15 @@ class TestWhatsAppRenderFirst:
     def test_load_more_banner_shows_for_144_messages(self):
         """144 messaggi in cache → il banner "124 older" resta presente."""
         from unittest.mock import MagicMock
+
         msgs = [
-            {"id": f"m{i}", "text": f"msg-{i}", "is_mine": False,
-             "read": True, "timestamp": 1000 + i}
+            {
+                "id": f"m{i}",
+                "text": f"msg-{i}",
+                "is_mine": False,
+                "read": True,
+                "timestamp": 1000 + i,
+            }
             for i in range(144)
         ]
         app = self._make_app(cache_msgs=msgs, backend_msgs=msgs)
@@ -1200,9 +1274,15 @@ class TestWhatsAppRenderFirst:
     def test_merge_never_shrinks_ui_cache(self):
         """Un backend.cache più piccolo non deve ridurre la cache UI (né il banner)."""
         from unittest.mock import MagicMock
+
         ui_msgs = [
-            {"id": f"m{i}", "text": f"msg-{i}", "is_mine": False,
-             "read": True, "timestamp": 1000 + i}
+            {
+                "id": f"m{i}",
+                "text": f"msg-{i}",
+                "is_mine": False,
+                "read": True,
+                "timestamp": 1000 + i,
+            }
             for i in range(144)
         ]
         # backend cache contiene solo gli ultimi 20 (es. cache non allineata).
@@ -1216,16 +1296,26 @@ class TestWhatsAppRenderFirst:
         assert len(app._cache[app.selected_contact.cache_key]) == 144
         app._add_load_more_widget.assert_called_once_with(124)
 
-
     def test_incoming_message_with_different_ids_not_duplicated(self):
         """Stesso messaggio ricevuto con id diversi (webhook vs REST) non duplica."""
         from unittest.mock import MagicMock
+
         msg_text = "E Kimi k2.7 coding? Che per me ha fatto la maggior parte del lavoro"
         # UI cache ha il messaggio con id webhook; backend cache lo ha con id REST.
-        ui_msg = {"id": "webhook-1", "text": msg_text, "is_mine": False,
-                  "read": True, "timestamp": 5000}
-        backend_msg = {"id": "rest-1", "text": msg_text, "is_mine": False,
-                       "read": True, "timestamp": 5000}
+        ui_msg = {
+            "id": "webhook-1",
+            "text": msg_text,
+            "is_mine": False,
+            "read": True,
+            "timestamp": 5000,
+        }
+        backend_msg = {
+            "id": "rest-1",
+            "text": msg_text,
+            "is_mine": False,
+            "read": True,
+            "timestamp": 5000,
+        }
         app = self._make_app(cache_msgs=[ui_msg], backend_msgs=[backend_msg])
         app._make_message_widget = MagicMock(return_value=MagicMock())
 

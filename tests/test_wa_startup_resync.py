@@ -33,6 +33,7 @@ def _make_backend(api_url: str = "http://api.test") -> WhatsAppBackend:
 
 # ─── _resync_wa_history (integrazione UI) ────────────────────────────────────
 
+
 class TestUIResync:
     def _make_app(self) -> SignalTUI:
         app = SignalTUI()
@@ -70,11 +71,13 @@ class TestUIResync:
 
         def boom():
             raise RuntimeError("boom")
+
         backend.resync_history = boom
         assert app._resync_wa_history() == 0
 
 
 # ─── resync_history (backend WhatsApp) ────────────────────────────────────────
+
 
 class TestResyncHistory:
     def test_targets_are_unread_union_of_db_cached_chats(self):
@@ -92,9 +95,17 @@ class TestResyncHistory:
         ]
 
         def fake_list(cid, limit=1):
-            return [{"id": f"m_{cid}", "key": {"id": f"m_{cid}"},
-                     "from": cid, "fromMe": False,
-                     "body": "ciao", "timestamp": now}]
+            return [
+                {
+                    "id": f"m_{cid}",
+                    "key": {"id": f"m_{cid}"},
+                    "from": cid,
+                    "fromMe": False,
+                    "body": "ciao",
+                    "timestamp": now,
+                }
+            ]
+
         backend._rest.list_messages.side_effect = fake_list
 
         n = backend.resync_history()
@@ -123,6 +134,7 @@ class TestResyncHistory:
 
         def boom(cid, limit=1):
             raise RuntimeError("wa down")
+
         backend._rest.list_messages.side_effect = boom
         # non deve propagare eccezioni
         n = backend.resync_history()
@@ -139,9 +151,11 @@ class TestResyncHistory:
 
 # ─── purge_whatsapp_cache.py ─────────────────────────────────────────────────
 
+
 @pytest.fixture
 def purge_mod():
     import purge_whatsapp_cache as mod
+
     return mod
 
 
@@ -222,18 +236,23 @@ def test_purge_is_failsafe_when_whatsapp_offline(purge_mod, monkeypatch, tmp_pat
 
 # ─── _wait_session_ready (Fix C) ───────────────────────────────────────────────
 
+
 class TestWaitSessionReady:
     def test_returns_true_when_working(self):
         """Appena lo stato è WORKING, l'attesa termina subito (True)."""
         backend = _make_backend()
-        backend._rest.get_session_status.return_value = {"status": "WORKING",
-                                                          "engine": {"state": "CONNECTED"}}
+        backend._rest.get_session_status.return_value = {
+            "status": "WORKING",
+            "engine": {"state": "CONNECTED"},
+        }
         assert backend._wait_session_ready(timeout=5) is True
 
     def test_retries_until_working(self):
         """Se inizialmente è connecting, riterara finché non diventa lavorativo."""
         backend = _make_backend()
-        states = iter([{"status": "CONNECTING"}, {"status": "PENDING"}, {"status": "WORKING"}])
+        states = iter(
+            [{"status": "CONNECTING"}, {"status": "PENDING"}, {"status": "WORKING"}]
+        )
         backend._rest.get_session_status.side_effect = lambda: next(states)
         backend._wait_session_ready(timeout=5)
         assert backend._rest.get_session_status.call_count == 3

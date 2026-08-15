@@ -64,11 +64,19 @@ def migrate() -> None:
                        (contact_number, text, is_mine, sender, timestamp, quote_text,
                         msg_type, attachment_info, attachment_id, read, status)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (contact, msg.get("text"), int(msg.get("is_mine", False)),
-                     msg.get("sender"), msg.get("timestamp", 0),
-                     msg.get("quote_text"), msg.get("msg_type", "text"),
-                     msg.get("attachment_info"), msg.get("attachment_id"),
-                     int(msg.get("read", True)), msg.get("status", "read")),
+                    (
+                        contact,
+                        msg.get("text"),
+                        int(msg.get("is_mine", False)),
+                        msg.get("sender"),
+                        msg.get("timestamp", 0),
+                        msg.get("quote_text"),
+                        msg.get("msg_type", "text"),
+                        msg.get("attachment_info"),
+                        msg.get("attachment_id"),
+                        int(msg.get("read", True)),
+                        msg.get("status", "read"),
+                    ),
                 )
                 count += 1
 

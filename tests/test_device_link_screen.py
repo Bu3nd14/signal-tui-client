@@ -8,6 +8,7 @@ Covers:
 - Navigation: Esc to dismiss, Enter to select, Back button
 - Telegram disabled item cannot be selected
 """
+
 from __future__ import annotations
 
 import sys
@@ -31,9 +32,7 @@ class TestDeviceLinkPickerScreen:
 
     def test_telegram_is_enabled(self):
         """Telegram is present and enabled (not a placeholder anymore)."""
-        telegram = next(
-            item for item in _PROTOCOL_ITEMS if item["id"] == "telegram"
-        )
+        telegram = next(item for item in _PROTOCOL_ITEMS if item["id"] == "telegram")
         assert telegram["disabled"] is False
         assert "📨" in telegram["label"]
 
@@ -118,11 +117,9 @@ class TestDeviceLinkPickerScreen:
         screen = DeviceLinkPickerScreen()
         # Telegram is index 2 in the full list
         telegram_idx = next(
-            i for i, item in enumerate(_PROTOCOL_ITEMS)
-            if item["id"] == "telegram"
+            i for i, item in enumerate(_PROTOCOL_ITEMS) if item["id"] == "telegram"
         )
         screen._select_protocol(telegram_idx)
-
 
 
 class TestDeviceLinkBinding:
@@ -131,26 +128,25 @@ class TestDeviceLinkBinding:
     def test_binding_exists(self):
         """Ctrl+L is mapped to open_device_link action."""
         from signal_tui import SignalTUI
+
         # Check BINDINGS list for ctrl+l entry
-        bindings = {
-            binding.key: binding.action
-            for binding in SignalTUI.BINDINGS
-        }
+        bindings = {binding.key: binding.action for binding in SignalTUI.BINDINGS}
         assert "ctrl+l" in bindings
         assert bindings["ctrl+l"] == "open_device_link"
 
     def test_action_method_exists(self):
         """action_open_device_link exists on SignalTUI."""
         from signal_tui import SignalTUI
+
         assert hasattr(SignalTUI, "action_open_device_link")
         assert callable(SignalTUI.action_open_device_link)
 
     def test_open_device_link_method_exists(self):
         """_open_device_link exists and calls push_screen."""
         from signal_tui import SignalTUI
+
         assert hasattr(SignalTUI, "_open_device_link")
         assert callable(SignalTUI._open_device_link)
-
 
 
 class TestDeviceLinkTouchedTracking:
@@ -163,19 +159,23 @@ class TestDeviceLinkTouchedTracking:
     def test_transition_to_qr_marks_touched(self):
         screen = DeviceLinkPickerScreen()
         screen._selected_protocol = "telegram"
-        with patch.object(screen, "_populate_qr_phase"), \
-             patch.object(screen, "_show_phase"), \
-             patch.object(screen, "run_worker"), \
-             patch.object(screen, "_fetch_real_qr", new=MagicMock()):
+        with (
+            patch.object(screen, "_populate_qr_phase"),
+            patch.object(screen, "_show_phase"),
+            patch.object(screen, "run_worker"),
+            patch.object(screen, "_fetch_real_qr", new=MagicMock()),
+        ):
             screen._transition_to_qr(phone="")
         assert screen._touched_protocols == {"telegram"}
 
     def test_select_telegram_marks_touched_via_qr(self):
         screen = DeviceLinkPickerScreen()
-        with patch.object(screen, "_populate_qr_phase"), \
-             patch.object(screen, "_show_phase"), \
-             patch.object(screen, "run_worker"), \
-             patch.object(screen, "_fetch_real_qr", new=MagicMock()):
+        with (
+            patch.object(screen, "_populate_qr_phase"),
+            patch.object(screen, "_show_phase"),
+            patch.object(screen, "run_worker"),
+            patch.object(screen, "_fetch_real_qr", new=MagicMock()),
+        ):
             # has_whatsapp=False -> filtered = [signal, telegram], index 1 = telegram
             screen._select_protocol(1)
         assert screen._selected_protocol == "telegram"
@@ -183,8 +183,10 @@ class TestDeviceLinkTouchedTracking:
 
     def test_select_signal_phone_phase_does_not_mark(self):
         screen = DeviceLinkPickerScreen(signal_number="")
-        with patch.object(screen, "_transition_to_phone") as mock_phone, \
-             patch.object(screen, "_transition_to_qr") as mock_qr:
+        with (
+            patch.object(screen, "_transition_to_phone") as mock_phone,
+            patch.object(screen, "_transition_to_qr") as mock_qr,
+        ):
             screen._select_protocol(0)  # signal -> phone phase (no number)
         mock_phone.assert_called_once()
         mock_qr.assert_not_called()
@@ -196,6 +198,7 @@ class TestDeviceLinkReconnectWiring:
 
     def test_open_device_link_reconnects_only_touched(self):
         from signal_tui import SignalTUI
+
         app = SignalTUI()
         fake_screen = MagicMock()
         fake_screen._touched_protocols = {"telegram"}

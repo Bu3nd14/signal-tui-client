@@ -30,23 +30,48 @@ def tmp_cache_file(tmp_cache_dir: Path) -> Path:
 def sample_messages() -> dict[str, list[dict]]:
     """Return a sample in-memory cache with recent timestamps."""
     import time
+
     now_ms = int(time.time() * 1000)
     return {
         "+391234567890": [
-            {"text": "Ciao!", "is_mine": False, "sender": "Mario",
-             "timestamp": now_ms, "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None, "read": False,
-             "status": "read"},
-            {"text": "Come stai?", "is_mine": True, "sender": "You",
-             "timestamp": now_ms + 1, "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None, "read": True,
-             "status": "sent"},
+            {
+                "text": "Ciao!",
+                "is_mine": False,
+                "sender": "Mario",
+                "timestamp": now_ms,
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+                "read": False,
+                "status": "read",
+            },
+            {
+                "text": "Come stai?",
+                "is_mine": True,
+                "sender": "You",
+                "timestamp": now_ms + 1,
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+                "read": True,
+                "status": "sent",
+            },
         ],
         "+391111111111": [
-            {"text": "Messaggio recente", "is_mine": False, "sender": "Luigi",
-             "timestamp": now_ms - 1000, "quote_text": None, "msg_type": "text",
-             "attachment_info": None, "attachment_id": None, "read": False,
-             "status": "read"},
+            {
+                "text": "Messaggio recente",
+                "is_mine": False,
+                "sender": "Luigi",
+                "timestamp": now_ms - 1000,
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+                "read": False,
+                "status": "read",
+            },
         ],
     }
 
@@ -79,8 +104,12 @@ def sample_envelope_image() -> dict:
             "message": "",
             "timestamp": 3000000,
             "attachments": [
-                {"contentType": "image/jpeg", "filename": "photo.jpg",
-                 "id": "att-123", "caption": "Guarda!"},
+                {
+                    "contentType": "image/jpeg",
+                    "filename": "photo.jpg",
+                    "id": "att-123",
+                    "caption": "Guarda!",
+                },
             ],
             "quote": {},
         },
@@ -106,10 +135,8 @@ def sample_envelope_receipt() -> dict:
 def sample_contacts_rpc_output() -> list[dict]:
     """Return sample contact list as returned by RPC."""
     return [
-        {"number": "+391234567890", "name": "Mario Rossi",
-         "uuid": "uuid-123"},
-        {"number": "+391111111111", "name": "Luigi Verdi",
-         "uuid": "uuid-456"},
+        {"number": "+391234567890", "name": "Mario Rossi", "uuid": "uuid-123"},
+        {"number": "+391111111111", "name": "Luigi Verdi", "uuid": "uuid-456"},
     ]
 
 

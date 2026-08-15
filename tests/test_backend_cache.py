@@ -30,8 +30,7 @@ from backend import (
 def tmp_db(tmp_path: Path):
     """Point backend at a temporary SQLite DB and reset it between tests."""
     db_file = tmp_path / "messages.db"
-    with patch("backend.DB_FILE", db_file), \
-         patch("backend.CACHE_DIR", tmp_path):
+    with patch("backend.DB_FILE", db_file), patch("backend.CACHE_DIR", tmp_path):
         yield db_file
 
 
@@ -41,10 +40,18 @@ class TestCacheAddLoad:
     def test_add_and_load(self, tmp_db):
         """Aggiunge messaggi, ricarica, verifica contenuto."""
         _add_message_to_cache(
-            "+391234567890", "Ciao!", False, "Mario", 1000,
+            "+391234567890",
+            "Ciao!",
+            False,
+            "Mario",
+            1000,
         )
         _add_message_to_cache(
-            "+391234567890", "Come stai?", True, "You", 1001,
+            "+391234567890",
+            "Come stai?",
+            True,
+            "You",
+            1001,
         )
         loaded = _load_cache()
         assert "+391234567890" in loaded
@@ -66,15 +73,18 @@ class TestCacheAddLoad:
         """Aggiunge in una directory che non esiste → viene creata."""
         cache_dir = tmp_path / "nested" / "dir"
         db_file = cache_dir / "messages.db"
-        with patch("backend.DB_FILE", db_file), \
-             patch("backend.CACHE_DIR", cache_dir):
+        with patch("backend.DB_FILE", db_file), patch("backend.CACHE_DIR", cache_dir):
             _add_message_to_cache("+39", "test", True, "You", 1)
         assert db_file.exists()
 
     def test_add_preserves_optional_fields(self, tmp_db):
         """I campi opzionali (quote, attachment, msg_type) vengono salvati."""
         _add_message_to_cache(
-            "+391234567890", "img", False, "Mario", 2000,
+            "+391234567890",
+            "img",
+            False,
+            "Mario",
+            2000,
             quote_text="citazione",
             msg_type="image",
             attachment_info="photo.jpg",
@@ -172,8 +182,12 @@ class TestUpdateMessageStatus:
 
     def test_update_status_scoped_by_protocol(self, tmp_db):
         """Stesso timestamp su protocolli diversi → aggiorna solo quello giusto."""
-        _add_message_to_cache("+391234567890", "Ciao!", True, "You", 1000, protocol="signal")
-        _add_message_to_cache("391234567890@c.us", "Ciao!", True, "You", 1000, protocol="whatsapp")
+        _add_message_to_cache(
+            "+391234567890", "Ciao!", True, "You", 1000, protocol="signal"
+        )
+        _add_message_to_cache(
+            "391234567890@c.us", "Ciao!", True, "You", 1000, protocol="whatsapp"
+        )
         _update_message_status(1000, "delivered", "signal", "+391234567890")
         loaded = _load_cache()
         assert loaded["+391234567890"][0]["status"] == "delivered"
@@ -181,8 +195,12 @@ class TestUpdateMessageStatus:
 
     def test_update_status_scoped_by_contact(self, tmp_db):
         """Stesso timestamp su contatti diversi (stesso protocollo) → aggiorna solo quello giusto."""
-        _add_message_to_cache("+391234567890", "Ciao!", True, "You", 1000, protocol="signal")
-        _add_message_to_cache("+399999999999", "Ciao!", True, "You", 1000, protocol="signal")
+        _add_message_to_cache(
+            "+391234567890", "Ciao!", True, "You", 1000, protocol="signal"
+        )
+        _add_message_to_cache(
+            "+399999999999", "Ciao!", True, "You", 1000, protocol="signal"
+        )
         _update_message_status(1000, "delivered", "signal", "+391234567890")
         loaded = _load_cache()
         assert loaded["+391234567890"][0]["status"] == "delivered"
@@ -196,10 +214,18 @@ class TestProcessReceipt:
         """Return an in-memory cache with a sent message."""
         return {
             "+391234567890": [
-                {"text": "Ciao!", "is_mine": True, "sender": "You",
-                 "timestamp": 1000001, "quote_text": None, "msg_type": "text",
-                 "attachment_info": None, "attachment_id": None, "read": True,
-                 "status": "sent"},
+                {
+                    "text": "Ciao!",
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": 1000001,
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                    "read": True,
+                    "status": "sent",
+                },
             ]
         }
 
@@ -274,8 +300,12 @@ class TestProcessReceipt:
         """Non deve downgradare: sent → delivered OK, delivered → sent NO."""
         messages = {
             "+391234567890": [
-                {"text": "test", "is_mine": True, "timestamp": 1000001,
-                 "status": "delivered"},
+                {
+                    "text": "test",
+                    "is_mine": True,
+                    "timestamp": 1000001,
+                    "status": "delivered",
+                },
             ]
         }
         envelope = {

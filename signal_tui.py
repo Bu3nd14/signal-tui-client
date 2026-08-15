@@ -48,6 +48,7 @@ def _acquire_lock() -> bool:
         logger.debug("Lock acquisition failed, allowing startup", exc_info=True)
         return True
 
+
 def _release_lock():
     """Remove the lock file if it belongs to us."""
     try:
@@ -59,6 +60,7 @@ def _release_lock():
     except Exception as _e:
         logger.debug("Lock release failed", exc_info=True)
 
+
 # Global exception handler: salva le eccezioni non gestite su file
 # per debug, senza interferire con stderr usato da Textual per la TUI.
 def _global_exception_handler(exc_type, exc_value, exc_traceback):
@@ -66,9 +68,12 @@ def _global_exception_handler(exc_type, exc_value, exc_traceback):
         with open("/tmp/signal-crash.log", "w") as f:
             traceback.print_exception(exc_type, exc_value, exc_traceback, file=f)
     except Exception as _e:
-        logger.debug("Failed to write crash log", exc_info=True)  # non vogliamo causare altri errori
+        logger.debug(
+            "Failed to write crash log", exc_info=True
+        )  # non vogliamo causare altri errori
     # Chiama comunque l'handler predefinito per vedere l'errore anche in console
     sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
 
 sys.excepthook = _global_exception_handler
 
@@ -88,6 +93,7 @@ logger.setLevel(logging.DEBUG)
 
 if __name__ == "__main__":
     import logging
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -96,8 +102,14 @@ if __name__ == "__main__":
     import signal as signal_module
 
     if not _acquire_lock():
-        print("❌ Signal TUI is already running (lock file /tmp/signal-tui.lock).", file=sys.stderr)
-        print("   If you're sure it's not running, delete the lock file and try again.", file=sys.stderr)
+        print(
+            "❌ Signal TUI is already running (lock file /tmp/signal-tui.lock).",
+            file=sys.stderr,
+        )
+        print(
+            "   If you're sure it's not running, delete the lock file and try again.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     app = SignalTUI()

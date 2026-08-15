@@ -30,9 +30,11 @@ from models import (
 
 # ─── Telethon mock objects ────────────────────────────────────────────────
 
+
 @dataclass
 class MockTelethonUser:
     """Mimics telethon.tl.types.User."""
+
     id: int
     first_name: str = ""
     last_name: str = ""
@@ -43,6 +45,7 @@ class MockTelethonUser:
 @dataclass
 class MockTelethonChat:
     """Mimics telethon.tl.types.Chat (group)."""
+
     id: int
     title: str = ""
 
@@ -50,12 +53,14 @@ class MockTelethonChat:
 @dataclass
 class MockTelethonChannel:
     """Mimics telethon.tl.types.Channel."""
+
     id: int
     title: str = ""
 
 
 class MockTelethonDate:
     """Mimics datetime.datetime for timestamp conversion."""
+
     def __init__(self, ts_ms: int):
         self._ts = ts_ms / 1000.0
 
@@ -65,11 +70,24 @@ class MockTelethonDate:
 
 class MockTelethonMessage:
     """Mimics telethon.tl.types.Message."""
+
     def __init__(
-        self, *, id: int, chat_id: int, text: str = "", out: bool = False,
-        sender=None, date: MockTelethonDate | None = None,
-        photo=None, sticker=None, document=None, video=None, audio=None,
-        voice=None, file=None, reply_to=None,
+        self,
+        *,
+        id: int,
+        chat_id: int,
+        text: str = "",
+        out: bool = False,
+        sender=None,
+        date: MockTelethonDate | None = None,
+        photo=None,
+        sticker=None,
+        document=None,
+        video=None,
+        audio=None,
+        voice=None,
+        file=None,
+        reply_to=None,
     ):
         self.id = id
         self.chat_id = chat_id
@@ -89,11 +107,13 @@ class MockTelethonMessage:
 
 class MockReplyTo:
     """Mimics telethon.tl.types.MessageReplyHeader."""
+
     def __init__(self, reply_to_msg_id: int | None = None):
         self.reply_to_msg_id = reply_to_msg_id
 
 
 # ─── Test helpers ─────────────────────────────────────────────────────────
+
 
 def _make_backend() -> TelegramBackend:
     """Create a TelegramBackend with Telethon client mocked."""
@@ -113,6 +133,7 @@ def _make_backend() -> TelegramBackend:
 
 # ─── Contact mapping ──────────────────────────────────────────────────────
 
+
 class TestContactMapping:
     """📨 Mappatura Telethon User/Chat/Channel → ChatContact."""
 
@@ -120,8 +141,11 @@ class TestContactMapping:
         """User Telethon → ChatContact con tutti i campi."""
         backend = _make_backend()
         user = MockTelethonUser(
-            id=123456789, first_name="Mario", last_name="Rossi",
-            username="mario_rossi", phone="+391234567890",
+            id=123456789,
+            first_name="Mario",
+            last_name="Rossi",
+            username="mario_rossi",
+            phone="+391234567890",
         )
         contact = backend._entity_to_contact(user)
         assert contact.id == "123456789"
@@ -168,7 +192,9 @@ class TestContactMapping:
         contact = backend._entity_to_contact(user)
         assert contact.cache_key == contact_cache_key(PROTOCOL_TELEGRAM, "1")
 
+
 # ─── Message mapping ──────────────────────────────────────────────────────
+
 
 class TestMessageMapping:
     """📩 Mappatura Telethon Message → ChatEvent."""
@@ -177,8 +203,12 @@ class TestMessageMapping:
         backend = _make_backend()
         sender = MockTelethonUser(id=111, first_name="Giovanni")
         msg = MockTelethonMessage(
-            id=42, chat_id=111, text="Ciao!", out=False,
-            sender=sender, date=MockTelethonDate(1700000000000),
+            id=42,
+            chat_id=111,
+            text="Ciao!",
+            out=False,
+            sender=sender,
+            date=MockTelethonDate(1700000000000),
         )
         evt = backend._message_to_chat_event(msg)
         assert evt is not None
@@ -195,7 +225,10 @@ class TestMessageMapping:
     def test_message_outgoing_is_mine(self):
         backend = _make_backend()
         msg = MockTelethonMessage(
-            id=1, chat_id=222, text="Ok", out=True,
+            id=1,
+            chat_id=222,
+            text="Ok",
+            out=True,
             sender=MockTelethonUser(id=999, first_name="You"),
             date=MockTelethonDate(1700000000000),
         )
@@ -206,7 +239,10 @@ class TestMessageMapping:
     def test_message_photo_type(self):
         backend = _make_backend()
         msg = MockTelethonMessage(
-            id=3, chat_id=111, photo=True, out=False,
+            id=3,
+            chat_id=111,
+            photo=True,
+            out=False,
             sender=MockTelethonUser(id=111, first_name="Mario"),
             date=MockTelethonDate(1700000000000),
         )
@@ -216,7 +252,10 @@ class TestMessageMapping:
     def test_message_sticker_type(self):
         backend = _make_backend()
         msg = MockTelethonMessage(
-            id=4, chat_id=111, sticker=True, out=False,
+            id=4,
+            chat_id=111,
+            sticker=True,
+            out=False,
             sender=MockTelethonUser(id=111, first_name="Mario"),
             date=MockTelethonDate(1700000000000),
         )
@@ -226,7 +265,10 @@ class TestMessageMapping:
     def test_message_document_type(self):
         backend = _make_backend()
         msg = MockTelethonMessage(
-            id=5, chat_id=111, document=True, out=False,
+            id=5,
+            chat_id=111,
+            document=True,
+            out=False,
             sender=MockTelethonUser(id=111, first_name="Mario"),
             date=MockTelethonDate(1700000000000),
         )
@@ -238,7 +280,9 @@ class TestMessageMapping:
         backend = _make_backend()
         for media in ("video", "audio", "voice"):
             kwargs = {
-                "id": 7, "chat_id": 111, media: True,
+                "id": 7,
+                "chat_id": 111,
+                media: True,
                 "out": False,
                 "sender": MockTelethonUser(id=111, first_name="Mario"),
                 "date": MockTelethonDate(1700000000000),
@@ -250,7 +294,10 @@ class TestMessageMapping:
     def test_message_sender_fallback_to_id(self):
         backend = _make_backend()
         msg = MockTelethonMessage(
-            id=9, chat_id=111, text="Hey", out=False,
+            id=9,
+            chat_id=111,
+            text="Hey",
+            out=False,
             sender=MockTelethonUser(id=777),
             date=MockTelethonDate(1700000000000),
         )
@@ -260,7 +307,10 @@ class TestMessageMapping:
     def test_timestamp_conversion(self):
         backend = _make_backend()
         msg = MockTelethonMessage(
-            id=10, chat_id=111, text=".", out=False,
+            id=10,
+            chat_id=111,
+            text=".",
+            out=False,
             sender=MockTelethonUser(id=111, first_name="T"),
             date=MockTelethonDate(1700000000123),
         )
@@ -271,7 +321,10 @@ class TestMessageMapping:
     def test_message_quote_no_crash(self):
         backend = _make_backend()
         msg = MockTelethonMessage(
-            id=8, chat_id=111, text="Risposta", out=False,
+            id=8,
+            chat_id=111,
+            text="Risposta",
+            out=False,
             sender=MockTelethonUser(id=111, first_name="Mario"),
             date=MockTelethonDate(1700000000000),
             reply_to=MockReplyTo(reply_to_msg_id=5),
@@ -283,15 +336,20 @@ class TestMessageMapping:
 
 # ─── Typing event ─────────────────────────────────────────────────────────
 
+
 class TestTypingEvent:
     """⌨️  Evento typing da ChatAction → ChatEvent."""
 
     def test_typing_started_event(self):
         backend = _make_backend()
-        backend._events.put(ChatEvent(
-            type="typing", protocol=PROTOCOL_TELEGRAM,
-            contact_id="222", payload={"action": "STARTED"},
-        ))
+        backend._events.put(
+            ChatEvent(
+                type="typing",
+                protocol=PROTOCOL_TELEGRAM,
+                contact_id="222",
+                payload={"action": "STARTED"},
+            )
+        )
         events = backend.poll_once()
         assert len(events) == 1
         assert events[0].type == "typing"
@@ -301,16 +359,21 @@ class TestTypingEvent:
 
 # ─── Event queue ──────────────────────────────────────────────────────────
 
+
 class TestEventQueue:
     """📬 Contratto coda eventi: .put() thread-safe, poll_once() svuota."""
 
     def test_poll_once_drains_queue(self):
         backend = _make_backend()
         for i in range(3):
-            backend._events.put(ChatEvent(
-                type="message", protocol=PROTOCOL_TELEGRAM,
-                contact_id=str(i), payload={},
-            ))
+            backend._events.put(
+                ChatEvent(
+                    type="message",
+                    protocol=PROTOCOL_TELEGRAM,
+                    contact_id=str(i),
+                    payload={},
+                )
+            )
         events = backend.poll_once()
         assert len(events) == 3
         assert [e.contact_id for e in events] == ["0", "1", "2"]
@@ -327,10 +390,14 @@ class TestEventQueue:
         def producer():
             try:
                 for i in range(50):
-                    backend._events.put(ChatEvent(
-                        type="message", protocol=PROTOCOL_TELEGRAM,
-                        contact_id=str(i), payload={"n": i},
-                    ))
+                    backend._events.put(
+                        ChatEvent(
+                            type="message",
+                            protocol=PROTOCOL_TELEGRAM,
+                            contact_id=str(i),
+                            payload={"n": i},
+                        )
+                    )
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
 
@@ -349,7 +416,9 @@ class TestEventQueue:
             all_events.extend(batch)
         assert len(all_events) == 200
 
+
 # ─── Cache and dedup ──────────────────────────────────────────────────────
+
 
 class TestCacheDedup:
     """🗄️  Cache in-memory e dedup messaggi (dal thread TUI)."""
@@ -357,11 +426,16 @@ class TestCacheDedup:
     def test_ingest_message_adds_to_cache(self):
         backend = _make_backend()
         data = {
-            "id": "msg-1", "contact_id": "111",
-            "protocol": PROTOCOL_TELEGRAM, "text": "Ciao!",
-            "is_mine": False, "sender": "Mario",
-            "timestamp": 1700000000000, "quote_text": None,
-            "msg_type": "text", "attachment_info": None,
+            "id": "msg-1",
+            "contact_id": "111",
+            "protocol": PROTOCOL_TELEGRAM,
+            "text": "Ciao!",
+            "is_mine": False,
+            "sender": "Mario",
+            "timestamp": 1700000000000,
+            "quote_text": None,
+            "msg_type": "text",
+            "attachment_info": None,
             "attachment_id": None,
         }
         added = backend.ingest_message("111", data, 1700000000000)
@@ -373,10 +447,14 @@ class TestCacheDedup:
     def test_ingest_message_dedup_same_id(self):
         backend = _make_backend()
         data = {
-            "id": "msg-1", "contact_id": "111",
-            "protocol": PROTOCOL_TELEGRAM, "text": "Ciao!",
-            "is_mine": False, "sender": "Mario",
-            "timestamp": 1700000000000, "msg_type": "text",
+            "id": "msg-1",
+            "contact_id": "111",
+            "protocol": PROTOCOL_TELEGRAM,
+            "text": "Ciao!",
+            "is_mine": False,
+            "sender": "Mario",
+            "timestamp": 1700000000000,
+            "msg_type": "text",
         }
         assert backend.ingest_message("111", data, 1700000000000) is True
         assert backend.ingest_message("111", data, 1700000000000) is False
@@ -384,10 +462,24 @@ class TestCacheDedup:
 
     def test_ingest_message_different_contact(self):
         backend = _make_backend()
-        data_a = {"id": "a", "text": "Ok", "timestamp": 1000, "is_mine": False,
-                   "sender": "A", "msg_type": "text", "protocol": PROTOCOL_TELEGRAM}
-        data_b = {"id": "b", "text": "Ok", "timestamp": 1000, "is_mine": False,
-                   "sender": "B", "msg_type": "text", "protocol": PROTOCOL_TELEGRAM}
+        data_a = {
+            "id": "a",
+            "text": "Ok",
+            "timestamp": 1000,
+            "is_mine": False,
+            "sender": "A",
+            "msg_type": "text",
+            "protocol": PROTOCOL_TELEGRAM,
+        }
+        data_b = {
+            "id": "b",
+            "text": "Ok",
+            "timestamp": 1000,
+            "is_mine": False,
+            "sender": "B",
+            "msg_type": "text",
+            "protocol": PROTOCOL_TELEGRAM,
+        }
         assert backend.ingest_message("111", data_a, 1000) is True
         assert backend.ingest_message("222", data_b, 1000) is True
         assert len(backend.cache["111"]) == 1
@@ -395,10 +487,24 @@ class TestCacheDedup:
 
     def test_ingest_message_distinct_ids_same_second(self):
         backend = _make_backend()
-        data1 = {"id": "tg-1", "text": "A", "timestamp": 1000, "is_mine": False,
-                  "sender": "X", "msg_type": "text", "protocol": PROTOCOL_TELEGRAM}
-        data2 = {"id": "tg-2", "text": "B", "timestamp": 1000, "is_mine": False,
-                  "sender": "X", "msg_type": "text", "protocol": PROTOCOL_TELEGRAM}
+        data1 = {
+            "id": "tg-1",
+            "text": "A",
+            "timestamp": 1000,
+            "is_mine": False,
+            "sender": "X",
+            "msg_type": "text",
+            "protocol": PROTOCOL_TELEGRAM,
+        }
+        data2 = {
+            "id": "tg-2",
+            "text": "B",
+            "timestamp": 1000,
+            "is_mine": False,
+            "sender": "X",
+            "msg_type": "text",
+            "protocol": PROTOCOL_TELEGRAM,
+        }
         assert backend.ingest_message("111", data1, 1000) is True
         assert backend.ingest_message("111", data2, 1000) is True
         assert len(backend.cache["111"]) == 2
@@ -417,9 +523,16 @@ class TestCacheDedup:
             # 1) Invio ottimistico dalla TUI: nessun id, ts client.
             added = backend.ingest_message(
                 "111",
-                {"text": "ciao", "is_mine": True, "sender": "You",
-                 "timestamp": 1000, "quote_text": None, "msg_type": "text",
-                 "attachment_info": None, "attachment_id": None},
+                {
+                    "text": "ciao",
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": 1000,
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                },
                 1000,
             )
             assert added is True
@@ -427,9 +540,17 @@ class TestCacheDedup:
             # 2) Echo reale entro la finestra di dedup.
             added_echo = backend.ingest_message(
                 "111",
-                {"id": "42", "text": "ciao", "is_mine": True, "sender": "You",
-                 "timestamp": 1500, "quote_text": None, "msg_type": "text",
-                 "attachment_info": None, "attachment_id": None},
+                {
+                    "id": "42",
+                    "text": "ciao",
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": 1500,
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                },
                 1500,
             )
 
@@ -448,6 +569,7 @@ class TestCacheDedup:
 
 # ─── Thread boundary contract ─────────────────────────────────────────────
 
+
 class TestThreadBoundary:
     """🧵 Vincolo: gli handler NON toccano SQLite o cache."""
 
@@ -455,8 +577,12 @@ class TestThreadBoundary:
         backend = _make_backend()
         sender = MockTelethonUser(id=111, first_name="Mario")
         msg = MockTelethonMessage(
-            id=42, chat_id=111, text="Test", out=False,
-            sender=sender, date=MockTelethonDate(1700000000000),
+            id=42,
+            chat_id=111,
+            text="Test",
+            out=False,
+            sender=sender,
+            date=MockTelethonDate(1700000000000),
         )
         with patch.object(backend, "ingest_message") as mock_ingest:
             evt = backend._message_to_chat_event(msg)
@@ -469,10 +595,15 @@ class TestThreadBoundary:
     def test_cache_written_only_after_poll_once(self):
         backend = _make_backend()
         evt = ChatEvent(
-            type="message", protocol=PROTOCOL_TELEGRAM,
-            contact_id="111", payload={
-                "id": "msg-1", "text": "Ciao", "is_mine": False,
-                "sender": "Mario", "timestamp": 1700000000000,
+            type="message",
+            protocol=PROTOCOL_TELEGRAM,
+            contact_id="111",
+            payload={
+                "id": "msg-1",
+                "text": "Ciao",
+                "is_mine": False,
+                "sender": "Mario",
+                "timestamp": 1700000000000,
                 "msg_type": "text",
             },
         )
@@ -486,6 +617,7 @@ class TestThreadBoundary:
 
 
 # ─── Disconnect ───────────────────────────────────────────────────────────
+
 
 class TestDisconnect:
     """🔌 disconnect_sync ferma il thread e il client."""
@@ -515,10 +647,13 @@ class TestDisconnect:
         backend._loop_thread = MagicMock()
         backend._running = True
 
-        with patch.object(backend, "disconnect_sync") as mock_disc, \
-             patch.object(backend, "_load_protocol_cache",
-                          side_effect=RuntimeError("stop early")), \
-             pytest.raises(RuntimeError):
+        with (
+            patch.object(backend, "disconnect_sync") as mock_disc,
+            patch.object(
+                backend, "_load_protocol_cache", side_effect=RuntimeError("stop early")
+            ),
+            pytest.raises(RuntimeError),
+        ):
             backend._connect_sync()
 
         # `disconnect_sync` è stato chiamato PRIMA di `_load_protocol_cache`
@@ -528,6 +663,7 @@ class TestDisconnect:
 
 # ─── Protocol constant ────────────────────────────────────────────────────
 
+
 class TestProtocolConstant:
     """🏷️  PROTOCOL_TELEGRAM e TelegramBackend."""
 
@@ -536,22 +672,25 @@ class TestProtocolConstant:
 
     def test_protocol_telegram_in_emoji_map(self):
         from models import PROTOCOL_EMOJI, protocol_emoji
+
         assert PROTOCOL_TELEGRAM in PROTOCOL_EMOJI
         assert protocol_emoji(PROTOCOL_TELEGRAM) == "📨"
 
     def test_telegram_backend_protocol(self):
         from backends.telegram import TelegramBackend
+
         assert TelegramBackend.protocol == PROTOCOL_TELEGRAM
 
     def test_is_chat_backend_subclass(self):
         from backends.base import ChatBackend
         from backends.telegram import TelegramBackend
+
         assert issubclass(TelegramBackend, ChatBackend)
 
     def test_instantiable(self):
         from backends.telegram import TelegramBackend
+
         backend = TelegramBackend()
         assert backend.protocol == PROTOCOL_TELEGRAM
         assert isinstance(backend.contacts, list)
         assert isinstance(backend.cache, dict)
-

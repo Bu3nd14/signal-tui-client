@@ -142,9 +142,12 @@ class TestInitDBAutoMigrate:
     def tmp_backend_db(self, tmp_path: Path):
         """Point backend at a temp legacy DB for _init_db tests."""
         import backend as backend_mod
+
         db_file = tmp_path / "messages.db"
-        with patch.object(backend_mod, "DB_FILE", db_file), \
-             patch.object(backend_mod, "CACHE_DIR", tmp_path):
+        with (
+            patch.object(backend_mod, "DB_FILE", db_file),
+            patch.object(backend_mod, "CACHE_DIR", tmp_path),
+        ):
             _make_legacy_db(db_file)
             yield backend_mod, db_file
 
@@ -192,4 +195,3 @@ class TestInitDBAutoMigrate:
         backend_mod._init_db()  # must not raise
         cols = _table_columns(backend_mod.DB_FILE)
         assert "protocol" in cols
-

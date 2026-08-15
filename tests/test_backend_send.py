@@ -68,10 +68,13 @@ class TestSendRPC:
             mock_call.return_value = {"result": {}}
             client.send_message("Ciao!", "+391234567890")
 
-        mock_call.assert_called_once_with("send", {
-            "message": "Ciao!",
-            "recipient": ["+391234567890"],
-        })
+        mock_call.assert_called_once_with(
+            "send",
+            {
+                "message": "Ciao!",
+                "recipient": ["+391234567890"],
+            },
+        )
 
     def test_send_message_with_timestamp(self):
         """Send RPC con timestamp esplicito."""
@@ -81,11 +84,14 @@ class TestSendRPC:
             mock_call.return_value = {"result": {}}
             client.send_message("Ciao!", "+391234567890", timestamp=1000000)
 
-        mock_call.assert_called_once_with("send", {
-            "message": "Ciao!",
-            "recipient": ["+391234567890"],
-            "timestamp": 1000000,
-        })
+        mock_call.assert_called_once_with(
+            "send",
+            {
+                "message": "Ciao!",
+                "recipient": ["+391234567890"],
+                "timestamp": 1000000,
+            },
+        )
 
     def test_send_message_with_quote(self):
         """Send RPC con quote."""
@@ -101,10 +107,13 @@ class TestSendRPC:
                 quote_message="Originale",
             )
 
-        mock_call.assert_called_once_with("send", {
-            "message": "Ciao!",
-            "recipient": ["+391234567890"],
-            "quoteTimestamp": 1000000,
-            "quoteAuthor": "+391234567890",
-            "quoteMessage": "Originale",
-        })
+        mock_call.assert_called_once_with(
+            "send",
+            {
+                "message": "Ciao!",
+                "recipient": ["+391234567890"],
+                "quoteTimestamp": 1000000,
+                "quoteAuthor": "+391234567890",
+                "quoteMessage": "Originale",
+            },
+        )

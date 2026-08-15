@@ -97,6 +97,8 @@ def _ensure_download_server() -> str:
     t.start()
 
     return _DOWNLOAD_URL_BASE
+
+
 def _clean_download_dir(keep: str | None = None) -> None:
     """Remove all files in the temp download directory except *keep*."""
     dl_dir = _get_temp_download_dir()
@@ -108,6 +110,7 @@ def _clean_download_dir(keep: str | None = None) -> None:
                 child.unlink()
             elif child.is_dir():
                 import shutil
+
                 shutil.rmtree(child)
         except OSError:
             pass
@@ -130,6 +133,7 @@ def _serve_file_path(att_path: Path) -> str:
         link_path.symlink_to(att_path)
     except OSError:
         import shutil
+
         shutil.copy2(att_path, link_path)
 
     return f"{url_base}/{att_path.name}"

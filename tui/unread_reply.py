@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class UnreadReplyMixin:
-
     def _recompute_unread(self, contact_cache_key_value: str | None = None) -> bool:
         """Ricalcola i conteggi unread in ``self._unread_counts`` SOLO nei dati.
 
@@ -110,13 +109,13 @@ class UnreadReplyMixin:
                 try:
                     prev_widget.set_selected(False)
                 except Exception as _e:
-                    logger.debug("Failed to deselect previous reply widget", exc_info=True)
+                    logger.debug(
+                        "Failed to deselect previous reply widget", exc_info=True
+                    )
         self._reply_to = None
         self._update_reply_bar()
 
-    def on_message_widget_message_clicked(
-        self, event: MessageWidget.MessageClicked
-    ):
+    def on_message_widget_message_clicked(self, event: MessageWidget.MessageClicked):
         """Handle ``MessageClicked`` from a ``MessageWidget``.
 
         If download mode is active, serve the message text as a .txt file
@@ -147,7 +146,9 @@ class UnreadReplyMixin:
                 try:
                     prev_widget.set_selected(False)
                 except Exception as _e:
-                    logger.debug("Failed to deselect previous reply widget", exc_info=True)
+                    logger.debug(
+                        "Failed to deselect previous reply widget", exc_info=True
+                    )
 
         # Store the new reply target
         self._reply_to = {
@@ -160,7 +161,10 @@ class UnreadReplyMixin:
         # Highlight the clicked widget (find it by timestamp in the chat log)
         chat_log = self.chat_log
         for child in chat_log.children:
-            if isinstance(child, MessageWidget) and child._msg_timestamp == event.timestamp:
+            if (
+                isinstance(child, MessageWidget)
+                and child._msg_timestamp == event.timestamp
+            ):
                 child.set_selected(True)
                 self._reply_to["_widget"] = child
                 break

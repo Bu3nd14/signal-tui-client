@@ -187,6 +187,7 @@ def get_whatsapp_webhook_url() -> str:
 
 # ─── Telegram configuration ────────────────────────────────────────────────
 
+
 def get_telegram_api_id() -> int:
     """Read ``TELEGRAM_API_ID`` from env, config.json, or .env.
 
@@ -234,9 +235,7 @@ def get_telegram_session_path() -> Path:
     Uses ``XDG_DATA_HOME`` (default ``~/.local/share``) +
     ``signal-tui-client/telegram.session``.
     """
-    data_dir = Path(
-        os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
-    )
+    data_dir = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     return data_dir / "signal-tui-client" / "telegram.session"
 
 

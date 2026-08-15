@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 
 class DownloadModeMixin:
-
     def action_download_mode(self) -> None:
         """Toggle download mode on/off (Ctrl+D).
 
@@ -61,6 +60,7 @@ class DownloadModeMixin:
         A clickable ``DownloadLinkWidget`` is mounted in the chat log.
         """
         from backend import _serve_file_path
+
         if attachment_id:
             resolved = self.manager.get_attachment_path(
                 protocol or PROTOCOL_SIGNAL, attachment_id
@@ -114,7 +114,9 @@ class DownloadModeMixin:
         if att_path is None and event.attachment_id:
             protocol = self.selected_contact.protocol if self.selected_contact else None
             if protocol:
-                att_path = self.manager.get_attachment_path(protocol, event.attachment_id)
+                att_path = self.manager.get_attachment_path(
+                    protocol, event.attachment_id
+                )
 
         if self._download_mode:
             text = att_path.name if att_path else "attachment"
@@ -129,4 +131,3 @@ class DownloadModeMixin:
             self.push_screen(ImageModalScreen(att_path))
         else:
             self._status("❌ Image file not found on server")
-

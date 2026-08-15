@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class ContactListMixin:
-
     @staticmethod
     def _contact_sort_key(c: ChatContact) -> tuple:
         """Key per ordinare i contatti: ultimi messaggi in alto.
@@ -30,10 +29,12 @@ class ContactListMixin:
             unnamed = False
         has_messages = ts > 0
         return (
-            not has_messages,               # 0 = con messaggi (prima), 1 = senza
-            -ts,                            # più recente in alto (solo se has_messages)
-            1 if (not has_messages and unnamed) else 0,  # "solo numero senza msg" in coda
-            name,                           # alfabetico per i senza messaggi
+            not has_messages,  # 0 = con messaggi (prima), 1 = senza
+            -ts,  # più recente in alto (solo se has_messages)
+            1
+            if (not has_messages and unnamed)
+            else 0,  # "solo numero senza msg" in coda
+            name,  # alfabetico per i senza messaggi
             c.id,
         )
 
@@ -115,7 +116,10 @@ class ContactListMixin:
             if show:
                 if first_visible is None:
                     first_visible = i
-                if self.selected_contact is not None and key == self.selected_contact.cache_key:
+                if (
+                    self.selected_contact is not None
+                    and key == self.selected_contact.cache_key
+                ):
                     selected_index = i
 
         if selected_index is not None:
@@ -231,7 +235,6 @@ class ContactListMixin:
             self._render_timer.stop()
             self._render_timer = None
 
-
         def _sync_item(item, c):
             """Aggiorna testo/classe di un ListItem esistente per il contatto c."""
             label = item.children[0] if item.children else None
@@ -297,8 +300,6 @@ class ContactListMixin:
         # right ``display`` and the highlight lands on the correct row.
         self._apply_contact_visibility()
 
-
-
     def _apply_contact_filter(self) -> None:
         """Re-apply the active protocol filter to the contact list view.
 
@@ -340,7 +341,9 @@ class ContactListMixin:
     def action_cycle_protocol_filter(self):
         """Ctrl+W: cycle the contact list filter ALL -> SIGNAL -> WHATSAPP -> TELEGRAM."""
         order = ["all", "signal", "whatsapp", "telegram"]
-        idx = order.index(self._protocol_filter) if self._protocol_filter in order else 0
+        idx = (
+            order.index(self._protocol_filter) if self._protocol_filter in order else 0
+        )
         self._protocol_filter = order[(idx + 1) % len(order)]
         self._apply_contact_filter()
         # NB: volutamente NON scriviamo niente nella chat qui: il ctrl+W aggiorna
@@ -364,7 +367,9 @@ class ContactListMixin:
         self.selected_contact = contact
         # Update the chat banner with the selected contact's name.
         chat_title = self.query_one("#ChatTitle", Label)
-        chat_title.update(f"{protocol_emoji(contact.protocol)} Chat - {contact.display_name}")
+        chat_title.update(
+            f"{protocol_emoji(contact.protocol)} Chat - {contact.display_name}"
+        )
         self._seen_timestamps.clear()
         self._seen_message_ids.clear()
         # Per WhatsApp la ricezione è PUSH via webhook (handle_webhook): WAHA
@@ -402,7 +407,6 @@ class ContactListMixin:
             self.selected_contact.id
         )
         self._unread_counts[cache_key] = 0
-
 
         # Highlight the contact in the left list and remove the *N badge.
         # The ListView keeps ALL contacts in the DOM after the Ctrl+W filter

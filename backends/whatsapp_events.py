@@ -71,9 +71,9 @@ def _resolve_sender_name(sender: str, contacts_by_jid: dict | None) -> str:
     return sender
 
 
-
-
-def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[ChatEvent]:
+def _event_from_message(
+    raw: dict, contacts_by_jid: dict | None = None
+) -> list[ChatEvent]:
     """Normalize a raw incoming message dict into zero or more ``ChatEvent`` objects.
 
     When *raw* carries an ``attachments`` array with N elements, N events are
@@ -119,7 +119,12 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[
     if "@broadcast" in chat_jid:
         return []
 
-    text = raw.get("text") or raw.get("body") or (raw.get("message") or {}).get("conversation") or ""
+    text = (
+        raw.get("text")
+        or raw.get("body")
+        or (raw.get("message") or {}).get("conversation")
+        or ""
+    )
     ts = raw.get("timestamp")
     ts_ms = 0
     if isinstance(ts, (int, float)):
@@ -151,7 +156,9 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[
                 att_type = "attachment"
             else:
                 att_type = msg_type if msg_type != "text" else "attachment"
-            att_info = caption or att.get("caption") or att.get("filename") or mime or "Media"
+            att_info = (
+                caption or att.get("caption") or att.get("filename") or mime or "Media"
+            )
             media_items.append((att_id, att_info, att_type))
 
     # If still no media, look inside the nested "message" object (WAHA Core).
@@ -180,7 +187,11 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[
                         or media.get("caption")
                         or media.get("filename")
                         or media.get("mimetype")
-                        or (f"{media_key} ({msg_id[:16]}...)" if len(str(msg_id)) > 16 else f"{media_key}")
+                        or (
+                            f"{media_key} ({msg_id[:16]}...)"
+                            if len(str(msg_id)) > 16
+                            else f"{media_key}"
+                        )
                     )
                     media_items.append((att_id, att_info, att_type))
                     break
@@ -223,8 +234,11 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[
             raw.get("participant")
             or raw.get("sender")
             or raw.get("author")
-            or (raw.get("key", {}).get("participant")
-                if isinstance(raw.get("key"), dict) else None)
+            or (
+                raw.get("key", {}).get("participant")
+                if isinstance(raw.get("key"), dict)
+                else None
+            )
         )
 
         # Nome visualizzato se disponibile, altrimenti il JID del mittente.
@@ -236,7 +250,11 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[
             or ("You" if is_mine else chat_jid)
         )
     else:
-        sender = raw.get("pushName") or raw.get("senderName") or ("You" if is_mine else chat_jid)
+        sender = (
+            raw.get("pushName")
+            or raw.get("senderName")
+            or ("You" if is_mine else chat_jid)
+        )
 
     # Se il sender è un JID (es. "220988985864200@lid"), prova a risolverlo
     # al nome del contatto tramite la rubrica caricata dal backend.
@@ -245,7 +263,9 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[
     quote = raw.get("quote") or raw.get("quotedMessage")
     quote_text = None
     if isinstance(quote, dict):
-        quote_text = quote.get("text") or quote.get("body") or quote.get("conversation") or None
+        quote_text = (
+            quote.get("text") or quote.get("body") or quote.get("conversation") or None
+        )
 
     # ── Build events ───────────────────────────────────────────────────
     if media_items:
@@ -259,45 +279,49 @@ def _event_from_message(raw: dict, contacts_by_jid: dict | None = None) -> list[
                     msg_text = f"{label}: {att_id!s}"
                 else:
                     msg_text = label
-            events.append(ChatEvent(
-                type="message",
-                protocol=PROTOCOL_WHATSAPP,
-                contact_id=chat_jid,
-                payload={
-                    "id": msg_id,
-                    "text": msg_text,
-                    "is_mine": is_mine,
-                    "sender": sender,
-                    "is_group": is_group,
-                    "timestamp": ts_ms,
-                    "quote_text": quote_text,
-                    "msg_type": att_type,
-                    "attachment_info": att_info,
-                    "attachment_id": att_id,
-                    "contact": None,
-                },
-            ))
+            events.append(
+                ChatEvent(
+                    type="message",
+                    protocol=PROTOCOL_WHATSAPP,
+                    contact_id=chat_jid,
+                    payload={
+                        "id": msg_id,
+                        "text": msg_text,
+                        "is_mine": is_mine,
+                        "sender": sender,
+                        "is_group": is_group,
+                        "timestamp": ts_ms,
+                        "quote_text": quote_text,
+                        "msg_type": att_type,
+                        "attachment_info": att_info,
+                        "attachment_id": att_id,
+                        "contact": None,
+                    },
+                )
+            )
         return events
 
     # No media: pure text message (or sticker from msg_type).
-    return [ChatEvent(
-        type="message",
-        protocol=PROTOCOL_WHATSAPP,
-        contact_id=chat_jid,
-        payload={
-            "id": msg_id,
-            "text": text,
-            "is_mine": is_mine,
-            "sender": sender,
-            "is_group": is_group,
-            "timestamp": ts_ms,
-            "quote_text": quote_text,
-            "msg_type": msg_type,
-            "attachment_info": None,
-            "attachment_id": None,
-            "contact": None,
-        },
-    )]
+    return [
+        ChatEvent(
+            type="message",
+            protocol=PROTOCOL_WHATSAPP,
+            contact_id=chat_jid,
+            payload={
+                "id": msg_id,
+                "text": text,
+                "is_mine": is_mine,
+                "sender": sender,
+                "is_group": is_group,
+                "timestamp": ts_ms,
+                "quote_text": quote_text,
+                "msg_type": msg_type,
+                "attachment_info": None,
+                "attachment_id": None,
+                "contact": None,
+            },
+        )
+    ]
 
 
 def _event_from_receipt(raw: dict) -> ChatEvent | None:
@@ -314,12 +338,18 @@ def _event_from_receipt(raw: dict) -> ChatEvent | None:
     ids = receipt.get("messageIds") if isinstance(receipt, dict) else None
     ids = ids or (receipt.get("ids") if isinstance(receipt, dict) else None) or []
     receipt_type = receipt.get("type") if isinstance(receipt, dict) else None
-    is_read = str(receipt_type or raw.get("receiptType") or "").lower() in ("read", "read-receipt")
+    is_read = str(receipt_type or raw.get("receiptType") or "").lower() in (
+        "read",
+        "read-receipt",
+    )
     return ChatEvent(
         type="receipt",
         protocol=PROTOCOL_WHATSAPP,
         contact_id=chat_jid,
-        payload={"message_ids": ids if isinstance(ids, list) else [], "is_read": is_read},
+        payload={
+            "message_ids": ids if isinstance(ids, list) else [],
+            "is_read": is_read,
+        },
     )
 
 
@@ -356,9 +386,7 @@ def _event_from_ack(raw: dict) -> ChatEvent | None:
         )
     else:
         chat_jid = _jid_string(
-            content.get("chatId")
-            or content.get("from")
-            or content.get("remoteJid")
+            content.get("chatId") or content.get("from") or content.get("remoteJid")
         )
     msg_id = content.get("id") or content.get("msgId") or content.get("messageId")
     if not chat_jid or not msg_id:
@@ -394,7 +422,9 @@ def _event_from_typing(raw: dict) -> ChatEvent | None:
     if not chat_jid:
         return None
     pr = raw.get("presence") or raw.get("typing") or raw.get("type") or ""
-    action = "STARTED" if str(pr).lower() in ("composing", "typing", "true") else "STOPPED"
+    action = (
+        "STARTED" if str(pr).lower() in ("composing", "typing", "true") else "STOPPED"
+    )
     return ChatEvent(
         type="typing",
         protocol=PROTOCOL_WHATSAPP,
@@ -416,9 +446,21 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> list[Chat
     payload = raw.get("payload")
     content = payload if isinstance(payload, dict) else raw
 
-    if evt in ("message", "message.any", "message.new", "messages.upsert", "messages/upsert"):
+    if evt in (
+        "message",
+        "message.any",
+        "message.new",
+        "messages.upsert",
+        "messages/upsert",
+    ):
         return _event_from_message(content, contacts_by_jid)
-    if evt in ("typing", "presence.update", "presence/update", "presence", "presence.update"):
+    if evt in (
+        "typing",
+        "presence.update",
+        "presence/update",
+        "presence",
+        "presence.update",
+    ):
         event = _event_from_typing(content)
         return [event] if event is not None else []
     if evt in ("receipt", "receipts.update", "receipt/update", "message.receipt"):
@@ -429,11 +471,12 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> list[Chat
         return [event] if event is not None else []
     # Some APIs emit the message object directly without an 'event' field.
     if (content.get("remoteJid") or content.get("from") or content.get("chatId")) and (
-        "text" in content or "body" in content or content.get("message")
-        or content.get("attachments") or content.get("hasMedia")
+        "text" in content
+        or "body" in content
+        or content.get("message")
+        or content.get("attachments")
+        or content.get("hasMedia")
         or content.get("media")
     ):
         return _event_from_message(content, contacts_by_jid)
     return []
-
-

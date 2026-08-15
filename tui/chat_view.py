@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 
 class ChatViewMixin:
-
     @property
     def chat_log(self) -> Vertical:
         """The ``#chat-log`` widget, lazily cached on first access."""
@@ -83,14 +82,10 @@ class ChatViewMixin:
                 in self._shown_in_log
             ):
                 return
-            if (
-                self.selected_contact is not None
-                and timestamp
-            ):
+            if self.selected_contact is not None and timestamp:
                 self._shown_in_log.add(
                     (protocol, self.selected_contact.cache_key, timestamp, text)
                 )
-
 
         chat_log = self.chat_log
 
@@ -210,7 +205,9 @@ class ChatViewMixin:
         att_path: Path | None = None
         if attachment_id:
             resolved_protocol = protocol or PROTOCOL_SIGNAL
-            att_path = self.manager.get_attachment_path(resolved_protocol, attachment_id)
+            att_path = self.manager.get_attachment_path(
+                resolved_protocol, attachment_id
+            )
 
         if att_path is None:
             fallback = f"[🖼️ Image: {attachment_info}]"
@@ -313,7 +310,9 @@ class ChatViewMixin:
                     if not msg.get("is_mine"):
                         msg["read"] = True
             except Exception as _e:  # fallback: stay on the local cache
-                logger.debug("History fetch failed, staying on local cache", exc_info=True)
+                logger.debug(
+                    "History fetch failed, staying on local cache", exc_info=True
+                )
 
         if _is_stale():
             return
@@ -325,7 +324,9 @@ class ChatViewMixin:
         if cache_changed or not rendered_any:
             self._render_chat_window(contact, _is_stale, pending_fetch=False)
 
-    def _render_chat_window(self, contact, is_stale, pending_fetch: bool = False) -> bool:
+    def _render_chat_window(
+        self, contact, is_stale, pending_fetch: bool = False
+    ) -> bool:
         """Sort the contact's cache, take the newest window and mount it atomically.
 
         Returns ``True`` if at least one message was rendered, ``False`` if the
@@ -371,7 +372,9 @@ class ChatViewMixin:
             ts = msg.get("timestamp", 0)
             if ts:
                 self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
-                self._seen_message_ids.add((contact.protocol, contact.cache_key, ts, text))
+                self._seen_message_ids.add(
+                    (contact.protocol, contact.cache_key, ts, text)
+                )
                 mid = msg.get("id")
                 if mid:
                     self._seen_message_ids.add(
@@ -401,12 +404,8 @@ class ChatViewMixin:
                     text = msg.get("text", "")
                     ts = msg.get("timestamp", 0)
                     if ts:
-                        self._shown_in_log.add(
-                            (protocol, contact.cache_key, ts, text)
-                        )
-                    widgets.extend(
-                        self._build_message_widgets(protocol, is_group, msg)
-                    )
+                        self._shown_in_log.add((protocol, contact.cache_key, ts, text))
+                    widgets.extend(self._build_message_widgets(protocol, is_group, msg))
                 except Exception as _e:
                     logger.debug("Failed to build a message widget", exc_info=True)
 
@@ -511,27 +510,34 @@ class ChatViewMixin:
 
         if msg_type == "image":
             from ui_components import ImageWidget
+
             display = attachment_info or text or "Image"
-            widgets.append(ImageWidget(
-                attachment_path=None,
-                attachment_id=attachment_id or "",
-                fallback_text=f"[🖼️ {display}]",
-            ))
+            widgets.append(
+                ImageWidget(
+                    attachment_path=None,
+                    attachment_id=attachment_id or "",
+                    fallback_text=f"[🖼️ {display}]",
+                )
+            )
         else:
             display_text = text
             if msg_type == "sticker":
-                display_text = f"🎨 {text}" if text and text != "Media" else "🎨 [Sticker]"
+                display_text = (
+                    f"🎨 {text}" if text and text != "Media" else "🎨 [Sticker]"
+                )
             elif msg_type == "attachment":
                 display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
-            widgets.append(self._make_message_widget(
-                text=display_text,
-                is_mine=is_mine,
-                timestamp=ts,
-                sender=sender,
-                status=status,
-                protocol=protocol,
-                is_group=is_group,
-            ))
+            widgets.append(
+                self._make_message_widget(
+                    text=display_text,
+                    is_mine=is_mine,
+                    timestamp=ts,
+                    sender=sender,
+                    status=status,
+                    protocol=protocol,
+                    is_group=is_group,
+                )
+            )
         return widgets
 
     def _add_load_more_widget(self, remaining: int):
@@ -570,7 +576,9 @@ class ChatViewMixin:
 
             if ts:
                 self._seen_timestamps.add((contact.protocol, contact.cache_key, ts))
-                self._seen_message_ids.add((contact.protocol, contact.cache_key, ts, text))
+                self._seen_message_ids.add(
+                    (contact.protocol, contact.cache_key, ts, text)
+                )
                 mid = msg.get("id")
                 if mid:
                     self._seen_message_ids.add(
@@ -615,9 +623,7 @@ class ChatViewMixin:
         cached = sorted(cached, key=lambda m: int(m.get("timestamp") or 0))
 
         # Only consider messages newer than the newest one already shown.
-        max_seen = max(
-            (t for (_p, _k, t) in self._seen_timestamps), default=0
-        )
+        max_seen = max((t for (_p, _k, t) in self._seen_timestamps), default=0)
         for msg in cached:
             ts = msg.get("timestamp", 0)
             text = msg.get("text", "")
@@ -636,10 +642,16 @@ class ChatViewMixin:
             # dall'echo, con ts/testo nuovi) non deve essere rimontato come nuovo.
             if is_new:
                 mid = msg.get("id")
-                if mid and (contact.protocol, contact.cache_key, mid) in self._seen_message_ids:
+                if (
+                    mid
+                    and (contact.protocol, contact.cache_key, mid)
+                    in self._seen_message_ids
+                ):
                     is_new = False
             if is_new:
-                self._seen_timestamps.add((contact.protocol, contact.cache_key, int(ts)))
+                self._seen_timestamps.add(
+                    (contact.protocol, contact.cache_key, int(ts))
+                )
                 self._seen_message_ids.add(identity)
                 if msg.get("id"):
                     self._seen_message_ids.add(
@@ -668,5 +680,3 @@ class ChatViewMixin:
         if new_count > 0:
             chat_log = self.chat_log
             chat_log.scroll_end(animate=False)
-
-

@@ -44,6 +44,7 @@ def contact_cache_key(protocol: str, contact_id: str) -> str:
 
 # ─── Data models ─────────────────────────────────────────────────────────────
 
+
 @dataclass
 class ChatContact:
     """A contact in a chat protocol.
@@ -150,4 +151,3 @@ class ChatEvent:
     protocol: str
     contact_id: str
     payload: dict[str, Any] = field(default_factory=dict)
-

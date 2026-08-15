@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 
-
 _NOT_CONFIGURED_MSG = (
     "Signal phone number not configured.\n"
     "Set the SIGNAL_USER_NUMBER environment variable or create a config.json file:\n"
@@ -66,8 +65,11 @@ DAEMON_HTTP_PORT = 8080
 DAEMON_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/rpc"
 SSE_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/events"
 # Directory where signal-cli stores downloaded attachments
-SIGNAL_CLI_ATTACHMENTS_DIR = Path.home() / ".local" / "share" / "signal-cli" / "attachments"
+SIGNAL_CLI_ATTACHMENTS_DIR = (
+    Path.home() / ".local" / "share" / "signal-cli" / "attachments"
+)
 # ─── Signal CLI ──────────────────────────────────────────────────────────────
+
 
 def _find_signal_cli() -> Path | None:
     """Find the signal-cli executable in ./bin/, or ``None`` if absent.
@@ -77,7 +79,7 @@ def _find_signal_cli() -> Path | None:
     at the point of use to get the canonical FileNotFoundError.
     """
     bin_dir = PROJECT_DIR / "bin"
-    if not bin_dir.is_dir():          # evita il FileNotFoundError grezzo di iterdir()
+    if not bin_dir.is_dir():  # evita il FileNotFoundError grezzo di iterdir()
         return None
     for d in bin_dir.iterdir():
         if d.is_dir() and d.name.startswith("signal-cli-"):
@@ -117,8 +119,8 @@ def _run_subprocess(args: list[str]) -> str:
     Risolve binario e numero utente al momento dell'uso (non all'import):
     FileNotFoundError / RuntimeError canonici se non configurati.
     """
-    num = _require_user_number()   # prima il numero (stesso ordine dell'import attuale)
-    cli = find_signal_cli()        # poi il binario
+    num = _require_user_number()  # prima il numero (stesso ordine dell'import attuale)
+    cli = find_signal_cli()  # poi il binario
     result = subprocess.run(  # noqa: PLW1510 — return code checked explicitly below
         [str(cli), "-u", num] + args,
         capture_output=True,
@@ -152,6 +154,7 @@ def _send_subprocess(
 
 # ─── Attachment helpers ─────────────────────────────────────────────────────
 
+
 def get_attachment_path(attachment_id: str) -> Path | None:
     """Resolve a signal-cli attachment ID to a local file path.
 
@@ -164,6 +167,8 @@ def get_attachment_path(attachment_id: str) -> Path | None:
     if att_path.exists() and att_path.is_file():
         return att_path
     return None
+
+
 def _process_typing(envelope: dict) -> tuple[str, str] | None:
     """Extract typing-indicator data from an envelope.
 
@@ -209,7 +214,6 @@ def _process_typing(envelope: dict) -> tuple[str, str] | None:
 
 
 def _process_receipt(envelope: dict, cache: dict) -> list[dict]:
-
     """Process a receiptMessage envelope and update message statuses in cache.
 
     Receipt messages contain delivery and read receipts for messages we sent.
@@ -266,16 +270,22 @@ def _process_receipt(envelope: dict, cache: dict) -> list[dict]:
     if source in cache:
         for msg in cache[source]:
             ts = msg.get("timestamp", 0)
-            if msg.get("is_mine", False) and any(abs(ts - t) <= TOLERANCE_MS for t in timestamps):
+            if msg.get("is_mine", False) and any(
+                abs(ts - t) <= TOLERANCE_MS for t in timestamps
+            ):
                 old_status = msg.get("status", "sent")
                 # Only upgrade status: sent → delivered → read
-                if (old_status == "sent" and new_status in ("delivered", "read")) or \
-                   (old_status == "delivered" and new_status == "read"):
+                if (old_status == "sent" and new_status in ("delivered", "read")) or (
+                    old_status == "delivered" and new_status == "read"
+                ):
                     msg["status"] = new_status
                     updated_messages.append(msg)
 
     return updated_messages
+
+
 # ─── JSON-RPC Client via HTTP ────────────────────────────────────────────────
+
 
 class SignalRPCClient:
     """JSON-RPC client for communicating with signal-cli daemon over HTTP."""
@@ -422,6 +432,7 @@ class SignalRPCClient:
 
 
 # ─── Data model ──────────────────────────────────────────────────────────────
+
 
 class Contact:
     """Represents a Signal contact."""

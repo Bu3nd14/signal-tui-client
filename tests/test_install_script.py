@@ -27,6 +27,7 @@ REAL_PYTHON = sys.executable
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _make_executable(path: Path) -> None:
     """Make a file executable."""
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
@@ -83,7 +84,7 @@ def _extract_function(script: Path, func_name: str) -> str:
     # Find the closing brace at column 0
     for i in range(start, len(lines)):
         if lines[i].strip() == "}":
-            return "\n".join(lines[start:i + 1])
+            return "\n".join(lines[start : i + 1])
     raise ValueError(f"Function {func_name} not closed")
 
 
@@ -228,6 +229,7 @@ def _run_install(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
 
+
 class TestInstallScriptHelp:
     """📖 Help e parsing argomenti."""
 
@@ -259,9 +261,7 @@ class TestInstalledVersionDetection:
         func = _extract_function(INSTALL_SCRIPT, "get_installed_version")
         script = tmp_path / "detect.sh"
         script.write_text(
-            f"{func}\n"
-            f"BIN_DIR='{fake_bin}'\n"
-            "echo \"$(get_installed_version)\"\n",
+            f"{func}\nBIN_DIR='{fake_bin}'\necho \"$(get_installed_version)\"\n",
             encoding="utf-8",
         )
         result = subprocess.run(  # noqa: PLW1510 — return code asserted below
@@ -277,9 +277,7 @@ class TestInstalledVersionDetection:
         func = _extract_function(INSTALL_SCRIPT, "get_installed_version")
         script = tmp_path / "detect.sh"
         script.write_text(
-            f"{func}\n"
-            f"BIN_DIR='{empty_bin}'\n"
-            "echo \"[$(get_installed_version)]\"\n",
+            f"{func}\nBIN_DIR='{empty_bin}'\necho \"[$(get_installed_version)]\"\n",
             encoding="utf-8",
         )
         result = subprocess.run(  # noqa: PLW1510 — return code asserted below

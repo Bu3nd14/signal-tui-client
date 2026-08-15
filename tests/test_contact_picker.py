@@ -18,9 +18,15 @@ from models import PROTOCOL_SIGNAL, ChatContact
 def _make_contacts() -> list[ChatContact]:
     """Build a small sample contact list for tests."""
     return [
-        ChatContact(id="+391234567890", display_name="Alice Rossi", protocol=PROTOCOL_SIGNAL),
-        ChatContact(id="+391234567891", display_name="Bob Bianchi", protocol=PROTOCOL_SIGNAL),
-        ChatContact(id="+391234567892", display_name="Carla Verdi", protocol=PROTOCOL_SIGNAL),
+        ChatContact(
+            id="+391234567890", display_name="Alice Rossi", protocol=PROTOCOL_SIGNAL
+        ),
+        ChatContact(
+            id="+391234567891", display_name="Bob Bianchi", protocol=PROTOCOL_SIGNAL
+        ),
+        ChatContact(
+            id="+391234567892", display_name="Carla Verdi", protocol=PROTOCOL_SIGNAL
+        ),
         # display_name empty → search falls back to the id (number)
         ChatContact(id="+391234567893", display_name="", protocol=PROTOCOL_SIGNAL),
     ]
@@ -40,7 +46,6 @@ class TestSearchContacts:
         lower = search_contacts(_make_contacts(), "alice")
         upper = search_contacts(_make_contacts(), "ALICE")
         assert [c.id for c in lower] == [c.id for c in upper]
-
 
     def test_search_by_number(self):
         """Cerca parte del numero → deve trovare il contatto."""

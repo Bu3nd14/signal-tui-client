@@ -26,6 +26,7 @@ import sys
 def _ensure_venv() -> None:
     try:
         import qrcode  # noqa: F401
+
         return
     except ImportError:
         pass
@@ -56,7 +57,10 @@ def main() -> None:
     api_url = resolve_whatsapp_api_url()
     if not api_url:
         print("❌ WhatsApp API URL not configured.", file=sys.stderr)
-        print("   Set WHATSAPP_API_URL or add 'whatsapp_api_url' to config.json.", file=sys.stderr)
+        print(
+            "   Set WHATSAPP_API_URL or add 'whatsapp_api_url' to config.json.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     session_name = get_whatsapp_session_name()
@@ -77,15 +81,31 @@ def main() -> None:
     qr = client.get_fresh_pairing_qr(reset=True)
     if not qr:
         if client.last_status == 401:
-            print("❌ WhatsApp API ha rifiutato la richiesta (401 Unauthorized).", file=sys.stderr)
-            print("   La WAHA richiede una API key via header X-Api-Key.", file=sys.stderr)
-            print("   Controlla che il file .env contenga WAHA_API_KEY e che config.json", file=sys.stderr)
-            print("   o la variabile WHATSAPP_API_KEY siano allineati.", file=sys.stderr)
+            print(
+                "❌ WhatsApp API ha rifiutato la richiesta (401 Unauthorized).",
+                file=sys.stderr,
+            )
+            print(
+                "   La WAHA richiede una API key via header X-Api-Key.", file=sys.stderr
+            )
+            print(
+                "   Controlla che il file .env contenga WAHA_API_KEY e che config.json",
+                file=sys.stderr,
+            )
+            print(
+                "   o la variabile WHATSAPP_API_KEY siano allineati.", file=sys.stderr
+            )
         else:
             print("❌ Could not obtain a pairing QR from the API.", file=sys.stderr)
-            print("   Es: docker compose up -d  (o ./scripts/start_whatsapp.sh)", file=sys.stderr)
+            print(
+                "   Es: docker compose up -d  (o ./scripts/start_whatsapp.sh)",
+                file=sys.stderr,
+            )
             print("   poi conferma che l'API risponda:", file=sys.stderr)
-            print(f"       curl -H 'X-Api-Key: <chiave>' {api_url}/api/version", file=sys.stderr)
+            print(
+                f"       curl -H 'X-Api-Key: <chiave>' {api_url}/api/version",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
     _save_qr_png(qr, session_name)
@@ -155,7 +175,10 @@ def _save_qr_png(qr, session_name: str) -> str:
             return candidate
         except OSError:
             continue
-    print("❌ Impossibile salvare il QR PNG (nessuna cartella scrivibile).", file=sys.stderr)
+    print(
+        "❌ Impossibile salvare il QR PNG (nessuna cartella scrivibile).",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 

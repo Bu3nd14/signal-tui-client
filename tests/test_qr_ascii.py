@@ -54,14 +54,20 @@ def _matrix_to_grayscale_png(mat):
     raw = b"".join(rows)
 
     def chunk(tag, data):
-        return (struct.pack(">I", len(data)) + tag + data
-                + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff))
+        return (
+            struct.pack(">I", len(data))
+            + tag
+            + data
+            + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+        )
 
     ihdr = struct.pack(">IIBBBBB", size, size, 8, 0, 0, 0, 0)  # gray, 8-bit
-    return (b"\x89PNG\r\n\x1a\n"
-            + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", zlib.compress(raw, 9))
-            + chunk(b"IEND", b""))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(raw, 9))
+        + chunk(b"IEND", b"")
+    )
 
 
 def _ascii_to_module_grid(out):
@@ -70,10 +76,10 @@ def _ascii_to_module_grid(out):
     chiari sono blocchi pieni (█); i moduli scuri sono ▀ (sopra), ▄ (sotto) o ' '.
     """
     glyph_map = {
-        "\u2588": (False, False),   # full block -> top chiaro, bottom chiaro
-        "\u2584": (True, False),    # low half   -> top scuro, bottom chiaro
-        "\u2580": (False, True),    # up half    -> top chiaro, bottom scuro
-        " ": (True, True),          # spazio      -> entrambi scuri
+        "\u2588": (False, False),  # full block -> top chiaro, bottom chiaro
+        "\u2584": (True, False),  # low half   -> top scuro, bottom chiaro
+        "\u2580": (False, True),  # up half    -> top chiaro, bottom scuro
+        " ": (True, True),  # spazio      -> entrambi scuri
     }
     grid = []
     for line in out.split("\n"):
@@ -104,8 +110,8 @@ def test_qr_png_to_ascii_has_no_ansi_and_right_shape():
     out = qr_png_to_ascii(png)
     n = len(mat)
     lines = out.split("\n")
-    assert "\x1b[" not in out              # nessun colore ANSI
-    assert len(lines) <= (n // 2) + 3       # ~metà righe modulo + bordi
+    assert "\x1b[" not in out  # nessun colore ANSI
+    assert len(lines) <= (n // 2) + 3  # ~metà righe modulo + bordi
     assert max(len(l) for l in lines) >= n  # almeno 1 colonna per modulo
     assert max(len(l) for l in lines) <= n + 4
 
@@ -117,8 +123,8 @@ def test_qr_png_to_ascii_preserves_finder_geometry():
     out = qr_png_to_ascii(png)
     grid = _ascii_to_module_grid(out)
     # grid = modulo (m, m) -> riga/colonna m+border (m+2). Il finder è in (1,1).
-    assert grid[2][2] is True        # angolo del bordo finder (module 0,0) scuro
-    assert grid[5][5] is True        # centro finder (module 3,3) scuro
+    assert grid[2][2] is True  # angolo del bordo finder (module 0,0) scuro
+    assert grid[5][5] is True  # centro finder (module 3,3) scuro
 
 
 def test_qr_png_to_ascii_fidelity_roundtrip():
@@ -131,6 +137,6 @@ def test_qr_png_to_ascii_fidelity_roundtrip():
     first = next((i for i, r in enumerate(grid) if any(r)), 0)
     cols = [i for i, v in enumerate(grid[first]) if v]
     c0 = min(cols) if cols else 0
-    core = [grid[i][c0:c0 + n] for i in range(first, first + n)]
+    core = [grid[i][c0 : c0 + n] for i in range(first, first + n)]
     mismatches = sum(1 for r in range(n) for c in range(n) if core[r][c] != mat[r][c])
     assert mismatches == 0

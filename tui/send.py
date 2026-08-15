@@ -30,7 +30,6 @@ def _resolve_emoji_replacer():
 
 
 class SendMixin:
-
     def on_input_submitted(self, event: Input.Submitted):
         """Send a message when the user presses Enter.
         Also converts any :emoji: aliases in the message.
@@ -89,19 +88,20 @@ class SendMixin:
         # Update in-memory cache for UI
         if cache_key not in self._cache:
             self._cache[cache_key] = []
-        self._cache[cache_key].append({
-            "text": message,
-            "is_mine": True,
-            "sender": "You",
-            "timestamp": ts,
-            "quote_text": quote_text,
-            "msg_type": "text",
-            "attachment_info": None,
-            "attachment_id": None,
-            "read": True,
-            "status": "sent",
-        })
-
+        self._cache[cache_key].append(
+            {
+                "text": message,
+                "is_mine": True,
+                "sender": "You",
+                "timestamp": ts,
+                "quote_text": quote_text,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+                "read": True,
+                "status": "sent",
+            }
+        )
 
         # Show the message in the UI immediately (with quote if replying)
 
@@ -122,12 +122,16 @@ class SendMixin:
         self._cancel_reply()
 
         self.run_worker(
-            lambda msg=message, ts=ts, rdata=reply_data: self._send_message_worker(msg, ts, rdata),
+            lambda msg=message, ts=ts, rdata=reply_data: self._send_message_worker(
+                msg, ts, rdata
+            ),
             exclusive=False,
             thread=True,
         )
 
-    def _send_message_worker(self, message: str, timestamp: int, reply_data: dict | None = None):
+    def _send_message_worker(
+        self, message: str, timestamp: int, reply_data: dict | None = None
+    ):
         """Send a message via the active backend's send path.
 
         Parameters
@@ -159,8 +163,7 @@ class SendMixin:
         backend = self.manager.get(contact.protocol)
         if backend is None:
             self.call_from_thread(
-                self._status,
-                f"❌ No backend for protocol: {contact.protocol}", 0
+                self._status, f"❌ No backend for protocol: {contact.protocol}", 0
             )
             return
 
@@ -178,13 +181,14 @@ class SendMixin:
                 if ingest_backend is not None:
                     ingest_backend.ingest_message(
                         contact.id,
-                        {"id": result, "text": message, "is_mine": True,
-                         "sender": "You", "timestamp": int(time.time() * 1000)},
+                        {
+                            "id": result,
+                            "text": message,
+                            "is_mine": True,
+                            "sender": "You",
+                            "timestamp": int(time.time() * 1000),
+                        },
                         int(time.time() * 1000),
                     )
         except Exception as e:  # noqa: BLE001
-            self.call_from_thread(
-                self._status,
-                f"❌ Send error: {e}", 0
-            )
-
+            self.call_from_thread(self._status, f"❌ Send error: {e}", 0)
