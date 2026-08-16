@@ -637,12 +637,36 @@ class TelegramBackend(ChatBackend):
             logger.exception("Telegram: failed to load protocol cache")
             return {}
 
-    def ingest_message(self, contact_id: str, data: dict, ts: int) -> bool:
+    def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
+        """Persist a message to the SQLite cache (Telegram protocol)."""
+        from backend import _add_message_to_cache
+
+        _add_message_to_cache(
+            contact_id,
+            data.get("text", ""),
+            data.get("is_mine", False),
+            data.get("sender", ""),
+            ts,
+            quote_text=data.get("quote_text"),
+            msg_type=data.get("msg_type", "text"),
+            attachment_info=data.get("attachment_info"),
+            attachment_id=data.get("attachment_id"),
+            protocol=PROTOCOL_TELEGRAM,
+            msg_id=data.get("id"),
+        )
+
+    def ingest_message(
+        self, contact_id: str, data: dict, ts: int, persist: bool = True
+    ) -> bool:
         """Add a message to the in-memory cache AND SQLite with dedup.
+
+        When ``persist=False`` the in-memory cache is still seeded (dedup
+        keeps working on the UI thread) but the SQLite write is skipped;
+        the caller is responsible for calling ``_persist_message`` later.
 
         Returns True if the message was newly added, False if duplicate.
         """
-        from backend import _add_message_to_cache, _update_message_id
+        from backend import _update_message_id
 
         mid = data.get("id")
         if mid and mid in self._seen_msg_ids:
@@ -679,22 +703,11 @@ class TelegramBackend(ChatBackend):
                 return False
 
         # Persist to SQLite (same pattern as Signal/WhatsApp backends)
-        try:
-            _add_message_to_cache(
-                contact_id,
-                text,
-                data.get("is_mine", False),
-                data.get("sender", ""),
-                ts,
-                quote_text=data.get("quote_text"),
-                msg_type=data.get("msg_type", "text"),
-                attachment_info=data.get("attachment_info"),
-                attachment_id=data.get("attachment_id"),
-                protocol=PROTOCOL_TELEGRAM,
-                msg_id=mid,
-            )
-        except Exception:
-            logger.exception("Telegram: _add_message_to_cache failed")
+        if persist:
+            try:
+                self._persist_message(contact_id, data, ts)
+            except Exception:
+                logger.exception("Telegram: _add_message_to_cache failed")
 
         if contact_id not in self.cache:
             self.cache[contact_id] = []

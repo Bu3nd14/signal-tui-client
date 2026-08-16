@@ -650,12 +650,36 @@ class SignalBackend(ChatBackend):
                 return True
         return False
 
-    def ingest_message(self, contact_id: str, data: dict, ts: int) -> bool:
+    def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
+        """Persist a message to the SQLite cache (Signal protocol).
+
+        Mirrors the arguments previously passed inline by ``ingest_message``
+        (default ``protocol='signal'`` and ``msg_id=None``).
+        """
+        _add_message_to_cache(
+            contact_id,
+            data["text"],
+            data["is_mine"],
+            data["sender"],
+            ts,
+            quote_text=data["quote_text"],
+            msg_type=data["msg_type"],
+            attachment_info=data["attachment_info"],
+            attachment_id=data.get("attachment_id"),
+        )
+
+    def ingest_message(
+        self, contact_id: str, data: dict, ts: int, persist: bool = True
+    ) -> bool:
         """Save an incoming/outgoing message to cache and DB.
 
         Idempotent per message identity: if the same message was already
         ingested (e.g. optimistically on send and later as a sync sent-envelope),
         it is *not* added a second time — preventing duplicates on reload.
+
+        When ``persist=False`` the in-memory cache is still seeded (dedup
+        keeps working on the UI thread) but the SQLite write is skipped;
+        the caller is responsible for calling ``_persist_message`` later.
 
         Returns ``True`` if the message was newly added, ``False`` if it was a
         duplicate (already present).
@@ -666,17 +690,8 @@ class SignalBackend(ChatBackend):
         if self._message_already_cached(contact_id, ts, is_mine, text):
             return False
 
-        _add_message_to_cache(
-            contact_id,
-            text,
-            is_mine,
-            data["sender"],
-            ts,
-            quote_text=data["quote_text"],
-            msg_type=data["msg_type"],
-            attachment_info=data["attachment_info"],
-            attachment_id=data.get("attachment_id"),
-        )
+        if persist:
+            self._persist_message(contact_id, data, ts)
         self._add_cached_message(
             contact_id,
             {
