@@ -32,7 +32,7 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 52
+fail_under = 68
 show_missing = true
 
 [tool.ruff]

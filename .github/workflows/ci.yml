@@ -3,7 +3,7 @@
 #
 # Trigger : push su `master` + `pull_request` (le feature branch NON triggerano).
 # Matrice : Python 3.12 + 3.13 — runner ubuntu-latest.
-#   · 3.12 (coverage) → `make coverage` (gate fail_under=52) + upload Codecov (OIDC)
+#   · 3.12 (coverage) → `make coverage` (gate fail_under=68) + upload Codecov (OIDC)
 #   · 3.13 (test)     → `make test` (verifica cross-versione, senza overhead coverage)
 #
 # Fonte di verità: `pyproject.toml` (flag pytest/coverage/ruff) e `Makefile`
@@ -95,9 +95,9 @@ jobs:
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
       # Gamba coverage (3.12): `make coverage` = pytest --cov --cov-report=term-missing
-      # --cov-report=xml. Applica il gate `fail_under = 52` (pyproject.toml) e genera
+      # --cov-report=xml. Applica il gate `fail_under = 68` (pyproject.toml) e genera
       # coverage.xml. Fallisce il job se la coverage scende sotto la baseline.
-      - name: Test con coverage e gate (soglia 52%)
+      - name: Test con coverage e gate (soglia 68%)
         if: matrix.coverage
         run: make coverage
 
