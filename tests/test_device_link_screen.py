@@ -12,8 +12,14 @@ Covers:
 from __future__ import annotations
 
 import sys
+from asyncio import run
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+
+import pytest
+from textual.containers import Vertical
+from textual.widgets import Input, ListView
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -209,3 +215,230 @@ class TestDeviceLinkReconnectWiring:
         callback = app.push_screen.call_args[0][1]
         callback(None)
         app._reconnect_touched_backends.assert_called_once_with({"telegram"})
+
+
+class TestDeviceLinkScreenFlows:
+    @pytest.mark.integration
+    async def test_mount_populates_picker_and_phase_visibility(self, app_for_test):
+        screen = DeviceLinkPickerScreen(has_whatsapp=True, has_telegram=True)
+        async with app_for_test.run_test() as pilot:
+            await app_for_test.push_screen(screen)
+            await pilot.pause()
+            picker = screen.query_one("#link-picker-container", Vertical)
+            phone = screen.query_one("#link-phone-container", Vertical)
+            qr = screen.query_one("#link-qr-container", Vertical)
+            protocols = screen.query_one("#link-protocol-list", ListView)
+            assert picker.display is True
+            assert phone.display is False
+            assert qr.display is False
+            assert len(protocols.children) == 3
+            screen._show_phase("phone")
+            assert phone.display is True
+            assert picker.display is False
+
+    @pytest.mark.integration
+    async def test_phone_transition_and_handlers(self, app_for_test):
+        screen = DeviceLinkPickerScreen(signal_number="", force_phone_input=True)
+        async with app_for_test.run_test() as pilot:
+            await app_for_test.push_screen(screen)
+            await pilot.pause()
+            screen._selected_protocol = "signal"
+            screen._transition_to_phone()
+            assert screen._phase == "phone"
+            phone = screen.query_one("#link-phone-input", Input)
+            device = screen.query_one("#link-device-input", Input)
+            phone.value = "+39123"
+            device.value = "Test device"
+            screen._transition_to_qr = MagicMock()
+            screen._on_phone_confirm()
+            screen._transition_to_qr.assert_called_once_with("+39123")
+            screen._on_go_back()
+            assert screen._phase == "picker"
+
+    def test_select_protocol_and_event_handlers(self):
+        screen = DeviceLinkPickerScreen(
+            signal_number="", has_whatsapp=True, has_telegram=True
+        )
+        screen._transition_to_phone = MagicMock()
+        screen._transition_to_qr = MagicMock()
+        screen._select_protocol(1)
+        screen._transition_to_qr.assert_called_once_with(phone="")
+        screen._selected_protocol = "signal"
+        screen._phase = "picker"
+        list_view = MagicMock(index=0)
+        screen.query_one = MagicMock(return_value=list_view)
+        screen._select_protocol = MagicMock()
+        screen.on_list_view_selected(MagicMock())
+        screen._select_protocol.assert_called_once_with(0)
+        screen._on_phone_confirm = MagicMock()
+        screen._on_go_back = MagicMock()
+        screen.dismiss = MagicMock()
+        for button_id in ("link-phone-start", "link-phone-back", "link-qr-cancel"):
+            screen.on_button_pressed(MagicMock(button=MagicMock(id=button_id)))
+        screen._on_phone_confirm.assert_called_once()
+        screen._on_go_back.assert_called_once()
+        screen.dismiss.assert_called_once_with(None)
+
+    def test_async_qr_dispatch_and_completion_checks(self):
+        screen = DeviceLinkPickerScreen()
+        screen._get_signal_link_url = AsyncMock(return_value="signal-url")
+        screen._selected_protocol = "signal"
+        assert run(screen._get_qr_data_async("")) == "signal-url"
+        screen._get_whatsapp_qr = AsyncMock(return_value="ascii")
+        screen._selected_protocol = "whatsapp"
+        assert run(screen._get_qr_data_async("")) == "ASCII:ascii"
+        screen._get_telegram_qr_link = AsyncMock(return_value="telegram-url")
+        screen._selected_protocol = "telegram"
+        assert run(screen._get_qr_data_async("")) == "telegram-url"
+
+        screen._linking_proc = MagicMock(poll=MagicMock(return_value=None))
+        assert run(screen._check_signal_done()) is False
+        screen._linking_proc.poll.return_value = 0
+        assert run(screen._check_signal_done()) is True
+
+    def test_fetch_qr_and_telegram_2fa(self):
+        screen = DeviceLinkPickerScreen()
+        code = MagicMock()
+        status = MagicMock()
+        screen.query_one = MagicMock(side_effect=[code, status])
+        screen.run_worker = MagicMock(side_effect=lambda coro, **kwargs: coro.close())
+        screen._get_qr_data_async = AsyncMock(return_value="ASCII:QR")
+        run(screen._fetch_real_qr(""))
+        code.update.assert_called_once_with("QR")
+
+        tb = MagicMock()
+        screen.query_one = MagicMock(return_value=MagicMock(value="secret"))
+        with patch.object(
+            DeviceLinkPickerScreen,
+            "app",
+            new_callable=PropertyMock,
+            return_value=SimpleNamespace(telegram_backend=tb),
+        ):
+            screen._on_2fa_submit()
+        assert screen.run_worker.call_count == 2
+
+    def test_whatsapp_and_telegram_qr_helpers(self):
+        screen = DeviceLinkPickerScreen()
+        wa = SimpleNamespace(_rest=MagicMock())
+        wa._rest.get_session_status.return_value = {"status": "working"}
+        with patch.object(
+            DeviceLinkPickerScreen,
+            "app",
+            new_callable=PropertyMock,
+            return_value=SimpleNamespace(whatsapp_backend=wa),
+        ):
+            assert run(screen._get_whatsapp_qr()).startswith("INFO:")
+
+        tb = MagicMock()
+        tb.get_pairing_qr.return_value = "tg-url"
+        with patch.object(
+            DeviceLinkPickerScreen,
+            "app",
+            new_callable=PropertyMock,
+            return_value=SimpleNamespace(telegram_backend=tb),
+        ):
+            assert run(screen._get_telegram_qr_link()) == "tg-url"
+
+    def test_qr_populator_polling_and_fetch_paths(self):
+        screen = DeviceLinkPickerScreen()
+        screen._selected_protocol = "signal"
+        container = MagicMock()
+        code, status = MagicMock(), MagicMock()
+        screen.query_one = MagicMock(side_effect=[container, code, status])
+        with patch("device_link_screen.Center", return_value=MagicMock()):
+            screen._populate_qr_phase("QR", "+391")
+        assert container.mount.call_count >= 5
+
+        screen._phase = "qr"
+        screen._check_signal_done = AsyncMock(return_value=True)
+        screen.query_one = MagicMock(side_effect=[status, code])
+        screen.dismiss = MagicMock()
+        with patch("asyncio.sleep", AsyncMock()):
+            run(screen._poll_completion(""))
+        screen.dismiss.assert_called_once_with(None)
+
+        screen.query_one = MagicMock(side_effect=[code, status])
+        screen.run_worker = MagicMock(side_effect=lambda coro, **kwargs: coro.close())
+        screen._get_qr_data_async = AsyncMock(return_value="signal-url")
+        with patch("device_link_screen.qr_to_ascii", return_value="ASCII"):
+            run(screen._fetch_real_qr(""))
+        code.update.assert_called_with("ASCII")
+
+        screen.query_one = MagicMock(side_effect=[code, status])
+        screen._get_qr_data_async = AsyncMock(side_effect=RuntimeError("bad qr"))
+        run(screen._fetch_real_qr(""))
+        assert "❌ bad qr" in code.update.call_args.args[0]
+
+    def test_whatsapp_refresh_telegram_state_and_qr_variants(self):
+        screen = DeviceLinkPickerScreen()
+        status, code = MagicMock(), MagicMock()
+        screen._qr_start_time = 0
+        wa = SimpleNamespace(_rest=MagicMock())
+        wa._rest.get_session_status.return_value = {"status": "scan_qr"}
+        screen._get_whatsapp_qr_fresh = AsyncMock(return_value="INFO:fresh")
+        with (
+            patch.object(
+                DeviceLinkPickerScreen,
+                "app",
+                new_callable=PropertyMock,
+                return_value=SimpleNamespace(whatsapp_backend=wa),
+            ),
+            patch("device_link_screen.time.time", return_value=100),
+        ):
+            screen.query_one = MagicMock(return_value=code)
+            assert run(screen._check_whatsapp_done()) is False
+        code.update.assert_called_once()
+
+        tb = MagicMock(_connected=False, _needs_2fa=True)
+        container = MagicMock()
+        screen._qr_start_time = 100
+        with (
+            patch.object(
+                DeviceLinkPickerScreen,
+                "app",
+                new_callable=PropertyMock,
+                return_value=SimpleNamespace(telegram_backend=tb),
+            ),
+            patch("device_link_screen.time.time", return_value=100),
+        ):
+            screen.query_one = MagicMock(side_effect=[status, container])
+            assert run(screen._check_telegram_done()) is False
+        status.update.assert_called_once()
+
+        wa._rest.get_session_status.return_value = {"status": "pending"}
+        wa._rest.get_pairing_qr.return_value = "current-qr"
+        with patch.object(
+            DeviceLinkPickerScreen,
+            "app",
+            new_callable=PropertyMock,
+            return_value=SimpleNamespace(whatsapp_backend=wa),
+        ):
+            assert run(screen._get_whatsapp_qr()) == "current-qr"
+        wa._rest.get_session_status.return_value = {"status": "failed"}
+        wa._rest.get_fresh_pairing_qr.return_value = "fresh-qr"
+        with patch.object(
+            DeviceLinkPickerScreen,
+            "app",
+            new_callable=PropertyMock,
+            return_value=SimpleNamespace(whatsapp_backend=wa),
+        ):
+            assert run(screen._get_whatsapp_qr()) == "fresh-qr"
+
+    def test_complete_2fa_and_dismiss_cleanup(self):
+        screen = DeviceLinkPickerScreen()
+        tb = MagicMock()
+        tb.complete_2fa.return_value = False
+        status, inp = MagicMock(), MagicMock()
+        screen.query_one = MagicMock(side_effect=[status, inp])
+        with patch("asyncio.sleep", AsyncMock()):
+            run(screen._complete_2fa_worker(tb, "wrong"))
+        inp.focus.assert_called_once()
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 123
+        screen._linking_proc = proc
+        with patch("textual.screen.Screen.dismiss") as dismiss:
+            screen.dismiss(None)
+        proc.terminate.assert_called_once()
+        dismiss.assert_called_once()
