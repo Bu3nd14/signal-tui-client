@@ -5,6 +5,7 @@ All tests use in-memory / tmp_path to avoid touching real files or daemons.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -147,3 +148,76 @@ def sample_contacts_subprocess_output() -> str:
         "Number:+391234567890 Name:Mario ACI:uuid-123\n"
         "Number:+391111111111 Name:Luigi Verdi ACI:uuid-456 Profile name:Luigi\n"
     )
+
+
+@contextmanager
+def _make_test_app():
+    """Build a ``SignalTUI`` with mocked, I/O-free backends and neutralized workers.
+
+    Kept as a shared context manager so both ``app_for_test`` and
+    ``app_for_test_with_mocks`` reuse the same setup.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from textual.containers import Vertical
+
+    from models import PROTOCOL_SIGNAL, ChatContact
+    from tui.app import SignalTUI
+
+    def _noop_on_mount(self: SignalTUI) -> None:
+        """Mount the UI without starting poll/connect workers, then render contacts."""
+        self._chat_log = self.query_one("#chat-log", Vertical)
+        self._render_contact_list(list(self.contacts))
+
+    # Patch the symbols where they are IMPORTED/USED (``tui.app``), not where
+    # they are defined (``backends`` / ``signal_tui`` shim).
+    with (
+        patch("tui.app.BackendManager"),
+        patch("tui.app.SignalBackend"),
+        patch("tui.app.whatsapp_enabled", return_value=False),
+        patch("tui.app.telegram_enabled", return_value=False),
+        patch.object(SignalTUI, "on_mount", _noop_on_mount),
+    ):
+        app = SignalTUI()
+        # Route manager.get(protocol) to the mocked Signal backend so selection
+        # and send paths resolve to the same mock (easy to assert on).
+        app.signal_backend.protocol = PROTOCOL_SIGNAL
+        app.manager.get.return_value = app.signal_backend
+        # Neutralize background workers (load-messages / send) to keep tests
+        # deterministic and thread-free.
+        app.run_worker = MagicMock()
+        app.contacts = [
+            ChatContact(
+                id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+            ),
+            ChatContact(
+                id="+391111111111", display_name="Luigi", protocol=PROTOCOL_SIGNAL
+            ),
+            ChatContact(
+                id="+392222222222", display_name="Giulia", protocol=PROTOCOL_SIGNAL
+            ),
+        ]
+        yield app
+
+
+@pytest.fixture
+def app_for_test():
+    """Create a ``SignalTUI`` instance ready for ``App.run_test()`` headless.
+
+    No real I/O happens: the backends are mocked, WhatsApp/Telegram are
+    disabled, the ``on_mount`` workers (poll loop + per-protocol connections)
+    are neutralized, background workers are no-ops, and a small set of fake
+    contacts is injected and rendered.
+    """
+    with _make_test_app() as app:
+        yield app
+
+
+@pytest.fixture
+def app_for_test_with_mocks():
+    """Like ``app_for_test`` but also yields the mocked Signal backend.
+
+    Useful for tests that must assert on backend calls (e.g. message send).
+    """
+    with _make_test_app() as app:
+        yield app, app.signal_backend

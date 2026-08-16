@@ -1,12 +1,11 @@
 # Dipendenze di sviluppo / CI — Signal TUI Client
 # Installare con:  pip install -r requirements-dev.txt
-#
-# pytest-asyncio è RIMANDATO alla Fase 6 (test TUI async, vedi PLAN_TUI_TESTING.md):
-# nessun test usa @pytest.mark.asyncio oggi, quindi aggiungerlo ora introdurrebbe
-# una dipendenza inutilizzata senza benefici (e non va impostato `asyncio_mode`).
 
 # --- Test runner ---
 pytest>=9.1,<10
+# Necessario per i test TUI asincroni basati su App.run_test() (headless).
+# Vedi PLAN_TUI_TESTING.md: `asyncio_mode = "auto"` in pyproject.toml.
+pytest-asyncio>=0.25
 
 # --- Coverage (plugin pytest + libreria) ---
 pytest-cov>=7.1,<8

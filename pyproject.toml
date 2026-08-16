@@ -10,6 +10,8 @@
 testpaths = ["tests", "Telegram"]
 pythonpath = ["."]
 addopts = "-ra --tb=short --strict-markers"
+asyncio_mode = "auto"
+markers = ["integration: test che lancia la TUI (lento, headless)"]
 
 [tool.coverage.run]
 source = ["."]
