@@ -299,3 +299,58 @@ class TestSendPersistOffthread:
         assert kwargs["quote_timestamp"] == 1234
         assert kwargs["quote_author"] == contact.id
         assert kwargs["quote_message"] == "domanda"
+
+    # ── T2h: worker submission target is immutable ───────────────────────
+
+    def test_worker_uses_original_contact_after_same_protocol_switch(self, tmp_db):
+        """Changing Signal chat before execution must not redirect the send."""
+        app = _signal_app()
+        original = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        other = ChatContact(
+            id="+399876543210", display_name="Luigi", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = original
+        _prepare_send(app)
+        app._reply_to = {"text": "domanda", "timestamp": 1234}
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        _send_text(app, "risposta")
+        app.selected_contact = other
+        _run_workers(app)
+
+        args = app.signal_backend.send_message_sync.call_args
+        assert args.args[:2] == (original.id, "risposta")
+        assert args.kwargs["quote_author"] == original.id
+
+    def test_worker_uses_original_protocol_after_protocol_switch(self, tmp_db):
+        """Changing protocol before execution must not redirect the send."""
+        app = _signal_app()
+        whatsapp = WhatsAppBackend()
+        whatsapp.send_message_sync = MagicMock(return_value="wa-ts")
+        app.manager.register(whatsapp)
+        signal_contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        whatsapp_contact = ChatContact(
+            id="16660245291231@lid",
+            display_name="Pix",
+            protocol=PROTOCOL_WHATSAPP,
+        )
+        app.selected_contact = signal_contact
+        _prepare_send(app)
+        app.signal_backend.send_message_sync = MagicMock(return_value="signal-ts")
+
+        _send_text(app, "ciao")
+        app.selected_contact = whatsapp_contact
+        _run_workers(app)
+
+        app.signal_backend.send_message_sync.assert_called_once_with(
+            signal_contact.id,
+            "ciao",
+            quote_timestamp=None,
+            quote_author=None,
+            quote_message=None,
+        )
+        whatsapp.send_message_sync.assert_not_called()

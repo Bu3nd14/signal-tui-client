@@ -1,27 +1,12 @@
 # Bug Report — Signal TUI Client
 
-> **Stato:** Revisionato il 16/08/2026 — verifica conclusiva manuale del codice.
+> **Stato:** Revisionato il 17/08/2026 — verifica conclusiva manuale del codice.
 > **Ordinamento:** Per impatto sull'utente finale (dal più grave al meno grave).
 > **Nota:** I bug #2, #14, #15 (pattern `_save_cache/_prune_cache/_load_cache` su JSON) sono stati **rimossi** — il passaggio a SQLite li ha resi obsoleti.
 
 ---
 
 ## 🔴 Critici (impatto diretto sull'esperienza utente)
-
-### #22 — Il worker di invio rilegge `selected_contact` e può inviare alla chat sbagliata (`tui/send.py`, righe 126-128, 162-178)
-
-Il worker viene avviato dopo l'invio ottimistico, ma ricava nuovamente il contatto da
-`self.selected_contact`. Se l'utente cambia chat prima dell'esecuzione, il testo
-composto per A viene inviato al destinatario B.
-
-**Scenario:** inviare un messaggio e selezionare immediatamente un'altra conversazione.
-
-**Impatto:** Invio di contenuto potenzialmente riservato al destinatario errato.
-
-**Fix suggerito:** passare al worker una snapshot immutabile del contatto/backend
-selezionato al momento del submit e usarla per invio, quote e persistenza.
-
----
 
 ### #21 — `_mount_window` omette `attachment_path` obbligatorio → TypeError silenzioso (`signal_tui.py`, riga 1540) ✅ RISOLTO
 
@@ -275,3 +260,9 @@ strutturare il loop senza dipendere dall'ultimo elemento iterato.
 | #2 | `_process_envelope` salva/ricarica cache ridondantemente | Funzione non esiste più — envelope parsing in `backends/signal.py` usa SQLite |
 | #14 | `on_list_view_selected` salva/ricarica cache ridondantemente | Pattern `_save_cache`/`_load_cache` rimosso con SQLite |
 | #15 | `on_input_submitted` salva/ricarica cache ridondantemente | Pattern `_save_cache`/`_load_cache` rimosso con SQLite |
+
+## ✅ Bug risolti (storico)
+
+| # | Descrizione | Fix e verifica |
+|---|-------------|----------------|
+| #22 | Il worker di invio poteva rileggere `selected_contact` e inviare alla chat sbagliata | `protocol` e `contact_id` vengono catturati al submit e passati al worker; aggiunti test di regressione |

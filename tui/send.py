@@ -58,6 +58,7 @@ class SendMixin:
 
         contact = self.selected_contact
         contact_id = contact.id
+        protocol = contact.protocol
         cache_key = contact.cache_key
         ts = int(time.time() * 1000)
 
@@ -80,7 +81,7 @@ class SendMixin:
         # su signal_backend): per WhatsApp deve finire nel WhatsAppBackend.cache,
         # altrimenti il polling dei messaggi non lo riconosce e ri-accoderebbe
         # l'echo -> messaggio mostrato DOPPIO (che si sistemava solo rientrando).
-        ingest_backend = self.manager.get(contact.protocol)
+        ingest_backend = self.manager.get(protocol)
         if ingest_backend is None:
             ingest_backend = self.signal_backend
         added = ingest_backend.ingest_message(contact_id, data, ts, persist=False)
@@ -115,8 +116,8 @@ class SendMixin:
             sender="You",
             status="sent",
         )
-        self._seen_timestamps.add((contact.protocol, cache_key, ts))
-        self._seen_message_ids.add((contact.protocol, cache_key, int(ts), message))
+        self._seen_timestamps.add((protocol, cache_key, ts))
+        self._seen_message_ids.add((protocol, cache_key, int(ts), message))
 
         event.input.value = ""
 
@@ -124,8 +125,15 @@ class SendMixin:
         self._cancel_reply()
 
         self.run_worker(
-            lambda msg=message, ts=ts, rdata=reply_data, persist=((ingest_backend, contact_id, data, ts) if added else None): (
-                self._send_message_worker(msg, ts, rdata, persist=persist)
+            lambda msg=message, ts=ts, rdata=reply_data, persist=((ingest_backend, contact_id, data, ts) if added else None), protocol=protocol, contact_id=contact_id: (
+                self._send_message_worker(
+                    msg,
+                    ts,
+                    rdata,
+                    persist=persist,
+                    protocol=protocol,
+                    contact_id=contact_id,
+                )
             ),
             exclusive=False,
             thread=True,
@@ -137,6 +145,9 @@ class SendMixin:
         timestamp: int,
         reply_data: dict | None = None,
         persist: tuple | None = None,
+        *,
+        protocol: str,
+        contact_id: str,
     ):
         """Send a message via the active backend's send path.
 
@@ -154,48 +165,47 @@ class SendMixin:
             the optimistic row is persisted to SQLite here (worker thread),
             BEFORE the network send, so the echo always finds the row to
             upgrade via ``_update_message_id``.
+        protocol:
+            The protocol selected when the message was submitted.
+        contact_id:
+            The contact ID selected when the message was submitted.
         """
         if persist is not None:
-            backend, contact_id, data, ts = persist
-            backend._persist_message(contact_id, data, ts)
-
-        if not self.selected_contact:
-            return
-
-        contact = self.selected_contact
+            persist_backend, persist_contact_id, data, ts = persist
+            persist_backend._persist_message(persist_contact_id, data, ts)
 
         # Extract quote parameters from reply_data
         # quote_author MUST be a contact id, not a display name.
-        # We always use the selected contact's id because we are
-        # replying to the person we are chatting with.
+        # Use the contact selected at submission because we are replying to
+        # the person we were chatting with.
         quote_timestamp = reply_data.get("timestamp") if reply_data else None
-        quote_author = contact.id if reply_data else None
+        quote_author = contact_id if reply_data else None
         quote_message = reply_data.get("text") if reply_data else None
 
-        # Send synchronously through the selected contact's backend.  This is
+        # Send synchronously through the submission contact's backend. This is
         # a sync call running in a worker thread; it is NOT an async coroutine
         # that needs awaiting, which would otherwise be silently dropped.
-        backend = self.manager.get(contact.protocol)
+        backend = self.manager.get(protocol)
         if backend is None:
             self.call_from_thread(
-                self._status, f"❌ No backend for protocol: {contact.protocol}", 0
+                self._status, f"❌ No backend for protocol: {protocol}", 0
             )
             return
 
         try:
             result = backend.send_message_sync(
-                contact.id,
+                contact_id,
                 message,
                 quote_timestamp=quote_timestamp,
                 quote_author=quote_author,
                 quote_message=quote_message,
             )
             # For Telegram, ingest the real message id to upgrade the optimistic entry
-            if contact.protocol == PROTOCOL_TELEGRAM and result:
-                ingest_backend = self.manager.get(contact.protocol)
+            if protocol == PROTOCOL_TELEGRAM and result:
+                ingest_backend = self.manager.get(protocol)
                 if ingest_backend is not None:
                     ingest_backend.ingest_message(
-                        contact.id,
+                        contact_id,
                         {
                             "id": result,
                             "text": message,
