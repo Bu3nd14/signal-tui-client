@@ -103,6 +103,8 @@ class SendMixin:
             }
         )
 
+        self._promote_contact_after_send(contact, ts)
+
         # Show the message in the UI immediately (with quote if replying)
 
         self._add_message(

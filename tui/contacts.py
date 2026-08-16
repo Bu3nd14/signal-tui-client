@@ -52,6 +52,16 @@ class ContactListMixin:
         self._sort_contacts()
         self._render_contact_list(list(self.contacts))
 
+    def _promote_contact_after_send(self, contact: ChatContact, timestamp: int) -> None:
+        """Update and immediately render the sent contact's position in the list."""
+        if timestamp <= contact.last_message_ts:
+            return
+
+        contact.last_message_ts = timestamp
+        self._sort_contacts()
+        if self._is_mounted:
+            self._render_contact_list(list(self.contacts))
+
     def _sync_last_ts(self):
         """Recover ``last_message_ts`` for every contact from the local cache.
 
