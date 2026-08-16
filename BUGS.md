@@ -1,6 +1,6 @@
 # Bug Report — Signal TUI Client
 
-> **Stato:** Revisionato il 07/08/2026 — verificato con ruff v0.16.1 e analisi manuale del codice.
+> **Stato:** Revisionato il 16/08/2026 — verifica conclusiva manuale del codice.
 > **Ordinamento:** Per impatto sull'utente finale (dal più grave al meno grave).
 > **Nota:** I bug #2, #14, #15 (pattern `_save_cache/_prune_cache/_load_cache` su JSON) sono stati **rimossi** — il passaggio a SQLite li ha resi obsoleti.
 
@@ -8,22 +8,35 @@
 
 ## 🔴 Critici (impatto diretto sull'esperienza utente)
 
+### #22 — Il worker di invio rilegge `selected_contact` e può inviare alla chat sbagliata (`tui/send.py`, righe 126-128, 162-178)
+
+Il worker viene avviato dopo l'invio ottimistico, ma ricava nuovamente il contatto da
+`self.selected_contact`. Se l'utente cambia chat prima dell'esecuzione, il testo
+composto per A viene inviato al destinatario B.
+
+**Scenario:** inviare un messaggio e selezionare immediatamente un'altra conversazione.
+
+**Impatto:** Invio di contenuto potenzialmente riservato al destinatario errato.
+
+**Fix suggerito:** passare al worker una snapshot immutabile del contatto/backend
+selezionato al momento del submit e usarla per invio, quote e persistenza.
+
+---
+
 ### #21 — `_mount_window` omette `attachment_path` obbligatorio → TypeError silenzioso (`signal_tui.py`, riga 1540) ✅ RISOLTO
 
 La chiamata `ImageWidget(attachment_id=..., fallback_text=...)` ometteva il parametro
-obbligatorio `attachment_path` (che non ha default).  Il `TypeError` veniva ingoiato
-da `except Exception: pass` (riga 1559), quindi il widget non veniva mai aggiunto
-alla chat.  **Nessun placeholder visibile per le immagini caricate da cache.**
+obbligatorio `attachment_path` (che non ha default). Il `TypeError` veniva ingoiato
+alla chat. **Nessun placeholder visibile per le immagini caricate da cache.**
 
-**Fix:** aggiunto `attachment_path=None` esplicito nella chiamata.  Aggiunto test
+**Fix:** aggiunto `attachment_path=None` esplicito nella chiamata. Aggiunto test
 `test_image_messages_mount_from_cache` in `test_refresh_chat.py` (370/370 ✅).
 
 **Impatto prima del fix:** Le immagini nei messaggi caricati da cache (riapertura
-chat, riavvio app) non mostravano alcun placeholder.  Solo i messaggi live (via
-`_render_image_in_chat`) funzionavano.  Scoperto durante l'analisi del bug #1.
+chat, riavvio app) non mostravano alcun placeholder. Solo i messaggi live (via
+`_render_image_in_chat`) funzionavano. Scoperto durante l'analisi del bug #1.
 
 **Root cause del mancato rilevamento:** I test esistenti usavano solo `msg_type="text"`;
-il ramo `if msg_type == "image"` in `_mount_window` non era mai percorso dai test.
 
 ---
 
@@ -31,33 +44,170 @@ il ramo `if msg_type == "image"` in `_mount_window` non era mai percorso dai tes
 
 Il `for att in attachments` itera ma fa `return` al primo elemento che matcha.
 Se ci sono più attachment (es. un'immagine + un video), solo il primo viene processato.
-Inoltre il `return ("attachment", "📎 File", None)` finale (riga 369) è **dead code**
-perché il loop ritorna sempre al primo giro. Confermato da ruff (B007).
+Inoltre il `return ("attachment", "📎 File", None)` finale (riga 369) era **dead code**
+perché il loop ritornava sempre al primo giro.
 
 **Fix:** `_classify_attachments` ora accumula tutti gli attachment in una lista.
 `_extract_message_data` restituisce `list[dict]` (un dict per attachment). Il testo
-del messaggio va solo nel primo dict. `envelope_to_event` itera sulla lista e
-produce N `ChatEvent`.  Il chiamante (`_sse_listener`) accoda tutti gli eventi.
+produce N `ChatEvent`. Il chiamante (`_sse_listener`) accoda tutti gli eventi.
 Aggiunti 7 test (`test_backends.py`) per: singolo, multipli image, misti
 (image+video+audio), testo+attachment, solo testo, sentMessage multipli, envelope
 vuoto. 377/377 ✅.
 
-**Impatto prima del fix:** Media allegati persi — l'utente non vede attachment multipli.
+**Impatto prima del fix:** Media allegati persi — l'utente non vedeva attachment multipli.
 
 ---
 
-### #6 — `_poll_worker` nessun backoff/gestione errori (`signal_tui.py`, righe 1768-1800)
+## 🟠 Alti (sicurezza, integrità o perdita di messaggi)
 
-Se la ricezione RPC/SSE fallisce ripetutamente (es. daemon crash), il loop
-continua a pollare senza backoff, riempiendo i log di errori.
-L'eccezione viene catturata e loggata, ma non c'è alcun meccanismo di backoff
-o notifica all'utente.
+### #23 — L'invio ottimistico resta inviato e persistito dopo un errore di rete (`tui/send.py`, righe 153-160, 185-209)
 
-**Impatto:** CPU e log sprecati. L'utente non riceve feedback che il daemon non funziona.
+Il messaggio ottimistico viene scritto in SQLite prima della chiamata di rete. Se
+`send_message_sync` fallisce, viene mostrato solo uno status: il record resta con
+stato `sent`, senza stato `failed` né possibilità di retry.
+
+**Scenario:** perdita di rete o backend non raggiungibile durante l'invio.
+
+**Fix suggerito:** marcare il messaggio come fallito, aggiornare UI e cache, e offrire
+un retry che conservi destinatario e contenuto originali.
+
+---
+
+### #25 — Webhook WhatsApp multi-allegato perde tutti gli elementi dopo il primo (`backends/whatsapp_events.py`, righe 271-302; `backends/whatsapp.py`, righe 221-231)
+
+Gli eventi generati per gli attachment di uno stesso messaggio riusano `msg_id`.
+Il dedup del backend considera quindi duplicati gli eventi successivi e conserva
+solo il primo allegato.
+
+**Scenario:** messaggio WhatsApp con più attachment nell'array `attachments`.
+
+**Fix suggerito:** assegnare un id evento univoco per attachment (ad esempio
+`msg_id` più indice/id media) e mantenere un id comune separato per il messaggio.
+
+---
+
+### #26 — Download server esposto sulla LAN senza controllo d'accesso (`backend/download.py`, righe 61-72, 91-94)
+
+Il server degli attachment ascolta su `0.0.0.0`; `SimpleHTTPRequestHandler` espone
+la directory temporanea e gli URL non richiedono autenticazione o token.
+
+**Scenario:** un host della LAN raggiunge la porta di download e scarica attachment
+o enumera i file serviti.
+
+**Fix suggerito:** bind su loopback salvo opt-in esplicito; se serve accesso remoto,
+usare URL con token non prevedibile, disabilitare directory listing e applicare TTL.
+
+---
+
+### #27 — Webhook WhatsApp accetta POST non autenticati dalla rete (`backend/webhook.py`, righe 39-59, 93-97)
+
+Il listener WAHA è in bind su `0.0.0.0` e inoltra qualsiasi JSON ricevuto su
+`/webhook`, senza firma, token o altra autenticazione.
+
+**Scenario:** un host raggiungibile invia un POST artefatto e inserisce falsi
+messaggi/eventi nella TUI.
+
+**Fix suggerito:** bind su loopback per default e validare una firma HMAC o un token
+segreto prima di inoltrare il payload.
+
+---
+
+### #28 — Signal scarta i messaggi di mittenti non presenti nei contatti (`backends/signal.py`, righe 366-400, 605-608)
+
+`_identify_contact_for_envelope` restituisce `None` se il mittente non è nella lista
+contatti; `envelope_to_event` interrompe quindi l'elaborazione e il messaggio va perso.
+
+**Scenario:** ricezione da un nuovo numero o da un contatto non ancora sincronizzato.
+
+**Fix suggerito:** creare/aggiornare un contatto provvisorio dal mittente dell'envelope
+oppure conservare il messaggio finché la rubrica non è aggiornata.
 
 ---
 
 ## 🟡 Medi (funzionalità degradate)
+
+### #6 — Errori del polling eliminano lo sleep e il retry SSE è a pausa fissa (`tui/polling.py`, righe 18-100; `backends/signal.py`, righe 761-782)
+
+Le eccezioni in `_poll_worker` raggiungono l'`except` esterno prima dello sleep:
+il ciclo riparte subito, causando hot loop e log ripetuti. Il listener SSE ritenta
+inoltre sempre dopo una pausa fissa, senza comunicare all'utente lo stato degradato.
+
+**Scenario:** daemon o rete indisponibili per più tentativi consecutivi.
+
+**Fix suggerito:** applicare un backoff bounded con reset dopo successo e mostrare
+una notifica di connessione/ricezione degradata.
+
+---
+
+### #9 — Ricerca emoji non indicizza gli alias alternativi (`emoji_picker.py`, righe 35-54)
+
+L'indice di ricerca conserva solo il nome canonico di ogni emoji, non tutti gli alias.
+Per esempio `:smile:` è sostituibile ma non ricercabile se l'emoji è indicizzata con
+un altro nome.
+
+**Impatto:** Ricerca/autocomplete emoji incompleta.
+
+**Fix suggerito:** indicizzare tutti gli alias per emoji, mantenendo un risultato
+unico quando più alias corrispondono.
+
+---
+
+### #18 — Ogni nuovo download invalida gli URL precedenti (`backend/download.py`, righe 102-139, 175-181)
+
+`_clean_download_dir()` elimina tutti i file serviti prima di pubblicarne uno nuovo.
+Un URL già consegnato può quindi restituire 404 quando viene richiesto dopo un altro
+download.
+
+**Scenario:** l'utente apre due download in successione o condivide il primo URL.
+
+**Fix suggerito:** usare nomi univoci e retention temporale/per sessione, rimuovendo
+solo i file scaduti.
+
+---
+
+### #24 — Scadenze typing e mumbling dipendono dall'arrivo di eventi (`tui/polling.py`, righe 33-65)
+
+I timeout vengono valutati solo all'interno del `for event in events`. Se non arrivano
+altri eventi, typing e mumbling non scadono e lo stato resta visibile indefinitamente.
+
+**Fix suggerito:** valutare le scadenze a ogni ciclo di polling o tramite timer
+separato, anche con batch vuoti.
+
+---
+
+### #29 — Le reply Telegram sono visualizzate ma inviate come messaggi normali (`backends/telegram.py`, righe 333-378)
+
+I parametri della quote sono accettati ma la chiamata a `send_message` non passa
+`reply_to`. La UI cita il messaggio, mentre Telegram riceve un messaggio senza reply.
+
+**Fix suggerito:** risolvere l'id del messaggio quotato e passarlo come `reply_to`
+
+---
+
+### #30 — Reply Signal a un proprio messaggio usa l'autore della controparte (`tui/send.py`, righe 167-173)
+
+Per ogni reply il worker usa `contact.id` come `quote_author`. Quando il messaggio
+citato è dell'utente locale, Signal riceve invece l'autore della controparte.
+
+**Scenario:** rispondere a un proprio messaggio nella chat Signal.
+
+**Fix suggerito:** conservare l'autore/is_mine nei dati della reply e usare l'identità
+dell'account locale per messaggi propri.
+
+---
+
+### #32 — Le foto Telegram dello storico non sono scaricabili né apribili (`backends/telegram.py`, righe 411-427, 460-466, 482-500)
+
+Il download della foto avviene solo nel gestore live. Lo storico costruisce il
+placeholder senza path e, diversamente dai documenti, senza un identificatore
+utile al download lazy/on-demand.
+
+**Scenario:** aprire una chat con foto Telegram caricate dalla cronologia.
+
+**Fix suggerito:** scaricare le foto anche durante il fetch dello storico o conservare
+file/reference id e implementare il download lazy al click.
+
+---
 
 ### #5 — `_identify_contact_for_envelope` logica duplicata per `sent` (`backends/signal.py`, righe 320-351) ✅ RISOLTO
 
@@ -68,95 +218,35 @@ per evitare che un envelope `sentMessage` senza match cada nella ricerca per `so
 
 ---
 
-### #3 — `_add_message` per image non traccia timestamp in `_seen_timestamps` (`signal_tui.py`, righe 517-520)
-
-Quando `msg_type == "image"`, la funzione chiama `_render_image_in_chat` e fa `return`.
-Il chiamante si aspetta che il timestamp sia aggiunto a `_seen_timestamps`, ma per le image non lo fa.
-
-**Nota:** Attualmente mitigato dal chiamante che aggiunge il timestamp prima di chiamare
-`_add_message`, ma rimane un disallineamento: se in futuro si chiama `_add_message`
-per un'immagine senza gestire il timestamp esternamente, il timestamp verrà perso.
-
-**Impatto:** Potenziale duplicazione di immagini nella chat al refresh.
-
----
-
-### #9 — `search_emoji` perde alias multipli (`emoji_picker.py`, riga 45)
-
-La mappa `_EMOJI_TO_ALIAS` è popolata con l'**ultimo** alias incontrato per ogni
-emoji. Se un emoji ha più alias (es. `😄` = `smile` e `happy`), solo l'ultimo
-viene indicizzato. La ricerca potrebbe perdere match.
-
-**Impatto:** Ricerca emoji incompleta — l'utente potrebbe non trovare l'emoji che cerca.
-
----
-
 ## 🟢 Minori (comportamenti subottimali ma non bloccanti)
 
-### #10 — `on_input_changed` nella ricerca emoji non usa `search_emoji()` (`emoji_picker.py`, righe 347-374)
+### #10 — Il picker emoji duplica la ricerca e omette risultati (`emoji_picker.py`, righe 347-374)
 
-Invece di chiamare `search_emoji(query)` che è già definita, reimplementa la
-ricerca in modo diverso, creando prima una lista di tutti gli emoji e poi
-filtrando. Doppia implementazione = doppia manutenzione e possibili discrepanze.
+`on_input_changed` reimplementa la ricerca invece di usare `search_emoji()`. Cerca
+solo le 1.081 emoji delle categorie, contro le 5.225 considerate da `search_emoji()`,
+perciò alcuni risultati non compaiono nel picker.
 
-**Impatto:** Manutenibilità ridotta. Nessun impatto immediato per l'utente.
-
----
-
-### #4 — `_extract_message_data` quote dict vuoto (`backends/signal.py`, righe 412-413)
-
-```python
-quote = sent.get("quote", {})
-quote_text = quote.get("text", "") if quote else None
-```
-
-Se `quote` è un dict vuoto `{}`, la condizione `if quote` è `False` (in Python
-`bool({})` è `False`), quindi `quote_text` sarà `None`. Tuttavia, se `quote`
-contiene altre chiavi ma non `"text"`, allora `quote.get("text", "")` ritornerà `""`
-e verrà passato come `quote_text=""`, creando un widget quote vuoto.
-
-**Impatto:** In rari casi, potrebbe apparire un piccolo spazio vuoto nella chat.
+**Fix suggerito:** riusare `search_emoji()` o un indice condiviso per ricerca e
+autocomplete.
 
 ---
 
-### #7 — `_is_daemon_running` crea nuova istanza RPC ogni volta (`backend.py`, righe 86-93)
+### #11 — Output stdout vuoto di catimg apre una modale vuota (`ui_components.py`)
 
-Crea un nuovo `SignalRPCClient()` invece di accettarne uno opzionale. Questo è
-un problema perché se il daemon è stato appena avviato, il test potrebbe fallire
-per una race condition.
+Se `catimg` non produce stdout (ad esempio per un file corrotto), la modale renderizza
+testo ANSI vuoto senza errore visibile.
 
-**Impatto:** Falso negativo all'avvio del daemon, ritardando la connessione.
-
----
-
-### #11 — `ImageModalScreen._render_image` non gestisce output vuoto di catimg (`ui_components.py`, riga 387)
-
-Se `catimg` non produce output (es. file corrotto), `ansi_output` sarà vuoto e
-`RichText.from_ansi("")` produce un `RichText` vuoto. Non causa crash ma mostra
-una schermata modale vuota senza messaggio d'errore chiaro.
-
-**Impatto:** Schermata modale vuota invece di un messaggio d'errore esplicativo.
+**Fix suggerito:** controllare `ansi_output.strip()` e mostrare un messaggio d'errore
+esplicito quando l'output è vuoto.
 
 ---
 
-### #12 — `ImageModalScreen._render_image` non gestisce `PermissionError` su attachment (`ui_components.py`, riga 340)
+### #31 — `ImageWidget` ricostruito dalla cache perde classe e allineamento (`tui/chat_view.py`, righe 541-551)
 
-Se il file attachment non è leggibile (es. permessi 000), `catimg` fallirà.
-L'eccezione viene catturata dal generico `except Exception` (riga 409), che mostra
-un messaggio d'errore generico non chiaro per l'utente.
+Il ramo cache crea `ImageWidget` senza assegnare `msg-left` o `msg-right`, a differenza
+del rendering live. Immagini ricaricate perdono quindi allineamento e colore previsti.
 
-**Impatto:** Messaggio d'errore poco informativo.
-
----
-
-### #8 — `_find_signal_cli` non gestisce `PermissionError` (`backend.py`, righe 67-75)
-
-Se il file esiste ma non ha il permesso di esecuzione, viene ignorato silenziosamente.
-Se la directory `bin/` non esiste, `iterdir()` solleva `FileNotFoundError` non gestito.
-Se **tutti** i file mancano dei permessi di esecuzione, la funzione solleva
-`FileNotFoundError` senza un messaggio chiaro.
-
-**Impatto:** Crash all'avvio con messaggio poco chiaro in caso di setup errato.
+**Fix suggerito:** assegnare la classe in base a `is_mine`, come nel percorso live.
 
 ---
 
@@ -167,45 +257,14 @@ gestisce correttamente nomi con spazi (es. "Mario Rossi"). Commit: (vedi git log
 
 ---
 
-### #18 — `_clean_download_dir` race condition potenziale (`backend.py`, righe 898-911)
+### #33 — Stream SSE Signal senza eventi causa `UnboundLocalError` (`backends/signal.py`, righe 761-775)
 
-Se due download vengono serviti in rapida successione, `_clean_download_dir()`
-cancella il file del download precedente prima che l'utente abbia finito di scaricarlo.
-Il cleanup cancella *tutti* i file nella directory temporanea invece di solo quelli vecchi.
+Dopo il `for envelope in ...`, il listener valuta `if envelope:`. Se lo stream termina
+senza produrre elementi, `envelope` non è definita e l'errore viene mascherato come
+connection lost.
 
-**Impatto:** L'utente potrebbe cliccare un link di download e trovare un 404 perché
-il file è già stato cancellato da un download successivo.
-
----
-
-### #19 (nuovo) — `_prune_cache` ha variabile `cutoff` inutilizzata (`backend.py`, riga 359)
-
-```python
-now_ms = int(time.time() * 1000)
-cutoff = now_ms - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
-```
-
-La variabile `cutoff` è calcolata ma mai usata — la potatura è passata da time-based
-a count-based (200 messaggi per contatto). Il calcolo e la costante `CACHE_RETENTION_DAYS`
-sono residui della vecchia logica. Rilevato da ruff (F841).
-
-**Impatto:** Dead code — `CACHE_RETENTION_DAYS` non ha più effetto. La retention è
-solo count-based (200 messaggi/contatto).
-
----
-
-### #20 (nuovo) — `subprocess.run` senza `check` esplicito (`backend.py`, riga 98; `backends/signal.py`, riga 166)
-
-```python
-result = subprocess.run([...], capture_output=True, text=True)
-```
-
-Manca `check=False` esplicito. Se il processo fallisce, il comportamento dipende
-dal chiamante che controlla `result.returncode` — ma senza `check` il default è
-silenzioso. Rilevato da ruff (PLW1510).
-
-**Impatto:** Basso — i chiamanti già gestiscono `returncode`, ma il codice è
-ambiguo per un futuro maintainer.
+**Fix suggerito:** rimuovere il controllo finale oppure inizializzare la variabile e
+strutturare il loop senza dipendere dall'ultimo elemento iterato.
 
 ---
 
