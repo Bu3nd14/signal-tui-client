@@ -238,7 +238,11 @@ class SignalTUI(
             if self._status_timer is not None:
                 self._status_timer.stop()
                 self._status_timer = None
-            if duration > 0:
+            # Schedule the auto-clear timer only if the message pump is running.
+            # In unit tests the app is instantiated without an event loop, so
+            # set_timer() would raise "no running event loop" and leak a
+            # coroutine (RuntimeWarning: 'Timer._run_timer' was never awaited).
+            if duration > 0 and self.is_running:
                 self._status_timer = self.set_timer(duration, self._status_clear)
         except Exception as _e:
             logger.debug("Failed to update status bar", exc_info=True)
