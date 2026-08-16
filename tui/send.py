@@ -122,9 +122,9 @@ class SendMixin:
         self._cancel_reply()
 
         self.run_worker(
-            lambda msg=message, ts=ts, rdata=reply_data, persist=(
-                (ingest_backend, contact_id, data, ts) if added else None
-            ): self._send_message_worker(msg, ts, rdata, persist=persist),
+            lambda msg=message, ts=ts, rdata=reply_data, persist=((ingest_backend, contact_id, data, ts) if added else None): (
+                self._send_message_worker(msg, ts, rdata, persist=persist)
+            ),
             exclusive=False,
             thread=True,
         )

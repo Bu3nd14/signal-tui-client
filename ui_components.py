@@ -334,7 +334,9 @@ class ImageWidget(Static):
                 self.ImageClicked(self.attachment_path, self.attachment_id)
             )
 
-    def update_attachment(self, attachment_path: Path | None, fallback_text: str) -> None:
+    def update_attachment(
+        self, attachment_path: Path | None, fallback_text: str
+    ) -> None:
         """Update the resolved attachment path and refresh the placeholder text."""
         self.attachment_path = attachment_path
         self.update(fallback_text)
