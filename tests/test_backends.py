@@ -30,6 +30,31 @@ from models import (
 # ─── ChatBackend ABC ─────────────────────────────────────────────────────────
 
 
+class _MinimalBackend(ChatBackend):
+    """Concrete ChatBackend implementing every abstract method trivially."""
+
+    protocol = "test"
+
+    async def connect(self) -> None:
+        pass
+
+    async def disconnect(self) -> None:
+        pass
+
+    async def list_contacts(self) -> list[ChatContact]:
+        return []
+
+    async def send_message(self, *args, **kwargs) -> str:
+        return ""
+
+    async def mark_read(self, contact_id: str) -> None:
+        pass
+
+    async def receive(self):
+        if False:
+            yield
+
+
 class TestChatBackendABC:
     """🧱 ChatBackend deve essere astratto e con protocollo obbligatorio."""
 
@@ -67,6 +92,41 @@ class TestChatBackendABC:
 
         with pytest.raises(ValueError):
             manager.register(_NoProtocol())
+
+    def test_default_get_attachment_path_none(self):
+        """Default get_attachment_path returns None."""
+        assert _MinimalBackend().get_attachment_path("x") is None
+
+    def test_default_needs_pairing_false(self):
+        """Default needs_pairing is False."""
+        assert _MinimalBackend().needs_pairing is False
+
+    def test_default_get_pairing_qr_none(self):
+        """Default get_pairing_qr returns None."""
+        assert asyncio.run(_MinimalBackend().get_pairing_qr()) is None
+
+    @pytest.mark.parametrize(
+        "method_name,args",
+        [
+            ("connect", ()),
+            ("disconnect", ()),
+            ("list_contacts", ()),
+            ("send_message", ("+391234567890", "ciao")),
+            ("mark_read", ("+391234567890",)),
+        ],
+    )
+    def test_abstract_method_raises_not_implemented(self, method_name, args):
+        """Calling an abstract method on the base class raises NotImplementedError."""
+        inst = _MinimalBackend()
+        coro = getattr(ChatBackend, method_name)(inst, *args)
+        with pytest.raises(NotImplementedError):
+            asyncio.run(coro)
+
+    def test_abstract_receive_raises_not_implemented(self):
+        """The abstract async-generator receive raises NotImplementedError on iterate."""
+        agen = ChatBackend.receive(_MinimalBackend())
+        with pytest.raises(NotImplementedError):
+            asyncio.run(agen.__anext__())
 
 
 # ─── SignalBackend ───────────────────────────────────────────────────────────
@@ -518,6 +578,40 @@ class TestBackendManager:
         manager = BackendManager()
         with pytest.raises(KeyError):
             asyncio.run(manager.send_message("nope", "x", "ciao"))
+
+    def test_connect_all(self):
+        """connect_all awaits every backend's connect()."""
+        from unittest.mock import AsyncMock
+
+        manager = BackendManager()
+        backend = SignalBackend()
+        manager.register(backend)
+        backend.connect = AsyncMock()
+
+        asyncio.run(manager.connect_all())
+
+        backend.connect.assert_awaited_once()
+
+    def test_list_contacts_ignores_backend_without_contacts(self):
+        """A backend without a .contacts attribute is skipped without crashing."""
+
+        class _NoContacts(ChatBackend):
+            protocol = "test"
+
+            async def connect(self): ...
+            async def disconnect(self): ...
+            async def list_contacts(self):
+                return []
+
+            async def send_message(self, *a, **k):
+                return ""
+
+            async def mark_read(self, *a): ...
+            async def receive(self): ...
+
+        manager = BackendManager()
+        manager.register(_NoContacts())
+        assert manager.list_contacts() == []
 
 
 # ─── Send path regression (message actually sent) ─────────────────────────────

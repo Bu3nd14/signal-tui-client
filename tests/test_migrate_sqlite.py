@@ -11,6 +11,7 @@ Verifies that:
 from __future__ import annotations
 
 import json
+import runpy
 import sqlite3
 import sys
 from pathlib import Path
@@ -166,3 +167,9 @@ class TestMigrate:
         assert row[1] == "image"
         assert row[2] == "photo.jpg"
         assert row[3] == "att-123"
+
+
+def test_main_guard(tmp_path: Path, monkeypatch):
+    """Running the script directly (__main__) is a no-op without messages.json."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    runpy.run_path(PROJECT_ROOT / "migrate_cache_sqlite.py", run_name="__main__")

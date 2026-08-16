@@ -9,6 +9,7 @@ Verifies:
 
 from __future__ import annotations
 
+import runpy
 import sqlite3
 import sys
 from pathlib import Path
@@ -195,3 +196,9 @@ class TestInitDBAutoMigrate:
         backend_mod._init_db()  # must not raise
         cols = _table_columns(backend_mod.DB_FILE)
         assert "protocol" in cols
+
+
+def test_main_guard(tmp_path: Path, monkeypatch):
+    """Running the script directly (__main__) is a no-op without a DB."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    runpy.run_path(PROJECT_ROOT / "migrate_cache_protocol.py", run_name="__main__")
