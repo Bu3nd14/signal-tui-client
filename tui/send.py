@@ -83,7 +83,7 @@ class SendMixin:
         ingest_backend = self.manager.get(contact.protocol)
         if ingest_backend is None:
             ingest_backend = self.signal_backend
-        ingest_backend.ingest_message(contact_id, data, ts, persist=False)
+        added = ingest_backend.ingest_message(contact_id, data, ts, persist=False)
 
         # Update in-memory cache for UI
         if cache_key not in self._cache:
@@ -123,10 +123,7 @@ class SendMixin:
 
         self.run_worker(
             lambda msg=message, ts=ts, rdata=reply_data, persist=(
-                ingest_backend,
-                contact_id,
-                data,
-                ts,
+                (ingest_backend, contact_id, data, ts) if added else None
             ): self._send_message_worker(msg, ts, rdata, persist=persist),
             exclusive=False,
             thread=True,
