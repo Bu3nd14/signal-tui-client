@@ -190,8 +190,8 @@ class ChatViewMixin:
         chat_log: Vertical,
         protocol: str | None = None,
     ):
-        """Resolve the attachment path and mount a clickable placeholder
-        ``ImageWidget``.
+        """Mount a clickable ``ImageWidget`` placeholder immediately and
+        resolve the attachment path in a worker thread.
 
         Uses the ``BackendManager`` to route the attachment-id resolution to
         the correct protocol backend (Signal, WhatsApp, ...).  Falls back to
@@ -201,31 +201,61 @@ class ChatViewMixin:
         The actual image rendering happens on-demand when the user presses
         Enter or clicks the widget, which opens a fullscreen modal.
         """
-        # Resolve the file path via the protocol-appropriate backend.
-        att_path: Path | None = None
-        if attachment_id:
-            resolved_protocol = protocol or PROTOCOL_SIGNAL
-            att_path = self.manager.get_attachment_path(
-                resolved_protocol, attachment_id
-            )
+        resolved_protocol = protocol or PROTOCOL_SIGNAL
 
-        if att_path is None:
-            fallback = f"[🖼️ Image: {attachment_info}]"
+        if not attachment_id:
             widget = ImageWidget(
                 attachment_path=None,
-                attachment_id=attachment_id or "",
-                fallback_text=fallback,
+                attachment_id="",
+                fallback_text=f"[🖼️ Image: {attachment_info}]",
             )
-        else:
-            widget = ImageWidget(
-                attachment_path=att_path,
-                attachment_id=attachment_id or "",
-                fallback_text=f"[🖼️ Image: {att_path.name} — Click Enter to View]",
-            )
+            widget.classes = "msg-right" if is_mine else "msg-left"
+            chat_log.mount(widget)
+            chat_log.scroll_end(animate=False)
+            return
 
+        widget = ImageWidget(
+            attachment_path=None,
+            attachment_id=attachment_id,
+            fallback_text=f"[🖼️ Image: {attachment_info} — loading…]",
+        )
         widget.classes = "msg-right" if is_mine else "msg-left"
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
+
+        self.run_worker(
+            lambda: self._resolve_attachment_worker(
+                resolved_protocol, attachment_id, widget, attachment_info
+            ),
+            thread=True,
+            exclusive=False,
+        )
+
+    def _resolve_attachment_worker(
+        self,
+        protocol: str,
+        attachment_id: str,
+        widget: ImageWidget,
+        attachment_info: str,
+    ):
+        """Worker thread: resolve the attachment path without blocking the UI."""
+        path = self.manager.get_attachment_path(protocol, attachment_id)
+        self.call_from_thread(
+            self._finish_attachment_resolve, widget, path, attachment_info
+        )
+
+    def _finish_attachment_resolve(
+        self, widget: ImageWidget, path: Path | None, attachment_info: str
+    ):
+        """UI thread: update the placeholder with the resolved attachment path."""
+        if not widget.is_mounted:
+            return
+        if path is None:
+            widget.update_attachment(None, f"[🖼️ Image: {attachment_info}]")
+        else:
+            widget.update_attachment(
+                path, f"[🖼️ Image: {path.name} — Click Enter to View]"
+            )
 
     def _clear_chat(self):
         """Clear the chat and reset the render-level de-dup set."""

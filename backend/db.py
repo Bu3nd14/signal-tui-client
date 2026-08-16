@@ -17,6 +17,10 @@ CACHE_FILE = CACHE_DIR / "messages.json"
 DB_FILE = CACHE_DIR / "messages.db"
 CACHE_RETENTION_DAYS = 3
 
+# Current schema version, persisted via ``PRAGMA user_version`` so the legacy
+# migration below is skipped once the schema is known to be up to date.
+_SCHEMA_VERSION = 1
+
 
 # ─── Message cache (SQLite) ─────────────────────────────────────────────────
 
@@ -29,6 +33,11 @@ def _ensure_cache_dir():
     _backend.CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _current_schema_version(conn: sqlite3.Connection) -> int:
+    """Read the schema version stored in ``PRAGMA user_version``."""
+    return conn.execute("PRAGMA user_version").fetchone()[0]
+
+
 def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
     """Upgrade a legacy ``messages`` table to the multi-protocol schema.
 
@@ -38,9 +47,15 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
     message is assigned to the Signal protocol.  The contact index is then
     rebuilt to include the protocol prefix.
 
+    The migration is gated by ``PRAGMA user_version`` so the DROP/CREATE index
+    churn runs only once per database, not on every write.
+
     Works on the connection passed in; the caller is responsible for
     committing / closing.
     """
+    if _current_schema_version(conn) >= _SCHEMA_VERSION:
+        return
+
     columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
 
     if "protocol" not in columns:
@@ -63,6 +78,8 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_messages_contact "
         "ON messages(protocol, contact_number, timestamp)"
     )
+
+    conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
 
 def _init_db():

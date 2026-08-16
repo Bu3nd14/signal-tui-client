@@ -83,7 +83,7 @@ class SendMixin:
         ingest_backend = self.manager.get(contact.protocol)
         if ingest_backend is None:
             ingest_backend = self.signal_backend
-        ingest_backend.ingest_message(contact_id, data, ts)
+        added = ingest_backend.ingest_message(contact_id, data, ts, persist=False)
 
         # Update in-memory cache for UI
         if cache_key not in self._cache:
@@ -122,15 +122,19 @@ class SendMixin:
         self._cancel_reply()
 
         self.run_worker(
-            lambda msg=message, ts=ts, rdata=reply_data: self._send_message_worker(
-                msg, ts, rdata
+            lambda msg=message, ts=ts, rdata=reply_data, persist=((ingest_backend, contact_id, data, ts) if added else None): (
+                self._send_message_worker(msg, ts, rdata, persist=persist)
             ),
             exclusive=False,
             thread=True,
         )
 
     def _send_message_worker(
-        self, message: str, timestamp: int, reply_data: dict | None = None
+        self,
+        message: str,
+        timestamp: int,
+        reply_data: dict | None = None,
+        persist: tuple | None = None,
     ):
         """Send a message via the active backend's send path.
 
@@ -143,7 +147,16 @@ class SendMixin:
             Passed to the backend so that receipt timestamps match.
         reply_data:
             If provided, the message is sent as a quote/reply.
+        persist:
+            Optional ``(backend, contact_id, data, ts)`` payload.  When given,
+            the optimistic row is persisted to SQLite here (worker thread),
+            BEFORE the network send, so the echo always finds the row to
+            upgrade via ``_update_message_id``.
         """
+        if persist is not None:
+            backend, contact_id, data, ts = persist
+            backend._persist_message(contact_id, data, ts)
+
         if not self.selected_contact:
             return
 

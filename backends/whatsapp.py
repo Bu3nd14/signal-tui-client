@@ -830,12 +830,36 @@ class WhatsAppBackend(ChatBackend):
                 return msg
         return None
 
-    def ingest_message(self, contact_id: str, data: dict, ts: int) -> bool:
+    def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
+        """Persist a message to the SQLite cache (WhatsApp protocol)."""
+        from backend import _add_message_to_cache
+
+        _add_message_to_cache(
+            contact_id,
+            data["text"],
+            data["is_mine"],
+            data.get("sender", ""),
+            ts,
+            quote_text=data.get("quote_text"),
+            msg_type=data.get("msg_type", "text"),
+            attachment_info=data.get("attachment_info"),
+            attachment_id=data.get("attachment_id"),
+            protocol=PROTOCOL_WHATSAPP,
+            msg_id=data.get("id"),
+        )
+
+    def ingest_message(
+        self, contact_id: str, data: dict, ts: int, persist: bool = True
+    ) -> bool:
         """Save an incoming/outgoing message to the DB cache and in-memory cache.
+
+        When ``persist=False`` the in-memory cache is still seeded (dedup
+        keeps working on the UI thread) but the SQLite write is skipped;
+        the caller is responsible for calling ``_persist_message`` later.
 
         Returns ``True`` if newly added, ``False`` if it was a duplicate.
         """
-        from backend import _add_message_to_cache, _update_message_id
+        from backend import _update_message_id
 
         text = data["text"]
         is_mine = data["is_mine"]
@@ -865,19 +889,8 @@ class WhatsAppBackend(ChatBackend):
                 )
             return False
 
-        _add_message_to_cache(
-            contact_id,
-            text,
-            is_mine,
-            data.get("sender", ""),
-            ts,
-            quote_text=data.get("quote_text"),
-            msg_type=data.get("msg_type", "text"),
-            attachment_info=data.get("attachment_info"),
-            attachment_id=data.get("attachment_id"),
-            protocol=PROTOCOL_WHATSAPP,
-            msg_id=msg_id,
-        )
+        if persist:
+            self._persist_message(contact_id, data, ts)
         self._add_cached_message(
             contact_id,
             {
