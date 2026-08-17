@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -764,6 +765,67 @@ class TestWhatsAppEvents:
         assert ev is not None
         assert ev.payload["msg_type"] == "attachment"
 
+    def test_media_synthetic_text_uses_url_then_parent_part_identity(self):
+        events = _event_from_message(
+            {
+                "id": "parent-media",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "attachments": [
+                    {"url": "https://wa.to/media/one", "filename": "one.jpg"},
+                    {"filename": "two.jpg", "mimetype": "image/jpeg"},
+                ],
+            }
+        )
+
+        assert [event.payload["text"] for event in events] == [
+            "Media: https://wa.to/media/one",
+            "Media: parent-media:2",
+        ]
+        assert [event.payload["attachment_info"] for event in events] == [
+            "one.jpg",
+            "two.jpg",
+        ]
+
+    def test_single_media_without_id_or_url_uses_parent_part_identity_in_all_forms(
+        self,
+    ):
+        base = {
+            "id": "parent-media",
+            "from": "3912345678@c.us",
+            "timestamp": 1700000000,
+        }
+        payloads = [
+            {
+                **base,
+                "attachments": [{"filename": "photo.jpg", "mimetype": "image/jpeg"}],
+            },
+            {
+                **base,
+                "message": {
+                    "id": "message-container-id",
+                    "imageMessage": {
+                        "filename": "photo.jpg",
+                        "mimetype": "image/jpeg",
+                    },
+                },
+            },
+            {
+                **base,
+                "hasMedia": True,
+                "media": {"filename": "photo.jpg", "mimetype": "image/jpeg"},
+            },
+        ]
+
+        events = [_msg(payload) for payload in payloads]
+
+        assert [event.payload["text"] for event in events] == [
+            "Media: parent-media:1",
+        ] * len(payloads)
+        assert [event.payload["attachment_id"] for event in events] == [None] * len(
+            payloads
+        )
+
     def test_hasMedia_no_media_dict(self):
         """hasMedia=true but media is not a dict → still text, no attachment."""
         ev = _msg(
@@ -811,7 +873,7 @@ class TestWhatsAppEvents:
         )
         assert ev.payload["attachment_id"] == "https://wa.to/img/no-text-photo.jpg"
         assert ev.payload["attachment_info"] == "Senza testo!"
-        assert ev.payload["text"] == "Senza testo!"  # caption becomes text
+        assert ev.payload["text"] == "Media: https://wa.to/img/no-text-photo.jpg"
 
     def test_event_from_raw_fallback_recognizes_hasMedia_without_text_key(self):
         """_event_from_raw fallback riconosce hasMedia anche senza key 'text'.
@@ -1184,6 +1246,76 @@ class TestWhatsAppWebhook:
         assert backend.handle_webhook(envelope) is True  # retry
         events = backend.poll_once()
         assert len(events) == 1  # dedup per id
+
+    def test_attachment_parts_have_stable_text_and_live_dedup_is_per_part(self):
+        """A multipart message keeps every attachment while retries stay idempotent."""
+        backend = self._backend()
+        payload = {
+            "id": "parent-1",
+            "from": "1@c.us",
+            "fromMe": False,
+            "timestamp": 1700000000,
+            "attachments": [
+                {"id": "media-a", "filename": "first.jpg", "mimetype": "image/jpeg"},
+                {"id": "media-b", "filename": "second.jpg", "mimetype": "image/jpeg"},
+            ],
+        }
+        envelope = {"event": "message", "payload": payload}
+
+        assert backend.handle_webhook(envelope) is True
+        assert backend.handle_webhook(envelope) is True
+        events = backend.poll_once()
+        assert [event.payload["text"] for event in events] == [
+            "Media: media-a",
+            "Media: media-b",
+        ]
+
+        payload["attachments"].reverse()
+        assert backend.handle_webhook(envelope) is True
+        assert backend.poll_once() == []
+
+    def test_single_media_has_synthetic_text_while_plain_text_is_unchanged(self):
+        plain = _msg({"id": "plain", "from": "1@c.us", "text": "hello", "timestamp": 1})
+        media = _msg(
+            {
+                "id": "parent-media",
+                "from": "1@c.us",
+                "timestamp": 1,
+                "hasMedia": True,
+                "media": {"url": "https://wa.test/photo.jpg", "filename": "photo.jpg"},
+            }
+        )
+        assert plain.payload["text"] == "hello"
+        assert media.payload["text"] == "Media: https://wa.test/photo.jpg"
+
+    def test_outgoing_echo_and_ack_read_keep_the_parent_message_id(self):
+        import backend as backend_mod
+
+        backend = self._backend()
+        payload = {
+            "id": "outgoing-parent",
+            "to": "1@c.us",
+            "fromMe": True,
+            "timestamp": 1700000000,
+            "body": "sent from another device",
+            "status": 2,
+        }
+        with (
+            patch.object(backend, "_persist_message"),
+            patch.object(backend_mod, "_update_message_status"),
+        ):
+            assert backend.handle_webhook({"event": "message.ack", "payload": payload})
+            echo = backend.poll_once()
+            assert [event.type for event in echo] == ["message"]
+            assert backend.cache["1@c.us"][0]["id"] == "outgoing-parent"
+
+            payload["status"] = 4
+            assert backend.handle_webhook({"event": "message.ack", "payload": payload})
+            events = backend.poll_once()
+            receipt = next(event for event in events if event.type == "receipt")
+            assert receipt.payload["message_ids"] == ["outgoing-parent"]
+            assert backend.process_receipt(receipt.payload)[0]["status"] == "read"
+            assert len(backend.cache["1@c.us"]) == 1
 
     def test_handle_webhook_ignores_non_message_events(self):
         """Eventi non-message (es. presence/typing fuori dalla registrazione)
@@ -1676,7 +1808,7 @@ class TestWAHAContract:
         assert msg["msg_type"] == "image"
         assert msg["attachment_id"] == "https://wa.to/media/abc123.jpg"
         assert msg["attachment_info"] == "Guarda questa foto!"
-        assert msg["text"] == "Guarda questa foto!"  # caption fills text
+        assert msg["text"] == "Media: https://wa.to/media/abc123.jpg"
 
     def test_webhook_image_via_message_any_end_to_end(self):
         """Stessa catena ma con event=message.any (WAHA Core può usarlo)."""
@@ -1845,6 +1977,128 @@ class TestSeedCacheFromDB:
     ``connect_sync`` semini la cache dal DB, filtrando SOLO il protocollo
     WhatsApp.
     """
+
+    def test_multipart_attachments_persist_and_seed_after_restart_without_schema_change(
+        self, tmp_path, monkeypatch
+    ):
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
+        backend_mod._init_db()
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            before = (
+                conn.execute("PRAGMA table_info(messages)").fetchall(),
+                conn.execute("PRAGMA index_list(messages)").fetchall(),
+            )
+
+        backend = _make_backend()
+        envelope = {
+            "event": "message",
+            "payload": {
+                "id": "parent-persisted",
+                "from": "1@c.us",
+                "timestamp": 1700000000,
+                "attachments": [
+                    {"id": "media-1", "filename": "one.jpg", "mimetype": "image/jpeg"},
+                    {"id": "media-2", "filename": "two.jpg", "mimetype": "image/jpeg"},
+                ],
+            },
+        }
+        backend.handle_webhook(envelope)
+        for event in backend.poll_once():
+            assert backend.ingest_message(
+                event.contact_id, event.payload, event.payload["timestamp"]
+            )
+
+        restarted = _make_backend()
+        restarted.cache = restarted._load_protocol_cache()
+        assert [message["text"] for message in restarted.cache["1@c.us"]] == [
+            "Media: media-1",
+            "Media: media-2",
+        ]
+        assert [message["id"] for message in restarted.cache["1@c.us"]] == [
+            "parent-persisted",
+            "parent-persisted",
+        ]
+
+        assert restarted.handle_webhook(envelope) is True
+        for event in restarted.poll_once():
+            assert not restarted.ingest_message(
+                event.contact_id, event.payload, event.payload["timestamp"]
+            )
+        assert len(restarted.cache["1@c.us"]) == 2
+
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            after = (
+                conn.execute("PRAGMA table_info(messages)").fetchall(),
+                conn.execute("PRAGMA index_list(messages)").fetchall(),
+            )
+        assert after == before
+
+    def test_single_media_variants_share_a_canonical_identity(
+        self, tmp_path, monkeypatch
+    ):
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
+        backend_mod._init_db()
+        backend = _make_backend()
+        attachment_form = {
+            "event": "message",
+            "payload": {
+                "id": "parent-media",
+                "from": "1@c.us",
+                "timestamp": 1700000000,
+                "attachments": [
+                    {
+                        "id": "stable-media-id",
+                        "filename": "original.jpg",
+                        "caption": "First caption",
+                        "mimetype": "image/jpeg",
+                    }
+                ],
+            },
+        }
+        nested_form = {
+            "event": "message",
+            "payload": {
+                "id": "parent-media",
+                "from": "1@c.us",
+                "timestamp": 1700000000,
+                "message": {
+                    "imageMessage": {
+                        "id": "stable-media-id",
+                        "filename": "renamed.png",
+                        "caption": "Different caption",
+                        "mimetype": "image/png",
+                    }
+                },
+            },
+        }
+
+        assert backend.handle_webhook(attachment_form)
+        for event in backend.poll_once():
+            assert backend.ingest_message(
+                event.contact_id, event.payload, event.payload["timestamp"]
+            )
+            assert event.payload["text"] == "Media: stable-media-id"
+
+        assert backend.handle_webhook(nested_form)
+        assert backend.poll_once() == []
+        assert len(backend.cache["1@c.us"]) == 1
+
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+
+        restarted = _make_backend()
+        restarted.cache = restarted._load_protocol_cache()
+        assert len(restarted.cache["1@c.us"]) == 1
+        assert restarted.handle_webhook(nested_form)
+        for event in restarted.poll_once():
+            assert not restarted.ingest_message(
+                event.contact_id, event.payload, event.payload["timestamp"]
+            )
+        assert len(restarted.cache["1@c.us"]) == 1
 
     def test_connect_sync_seeds_cache_from_db(self, tmp_path, monkeypatch):
         import time
@@ -2189,8 +2443,8 @@ class TestSeedCacheFromDB:
         assert len(events) == 1
         assert events[0].payload["id"] == "wa-echo-nested"
         assert events[0].payload["is_mine"] is True
-        # L'id è registrato in _seen_msg_ids (non ri-processato su retry).
-        assert "wa-echo-nested" in backend._seen_msg_ids
+        # La chiave effimera include id padre e testo (non ri-processato su retry).
+        assert (cid, "wa-echo-nested", "ciao") in backend._seen_message_keys
         # Prima: entry ottimistica senza id, poi ingest dello stesso echo:
         # il dedup per id in ingest_message NON deve creare un duplicato.
         backend.cache[cid] = [

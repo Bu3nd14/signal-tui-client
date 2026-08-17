@@ -148,7 +148,7 @@ def _event_from_message(
     attachments = raw.get("attachments") or []
     if isinstance(attachments, list) and attachments:
         for att in attachments:
-            att_id = att.get("id") or att.get("url") or str(ts_ms)
+            att_id = att.get("id") or att.get("url")
             mime = att.get("mimetype") or ""
             if mime.startswith("image/"):
                 att_type = "image"
@@ -176,12 +176,7 @@ def _event_from_message(
                 media = nested.get(media_key)
                 if isinstance(media, dict):
                     att_type = fallback_type if msg_type == "text" else msg_type
-                    att_id = (
-                        media.get("id")
-                        or media.get("url")
-                        or nested.get("id")
-                        or msg_id
-                    )
+                    att_id = media.get("id") or media.get("url")
                     att_info = (
                         caption
                         or media.get("caption")
@@ -209,7 +204,7 @@ def _event_from_message(
                 att_type = "sticker"
             else:
                 att_type = "attachment"
-            att_id = media.get("url") or msg_id
+            att_id = media.get("id") or media.get("url")
             att_info = (
                 caption
                 or media.get("caption")
@@ -270,15 +265,9 @@ def _event_from_message(
     # ── Build events ───────────────────────────────────────────────────
     if media_items:
         events: list[ChatEvent] = []
-        multiple = len(media_items) > 1
         for i, (att_id, att_info, att_type) in enumerate(media_items):
-            msg_text = text if i == 0 else ""
-            if not msg_text:
-                label = att_info or "Media"
-                if multiple and att_id:
-                    msg_text = f"{label}: {att_id!s}"
-                else:
-                    msg_text = label
+            media_identity = att_id or f"{msg_id}:{i + 1}"
+            msg_text = f"Media: {media_identity}"
             events.append(
                 ChatEvent(
                     type="message",

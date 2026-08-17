@@ -45,19 +45,6 @@ vuoto. 377/377 ✅.
 
 ## 🟠 Alti (sicurezza, integrità o perdita di messaggi)
 
-### #25 — Webhook WhatsApp multi-allegato perde tutti gli elementi dopo il primo (`backends/whatsapp_events.py`, righe 271-302; `backends/whatsapp.py`, righe 221-231)
-
-Gli eventi generati per gli attachment di uno stesso messaggio riusano `msg_id`.
-Il dedup del backend considera quindi duplicati gli eventi successivi e conserva
-solo il primo allegato.
-
-**Scenario:** messaggio WhatsApp con più attachment nell'array `attachments`.
-
-**Fix suggerito:** assegnare un id evento univoco per attachment (ad esempio
-`msg_id` più indice/id media) e mantenere un id comune separato per il messaggio.
-
----
-
 ### #26 — Download server esposto sulla LAN senza controllo d'accesso (`backend/download.py`, righe 61-72, 91-94)
 
 Il server degli attachment ascolta su `0.0.0.0`; `SimpleHTTPRequestHandler` espone
@@ -260,4 +247,5 @@ strutturare il loop senza dipendere dall'ultimo elemento iterato.
 |---|-------------|----------------|
 | #22 | Il worker di invio poteva rileggere `selected_contact` e inviare alla chat sbagliata | `protocol` e `contact_id` vengono catturati al submit e passati al worker; aggiunti test di regressione |
 | #23 | L'invio ottimistico restava inviato e persistito dopo un errore di rete | Introdotti gli stati `pending`, `sent` e `failed`; DB, cache e UI sono aggiornati atomicamente. Il retry conserva destinatario e contenuto e riusa la riga esistente senza duplicarla. Fix validata. |
+| #25 | Webhook WhatsApp multi-allegato perdeva tutti gli elementi dopo il primo | Dedup webhook effimero per `(contact, parent msg_id, testo sintetico)`: gli attachment dello stesso messaggio restano distinti. `parent msg_id`, DB e schema restano invariati; nessuna migrazione. Fix validata. |
 | #29 | Le reply Telegram erano visualizzate ma inviate come messaggi normali | ID Telegram originale propagato e persistito, passato a Telethon come `reply_to`; reply senza ID bloccata esplicitamente senza fallback normale e supporto retry sicuro. |

@@ -82,7 +82,7 @@ class WhatsAppBackend(ChatBackend):
         #: Dedup guard per i webhook: WAHA può ritrasmettere lo stesso evento in
         #: caso di retry, quindi teniamo gli id già visti per non accodare in
         #: doppio un messaggio (il dedup definitivo avviene in ``ingest_message``).
-        self._seen_msg_ids: set[str] = set()
+        self._seen_message_keys: set[tuple[str, str, str]] = set()
 
     def handle_webhook(self, raw: dict) -> bool:
         """Elabora un payload webhook WAHA (modalità Push/event-driven).
@@ -224,10 +224,15 @@ class WhatsAppBackend(ChatBackend):
         for event in events:
             if event.type == "message":
                 mid = event.payload.get("id")
-                if mid and mid in self._seen_msg_ids:
+                key = (
+                    event.contact_id,
+                    str(mid),
+                    " ".join(str(event.payload.get("text") or "").split()),
+                )
+                if mid and key in self._seen_message_keys:
                     continue  # retry già processato
                 if mid:
-                    self._seen_msg_ids.add(mid)
+                    self._seen_message_keys.add(key)
             self._enqueue_event(event)
         return True
 
@@ -804,9 +809,10 @@ class WhatsAppBackend(ChatBackend):
     ) -> dict | None:
         """Return the cached message matching the same identity, or ``None``.
 
-        For **incoming** messages (``is_mine=False``) the WhatsApp id is *not*
-        reliable — WAHA generates different ids for the same message via
-        webhook vs REST API.  We dedup purely on (text, fuzzy timestamp ±5s).
+        For **incoming** messages (``is_mine=False``), dedup uses the exact
+        id+text match when available.  Since WAHA ids can differ for the same
+        message between webhook and REST API, it falls back to text with a
+        fuzzy timestamp (±5s).
 
         For **outgoing** messages (``is_mine=True``) the id is stable and
         used as the primary identity (optimistic-send echo dedup).
@@ -817,6 +823,8 @@ class WhatsAppBackend(ChatBackend):
             if msg.get("text") != text:
                 continue
             if not is_mine:
+                if msg_id and msg.get("id") == msg_id:
+                    return msg
                 # Text + fuzzy timestamp — the only stable identity
                 # across WAHA's webhook and REST API paths.
                 if abs(msg.get("timestamp", 0) - ts) <= 5000:
