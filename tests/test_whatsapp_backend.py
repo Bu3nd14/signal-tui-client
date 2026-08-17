@@ -9,6 +9,7 @@ event-queue + ``poll_once`` surface.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -287,6 +288,29 @@ class TestWhatsAppRESTClient:
         with patch("urllib.request.urlopen", _json_response({"id": "msg-1"})):
             result = client.send_message("wa:x@s.whatsapp.net", "Ciao!")
         assert result == {"id": "msg-1"}
+
+    def test_send_message_uses_waha_reply_to(self):
+        client = WhatsAppRESTClient("http://api.test")
+        captured = {}
+
+        def fake_urlopen(req, timeout=30):
+            captured["payload"] = json.loads(req.data)
+            resp = MagicMock()
+            resp.read.return_value = b'{"id": "msg-1"}'
+            ctx = MagicMock()
+            ctx.__enter__.return_value = resp
+            return ctx
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            client.send_message(
+                "wa:x@s.whatsapp.net",
+                "Ciao!",
+                quote_message="legacy quote text",
+                reply_to_message_id="message-id-1",
+            )
+
+        assert captured["payload"]["reply_to"] == "message-id-1"
+        assert "quotedMessage" not in captured["payload"]
 
     def test_send_message_error_returns_none(self):
         client = WhatsAppRESTClient("http://api.test")
@@ -960,9 +984,37 @@ class TestWhatsAppBackend:
         with patch.object(
             backend._rest, "send_message", return_value={"id": "m"}
         ) as mock_send:
-            ts = backend.send_message_sync("wa:1@s.whatsapp.net", "Ciao!")
-        mock_send.assert_called_once()
+            ts = backend.send_message_sync(
+                "wa:1@s.whatsapp.net", "Ciao!", reply_to_message_id="message-id-1"
+            )
+        mock_send.assert_called_once_with(
+            "wa:1@s.whatsapp.net",
+            "Ciao!",
+            quote_timestamp=None,
+            quote_author=None,
+            quote_message=None,
+            reply_to_message_id="message-id-1",
+        )
         assert ts > 0
+
+    def test_send_message_forwards_reply_to_message_id(self):
+        backend = _make_backend()
+        with patch.object(backend, "send_message_sync", return_value="1") as mock_send:
+            result = asyncio.run(
+                backend.send_message(
+                    "wa:1@s.whatsapp.net", "Ciao!", reply_to_message_id="message-id-1"
+                )
+            )
+
+        assert result == "1"
+        mock_send.assert_called_once_with(
+            "wa:1@s.whatsapp.net",
+            "Ciao!",
+            quote_timestamp=None,
+            quote_author=None,
+            quote_message=None,
+            reply_to_message_id="message-id-1",
+        )
 
     def test_send_message_sync_raises_when_unreachable(self):
         backend = _make_backend()
