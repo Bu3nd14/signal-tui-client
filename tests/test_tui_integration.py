@@ -269,6 +269,7 @@ async def test_reply_bar_hidden_initially(app_for_test):
         app.selected_contact = contact
         app._cache[contact.cache_key] = [
             {
+                "id": "telegram-message-42",
                 "text": "Ciao",
                 "is_mine": True,
                 "sender": "You",
@@ -286,6 +287,7 @@ async def test_reply_bar_hidden_initially(app_for_test):
 
         assert not reply_bar.has_class("reply-bar-hidden")
         assert app._reply_to is not None
+        assert app._reply_to["message_id"] == "telegram-message-42"
 
         await pilot.click("#reply-cancel")
         await pilot.pause()

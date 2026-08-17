@@ -585,6 +585,7 @@ class WhatsAppBackend(ChatBackend):
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> str:
         """Async send (interface contract); delegates to the sync path."""
         return self.send_message_sync(
@@ -602,6 +603,7 @@ class WhatsAppBackend(ChatBackend):
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> str:
         """Send *text* to *contact_id*; returns the client timestamp (ms).
 
@@ -847,6 +849,9 @@ class WhatsAppBackend(ChatBackend):
             protocol=PROTOCOL_WHATSAPP,
             msg_id=data.get("id"),
             status=data.get("status"),
+            quote_timestamp=data.get("quote_timestamp"),
+            quote_author=data.get("quote_author"),
+            reply_to_message_id=data.get("reply_to_message_id"),
         )
 
     def ingest_message(
@@ -908,6 +913,7 @@ class WhatsAppBackend(ChatBackend):
                 "status": data.get("status", "sent" if is_mine else "read"),
                 "quote_timestamp": data.get("quote_timestamp"),
                 "quote_author": data.get("quote_author"),
+                "reply_to_message_id": data.get("reply_to_message_id"),
             },
         )
         return True

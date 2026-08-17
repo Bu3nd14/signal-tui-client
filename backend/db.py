@@ -19,7 +19,7 @@ CACHE_RETENTION_DAYS = 3
 
 # Current schema version, persisted via ``PRAGMA user_version`` so the legacy
 # migration below is skipped once the schema is known to be up to date.
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 # ─── Message cache (SQLite) ─────────────────────────────────────────────────
@@ -71,6 +71,15 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
     if "msg_id" not in columns:
         conn.execute("ALTER TABLE messages ADD COLUMN msg_id TEXT")
 
+    # Keep enough reply metadata to retry a failed message after a restart and,
+    # in particular, retain Telegram's server message id for reply_to.
+    if "quote_timestamp" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN quote_timestamp INTEGER")
+    if "quote_author" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN quote_author TEXT")
+    if "reply_to_message_id" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT")
+
     # Rebuild the index so it is namespaced by protocol.  Dropping and
     # re-creating is idempotent on both migrated and fresh tables.
     conn.execute("DROP INDEX IF EXISTS idx_messages_contact")
@@ -108,7 +117,11 @@ def _init_db():
                     attachment_info TEXT,
                     attachment_id TEXT,
                     read INTEGER DEFAULT 0,
-                    status TEXT DEFAULT 'read'
+                    status TEXT DEFAULT 'read',
+                    msg_id TEXT,
+                    quote_timestamp INTEGER,
+                    quote_author TEXT,
+                    reply_to_message_id TEXT
                 )
             """)
             # Upgrade a pre-existing legacy DB in place (idempotent).
@@ -158,6 +171,9 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
                 "msg_type": row["msg_type"],
                 "attachment_info": row["attachment_info"],
                 "attachment_id": row["attachment_id"],
+                "quote_timestamp": row["quote_timestamp"],
+                "quote_author": row["quote_author"],
+                "reply_to_message_id": row["reply_to_message_id"],
                 "read": bool(row["read"]),
                 "status": row["status"],
                 "protocol": row["protocol"],
@@ -179,6 +195,9 @@ def _add_message_to_cache(
     protocol: str = "signal",
     msg_id: str | None = None,
     status: str | None = None,
+    quote_timestamp: int | None = None,
+    quote_author: str | None = None,
+    reply_to_message_id: str | None = None,
 ):
     """Add a message to the SQLite cache (incremental INSERT).
     msg_type: "text", "image", "sticker", "attachment"
@@ -197,8 +216,8 @@ def _add_message_to_cache(
                 """INSERT INTO messages
                    (protocol, contact_number, text, is_mine, sender, timestamp,
                     quote_text, msg_type, attachment_info, attachment_id,
-                    read, status, msg_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     read, status, msg_id, quote_timestamp, quote_author, reply_to_message_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     protocol,
                     contact_number,
@@ -213,6 +232,9 @@ def _add_message_to_cache(
                     int(is_mine),
                     status or ("sent" if is_mine else "read"),
                     msg_id,
+                    quote_timestamp,
+                    quote_author,
+                    reply_to_message_id,
                 ),
             )
             conn.commit()

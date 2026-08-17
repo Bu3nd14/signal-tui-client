@@ -133,9 +133,10 @@ class TestSchemaVersioning:
 
         backend_mod._init_db()
 
-        assert _user_version(tmp_db) == 1
+        assert _user_version(tmp_db) == 2
         assert "protocol" in _table_columns(tmp_db)
         assert "msg_id" in _table_columns(tmp_db)
+        assert "reply_to_message_id" in _table_columns(tmp_db)
 
     def test_second_init_does_not_churn_index(self, tmp_db):
         """(a) la SECONDA ``_init_db()`` NON esegue DROP/CREATE INDEX."""
@@ -216,3 +217,21 @@ class TestSchemaVersioning:
         assert statistics.median(durations_ms) < 5.0, (
             f"_init_db median {statistics.median(durations_ms):.3f}ms >= 5ms"
         )
+
+    def test_reply_relationship_survives_cache_reload(self, tmp_db):
+        backend_mod._add_message_to_cache(
+            "42",
+            "reply",
+            True,
+            "You",
+            100,
+            protocol="telegram",
+            msg_id="99",
+            quote_text="original",
+            quote_timestamp=90,
+            quote_author="42",
+            reply_to_message_id="12",
+        )
+        message = backend_mod._load_cache(protocol="telegram")["42"][0]
+        assert message["reply_to_message_id"] == "12"
+        assert message["quote_timestamp"] == 90

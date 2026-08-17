@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from models import PROTOCOL_TELEGRAM
 from tui.events import EventHandlingMixin
 from tui.send import SendMixin
 from tui.unread_reply import UnreadReplyMixin
@@ -142,6 +143,67 @@ class TestRetryGuards:
         handler._transition_outgoing_status.assert_not_called()
         handler.run_worker.assert_not_called()
 
+    def test_retry_keeps_legacy_telegram_reply_failed_without_message_id(self):
+        contact = SimpleNamespace(
+            cache_key="telegram:42", protocol=PROTOCOL_TELEGRAM, id="42"
+        )
+        handler = _SendHandler(
+            contact,
+            [
+                {
+                    "is_mine": True,
+                    "timestamp": 1234,
+                    "text": "retry me",
+                    "status": "failed",
+                    "quote_timestamp": 1000,
+                }
+            ],
+        )
+
+        handler._retry_failed_message(1234, "retry me")
+
+        handler._status.assert_called_once_with(
+            "❌ Cannot retry a Telegram reply; original message ID is unavailable", 0
+        )
+        handler._transition_outgoing_status.assert_not_called()
+        handler.run_worker.assert_not_called()
+        assert handler._cache[contact.cache_key][0]["status"] == "failed"
+
+    def test_retry_telegram_reply_forwards_persisted_message_id_to_backend(self):
+        contact = SimpleNamespace(
+            cache_key="telegram:42", protocol=PROTOCOL_TELEGRAM, id="42"
+        )
+        handler = _SendHandler(
+            contact,
+            [
+                {
+                    "is_mine": True,
+                    "timestamp": 1234,
+                    "text": "retry me",
+                    "status": "failed",
+                    "quote_text": "original message",
+                    "quote_timestamp": 1000,
+                    "reply_to_message_id": "12",
+                }
+            ],
+        )
+        backend = MagicMock()
+        backend.send_message_sync.return_value = None
+        handler.manager = SimpleNamespace(get=MagicMock(return_value=backend))
+
+        handler._retry_failed_message(1234, "retry me")
+        worker = handler.run_worker.call_args.args[0]
+        worker()
+
+        backend.send_message_sync.assert_called_once_with(
+            "42",
+            "retry me",
+            quote_timestamp=1000,
+            quote_author="42",
+            quote_message="original message",
+            reply_to_message_id="12",
+        )
+
     def test_retry_returns_when_message_is_not_failed(self):
         contact = SimpleNamespace(
             cache_key="signal:Mario", protocol="signal", id="Mario"
@@ -218,6 +280,63 @@ class TestRetryGuards:
             protocol="signal",
             contact_id="Mario",
         )
+
+
+def test_telegram_send_result_updates_cache_and_optimistic_widget_message_id():
+    contact = SimpleNamespace(
+        cache_key="telegram:42", protocol=PROTOCOL_TELEGRAM, id="42"
+    )
+    timestamp = 1234
+    text = "telegram reply"
+    bubble = MessageWidget(text, timestamp=timestamp, is_mine=True, status="pending")
+    handler = _SendHandler(
+        contact,
+        [{"is_mine": True, "timestamp": timestamp, "text": text, "id": None}],
+    )
+    backend = MagicMock()
+    backend.send_message_sync.return_value = "77"
+    handler.manager = SimpleNamespace(get=MagicMock(return_value=backend))
+    handler.chat_log = SimpleNamespace(children=[bubble])
+    handler.call_from_thread = MagicMock(
+        side_effect=lambda callback, *args: callback(*args)
+    )
+    update_message_id = MagicMock(wraps=handler._update_outgoing_message_id)
+    handler._update_outgoing_message_id = update_message_id
+    reply_data = {"text": "original", "timestamp": 1000, "message_id": "12"}
+
+    handler._send_message_worker(
+        text,
+        timestamp,
+        reply_data,
+        protocol=PROTOCOL_TELEGRAM,
+        contact_id=contact.id,
+    )
+
+    backend.ingest_message.assert_called_once()
+    assert handler._cache[contact.cache_key][0]["id"] == "77"
+    assert bubble._message_id == "77"
+    update_message_id.assert_called_once_with(
+        PROTOCOL_TELEGRAM, contact.id, timestamp, text, "77"
+    )
+
+
+def test_telegram_message_id_update_keeps_cache_when_optimistic_widget_is_gone():
+    contact = SimpleNamespace(
+        cache_key="telegram:42", protocol=PROTOCOL_TELEGRAM, id="42"
+    )
+    handler = _SendHandler(
+        contact,
+        [{"is_mine": True, "timestamp": 1234, "text": "sent", "id": None}],
+    )
+    handler.call_from_thread = MagicMock(
+        side_effect=lambda callback, *args: callback(*args)
+    )
+
+    handler._update_outgoing_message_id(
+        PROTOCOL_TELEGRAM, contact.id, 1234, "sent", "77"
+    )
+
+    assert handler._cache[contact.cache_key][0]["id"] == "77"
 
 
 def test_send_without_backend_marks_optimistic_message_as_failed():

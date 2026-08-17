@@ -20,9 +20,15 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
+from models import (
+    PROTOCOL_SIGNAL,
+    PROTOCOL_TELEGRAM,
+    PROTOCOL_WHATSAPP,
+    ChatContact,
+    contact_cache_key,
+)
 from signal_tui import SignalTUI
-from ui_components import ImageWidget
+from ui_components import ImageWidget, MessageWidget
 
 
 def _make_message(text: str, ts: int, is_mine: bool = False) -> dict:
@@ -204,6 +210,55 @@ class TestRefreshChat:
         # All 3 messages are newer than max_seen=0, so all are added.
         assert len(added) == 3
         assert fake_chat_log.scrolled
+
+    def test_refresh_chat_preserves_telegram_message_id_in_widget_event(self):
+        app = SignalTUI()
+        contact = ChatContact(id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM)
+        app.selected_contact = contact
+        app._cache = {
+            contact.cache_key: [{**_make_message("telegram", ts=1), "id": "12345"}]
+        }
+        app._seen_timestamps = set()
+        app._seen_message_ids = set()
+        fake_chat_log = _FakeChatLog()
+
+        with patch.object(app, "query_one", return_value=fake_chat_log):
+            app._refresh_chat()
+
+        widget = next(
+            child
+            for child in fake_chat_log.children
+            if isinstance(child, MessageWidget)
+        )
+        events = []
+        widget.post_message = events.append
+        widget.on_click()
+
+        assert events[0].message_id == "12345"
+
+    def test_load_more_preserves_telegram_message_id_in_widget_event(self):
+        app = SignalTUI()
+        contact = ChatContact(id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM)
+        app.selected_contact = contact
+        app._cache = {
+            contact.cache_key: [{**_make_message("telegram", ts=1), "id": "12345"}]
+        }
+        app._status = MagicMock()
+        fake_chat_log = _FakeChatLog()
+
+        with patch.object(app, "query_one", return_value=fake_chat_log):
+            app._load_all_messages()
+
+        widget = next(
+            child
+            for child in fake_chat_log.children
+            if isinstance(child, MessageWidget)
+        )
+        events = []
+        widget.post_message = events.append
+        widget.on_click()
+
+        assert events[0].message_id == "12345"
 
 
 class TestLoadWorkerStaleness:

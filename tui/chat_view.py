@@ -42,6 +42,7 @@ class ChatViewMixin:
         sender: str = "",
         status: str = "sent",
         protocol: str | None = None,
+        message_id: str | None = None,
     ):
         """Add a message to the chat with correct alignment.
 
@@ -141,6 +142,7 @@ class ChatViewMixin:
                 status=status,
                 protocol=protocol or "",
                 sender_color=sender_color,
+                message_id=message_id,
             )
 
         chat_log.mount(widget)
@@ -156,6 +158,7 @@ class ChatViewMixin:
         status: str = "sent",
         protocol: str = "",
         is_group: bool = False,
+        message_id: str | None = None,
     ) -> Static:
         """Build a message widget without mounting it.
 
@@ -180,6 +183,7 @@ class ChatViewMixin:
             status=status,
             protocol=protocol,
             sender_color=sender_color,
+            message_id=message_id,
         )
 
     def _render_image_in_chat(
@@ -532,6 +536,7 @@ class ChatViewMixin:
         sender = msg.get("sender", "")
         status = msg.get("status", "sent" if is_mine else "read")
         ts = msg.get("timestamp", 0)
+        message_id = msg.get("id")
 
         widgets: list = []
         if quote_text:
@@ -566,6 +571,7 @@ class ChatViewMixin:
                     status=status,
                     protocol=protocol,
                     is_group=is_group,
+                    message_id=message_id,
                 )
             )
         return widgets
@@ -625,6 +631,7 @@ class ChatViewMixin:
                 timestamp=ts,
                 sender=sender,
                 status=status,
+                message_id=msg.get("id"),
             )
 
         self._loaded_all = True
@@ -704,6 +711,7 @@ class ChatViewMixin:
                     timestamp=ts,
                     sender=sender,
                     status=status,
+                    message_id=msg.get("id"),
                 )
                 new_count += 1
 

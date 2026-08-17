@@ -79,16 +79,18 @@ class BackendManager:
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> str:
         """Send a message via the backend for *protocol*."""
         backend = self._get_or_raise(protocol)
-        return await backend.send_message(
-            contact_id,
-            text,
-            quote_timestamp=quote_timestamp,
-            quote_author=quote_author,
-            quote_message=quote_message,
-        )
+        kwargs = {
+            "quote_timestamp": quote_timestamp,
+            "quote_author": quote_author,
+            "quote_message": quote_message,
+        }
+        if reply_to_message_id is not None:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        return await backend.send_message(contact_id, text, **kwargs)
 
     async def mark_read(self, protocol: str, contact_id: str) -> None:
         """Mark messages read via the backend for *protocol*."""

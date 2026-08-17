@@ -86,6 +86,13 @@ class TestMessageWidget:
         assert events[0].sender == "Mario"
         assert events[0].is_mine is False
 
+    def test_message_clicked_event_carries_protocol_message_id(self):
+        w = MessageWidget(text="Ciao", timestamp=1, message_id="42")
+        events = []
+        w.post_message = events.append
+        w.on_click()
+        assert events[0].message_id == "42"
+
     def test_blur_and_enter(self):
         w = MessageWidget(text="Ciao", timestamp=1, sender="Mario", protocol="signal")
         events = []

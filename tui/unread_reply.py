@@ -161,6 +161,8 @@ class UnreadReplyMixin:
             "sender": event.sender,
             "is_mine": event.is_mine,
         }
+        if event.message_id is not None:
+            self._reply_to["message_id"] = event.message_id
 
         # Highlight the clicked widget (find it by timestamp in the chat log)
         chat_log = self.chat_log

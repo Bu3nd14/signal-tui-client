@@ -147,15 +147,6 @@ separato, anche con batch vuoti.
 
 ---
 
-### #29 — Le reply Telegram sono visualizzate ma inviate come messaggi normali (`backends/telegram.py`, righe 333-378)
-
-I parametri della quote sono accettati ma la chiamata a `send_message` non passa
-`reply_to`. La UI cita il messaggio, mentre Telegram riceve un messaggio senza reply.
-
-**Fix suggerito:** risolvere l'id del messaggio quotato e passarlo come `reply_to`
-
----
-
 ### #30 — Reply Signal a un proprio messaggio usa l'autore della controparte (`tui/send.py`, righe 167-173)
 
 Per ogni reply il worker usa `contact.id` come `quote_author`. Quando il messaggio
@@ -269,3 +260,4 @@ strutturare il loop senza dipendere dall'ultimo elemento iterato.
 |---|-------------|----------------|
 | #22 | Il worker di invio poteva rileggere `selected_contact` e inviare alla chat sbagliata | `protocol` e `contact_id` vengono catturati al submit e passati al worker; aggiunti test di regressione |
 | #23 | L'invio ottimistico restava inviato e persistito dopo un errore di rete | Introdotti gli stati `pending`, `sent` e `failed`; DB, cache e UI sono aggiornati atomicamente. Il retry conserva destinatario e contenuto e riusa la riga esistente senza duplicarla. Fix validata. |
+| #29 | Le reply Telegram erano visualizzate ma inviate come messaggi normali | ID Telegram originale propagato e persistito, passato a Telethon come `reply_to`; reply senza ID bloccata esplicitamente senza fallback normale e supporto retry sicuro. |
