@@ -599,6 +599,7 @@ class WhatsAppBackend(ChatBackend):
             quote_timestamp=quote_timestamp,
             quote_author=quote_author,
             quote_message=quote_message,
+            reply_to_message_id=reply_to_message_id,
         )
 
     def send_message_sync(
@@ -625,6 +626,7 @@ class WhatsAppBackend(ChatBackend):
             quote_timestamp=quote_timestamp,
             quote_author=quote_author,
             quote_message=quote_message,
+            reply_to_message_id=reply_to_message_id,
         )
         if result is None:
             raise RuntimeError("WhatsApp API send failed / unreachable")

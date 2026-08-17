@@ -273,6 +273,7 @@ class WhatsAppRESTClient:
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> dict | None:
         """Send a message via WAHA ``/api/sendText``.
 
@@ -283,8 +284,8 @@ class WhatsAppRESTClient:
             "chatId": to,
             "text": text,
         }
-        if quote_message is not None:
-            payload["quotedMessage"] = quote_message
+        if reply_to_message_id is not None:
+            payload["reply_to"] = reply_to_message_id
         return self._request("POST", "/api/sendText", payload)
 
     def list_messages(self, chat_id: str, limit: int = 1) -> list[dict]:
