@@ -8,11 +8,12 @@ with ``-m "not integration"``.
 from unittest.mock import patch
 
 import pytest
+from textual import events
 from textual.containers import Vertical
-from textual.widgets import Input, Label, ListView, Static
+from textual.widgets import Label, ListView, Static
 
-from emoji_picker import EmojiPickerScreen
-from ui_components import MessageWidget
+from emoji_picker import EmojiCompletionWidget, EmojiPickerScreen, get_emoji_suggestions
+from ui_components import MessageTextArea, MessageWidget
 
 
 @pytest.mark.integration
@@ -111,9 +112,9 @@ async def test_send_message_mocked(app_for_test_with_mocks):
         # Select the first contact directly (selection UX is covered separately).
         app.selected_contact = app.contacts[0]
 
-        input_widget = app.query_one("#message-input", Input)
+        input_widget = app.query_one("#message-input", MessageTextArea)
         input_widget.focus()
-        input_widget.value = "Ciao!"
+        input_widget.text = "Ciao!"
 
         # Run the send worker synchronously so the backend call is deterministic.
         with patch.object(app, "run_worker", side_effect=lambda work, **kwargs: work()):
@@ -172,14 +173,68 @@ async def test_input_cleared_after_send(app_for_test):
 
         app.selected_contact = app.contacts[0]
 
-        input_widget = app.query_one("#message-input", Input)
+        input_widget = app.query_one("#message-input", MessageTextArea)
         input_widget.focus()
-        input_widget.value = "Ciao!"
+        input_widget.text = "Ciao!"
 
         await pilot.press("enter")
         await pilot.pause()
 
-        assert input_widget.value == ""
+        assert input_widget.text == ""
+
+
+@pytest.mark.integration
+async def test_message_text_area_paste_and_newline_shortcuts(app_for_test):
+    """The message editor accepts multiline paste and explicit newline shortcuts."""
+    async with app_for_test.run_test() as pilot:
+        editor = app_for_test.query_one("#message-input", MessageTextArea)
+        editor.focus()
+        await editor._on_paste(events.Paste("one\r\ntwo\rthree"))
+        assert editor.text == "one\ntwo\nthree"
+
+        await pilot.press("ctrl+j")
+        await pilot.press("shift+enter")
+        assert editor.text == "one\ntwo\nthree\n\n"
+
+
+@pytest.mark.integration
+async def test_multiline_message_is_sent_and_normalized(app_for_test_with_mocks):
+    """Enter sends multiline messages rather than inserting another newline."""
+    app, signal_backend = app_for_test_with_mocks
+    async with app.run_test() as pilot:
+        app.selected_contact = app.contacts[0]
+        editor = app.query_one("#message-input", MessageTextArea)
+        editor.focus()
+        editor.text = "first\r\nsecond\rthird"
+
+        with patch.object(app, "run_worker", side_effect=lambda work, **kwargs: work()):
+            await pilot.press("enter")
+
+        assert (
+            signal_backend.send_message_sync.call_args.args[1] == "first\nsecond\nthird"
+        )
+        assert editor.text == ""
+
+
+@pytest.mark.integration
+async def test_emoji_completion_keeps_enter_priority_over_send(app_for_test_with_mocks):
+    """Enter accepts an emoji completion before it submits the message."""
+    app, signal_backend = app_for_test_with_mocks
+    async with app.run_test() as pilot:
+        app.selected_contact = app.contacts[0]
+        editor = app.query_one("#message-input", MessageTextArea)
+        editor.focus()
+        editor.text = ":sm"
+        editor.move_cursor((0, len(editor.text)))
+        await pilot.press("i")
+        await pilot.pause()
+
+        completion = app.query_one("#emoji-completion", EmojiCompletionWidget)
+        assert completion.has_class("-visible")
+        await pilot.press("enter")
+
+        assert editor.text == f"{get_emoji_suggestions('smi')[0][0]} "
+        signal_backend.send_message_sync.assert_not_called()
 
 
 @pytest.mark.integration

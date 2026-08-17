@@ -209,7 +209,7 @@ Screen {
 
 #input-row {
     dock: bottom;
-    height: auto;
+    height: 3;
     margin: 1 0;
 }
 
@@ -230,8 +230,10 @@ Screen {
 
 #message-input {
     width: 1fr;
+    height: 3;
     margin: 0 1 0 0;
     border: tall $border;
+    overflow-y: auto;
 }
 
 Horizontal {

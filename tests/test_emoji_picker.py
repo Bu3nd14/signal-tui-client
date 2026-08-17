@@ -258,7 +258,10 @@ class TestEmojiCompletionWidget:
             widget._refresh_selection()
         second.add_class.assert_called_once_with("emoji-suggestion-selected")
 
-        input_widget = MagicMock(value="say :smi")
+        input_widget = MagicMock()
+        input_widget.text = "say :smi"
+        input_widget.cursor_location = (0, len(input_widget.text))
+        input_widget.replace.return_value.end_location = (0, 6)
         app = MagicMock()
         app.query_one.return_value = input_widget
         widget.hide_suggestions = MagicMock()
@@ -266,7 +269,8 @@ class TestEmojiCompletionWidget:
             EmojiCompletionWidget, "app", new_callable=PropertyMock, return_value=app
         ):
             widget._select_and_insert("😄")
-        assert input_widget.value == "say 😄 "
+        input_widget.replace.assert_called_once_with("😄 ", (0, 4), (0, 8))
+        input_widget.move_cursor.assert_called_once_with((0, 6))
         input_widget.focus.assert_called_once()
 
     def test_picker_focus_sections_and_grid_key_fallbacks(self):

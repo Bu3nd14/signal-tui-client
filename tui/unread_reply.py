@@ -3,9 +3,10 @@
 import logging
 
 from textual.containers import Horizontal
-from textual.widgets import Input, Static
+from textual.widgets import Static
 
 from ui_components import (
+    MessageTextArea,
     MessageWidget,
 )
 
@@ -180,6 +181,6 @@ class UnreadReplyMixin:
         # Return focus to the message input so the user can start typing
         # the reply immediately.
         try:
-            self.query_one("#message-input", Input).focus()
+            self.query_one("#message-input", MessageTextArea).focus()
         except Exception as _e:
             logger.debug("Failed to focus message input", exc_info=True)

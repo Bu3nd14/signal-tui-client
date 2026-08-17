@@ -21,7 +21,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Static
+from textual.widgets import Button, Input, Static, TextArea
 
 from emoji_data import PREDEFINED_CATEGORIES
 
@@ -664,19 +664,31 @@ class EmojiCompletionWidget(Vertical):
         # Walk up to the app and insert the emoji into the message input
         app = self.app
         try:
-            msg_input = app.query_one("#message-input", Input)
-            value = msg_input.value
-            last_colon = value.rfind(":")
-            if last_colon >= 0:
-                new_value = value[:last_colon] + emoji_char + " "
-                msg_input.value = new_value
-                msg_input.cursor_position = len(new_value)
+            msg_input = app.query_one("#message-input", TextArea)
+            line, column = msg_input.cursor_location
+            lines = msg_input.text.split("\n")
+            before_cursor = "\n".join(lines[:line])
+            if line:
+                before_cursor += "\n"
+            before_cursor += lines[line][:column]
+            alias_start = before_cursor.rfind(":")
+            if alias_start >= 0:
+                start_line = before_cursor.count("\n", 0, alias_start)
+                start_column = alias_start - (
+                    before_cursor.rfind("\n", 0, alias_start) + 1
+                )
+                result = msg_input.replace(
+                    emoji_char + " ",
+                    (start_line, start_column),
+                    (line, column),
+                )
+                msg_input.move_cursor(result.end_location)
         except Exception as _e:
             logger.debug("Failed to insert emoji into input", exc_info=True)
         self.hide_suggestions()
         # Refocus the input
         try:
-            msg_input = app.query_one("#message-input", Input)
+            msg_input = app.query_one("#message-input", TextArea)
             msg_input.focus()
         except Exception as _e:
             logger.debug("Failed to refocus message input", exc_info=True)

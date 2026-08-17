@@ -2,12 +2,13 @@
 
 import logging
 
-from textual.widgets import Input, Label, ListItem, ListView
+from textual.widgets import Label, ListItem, ListView
 
 from models import (
     ChatContact,
     protocol_emoji,
 )
+from ui_components import MessageTextArea
 
 logger = logging.getLogger(__name__)
 
@@ -447,7 +448,7 @@ class ContactListMixin:
         # Return focus to the message input so the user can start typing
         # immediately after selecting a contact.
         try:
-            self.query_one("#message-input", Input).focus()
+            self.query_one("#message-input", MessageTextArea).focus()
         except Exception as _e:
             logger.debug("Failed to focus message input", exc_info=True)
 

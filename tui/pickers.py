@@ -2,7 +2,7 @@
 
 import logging
 
-from textual.widgets import Input
+from textual.widgets import TextArea
 
 from contact_picker import ContactPickerScreen
 from device_link_screen import DeviceLinkPickerScreen
@@ -13,6 +13,7 @@ from emoji_picker import (
 from models import (
     ChatContact,
 )
+from ui_components import MessageTextArea
 
 logger = logging.getLogger("signal_tui")
 
@@ -28,13 +29,8 @@ class PickerMixin:
         def _on_emoji_selected(emoji_char: str | None) -> None:
             if emoji_char:
                 # Insert the selected emoji into the message input
-                msg_input = self.query_one("#message-input", Input)
-                current = msg_input.value
-                cursor = msg_input.cursor_position
-                # Insert at cursor position
-                new_value = current[:cursor] + emoji_char + current[cursor:]
-                msg_input.value = new_value
-                msg_input.cursor_position = cursor + len(emoji_char)
+                msg_input = self.query_one("#message-input", MessageTextArea)
+                msg_input.insert_at_cursor(emoji_char)
                 msg_input.focus()
             # Refresh chat to show any messages that arrived while the picker was open
             self._refresh_chat()
@@ -103,12 +99,18 @@ class PickerMixin:
             logger.debug("Emoji completion not found", exc_info=True)
             return False
 
-    def on_input_changed(self, event: Input.Changed) -> None:
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
         """Handle input changes for emoji alias auto-completion."""
-        if event.input.id != "message-input":
+        if event.text_area.id != "message-input":
             return
 
-        value = event.value
+        msg_input = event.text_area
+        line, column = msg_input.cursor_location
+        lines = msg_input.text.split("\n")
+        value = "\n".join(lines[:line])
+        if line:
+            value += "\n"
+        value += lines[line][:column]
         # Check if the user is typing an emoji alias (starts with ':')
         if ":" in value:
             # Find the last ':' that starts an alias
@@ -117,7 +119,7 @@ class PickerMixin:
                 # Check if there's a closing ':' after it
                 rest = value[last_colon + 1 :]
                 # If no space after the colon, it might be an incomplete alias
-                if " " not in rest and "/" not in rest:
+                if not any(char.isspace() or char == "/" for char in rest):
                     prefix = rest
                     # Try to show suggestions
                     completion = self.query_one(
@@ -144,16 +146,8 @@ class PickerMixin:
         if not completion.selected_emoji:
             return
 
-        msg_input = self.query_one("#message-input", Input)
-        value = msg_input.value
-        last_colon = value.rfind(":")
-        if last_colon < 0:
-            return
-
-        # Replace from the last ':' to the end with the emoji
-        new_value = value[:last_colon] + completion.selected_emoji + " "
-        msg_input.value = new_value
-        msg_input.cursor_position = len(new_value)
+        msg_input = self.query_one("#message-input", MessageTextArea)
+        msg_input.replace_completion(completion.selected_emoji)
         completion.hide_suggestions()
         msg_input.focus()
 
