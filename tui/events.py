@@ -184,11 +184,13 @@ class EventHandlingMixin:
             }
             updated = process(envelope)
         else:
-            # Generic backend (WhatsApp) uses a message-ids receipt payload.
+            # Generic backend (WhatsApp/Telegram) uses a message-ids receipt
+            # payload scoped to the contact that generated the receipt.
             updated = process(
                 {
                     "message_ids": event.payload.get("message_ids", []),
                     "is_read": event.payload.get("is_read", False),
+                    "contact_id": event.contact_id,
                 }
             )
         if not updated:
@@ -198,9 +200,15 @@ class EventHandlingMixin:
         ui_key = contact_cache_key(event.protocol, event.contact_id)
         ui_msgs = self._cache.get(ui_key)
         if ui_msgs is not None:
+            by_id = {str(m.get("id", "")): m for m in ui_msgs if m.get("id")}
             by_ts = {m.get("timestamp"): m for m in ui_msgs}
             for msg in updated:
-                target = by_ts.get(msg.get("timestamp"))
+                target = None
+                mid = msg.get("id")
+                if mid is not None:
+                    target = by_id.get(str(mid))
+                if target is None:
+                    target = by_ts.get(msg.get("timestamp"))
                 if target is not None:
                     target["status"] = msg.get("status", target.get("status", "sent"))
 
