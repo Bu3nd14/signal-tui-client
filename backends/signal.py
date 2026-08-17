@@ -666,6 +666,8 @@ class SignalBackend(ChatBackend):
             msg_type=data["msg_type"],
             attachment_info=data["attachment_info"],
             attachment_id=data.get("attachment_id"),
+            status=data.get("status"),
+            protocol=data.get("protocol", PROTOCOL_SIGNAL),
         )
 
     def ingest_message(
@@ -704,7 +706,9 @@ class SignalBackend(ChatBackend):
                 "attachment_info": data["attachment_info"],
                 "attachment_id": data.get("attachment_id"),
                 "read": is_mine,
-                "status": "sent" if is_mine else "read",
+                "status": data.get("status", "sent" if is_mine else "read"),
+                "quote_timestamp": data.get("quote_timestamp"),
+                "quote_author": data.get("quote_author"),
             },
         )
         return True

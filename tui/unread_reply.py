@@ -131,6 +131,10 @@ class UnreadReplyMixin:
             )
             return
 
+        if event.is_mine and event.status == "failed":
+            self._retry_failed_message(event.timestamp, event.text)
+            return
+
         # If clicking the same message, cancel the reply
         if (
             self._reply_to is not None

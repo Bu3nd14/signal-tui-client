@@ -61,6 +61,11 @@ def _prepare_send(app: SignalTUI) -> None:
     app.query_one = MagicMock(side_effect=Exception("no DOM in test"))
     app._add_message = MagicMock()
     app._cancel_reply = MagicMock()
+    app._status = MagicMock()
+    app._update_message_widgets_status = MagicMock()
+    app.call_from_thread = MagicMock(
+        side_effect=lambda callback, *args, **kwargs: callback(*args, **kwargs)
+    )
     app.run_worker = MagicMock()
     app._reply_to = None
     app._cache = {}
@@ -354,3 +359,32 @@ class TestSendPersistOffthread:
             quote_message=None,
         )
         whatsapp.send_message_sync.assert_not_called()
+
+    def test_failed_send_is_persisted_and_retry_reuses_the_same_message(self, tmp_db):
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol="signal"
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+        app.signal_backend.send_message_sync = MagicMock(
+            side_effect=RuntimeError("offline")
+        )
+
+        _send_text(app, "ciao")
+        _run_workers(app)
+
+        assert _db_rows(tmp_db)[0]["status"] == "failed"
+        assert app._cache[contact.cache_key][0]["status"] == "failed"
+        assert app.signal_backend.cache[contact.id][0]["status"] == "failed"
+
+        app.signal_backend.send_message_sync = MagicMock(return_value="ok")
+        ts = app._cache[contact.cache_key][0]["timestamp"]
+        app.run_worker.reset_mock()
+        app._retry_failed_message(ts, "ciao")
+        _run_workers(app)
+
+        assert len(_db_rows(tmp_db)) == 1
+        assert len(app._cache[contact.cache_key]) == 1
+        assert app._cache[contact.cache_key][0]["status"] == "sent"

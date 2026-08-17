@@ -117,8 +117,8 @@ class ChatMessage:
     attachment_id:
         Backend-specific attachment id for resolving the file on disk.
     status:
-        Delivery status for sent messages: ``"sent"``, ``"delivered"``,
-        ``"read"``.
+        Delivery status for sent messages: ``"pending"``, ``"failed"``,
+        ``"sent"``, ``"delivered"``, ``"read"``.
     """
 
     id: str

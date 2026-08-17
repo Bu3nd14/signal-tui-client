@@ -596,7 +596,13 @@ class TelegramBackend(ChatBackend):
                     str(i) for i in ids
                 }:
                     old = msg.get("status", "sent")
-                    rank = {"sent": 0, "delivered": 1, "read": 2}
+                    rank = {
+                        "pending": 0,
+                        "failed": 0,
+                        "sent": 1,
+                        "delivered": 2,
+                        "read": 3,
+                    }
                     if old != target and rank.get(target, 0) > rank.get(old, 0):
                         msg["status"] = target
                         updated.append(msg)
@@ -653,6 +659,7 @@ class TelegramBackend(ChatBackend):
             attachment_id=data.get("attachment_id"),
             protocol=PROTOCOL_TELEGRAM,
             msg_id=data.get("id"),
+            status=data.get("status"),
         )
 
     def ingest_message(
@@ -724,7 +731,9 @@ class TelegramBackend(ChatBackend):
                 "attachment_info": data.get("attachment_info"),
                 "attachment_id": data.get("attachment_id"),
                 "read": data.get("is_mine", False),  # incoming = unread
-                "status": "sent" if data.get("is_mine") else "read",
+                "status": data.get("status", "sent" if data.get("is_mine") else "read"),
+                "quote_timestamp": data.get("quote_timestamp"),
+                "quote_author": data.get("quote_author"),
             }
         )
 
