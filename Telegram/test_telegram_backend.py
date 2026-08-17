@@ -234,7 +234,7 @@ class TestMessageMapping:
         )
         evt = backend._message_to_chat_event(msg)
         assert evt.payload["is_mine"] is True
-        assert evt.payload["status"] == "sent"
+        assert "status" not in evt.payload
 
     def test_message_photo_type(self):
         backend = _make_backend()

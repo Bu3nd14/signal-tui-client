@@ -19,6 +19,7 @@ from .db import (
     _add_message_to_cache,
     _count_unread,
     _dedup_messages,
+    _dedup_messages_by_id,
     _ensure_cache_dir,
     _init_db,
     _load_cache,
@@ -27,6 +28,7 @@ from .db import (
     _prune_cache,
     _update_message_id,
     _update_message_status,
+    _update_message_status_by_id,
 )
 from .download import (
     _DOWNLOAD_SERVER,
@@ -97,6 +99,7 @@ __all__ = [
     "_clean_download_dir",
     "_count_unread",
     "_dedup_messages",
+    "_dedup_messages_by_id",
     "_ensure_cache_dir",
     "_ensure_download_server",
     "_find_signal_cli",
@@ -116,6 +119,7 @@ __all__ = [
     "_serve_file_path",
     "_update_message_id",
     "_update_message_status",
+    "_update_message_status_by_id",
     "ensure_webhook_server",
     "find_signal_cli",
     "get_attachment_path",

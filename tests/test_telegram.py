@@ -155,7 +155,6 @@ class TestTelegramMessages:
             "msg_type": "text",
             "attachment_info": None,
             "attachment_id": None,
-            "status": "sent",
             "protocol": PROTOCOL_TELEGRAM,
             "contact": contact,
         }
@@ -203,12 +202,16 @@ class TestTelegramMessages:
             ]
         }
         persist_status = MagicMock()
+        persist_status_by_id = MagicMock()
         monkeypatch.setattr("backend._update_message_status", persist_status)
+        monkeypatch.setattr(
+            "backend._update_message_status_by_id", persist_status_by_id
+        )
 
         assert backend.process_receipt({}) == []
-        assert [
-            item["id"] for item in backend.process_receipt({"message_ids": ["1", "2"]})
-        ] == ["1"]
+        updated = backend.process_receipt({"message_ids": ["1", "2"]})
+        assert [item["id"] for item in updated] == ["1"]
+        assert updated[0]["status"] == "delivered"
         assert backend.cache["42"][0]["status"] == "delivered"
         assert (
             backend.process_receipt({"message_ids": ["1"], "is_read": True})[0][
@@ -216,7 +219,8 @@ class TestTelegramMessages:
             ]
             == "read"
         )
-        assert persist_status.call_count == 2
+        assert persist_status.call_count == 0
+        assert persist_status_by_id.call_count == 2
 
         persisted = MagicMock()
         updated_id = MagicMock()

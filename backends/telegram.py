@@ -272,11 +272,77 @@ class TelegramBackend(ChatBackend):
             cc = self._entity_to_contact(dialog.entity)
             if dialog.message and dialog.message.date:
                 cc.last_message_ts = int(dialog.message.date.timestamp() * 1000)
+            read_max_id = getattr(dialog, "read_outbox_max_id", None)
+            if read_max_id:
+                cc.extras["read_outbox_max_id"] = int(read_max_id)
             contacts.append(cc)
             by_id[dialog.entity.id] = cc
 
         self.contacts = contacts
         self._contacts_by_id = by_id
+        self._reconcile_read_state()
+
+    def _reconcile_read_state(self) -> None:
+        """Mark outgoing messages as read based on server ``read_outbox_max_id``.
+
+        Called after contacts/dialogs are loaded so that receipts received while
+        the TUI was closed are not lost.  Scoped per contact; never downgrades.
+        """
+        from backend import _update_message_status_by_id
+
+        rank = {
+            "pending": 0,
+            "failed": 0,
+            "sent": 1,
+            "delivered": 2,
+            "read": 3,
+        }
+        for contact in self.contacts:
+            max_id = contact.extras.get("read_outbox_max_id")
+            if not max_id:
+                continue
+            try:
+                max_id_int = int(max_id)
+            except (ValueError, TypeError):
+                continue
+
+            updated_ids: list[str] = []
+            for msg in self.cache.get(contact.id, []):
+                if not msg.get("is_mine"):
+                    continue
+                mid = msg.get("id")
+                if mid is None:
+                    continue
+                try:
+                    mid_int = int(mid)
+                except (ValueError, TypeError):
+                    continue
+                if mid_int <= max_id_int:
+                    old = msg.get("status", "sent")
+                    if rank.get("read", 0) > rank.get(old, 0):
+                        msg["status"] = "read"
+                        updated_ids.append(str(mid))
+                        try:
+                            _update_message_status_by_id(
+                                str(mid),
+                                "read",
+                                protocol=PROTOCOL_TELEGRAM,
+                                contact_number=contact.id,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Telegram: _update_message_status_by_id failed"
+                            )
+
+            if updated_ids:
+                self._events.put(
+                    ChatEvent(
+                        type="receipt",
+                        protocol=PROTOCOL_TELEGRAM,
+                        contact_id=contact.id,
+                        payload={"message_ids": updated_ids, "is_read": True},
+                    )
+                )
 
     def fetch_recent_history(self, limit: int = 20) -> int:
         """Fetch recent messages for all known contacts from Telethon.
@@ -526,7 +592,6 @@ class TelegramBackend(ChatBackend):
             "msg_type": msg_type,
             "attachment_info": attachment_info,
             "attachment_id": att_id,
-            "status": "sent",
             "protocol": PROTOCOL_TELEGRAM,
             "contact": self._identify_contact(chat_id),
         }
@@ -539,53 +604,36 @@ class TelegramBackend(ChatBackend):
         )
 
     async def _handle_read_receipt(self, update: Any) -> None:
-        """Handle ``UpdateReadHistoryOutbox`` — marks sent messages as read."""
+        """Translate ``UpdateReadHistoryOutbox`` into a generic receipt event.
+
+        Does not mutate caches or SQLite directly: that is the responsibility
+        of ``process_receipt`` on the UI thread.
+        """
         from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
-        # Determine the peer's ID
         peer = update.peer
         if isinstance(peer, PeerUser):
             contact_id = str(peer.user_id)
         elif isinstance(peer, PeerChat):
-            contact_id = str(peer.chat_id)
+            # Match the convention used by Message.chat_id for legacy groups.
+            contact_id = str(-peer.chat_id)
         elif isinstance(peer, PeerChannel):
-            contact_id = str(peer.channel_id)
+            # Match the convention used by Message.chat_id for channels.
+            contact_id = str(-1000000000000 - peer.channel_id)
         else:
             return
 
         max_id = update.max_id
         logger.info("Telegram read receipt: contact=%s max_id=%s", contact_id, max_id)
 
-        # Update in-memory cache status
-        updated: list[dict] = []
+        # Resolve which messages belong to this contact and are <= max_id.
+        message_ids: list[str] = []
         for msg in self.cache.get(contact_id, []):
             mid = msg.get("id")
-            if (
-                mid
-                and int(mid) <= max_id
-                and msg.get("is_mine")
-                and msg.get("status") != "read"
-            ):
-                msg["status"] = "read"
-                updated.append(msg)
+            if mid and int(mid) <= max_id and msg.get("is_mine"):
+                message_ids.append(str(mid))
 
-        if updated:
-            # Persist to SQLite
-            try:
-                from backend import _update_message_status
-
-                for msg in updated:
-                    _update_message_status(
-                        msg["timestamp"],
-                        "read",
-                        protocol=PROTOCOL_TELEGRAM,
-                        contact_number=contact_id,
-                    )
-            except Exception:
-                logger.exception("Telegram: _update_message_status failed")
-
-            # Enqueue receipt event for the TUI (matches generic pattern)
-            message_ids = [msg.get("id") for msg in updated if msg.get("id")]
+        if message_ids:
             self._events.put(
                 ChatEvent(
                     type="receipt",
@@ -598,45 +646,66 @@ class TelegramBackend(ChatBackend):
     # ─── poll_once (queue drain) ───────────────────────────────────────────
 
     def process_receipt(self, envelope: dict) -> list[dict]:
-        """Handle a receipt batch against the in-memory cache.
+        """Handle a receipt batch: the only mutator for Telegram receipts.
 
-        Updates ``status`` for sent messages matching the reported ids.
-        Follows the same pattern as WhatsApp's ``process_receipt``.
+        Matches messages by their stable ``msg_id`` within the chat specified
+        by ``envelope["contact_id"]`` (if provided), advances the status with
+        a rank guard (pending/failed < sent < delivered < read), persists the
+        change via ``_update_message_status_by_id``, and returns the updated
+        entries so the UI can refresh its own cache and widgets.
         """
         ids = envelope.get("message_ids") or []
         if not ids:
             return []
         is_read = bool(envelope.get("is_read"))
         target = "read" if is_read else "delivered"
-        updated: list[dict] = []
-        to_persist: list[tuple[str, dict]] = []
-        for contact_id, msgs in self.cache.items():
-            for msg in msgs:
-                if msg.get("is_mine") and str(msg.get("id", "")) in {
-                    str(i) for i in ids
-                }:
-                    old = msg.get("status", "sent")
-                    rank = {
-                        "pending": 0,
-                        "failed": 0,
-                        "sent": 1,
-                        "delivered": 2,
-                        "read": 3,
-                    }
-                    if old != target and rank.get(target, 0) > rank.get(old, 0):
-                        msg["status"] = target
-                        updated.append(msg)
-                        to_persist.append((contact_id, msg))
-        if to_persist:
-            from backend import _update_message_status
+        rank = {
+            "pending": 0,
+            "failed": 0,
+            "sent": 1,
+            "delivered": 2,
+            "read": 3,
+        }
+        target_rank = rank.get(target, 0)
+        id_set = {str(i) for i in ids}
+        scoped_contact = envelope.get("contact_id")
 
-            for contact_id, msg in to_persist:
-                _update_message_status(
-                    msg["timestamp"],
-                    msg["status"],
-                    protocol=PROTOCOL_TELEGRAM,
-                    contact_number=contact_id,
-                )
+        updated: list[dict] = []
+        contacts_to_scan = [scoped_contact] if scoped_contact else self.cache.keys()
+        for contact_id in contacts_to_scan:
+            if contact_id not in self.cache:
+                continue
+            for msg in self.cache.get(contact_id, []):
+                if not msg.get("is_mine"):
+                    continue
+                mid = str(msg.get("id", ""))
+                if mid not in id_set:
+                    continue
+                old = msg.get("status", "sent")
+                if target_rank > rank.get(old, 0):
+                    msg["status"] = target
+                    updated.append(
+                        {
+                            "id": mid,
+                            "timestamp": msg.get("timestamp", 0),
+                            "status": target,
+                            "text": msg.get("text", ""),
+                            "is_mine": True,
+                        }
+                    )
+                    try:
+                        from backend import _update_message_status_by_id
+
+                        _update_message_status_by_id(
+                            mid,
+                            target,
+                            protocol=PROTOCOL_TELEGRAM,
+                            contact_number=contact_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Telegram: _update_message_status_by_id failed"
+                        )
         return updated
 
     # ─── poll_once (queue drain) ───────────────────────────────────────────
@@ -658,9 +727,14 @@ class TelegramBackend(ChatBackend):
         try:
             from backend import _load_cache as _load_sqlite_cache
 
-            return _load_sqlite_cache(protocol=PROTOCOL_TELEGRAM)
+            cache = _load_sqlite_cache(protocol=PROTOCOL_TELEGRAM)
+            self._seen_msg_ids = {
+                str(m.get("id")) for msgs in cache.values() for m in msgs if m.get("id")
+            }
+            return cache
         except Exception:
             logger.exception("Telegram: failed to load protocol cache")
+            self._seen_msg_ids = set()
             return {}
 
     def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
@@ -699,26 +773,23 @@ class TelegramBackend(ChatBackend):
         from backend import _update_message_id
 
         mid = data.get("id")
-        if mid and mid in self._seen_msg_ids:
-            return False
-        if mid:
-            self._seen_msg_ids.add(mid)
-
-        # Dedup by (contact, text, ts) within a small window.
-        # If the existing entry has no id and the new one does, upgrade it.
-        # The optimistic timestamp is KEPT (not replaced with the echo's): the
-        # UI cache, the backend cache and SQLite must keep the SAME timestamp,
-        # otherwise the next backend-cache reload (e.g. Ctrl+L reconnect) seeds
-        # the old client ts and `_on_backend_ready` re-adds the sent message
-        # (exact-ts identity mismatch) → doubled "sent" messages in UI.
         text = data.get("text", "")
-        for m in self.cache.get(contact_id, []):
-            if (
-                m.get("text") == text
-                and abs(int(m.get("timestamp", 0)) - ts) <= _INCOMING_DEDUP_WINDOW_MS
-            ):
-                if mid and not m.get("id"):
+
+        # (1) Cross-session dedup by stable msg_id.  Never touch status on hit.
+        if mid:
+            if mid in self._seen_msg_ids:
+                return False
+            for m in self.cache.get(contact_id, []):
+                if (
+                    not m.get("id")
+                    and m.get("text") == text
+                    and abs(int(m.get("timestamp", 0)) - ts)
+                    <= _INCOMING_DEDUP_WINDOW_MS
+                ):
+                    # Echo of an optimistic message: attach the real id, keep
+                    # the original optimistic timestamp and status intact.
                     m["id"] = mid
+                    self._seen_msg_ids.add(mid)
                     try:
                         _update_message_id(
                             contact_id,
@@ -730,7 +801,17 @@ class TelegramBackend(ChatBackend):
                         )
                     except Exception:
                         logger.exception("Telegram: _update_message_id failed")
-                return False
+                    return False
+            self._seen_msg_ids.add(mid)
+        else:
+            # (2) Fallback dedup for id-less optimistic rows only.
+            for m in self.cache.get(contact_id, []):
+                if (
+                    m.get("text") == text
+                    and abs(int(m.get("timestamp", 0)) - ts)
+                    <= _INCOMING_DEDUP_WINDOW_MS
+                ):
+                    return False
 
         # Persist to SQLite (same pattern as Signal/WhatsApp backends)
         if persist:

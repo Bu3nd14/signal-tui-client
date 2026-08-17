@@ -138,8 +138,12 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
     (e.g. ``"whatsapp"``), so each backend seeds its in-memory cache with only
     its own messages.  ``None`` (default) loads everything, preserving the
     legacy behaviour.
+
+    Also runs an idempotent cross-session dedup by ``msg_id`` so protocol
+    backends do not re-ingest duplicates after a restart.
     """
     _init_db()
+    _dedup_messages_by_id()
     with _DB_LOCK:
         conn = sqlite3.connect(_backend.DB_FILE)
         try:
@@ -379,6 +383,95 @@ def _update_message_status(
             )
             conn.commit()
             return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+def _update_message_status_by_id(
+    msg_id: str,
+    status: str,
+    protocol: str,
+    contact_number: str | None = None,
+) -> bool:
+    """Update a message status by its stable ``msg_id``.
+
+    Like ``_update_message_status`` but keyed by the per-message ``msg_id``
+    instead of the optimistic timestamp.  Used by the Telegram backend when a
+    server read/delivery receipt identifies messages by id.  The optional
+    ``contact_number`` scopes the update further when the same id could belong
+    to different chats.
+    """
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            where = "protocol = ? AND msg_id = ?"
+            params: list = [protocol, msg_id]
+            if contact_number is not None:
+                where += " AND contact_number = ?"
+                params.append(contact_number)
+            cursor = conn.execute(
+                "UPDATE messages SET status = ? WHERE "
+                + where
+                + " AND CASE status WHEN 'pending' THEN 0 WHEN 'failed' THEN 0 "
+                "WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END "
+                "<= CASE ? WHEN 'pending' THEN 0 WHEN 'failed' THEN 0 WHEN 'sent' THEN 1 "
+                "WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END",
+                [status, *params, status],
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+def _dedup_messages_by_id() -> int:
+    """Remove duplicate rows with the same ``(protocol, contact_number, msg_id, text)``.
+
+    When duplicate rows exist (e.g. an optimistic client-side row plus the
+    server-echo row fetched at startup), keep the one with the highest status
+    rank so a ``read`` receipt is never lost in favour of a ``sent`` duplicate.
+    ``text`` is part of the dedup key because some protocols (WhatsApp) split a
+    single incoming message into multiple cached rows (one per attachment) that
+    share the same ``msg_id`` but have different text.  Idempotent: running it
+    twice removes no additional rows.
+
+    Returns the number of rows removed.
+    """
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            before = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            # CTE: for every (protocol, contact_number, msg_id, text) group,
+            # order by status rank descending and rowid ascending, then delete
+            # every row past the first one.  This keeps the highest-status row
+            # and breaks ties deterministically by the smallest rowid.
+            conn.execute("""
+                DELETE FROM messages
+                WHERE rowid IN (
+                    SELECT rowid FROM (
+                        SELECT
+                            rowid,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY protocol, contact_number, msg_id, text
+                                ORDER BY
+                                    CASE status
+                                    WHEN 'pending' THEN 0 WHEN 'failed' THEN 0
+                                    WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2
+                                    WHEN 'read' THEN 3 ELSE 0
+                                    END DESC,
+                                    rowid ASC
+                            ) AS rn
+                        FROM messages
+                        WHERE msg_id IS NOT NULL AND msg_id != ''
+                    )
+                    WHERE rn > 1
+                )
+            """)
+            conn.commit()
+            after = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            return before - after
         finally:
             conn.close()
 
