@@ -290,6 +290,7 @@ class SignalBackend(ChatBackend):
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> str:
         """Send *text* to *contact_id*; returns the client timestamp (ms)."""
         return await asyncio.to_thread(
@@ -308,6 +309,7 @@ class SignalBackend(ChatBackend):
         quote_timestamp: int | None,
         quote_author: str | None,
         quote_message: str | None,
+        reply_to_message_id: str | None = None,
     ) -> str:
         ts = int(time.time() * 1000)
         if self._use_daemon and self._rpc:
@@ -338,6 +340,7 @@ class SignalBackend(ChatBackend):
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> str:
         """Synchronous send, for use from the TUI's sync worker threads.
 
@@ -668,6 +671,9 @@ class SignalBackend(ChatBackend):
             attachment_id=data.get("attachment_id"),
             status=data.get("status"),
             protocol=data.get("protocol", PROTOCOL_SIGNAL),
+            quote_timestamp=data.get("quote_timestamp"),
+            quote_author=data.get("quote_author"),
+            reply_to_message_id=data.get("reply_to_message_id"),
         )
 
     def ingest_message(
@@ -709,6 +715,7 @@ class SignalBackend(ChatBackend):
                 "status": data.get("status", "sent" if is_mine else "read"),
                 "quote_timestamp": data.get("quote_timestamp"),
                 "quote_author": data.get("quote_author"),
+                "reply_to_message_id": data.get("reply_to_message_id"),
             },
         )
         return True

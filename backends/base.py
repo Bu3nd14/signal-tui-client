@@ -57,6 +57,7 @@ class ChatBackend(ABC):
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> str:
         """Send *text* to *contact_id*; return the message id/timestamp.
 

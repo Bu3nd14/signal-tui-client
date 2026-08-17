@@ -574,6 +574,34 @@ class TestBackendManager:
             quote_message=None,
         )
 
+    def test_send_message_forwards_reply_to_message_id(self):
+        manager = BackendManager()
+        backend = SignalBackend()
+        manager.register(backend)
+
+        from unittest.mock import AsyncMock
+
+        backend.send_message = AsyncMock(return_value="1234")
+
+        result = asyncio.run(
+            manager.send_message(
+                PROTOCOL_SIGNAL,
+                "+391234567890",
+                "ciao",
+                reply_to_message_id="42",
+            )
+        )
+
+        assert result == "1234"
+        backend.send_message.assert_awaited_once_with(
+            "+391234567890",
+            "ciao",
+            quote_timestamp=None,
+            quote_author=None,
+            quote_message=None,
+            reply_to_message_id="42",
+        )
+
     def test_send_message_unknown_protocol_raises(self):
         manager = BackendManager()
         with pytest.raises(KeyError):

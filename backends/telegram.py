@@ -337,6 +337,7 @@ class TelegramBackend(ChatBackend):
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> str:
         """Send a text message via Telethon (called from TUI thread)."""
         if self._loop is None or self._client is None:
@@ -347,8 +348,9 @@ class TelegramBackend(ChatBackend):
                 eid = int(contact_id)
             except (ValueError, TypeError):
                 raise ValueError(f"Invalid Telegram contact id: {contact_id}")
+            reply_to = self._validated_reply_to_message_id(reply_to_message_id)
             entity = await self._client.get_input_entity(eid)
-            msg = await self._client.send_message(entity, text)
+            msg = await self._client.send_message(entity, text, reply_to=reply_to)
             return str(msg.id)
 
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
@@ -364,6 +366,7 @@ class TelegramBackend(ChatBackend):
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
     ) -> str:
         """Synchronous send, for use from the TUI's sync callbacks."""
         if self._loop is None or self._client is None:
@@ -374,12 +377,26 @@ class TelegramBackend(ChatBackend):
                 eid = int(contact_id)
             except (ValueError, TypeError):
                 raise ValueError(f"Invalid Telegram contact id: {contact_id}")
+            reply_to = self._validated_reply_to_message_id(reply_to_message_id)
             entity = await self._client.get_input_entity(eid)
-            msg = await self._client.send_message(entity, text)
+            msg = await self._client.send_message(entity, text, reply_to=reply_to)
             return str(msg.id)
 
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
         return future.result(timeout=30)
+
+    @staticmethod
+    def _validated_reply_to_message_id(reply_to_message_id: str | None) -> int | None:
+        """Return a valid Telegram reply id, rejecting invalid reply targets."""
+        if reply_to_message_id is None:
+            return None
+        try:
+            reply_to = int(reply_to_message_id)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid Telegram reply message id") from exc
+        if isinstance(reply_to_message_id, bool) or reply_to <= 0:
+            raise ValueError("Invalid Telegram reply message id")
+        return reply_to
 
     def mark_read_sync(self, contact_id: str) -> None:
         """Synchronous mark-read — persists read status to SQLite."""
@@ -489,7 +506,9 @@ class TelegramBackend(ChatBackend):
 
         # Quote / reply
         quote_text: str | None = None
+        reply_to_message_id: str | None = None
         if msg.reply_to and getattr(msg.reply_to, "reply_to_msg_id", None):
+            reply_to_message_id = str(msg.reply_to.reply_to_msg_id)
             cached = self.cache.get(chat_id, [])
             for m in cached:
                 if str(m.get("id")) == str(msg.reply_to.reply_to_msg_id):
@@ -503,6 +522,7 @@ class TelegramBackend(ChatBackend):
             "sender": sender,
             "timestamp": ts,
             "quote_text": quote_text,
+            "reply_to_message_id": reply_to_message_id,
             "msg_type": msg_type,
             "attachment_info": attachment_info,
             "attachment_id": att_id,
@@ -660,6 +680,9 @@ class TelegramBackend(ChatBackend):
             protocol=PROTOCOL_TELEGRAM,
             msg_id=data.get("id"),
             status=data.get("status"),
+            quote_timestamp=data.get("quote_timestamp"),
+            quote_author=data.get("quote_author"),
+            reply_to_message_id=data.get("reply_to_message_id"),
         )
 
     def ingest_message(
@@ -734,6 +757,7 @@ class TelegramBackend(ChatBackend):
                 "status": data.get("status", "sent" if data.get("is_mine") else "read"),
                 "quote_timestamp": data.get("quote_timestamp"),
                 "quote_author": data.get("quote_author"),
+                "reply_to_message_id": data.get("reply_to_message_id"),
             }
         )
 

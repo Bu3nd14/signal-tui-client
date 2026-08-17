@@ -24,6 +24,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -33,7 +34,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import backend as backend_mod
 from backends import BackendManager, SignalBackend, WhatsAppBackend
-from models import PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP, ChatContact, ChatEvent
+from models import (
+    PROTOCOL_SIGNAL,
+    PROTOCOL_TELEGRAM,
+    PROTOCOL_WHATSAPP,
+    ChatContact,
+    ChatEvent,
+)
 from signal_tui import SignalTUI
 
 
@@ -122,6 +129,36 @@ class TestSendPersistOffthread:
         assert len(app._cache[contact.cache_key]) == 1
         # The persistence work was deferred to a worker.
         assert app.run_worker.call_count == 1
+
+    @pytest.mark.parametrize("message_id", [None, "not-a-message-id", "0"])
+    def test_telegram_reply_without_valid_message_id_keeps_input_and_reply(
+        self, message_id
+    ):
+        app = SignalTUI()
+        contact = ChatContact(id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM)
+        app.selected_contact = contact
+        _prepare_send(app)
+        app.manager = MagicMock()
+        reply_data = {
+            "text": "original message",
+            "timestamp": 1234,
+            "message_id": message_id,
+        }
+        app._reply_to = reply_data
+        input_widget = SimpleNamespace(value="telegram reply")
+        event = SimpleNamespace(value="telegram reply", input=input_widget)
+
+        import signal_tui as stui
+
+        with patch.object(stui, "replace_emoji_aliases", side_effect=lambda text: text):
+            app.on_input_submitted(event)
+
+        assert input_widget.value == "telegram reply"
+        assert app._reply_to is reply_data
+        assert app._cache == {}
+        app._add_message.assert_not_called()
+        app.run_worker.assert_not_called()
+        app.manager.get.assert_not_called()
 
     # ── T2b: worker persists the correct row ─────────────────────────────
 

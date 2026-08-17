@@ -151,6 +151,7 @@ class TestTelegramMessages:
             "sender": "Ada Lovelace",
             "timestamp": 1735787045000,
             "quote_text": "quoted",
+            "reply_to_message_id": "12",
             "msg_type": "text",
             "attachment_info": None,
             "attachment_id": None,
@@ -337,6 +338,31 @@ class TestTelegramBackendOperations:
         )
         with pytest.raises(ValueError):
             asyncio.run(backend.send_message("bad", "hi"))
+
+    def test_send_reply_uses_positive_original_message_id(self, monkeypatch):
+        backend = _backend()
+        backend._loop = MagicMock()
+        backend._client = SimpleNamespace(
+            get_input_entity=AsyncMock(return_value="entity"),
+            send_message=AsyncMock(return_value=SimpleNamespace(id=77)),
+        )
+        monkeypatch.setattr(
+            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            lambda coro, _loop: SimpleNamespace(
+                result=lambda timeout: asyncio.run(coro)
+            ),
+        )
+
+        assert backend.send_message_sync("42", "hi", reply_to_message_id="12") == "77"
+        backend._client.send_message.assert_awaited_once_with(
+            "entity", "hi", reply_to=12
+        )
+        with pytest.raises(ValueError, match="reply message id"):
+            backend.send_message_sync("42", "hi", reply_to_message_id="0")
+
+    def test_validated_reply_to_message_id_rejects_non_numeric_string(self):
+        with pytest.raises(ValueError, match="reply message id"):
+            TelegramBackend._validated_reply_to_message_id("not-a-message-id")
 
     def test_disconnect_fetch_history_and_complete_2fa(self, monkeypatch):
         backend = _backend()

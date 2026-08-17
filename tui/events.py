@@ -92,6 +92,7 @@ class EventHandlingMixin:
                 self._cache[cache_key] = []
             self._cache[cache_key].append(
                 {
+                    "id": event.payload.get("id"),
                     "text": event.payload["text"],
                     "is_mine": is_mine,
                     "sender": event.payload.get("sender", ""),
@@ -100,6 +101,9 @@ class EventHandlingMixin:
                     "msg_type": event.payload.get("msg_type", "text"),
                     "attachment_info": event.payload.get("attachment_info"),
                     "attachment_id": event.payload.get("attachment_id"),
+                    "quote_timestamp": event.payload.get("quote_timestamp"),
+                    "quote_author": event.payload.get("quote_author"),
+                    "reply_to_message_id": event.payload.get("reply_to_message_id"),
                     "read": is_mine,
                     "status": event.payload.get(
                         "status", "sent" if is_mine else "read"
@@ -146,6 +150,7 @@ class EventHandlingMixin:
                     timestamp=ts,
                     sender=event.payload.get("sender", ""),
                     status=event.payload.get("status", "sent" if is_mine else "read"),
+                    message_id=event.payload.get("id"),
                 )
         else:
             # Message for another contact: mark the list dirty; the unread

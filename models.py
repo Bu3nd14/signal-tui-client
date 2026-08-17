@@ -133,6 +133,7 @@ class ChatMessage:
     attachment_info: str | None = None
     attachment_id: str | None = None
     status: str = "sent"
+    reply_to_message_id: str | None = None
 
 
 @dataclass

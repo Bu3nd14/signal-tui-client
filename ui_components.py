@@ -122,6 +122,7 @@ class MessageWidget(Static):
             sender: str,
             is_mine: bool,
             status: str,
+            message_id: str | None = None,
         ) -> None:
             super().__init__()
             self.text = text
@@ -129,6 +130,7 @@ class MessageWidget(Static):
             self.sender = sender
             self.is_mine = is_mine
             self.status = status
+            self.message_id = message_id
 
     def __init__(
         self,
@@ -140,6 +142,7 @@ class MessageWidget(Static):
         status: str = "sent",
         protocol: str = "",
         sender_color: str | None = None,
+        message_id: str | None = None,
     ) -> None:
         """Initialise the message widget.
 
@@ -173,6 +176,7 @@ class MessageWidget(Static):
         self._msg_is_mine = is_mine
         self._selected = False
         self._status = status
+        self._message_id = message_id
         self._protocol = protocol
         self._sender_color = sender_color
 
@@ -266,6 +270,7 @@ class MessageWidget(Static):
                 sender=self._msg_sender,
                 is_mine=self._msg_is_mine,
                 status=self._status,
+                message_id=self._message_id,
             )
         )
 
@@ -290,6 +295,7 @@ class MessageWidget(Static):
                 sender=self._msg_sender,
                 is_mine=self._msg_is_mine,
                 status=self._status,
+                message_id=self._message_id,
             )
         )
 

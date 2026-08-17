@@ -65,6 +65,24 @@ class SendMixin:
         # Capture reply data before clearing it
         reply_data = self._reply_to
         quote_text = reply_data.get("text") if reply_data else None
+        reply_to_message_id = reply_data.get("message_id") if reply_data else None
+
+        # Telegram replies must use the original server message id.  A timestamp
+        # is not a Telegram message id; refusing here prevents an optimistic
+        # normal-message bubble from being created for an impossible reply.
+        if reply_data and protocol == PROTOCOL_TELEGRAM:
+            try:
+                if (
+                    isinstance(reply_to_message_id, bool)
+                    or int(reply_to_message_id) <= 0
+                ):
+                    raise ValueError
+            except (TypeError, ValueError):
+                self._status(
+                    "❌ Cannot reply: the original Telegram message ID is unavailable",
+                    0,
+                )
+                return
 
         # Save to SQLite (incremental INSERT), protocol-aware.
         data = {
@@ -80,6 +98,7 @@ class SendMixin:
             "protocol": protocol,
             "quote_timestamp": reply_data.get("timestamp") if reply_data else None,
             "quote_author": contact_id if reply_data else None,
+            "reply_to_message_id": reply_to_message_id,
         }
         # Ingerisci l'ottimista nel backend CORRETTO del contatto (non hardcoded
         # su signal_backend): per WhatsApp deve finire nel WhatsAppBackend.cache,
@@ -107,6 +126,7 @@ class SendMixin:
                 "status": "pending",
                 "quote_timestamp": data["quote_timestamp"],
                 "quote_author": data["quote_author"],
+                "reply_to_message_id": reply_to_message_id,
             }
         )
 
@@ -121,6 +141,7 @@ class SendMixin:
             timestamp=ts,
             sender="You",
             status="pending",
+            message_id=None,
         )
         self._seen_timestamps.add((protocol, cache_key, ts))
         self._seen_message_ids.add((protocol, cache_key, int(ts), message))
@@ -187,6 +208,7 @@ class SendMixin:
         quote_timestamp = reply_data.get("timestamp") if reply_data else None
         quote_author = contact_id if reply_data else None
         quote_message = reply_data.get("text") if reply_data else None
+        reply_to_message_id = reply_data.get("message_id") if reply_data else None
 
         # Send synchronously through the submission contact's backend. This is
         # a sync call running in a worker thread; it is NOT an async coroutine
@@ -202,13 +224,14 @@ class SendMixin:
             return
 
         try:
-            result = backend.send_message_sync(
-                contact_id,
-                message,
-                quote_timestamp=quote_timestamp,
-                quote_author=quote_author,
-                quote_message=quote_message,
-            )
+            send_kwargs = {
+                "quote_timestamp": quote_timestamp,
+                "quote_author": quote_author,
+                "quote_message": quote_message,
+            }
+            if reply_to_message_id is not None:
+                send_kwargs["reply_to_message_id"] = reply_to_message_id
+            result = backend.send_message_sync(contact_id, message, **send_kwargs)
             self._transition_outgoing_status(
                 protocol, contact_id, timestamp, message, "sent", ("pending",)
             )
@@ -223,9 +246,16 @@ class SendMixin:
                             "text": message,
                             "is_mine": True,
                             "sender": "You",
-                            "timestamp": int(time.time() * 1000),
+                            "timestamp": timestamp,
+                            "quote_text": quote_message,
+                            "quote_timestamp": quote_timestamp,
+                            "quote_author": quote_author,
+                            "reply_to_message_id": reply_to_message_id,
                         },
-                        int(time.time() * 1000),
+                        timestamp,
+                    )
+                    self._update_outgoing_message_id(
+                        protocol, contact_id, timestamp, message, str(result)
                     )
         except Exception as e:  # noqa: BLE001
             self._transition_outgoing_status(
@@ -278,6 +308,43 @@ class SendMixin:
         )
         return True
 
+    def _update_outgoing_message_id(
+        self,
+        protocol: str,
+        contact_id: str,
+        timestamp: int,
+        text: str,
+        message_id: str,
+    ) -> None:
+        """Synchronize Telegram's real id into backend, UI cache and widget."""
+        from models import contact_cache_key
+
+        for msg in self._cache.get(contact_cache_key(protocol, contact_id), []):
+            if (
+                msg.get("is_mine")
+                and msg.get("timestamp") == timestamp
+                and msg.get("text") == text
+            ):
+                msg["id"] = message_id
+        self.call_from_thread(
+            self._update_outgoing_message_widget_id, timestamp, text, message_id
+        )
+
+    def _update_outgoing_message_widget_id(
+        self, timestamp: int, text: str, message_id: str
+    ) -> None:
+        """Update the mounted optimistic bubble on Textual's UI thread."""
+        try:
+            for child in self.chat_log.children:
+                if (
+                    getattr(child, "_msg_is_mine", False)
+                    and getattr(child, "_msg_timestamp", None) == timestamp
+                    and getattr(child, "_msg_text", None) == text
+                ):
+                    child._message_id = message_id
+        except Exception:
+            logger.debug("Unable to update optimistic message widget id", exc_info=True)
+
     def _retry_failed_message(self, timestamp: int, text: str) -> None:
         """Retry a failed optimistic message without creating another row or bubble."""
         contact = self.selected_contact
@@ -296,6 +363,19 @@ class SendMixin:
         )
         if message is None:
             return
+        if (
+            contact.protocol == PROTOCOL_TELEGRAM
+            and message.get("reply_to_message_id") is None
+            and (
+                message.get("quote_timestamp") is not None
+                or message.get("quote_author") is not None
+            )
+        ):
+            self._status(
+                "❌ Cannot retry a Telegram reply; original message ID is unavailable",
+                0,
+            )
+            return
         if message.get("quote_text") and message.get("quote_timestamp") is None:
             self._status(
                 "❌ Cannot retry a reply after reload; quote metadata is unavailable", 0
@@ -311,6 +391,8 @@ class SendMixin:
                 "text": message["quote_text"],
                 "timestamp": message["quote_timestamp"],
             }
+            if message.get("reply_to_message_id") is not None:
+                reply_data["message_id"] = message["reply_to_message_id"]
         self.run_worker(
             lambda: self._send_message_worker(
                 text,
