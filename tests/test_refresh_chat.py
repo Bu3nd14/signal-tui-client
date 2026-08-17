@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -84,6 +86,41 @@ class _FakeChatLog:
 
     def remove_children(self):
         self.children = []
+
+
+@pytest.mark.parametrize(
+    ("msg_type", "attachment_info", "expected"),
+    [
+        ("attachment", "Video caption", "📎 Video caption"),
+        ("attachment", "audio/ogg", "📎 audio/ogg"),
+        ("attachment", "report.pdf", "📎 report.pdf"),
+        ("sticker", "sticker/webp", "🎨 sticker/webp"),
+    ],
+)
+def test_media_rendering_uses_attachment_info_not_canonical_identity(
+    msg_type, attachment_info, expected
+):
+    app = SignalTUI()
+    canonical_text = "Media: stable-media-id"
+    message = {
+        "text": canonical_text,
+        "is_mine": False,
+        "sender": "Mario",
+        "timestamp": 1,
+        "msg_type": msg_type,
+        "attachment_info": attachment_info,
+        "attachment_id": "stable-media-id",
+    }
+
+    cached_widget = app._build_message_widgets("whatsapp", False, message)[0]
+    assert isinstance(cached_widget, MessageWidget)
+    assert cached_widget._msg_text == expected
+
+    app._chat_log = _FakeChatLog()
+    app._add_message(**message, protocol="whatsapp")
+    live_widget = app._chat_log.children[0]
+    assert isinstance(live_widget, MessageWidget)
+    assert live_widget._msg_text == expected
 
 
 class TestRefreshChat:
@@ -210,6 +247,35 @@ class TestRefreshChat:
         # All 3 messages are newer than max_seen=0, so all are added.
         assert len(added) == 3
         assert fake_chat_log.scrolled
+
+    def test_whatsapp_multipart_refresh_uses_parent_id_and_text(self):
+        """A DB-seeded multipart parent mounts every part once after webhook refresh."""
+        app = SignalTUI()
+        contact = ChatContact(
+            id="1@c.us", display_name="Mario", protocol=PROTOCOL_WHATSAPP
+        )
+        app.selected_contact = contact
+        app._cache = {
+            contact.cache_key: [
+                {**_make_message("one.jpg: media-1", ts=100), "id": "parent-1"},
+                {**_make_message("two.jpg: media-2", ts=100), "id": "parent-1"},
+            ]
+        }
+        app._seen_timestamps = set()
+        app._seen_message_ids = set()
+        added: list[str] = []
+        log = _FakeChatLog()
+
+        with (
+            patch.object(
+                app, "_add_message", side_effect=lambda text, **_: added.append(text)
+            ),
+            patch.object(app, "query_one", return_value=log),
+        ):
+            app._refresh_chat()
+            app._refresh_chat()
+
+        assert added == ["one.jpg: media-1", "two.jpg: media-2"]
 
     def test_refresh_chat_preserves_telegram_message_id_in_widget_event(self):
         app = SignalTUI()

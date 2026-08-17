@@ -21,6 +21,15 @@ from ui_components import (
 logger = logging.getLogger(__name__)
 
 
+def _media_display_text(text: str, attachment_info: str | None, msg_type: str) -> str:
+    """Return the user-facing label for non-image media."""
+    if msg_type == "sticker":
+        return f"🎨 {attachment_info or '[Sticker]'}"
+    if msg_type == "attachment":
+        return f"📎 {attachment_info or '[File]'}"
+    return text
+
+
 class ChatViewMixin:
     @property
     def chat_log(self) -> Vertical:
@@ -107,11 +116,7 @@ class ChatViewMixin:
             return
 
         # ── Non-image messages ──────────────────────────────────────────
-        display_text = text
-        if msg_type == "sticker":
-            display_text = f"🎨 {text}" if text and text != "Media" else "🎨 [Sticker]"
-        elif msg_type == "attachment":
-            display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
+        display_text = _media_display_text(text, attachment_info, msg_type)
 
         if is_info:
             if self.selected_contact is not None:
@@ -412,7 +417,7 @@ class ChatViewMixin:
                 mid = msg.get("id")
                 if mid:
                     self._seen_message_ids.add(
-                        (contact.protocol, contact.cache_key, mid)
+                        (contact.protocol, contact.cache_key, mid, text)
                     )
             batch.append(msg)
 
@@ -497,6 +502,8 @@ class ChatViewMixin:
                     continue
                 existing_ts = int(existing.get("timestamp") or 0)
                 if not is_mine:
+                    if mid and existing.get("id") == mid:
+                        return True
                     # Incoming: id unreliable -> text + fuzzy timestamp (+/-5s).
                     if abs(existing_ts - ts) <= 5000:
                         return True
@@ -555,13 +562,7 @@ class ChatViewMixin:
                 )
             )
         else:
-            display_text = text
-            if msg_type == "sticker":
-                display_text = (
-                    f"🎨 {text}" if text and text != "Media" else "🎨 [Sticker]"
-                )
-            elif msg_type == "attachment":
-                display_text = f"📎 {text}" if text and text != "Media" else "📎 [File]"
+            display_text = _media_display_text(text, attachment_info, msg_type)
             widgets.append(
                 self._make_message_widget(
                     text=display_text,
@@ -618,7 +619,7 @@ class ChatViewMixin:
                 mid = msg.get("id")
                 if mid:
                     self._seen_message_ids.add(
-                        (contact.protocol, contact.cache_key, mid)
+                        (contact.protocol, contact.cache_key, mid, text)
                     )
 
             self._add_message(
@@ -681,7 +682,7 @@ class ChatViewMixin:
                 mid = msg.get("id")
                 if (
                     mid
-                    and (contact.protocol, contact.cache_key, mid)
+                    and (contact.protocol, contact.cache_key, mid, text)
                     in self._seen_message_ids
                 ):
                     is_new = False
@@ -692,7 +693,7 @@ class ChatViewMixin:
                 self._seen_message_ids.add(identity)
                 if msg.get("id"):
                     self._seen_message_ids.add(
-                        (contact.protocol, contact.cache_key, msg.get("id"))
+                        (contact.protocol, contact.cache_key, msg.get("id"), text)
                     )
                 is_mine = msg.get("is_mine", False)
                 quote_text = msg.get("quote_text")
