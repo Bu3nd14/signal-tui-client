@@ -274,10 +274,14 @@ def _process_receipt(envelope: dict, cache: dict) -> list[dict]:
                 abs(ts - t) <= TOLERANCE_MS for t in timestamps
             ):
                 old_status = msg.get("status", "sent")
-                # Only upgrade status: sent → delivered → read
-                if (old_status == "sent" and new_status in ("delivered", "read")) or (
-                    old_status == "delivered" and new_status == "read"
-                ):
+                rank = {
+                    "pending": 0,
+                    "failed": 0,
+                    "sent": 1,
+                    "delivered": 2,
+                    "read": 3,
+                }
+                if rank.get(new_status, 0) > rank.get(old_status, 0):
                     msg["status"] = new_status
                     updated_messages.append(msg)
 

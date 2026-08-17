@@ -45,19 +45,6 @@ vuoto. 377/377 ✅.
 
 ## 🟠 Alti (sicurezza, integrità o perdita di messaggi)
 
-### #23 — L'invio ottimistico resta inviato e persistito dopo un errore di rete (`tui/send.py`, righe 153-160, 185-209)
-
-Il messaggio ottimistico viene scritto in SQLite prima della chiamata di rete. Se
-`send_message_sync` fallisce, viene mostrato solo uno status: il record resta con
-stato `sent`, senza stato `failed` né possibilità di retry.
-
-**Scenario:** perdita di rete o backend non raggiungibile durante l'invio.
-
-**Fix suggerito:** marcare il messaggio come fallito, aggiornare UI e cache, e offrire
-un retry che conservi destinatario e contenuto originali.
-
----
-
 ### #25 — Webhook WhatsApp multi-allegato perde tutti gli elementi dopo il primo (`backends/whatsapp_events.py`, righe 271-302; `backends/whatsapp.py`, righe 221-231)
 
 Gli eventi generati per gli attachment di uno stesso messaggio riusano `msg_id`.
@@ -205,6 +192,21 @@ per evitare che un envelope `sentMessage` senza match cada nella ricerca per `so
 
 ## 🟢 Minori (comportamenti subottimali ma non bloccanti)
 
+### #34 — Invii deduplicati possono lasciare una seconda bolla pending senza riga DB (`tui/send.py`)
+
+Due invii dello stesso testo entro la finestra di dedup possono creare una seconda
+bolla ottimistica mentre l'insert SQLite viene deduplicato. La finalizzazione aggiorna
+UI e cache solo se l'update DB trova una riga: la seconda bolla resta quindi `pending`
+senza record persistito.
+
+**Scenario:** inviare due volte rapidamente lo stesso testo alla stessa chat entro la
+finestra di deduplicazione.
+
+**Fix suggerito:** rendere la transizione di UI/cache indipendente dall'insert
+deduplicato, oppure impedire la creazione della seconda bolla e del relativo worker.
+
+---
+
 ### #10 — Il picker emoji duplica la ricerca e omette risultati (`emoji_picker.py`, righe 347-374)
 
 `on_input_changed` reimplementa la ricerca invece di usare `search_emoji()`. Cerca
@@ -266,3 +268,4 @@ strutturare il loop senza dipendere dall'ultimo elemento iterato.
 | # | Descrizione | Fix e verifica |
 |---|-------------|----------------|
 | #22 | Il worker di invio poteva rileggere `selected_contact` e inviare alla chat sbagliata | `protocol` e `contact_id` vengono catturati al submit e passati al worker; aggiunti test di regressione |
+| #23 | L'invio ottimistico restava inviato e persistito dopo un errore di rete | Introdotti gli stati `pending`, `sent` e `failed`; DB, cache e UI sono aggiornati atomicamente. Il retry conserva destinatario e contenuto e riusa la riga esistente senza duplicarla. Fix validata. |

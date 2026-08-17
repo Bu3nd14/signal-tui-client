@@ -846,6 +846,7 @@ class WhatsAppBackend(ChatBackend):
             attachment_id=data.get("attachment_id"),
             protocol=PROTOCOL_WHATSAPP,
             msg_id=data.get("id"),
+            status=data.get("status"),
         )
 
     def ingest_message(
@@ -904,7 +905,9 @@ class WhatsAppBackend(ChatBackend):
                 "attachment_info": data.get("attachment_info"),
                 "attachment_id": data.get("attachment_id"),
                 "read": is_mine,
-                "status": "sent" if is_mine else "read",
+                "status": data.get("status", "sent" if is_mine else "read"),
+                "quote_timestamp": data.get("quote_timestamp"),
+                "quote_author": data.get("quote_author"),
             },
         )
         return True
@@ -929,7 +932,13 @@ class WhatsAppBackend(ChatBackend):
                     str(i) for i in ids
                 }:
                     old = msg.get("status", "sent")
-                    rank = {"sent": 0, "delivered": 1, "read": 2}
+                    rank = {
+                        "pending": 0,
+                        "failed": 0,
+                        "sent": 1,
+                        "delivered": 2,
+                        "read": 3,
+                    }
                     if old != target and rank.get(target, 0) > rank.get(old, 0):
                         msg["status"] = target
                         updated.append(msg)

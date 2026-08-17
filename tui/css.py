@@ -101,6 +101,14 @@ Screen {
     color: $success;
 }
 
+.msg-pending {
+    color: $text-muted;
+}
+
+.msg-failed {
+    color: $error;
+}
+
 .msg-info {
     text-align: left;
     padding: 0 1;

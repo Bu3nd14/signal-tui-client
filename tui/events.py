@@ -101,7 +101,9 @@ class EventHandlingMixin:
                     "attachment_info": event.payload.get("attachment_info"),
                     "attachment_id": event.payload.get("attachment_id"),
                     "read": is_mine,
-                    "status": "sent" if is_mine else "read",
+                    "status": event.payload.get(
+                        "status", "sent" if is_mine else "read"
+                    ),
                 }
             )
 
@@ -143,7 +145,7 @@ class EventHandlingMixin:
                     attachment_id=event.payload.get("attachment_id"),
                     timestamp=ts,
                     sender=event.payload.get("sender", ""),
-                    status="sent" if is_mine else "read",
+                    status=event.payload.get("status", "sent" if is_mine else "read"),
                 )
         else:
             # Message for another contact: mark the list dirty; the unread
@@ -212,22 +214,22 @@ class EventHandlingMixin:
         chat_log = self.chat_log
         # Build timestamp→widget index once (O(M)) instead of scanning
         # children for every receipt (O(N×M)).
-        by_ts: dict[int, MessageWidget] = {}
+        by_identity: dict[tuple[int, str], MessageWidget] = {}
         for child in chat_log.children:
             if isinstance(child, MessageWidget):
-                by_ts[child._msg_timestamp] = child
+                by_identity[(child._msg_timestamp, child._msg_text)] = child
 
         for msg in updated_messages:
             ts = msg.get("timestamp", 0)
             new_status = msg.get("status", "sent")
             # Exact match O(1) — covers the common case.
-            widget = by_ts.get(ts)
+            widget = by_identity.get((ts, msg.get("text", "")))
             if widget is not None:
                 widget.set_status(new_status)
                 continue
             # Fuzzy fallback: WAHA timestamps may differ by a few ms from
             # the optimistic-send timestamp.  Runs only on cache miss.
-            for candidate_ts, w in by_ts.items():
+            for (candidate_ts, _candidate_text), w in by_identity.items():
                 if abs(candidate_ts - ts) <= 2000:
                     w.set_status(new_status)
                     break

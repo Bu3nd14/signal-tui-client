@@ -76,6 +76,10 @@ class SendMixin:
             "msg_type": "text",
             "attachment_info": None,
             "attachment_id": None,
+            "status": "pending",
+            "protocol": protocol,
+            "quote_timestamp": reply_data.get("timestamp") if reply_data else None,
+            "quote_author": contact_id if reply_data else None,
         }
         # Ingerisci l'ottimista nel backend CORRETTO del contatto (non hardcoded
         # su signal_backend): per WhatsApp deve finire nel WhatsAppBackend.cache,
@@ -100,7 +104,9 @@ class SendMixin:
                 "attachment_info": None,
                 "attachment_id": None,
                 "read": True,
-                "status": "sent",
+                "status": "pending",
+                "quote_timestamp": data["quote_timestamp"],
+                "quote_author": data["quote_author"],
             }
         )
 
@@ -114,7 +120,7 @@ class SendMixin:
             quote_text=quote_text,
             timestamp=ts,
             sender="You",
-            status="sent",
+            status="pending",
         )
         self._seen_timestamps.add((protocol, cache_key, ts))
         self._seen_message_ids.add((protocol, cache_key, int(ts), message))
@@ -187,6 +193,9 @@ class SendMixin:
         # that needs awaiting, which would otherwise be silently dropped.
         backend = self.manager.get(protocol)
         if backend is None:
+            self._transition_outgoing_status(
+                protocol, contact_id, timestamp, message, "failed", ("pending",)
+            )
             self.call_from_thread(
                 self._status, f"❌ No backend for protocol: {protocol}", 0
             )
@@ -199,6 +208,9 @@ class SendMixin:
                 quote_timestamp=quote_timestamp,
                 quote_author=quote_author,
                 quote_message=quote_message,
+            )
+            self._transition_outgoing_status(
+                protocol, contact_id, timestamp, message, "sent", ("pending",)
             )
             # For Telegram, ingest the real message id to upgrade the optimistic entry
             if protocol == PROTOCOL_TELEGRAM and result:
@@ -216,4 +228,97 @@ class SendMixin:
                         int(time.time() * 1000),
                     )
         except Exception as e:  # noqa: BLE001
+            self._transition_outgoing_status(
+                protocol, contact_id, timestamp, message, "failed", ("pending",)
+            )
             self.call_from_thread(self._status, f"❌ Send error: {e}", 0)
+
+    def _transition_outgoing_status(
+        self,
+        protocol: str,
+        contact_id: str,
+        timestamp: int,
+        text: str,
+        status: str,
+        expected_statuses: tuple[str, ...],
+    ) -> bool:
+        """Atomically advance one optimistic message across every cache layer."""
+        from backend import _update_message_status
+        from models import contact_cache_key
+
+        if not _update_message_status(
+            timestamp,
+            status,
+            protocol,
+            contact_id,
+            text=text,
+            expected_statuses=expected_statuses,
+        ):
+            return False
+        backend = self.manager.get(protocol)
+        if backend is None:
+            backend = self.signal_backend
+        for msg in getattr(backend, "cache", {}).get(contact_id, []):
+            if (
+                msg.get("is_mine")
+                and msg.get("timestamp") == timestamp
+                and msg.get("text") == text
+            ):
+                msg["status"] = status
+        for msg in self._cache.get(contact_cache_key(protocol, contact_id), []):
+            if (
+                msg.get("is_mine")
+                and msg.get("timestamp") == timestamp
+                and msg.get("text") == text
+            ):
+                msg["status"] = status
+        self.call_from_thread(
+            self._update_message_widgets_status,
+            [{"timestamp": timestamp, "text": text, "status": status}],
+        )
+        return True
+
+    def _retry_failed_message(self, timestamp: int, text: str) -> None:
+        """Retry a failed optimistic message without creating another row or bubble."""
+        contact = self.selected_contact
+        if contact is None:
+            return
+        message = next(
+            (
+                item
+                for item in self._cache.get(contact.cache_key, [])
+                if item.get("is_mine")
+                and item.get("timestamp") == timestamp
+                and item.get("text") == text
+                and item.get("status") == "failed"
+            ),
+            None,
+        )
+        if message is None:
+            return
+        if message.get("quote_text") and message.get("quote_timestamp") is None:
+            self._status(
+                "❌ Cannot retry a reply after reload; quote metadata is unavailable", 0
+            )
+            return
+        if not self._transition_outgoing_status(
+            contact.protocol, contact.id, timestamp, text, "pending", ("failed",)
+        ):
+            return
+        reply_data = None
+        if message.get("quote_text"):
+            reply_data = {
+                "text": message["quote_text"],
+                "timestamp": message["quote_timestamp"],
+            }
+        self.run_worker(
+            lambda: self._send_message_worker(
+                text,
+                timestamp,
+                reply_data,
+                protocol=contact.protocol,
+                contact_id=contact.id,
+            ),
+            exclusive=False,
+            thread=True,
+        )

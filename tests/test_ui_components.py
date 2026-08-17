@@ -52,6 +52,13 @@ class TestMessageWidget:
         w.set_status("read")
         assert w._status == "read"
 
+    def test_pending_and_failed_statuses_have_visual_classes(self):
+        w = MessageWidget(text="Ciao!", is_mine=True, status="pending")
+        assert w.has_class("msg-pending")
+        w.set_status("failed")
+        assert w.has_class("msg-failed")
+        assert not w.has_class("msg-pending")
+
     def test_set_selected(self):
         """Toggle selezione."""
         w = MessageWidget(text="Ciao!", timestamp=1000, sender="Mario")

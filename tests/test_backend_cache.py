@@ -206,6 +206,25 @@ class TestUpdateMessageStatus:
         assert loaded["+391234567890"][0]["status"] == "delivered"
         assert loaded["+399999999999"][0]["status"] == "sent"
 
+    def test_status_transition_is_conditional_and_never_regresses_receipts(
+        self, tmp_db
+    ):
+        _add_message_to_cache("+39", "Ciao", True, "You", 1000, status="pending")
+        assert _update_message_status(
+            1000,
+            "sent",
+            "signal",
+            "+39",
+            text="Ciao",
+            expected_statuses=("pending",),
+        )
+        assert not _update_message_status(1000, "failed", "signal", "+39", text="Ciao")
+        _update_message_status(1000, "read", "signal", "+39", text="Ciao")
+        assert not _update_message_status(
+            1000, "delivered", "signal", "+39", text="Ciao"
+        )
+        assert _load_cache()["+39"][0]["status"] == "read"
+
 
 class TestProcessReceipt:
     """📬 Elaborazione receiptMessage (delivery e read)."""

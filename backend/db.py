@@ -178,6 +178,7 @@ def _add_message_to_cache(
     attachment_id: str | None = None,
     protocol: str = "signal",
     msg_id: str | None = None,
+    status: str | None = None,
 ):
     """Add a message to the SQLite cache (incremental INSERT).
     msg_type: "text", "image", "sticker", "attachment"
@@ -210,7 +211,7 @@ def _add_message_to_cache(
                     attachment_info,
                     attachment_id,
                     int(is_mine),
-                    "sent" if is_mine else "read",
+                    status or ("sent" if is_mine else "read"),
                     msg_id,
                 ),
             )
@@ -319,8 +320,13 @@ def _dedup_messages() -> int:
 
 
 def _update_message_status(
-    timestamp: int, status: str, protocol: str, contact_number: str
-):
+    timestamp: int,
+    status: str,
+    protocol: str,
+    contact_number: str,
+    text: str | None = None,
+    expected_statuses: tuple[str, ...] | None = None,
+) -> bool:
     """Update a message status in SQLite, scoped per (protocol, contact, ts).
 
     A bare ``timestamp`` match would update messages of OTHER protocols or
@@ -331,12 +337,26 @@ def _update_message_status(
     with _DB_LOCK:
         conn = sqlite3.connect(_backend.DB_FILE)
         try:
-            conn.execute(
-                "UPDATE messages SET status = ? "
-                "WHERE protocol = ? AND contact_number = ? AND timestamp = ?",
-                (status, protocol, contact_number, timestamp),
+            where = "protocol = ? AND contact_number = ? AND timestamp = ?"
+            params: list = [protocol, contact_number, timestamp]
+            if text is not None:
+                where += " AND text = ?"
+                params.append(text)
+            if expected_statuses:
+                placeholders = ", ".join("?" for _ in expected_statuses)
+                where += f" AND status IN ({placeholders})"
+                params.extend(expected_statuses)
+            cursor = conn.execute(
+                "UPDATE messages SET status = ? WHERE "
+                + where
+                + " AND CASE status WHEN 'pending' THEN 0 WHEN 'failed' THEN 0 "
+                "WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END "
+                "<= CASE ? WHEN 'pending' THEN 0 WHEN 'failed' THEN 0 WHEN 'sent' THEN 1 "
+                "WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END",
+                [status, *params, status],
             )
             conn.commit()
+            return cursor.rowcount > 0
         finally:
             conn.close()
 

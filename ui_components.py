@@ -121,12 +121,14 @@ class MessageWidget(Static):
             timestamp: int,
             sender: str,
             is_mine: bool,
+            status: str,
         ) -> None:
             super().__init__()
             self.text = text
             self.timestamp = timestamp
             self.sender = sender
             self.is_mine = is_mine
+            self.status = status
 
     def __init__(
         self,
@@ -185,6 +187,8 @@ class MessageWidget(Static):
             super().__init__(text, markup=False, classes=classes)
         self.can_focus = True
         self._apply_status_style()
+        self.set_class(status == "pending", "msg-pending")
+        self.set_class(status == "failed", "msg-failed")
         self._apply_protocol_accent()
 
     _PROTOCOL_ACCENT: ClassVar[dict[str, str]] = {
@@ -220,7 +224,9 @@ class MessageWidget(Static):
 
         if self._status == "sent":
             self.styles.text_style = "italic"
-        elif self._status == "delivered":
+        elif self._status == "pending":
+            self.styles.text_style = "dim"
+        elif self._status in ("failed", "delivered"):
             self.styles.text_style = "bold"
         elif self._status == "read":
             self.styles.text_style = "none"
@@ -234,6 +240,8 @@ class MessageWidget(Static):
             New status: "sent", "delivered", or "read".
         """
         self._status = status
+        self.set_class(status == "pending", "msg-pending")
+        self.set_class(status == "failed", "msg-failed")
         self._apply_status_style()
         self.refresh()
 
@@ -257,6 +265,7 @@ class MessageWidget(Static):
                 timestamp=self._msg_timestamp,
                 sender=self._msg_sender,
                 is_mine=self._msg_is_mine,
+                status=self._status,
             )
         )
 
@@ -280,6 +289,7 @@ class MessageWidget(Static):
                 timestamp=self._msg_timestamp,
                 sender=self._msg_sender,
                 is_mine=self._msg_is_mine,
+                status=self._status,
             )
         )
 
