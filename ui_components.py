@@ -9,14 +9,89 @@ from pathlib import Path
 from typing import ClassVar
 
 from rich.text import Text as RichText
+from textual import events
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, ListItem, ListView, RichLog, Static
+from textual.widgets import (
+    Button,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    RichLog,
+    Static,
+    TextArea,
+)
 
 from emoji_picker import EmojiCompletionWidget
 
 logger = logging.getLogger(__name__)
+
+
+class MessageTextArea(TextArea):
+    """Compact message editor with send-on-Enter semantics."""
+
+    class Submitted(Message):
+        """Posted when the user submits the message with Enter."""
+
+        def __init__(self, text_area: "MessageTextArea") -> None:
+            super().__init__()
+            self.text_area = text_area
+            self.value = text_area.text
+
+    BINDINGS: ClassVar[list] = [
+        *TextArea.BINDINGS,
+        ("shift+enter,ctrl+j,ctrl+enter", "insert_newline", "New line"),
+    ]
+
+    async def _on_key(self, event: events.Key) -> None:
+        if event.key == "enter":
+            event.stop()
+            event.prevent_default()
+            self.post_message(self.Submitted(self))
+            return
+        await super()._on_key(event)
+
+    def action_insert_newline(self) -> None:
+        result = self.insert("\n")
+        self.move_cursor(result.end_location)
+
+    async def _on_paste(self, event: events.Paste) -> None:
+        if self.read_only:
+            return
+        text = event.text.replace("\r\n", "\n").replace("\r", "\n")
+        if result := self._replace_via_keyboard(text, *self.selection):
+            self.move_cursor(result.end_location)
+            self.focus()
+
+    def action_paste(self) -> None:
+        if self.read_only:
+            return
+        text = self.app.clipboard.replace("\r\n", "\n").replace("\r", "\n")
+        if result := self._replace_via_keyboard(text, *self.selection):
+            self.move_cursor(result.end_location)
+
+    def insert_at_cursor(self, text: str) -> None:
+        result = self.insert(text)
+        self.move_cursor(result.end_location)
+
+    def replace_completion(self, emoji_char: str) -> None:
+        line, column = self.cursor_location
+        lines = self.text.split("\n")
+        before_cursor = "\n".join(lines[:line])
+        if line:
+            before_cursor += "\n"
+        before_cursor += lines[line][:column]
+        alias_start = before_cursor.rfind(":")
+        if alias_start < 0:
+            return
+        start_line = before_cursor.count("\n", 0, alias_start)
+        start_column = alias_start - (before_cursor.rfind("\n", 0, alias_start) + 1)
+        result = self.replace(
+            emoji_char + " ", (start_line, start_column), (line, column)
+        )
+        self.move_cursor(result.end_location)
 
 
 class ContactListView(ListView):
@@ -89,7 +164,10 @@ class ChatAreaWidget(Vertical):
 
         yield Horizontal(
             Button("😊", id="emoji-btn", classes="emoji-toggle-btn"),
-            Input(placeholder="Type a message...", id="message-input"),
+            MessageTextArea(
+                placeholder="Type a message...",
+                id="message-input",
+            ),
             id="input-row",
         )
 

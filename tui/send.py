@@ -11,6 +11,7 @@ from emoji_picker import replace_emoji_aliases as _replace_emoji_aliases
 from models import (
     PROTOCOL_TELEGRAM,
 )
+from ui_components import MessageTextArea
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ def _resolve_emoji_replacer():
 
 
 class SendMixin:
-    def on_input_submitted(self, event: Input.Submitted):
+    def on_message_text_area_submitted(self, event: MessageTextArea.Submitted) -> None:
         """Send a message when the user presses Enter.
         Also converts any :emoji: aliases in the message.
         If emoji completion is visible, insert the selected emoji instead."""
@@ -51,7 +52,9 @@ class SendMixin:
             logger.debug("Failed to hide emoji completion", exc_info=True)
 
         # Convert emoji aliases (e.g. :smile: → 😊)
-        message = _resolve_emoji_replacer()(event.value.strip())
+        message = _resolve_emoji_replacer()(
+            event.value.replace("\r\n", "\n").replace("\r", "\n").strip()
+        )
 
         if not message:
             return
@@ -146,7 +149,7 @@ class SendMixin:
         self._seen_timestamps.add((protocol, cache_key, ts))
         self._seen_message_ids.add((protocol, cache_key, int(ts), message))
 
-        event.input.value = ""
+        event.text_area.text = ""
 
         # Cancel the reply highlight
         self._cancel_reply()
@@ -165,6 +168,12 @@ class SendMixin:
             exclusive=False,
             thread=True,
         )
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Keep synthetic legacy submissions working without handling real Inputs."""
+        if isinstance(event, Input.Submitted):
+            return
+        self.on_message_text_area_submitted(event)  # type: ignore[arg-type]
 
     def _send_message_worker(
         self,
