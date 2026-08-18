@@ -209,8 +209,24 @@ class EventHandlingMixin:
                     target = by_id.get(str(mid))
                 if target is None:
                     target = by_ts.get(msg.get("timestamp"))
+                if target is None:
+                    # Defensive fuzzy fallback: echo timestamp drift.  Bound the
+                    # match to the text so an unrelated entry is never touched.
+                    # On hit, self-heal the entry's identity with the real id.
+                    text = msg.get("text", "")
+                    ts = msg.get("timestamp", 0)
+                    if text:
+                        for m in ui_msgs:
+                            if (
+                                m.get("text", "") == text
+                                and abs(int(m.get("timestamp") or 0) - ts) <= 2000
+                            ):
+                                target = m
+                                break
                 if target is not None:
                     target["status"] = msg.get("status", target.get("status", "sent"))
+                    if mid is not None and not target.get("id"):
+                        target["id"] = mid
 
         if self.selected_contact and self.selected_contact.id == event.contact_id:
             self.call_from_thread(self._update_message_widgets_status, updated)
@@ -225,27 +241,40 @@ class EventHandlingMixin:
             List of message dicts that had their status changed.
         """
         chat_log = self.chat_log
-        # Build timestamp→widget index once (O(M)) instead of scanning
-        # children for every receipt (O(N×M)).
+        # Build indexes once (O(M)) instead of scanning children for every
+        # receipt (O(N×M)).  A widget is addressable by its server message id
+        # (``_message_id``), by exact (timestamp, text), or by a fuzzy
+        # timestamp fallback.
+        by_id: dict[str, MessageWidget] = {}
         by_identity: dict[tuple[int, str], MessageWidget] = {}
         for child in chat_log.children:
             if isinstance(child, MessageWidget):
+                if child._message_id:
+                    by_id[str(child._message_id)] = child
                 by_identity[(child._msg_timestamp, child._msg_text)] = child
 
         for msg in updated_messages:
             ts = msg.get("timestamp", 0)
             new_status = msg.get("status", "sent")
-            # Exact match O(1) — covers the common case.
-            widget = by_identity.get((ts, msg.get("text", "")))
+            mid = msg.get("id")
+            text = msg.get("text", "")
+            # 1) Primary: exact server message id.
+            widget = by_id.get(str(mid)) if mid is not None else None
             if widget is not None:
                 widget.set_status(new_status)
                 continue
-            # Fuzzy fallback: WAHA timestamps may differ by a few ms from
-            # the optimistic-send timestamp.  Runs only on cache miss.
-            for (candidate_ts, _candidate_text), w in by_identity.items():
-                if abs(candidate_ts - ts) <= 2000:
-                    w.set_status(new_status)
-                    break
+            # 2) Exact (timestamp, text) match.
+            widget = by_identity.get((ts, text))
+            if widget is not None:
+                widget.set_status(new_status)
+                continue
+            # 3) Fuzzy fallback (echo timestamp drift) BOUND TO THE TEXT so we
+            #    never recolor an unrelated bubble.
+            if text:
+                for (candidate_ts, candidate_text), w in by_identity.items():
+                    if candidate_text == text and abs(candidate_ts - ts) <= 2000:
+                        w.set_status(new_status)
+                        break
 
     # ─── Typing indicators ──────────────────────────────────────────────────
 

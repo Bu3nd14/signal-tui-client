@@ -16,6 +16,15 @@ from models import (
 
 logger = logging.getLogger("signal_tui")
 
+# Delivery status rank: used to decide whether a merge may overwrite the status
+# of an already-present entry (never downgrade read → sent).
+_STATUS_RANK = {"pending": 0, "failed": 0, "sent": 1, "delivered": 2, "read": 3}
+
+
+def _status_rank(status: str | None) -> int:
+    """Return the numeric rank of a delivery status (default 0)."""
+    return _STATUS_RANK.get(status, 0)
+
 
 class BackendConnectMixin:
     def _mark_backend_connecting(self, proto: str) -> None:
@@ -57,30 +66,39 @@ class BackendConnectMixin:
         for cid, msgs in backend.cache.items():
             key = contact_cache_key(proto, cid)
             ui_msgs = self._cache.setdefault(key, [])
-            seen_ids = {m.get("id") for m in ui_msgs if m.get("id")}
-            seen_identities = {
+            by_id = {m.get("id"): m for m in ui_msgs if m.get("id")}
+            by_identity = {
                 (
                     bool(m.get("is_mine", False)),
                     m.get("text", ""),
                     int(m.get("timestamp") or 0),
-                )
+                ): m
                 for m in ui_msgs
             }
             for m in msgs:
                 mid = m.get("id")
-                if mid and mid in seen_ids:
-                    continue
                 identity = (
                     bool(m.get("is_mine", False)),
                     m.get("text", ""),
                     int(m.get("timestamp") or 0),
                 )
-                if identity in seen_identities:
+                existing = None
+                if mid and mid in by_id:
+                    existing = by_id[mid]
+                elif identity in by_identity:
+                    existing = by_identity[identity]
+                if existing is not None:
+                    # Already present: still upgrade the status if the incoming
+                    # rank is higher (never downgrade read → sent).
+                    if _status_rank(m.get("status")) > _status_rank(
+                        existing.get("status")
+                    ):
+                        existing["status"] = m.get("status")
                     continue
                 ui_msgs.append(m)
                 if mid:
-                    seen_ids.add(mid)
-                seen_identities.add(identity)
+                    by_id[mid] = m
+                by_identity[identity] = m
             ui_msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
 
         # ── Merge contatti (aggiunge nuovi, aggiorna last_message_ts) ──

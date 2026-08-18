@@ -48,6 +48,31 @@ def _jid_string(value) -> str | None:
     return None
 
 
+def _ack_value(raw: dict) -> int | None:
+    """Return the numeric Baileys ack of a message dict, or ``None``.
+
+    WAHA exposes the delivery/read state as an integer ``ack`` (the Baileys
+    ``WAMessageAck`` enum: 2=SERVER_ACK, 3=DELIVERY_ACK, 4=READ) and, in some
+    builds, a human-readable ``ackName``.  Accept both so the history fetch can
+    reconcile read receipts without mutating the DB before enqueueing.
+    """
+    ack = raw.get("ack")
+    if ack is not None:
+        try:
+            return int(ack)
+        except (TypeError, ValueError):
+            pass
+    name = str(raw.get("ackName") or "").strip().upper()
+    mapping = {
+        "ERROR": 0,
+        "PENDING": 1,
+        "SERVER_ACK": 2,
+        "DELIVERY_ACK": 3,
+        "READ": 4,
+    }
+    return mapping.get(name)
+
+
 def _resolve_sender_name(sender: str, contacts_by_jid: dict | None) -> str:
     """Resolve a JID sender to a contact display name when possible.
 
@@ -263,6 +288,7 @@ def _event_from_message(
         )
 
     # ── Build events ───────────────────────────────────────────────────
+    ack_val = _ack_value(raw)
     if media_items:
         events: list[ChatEvent] = []
         for i, (att_id, att_info, att_type) in enumerate(media_items):
@@ -284,6 +310,7 @@ def _event_from_message(
                         "msg_type": att_type,
                         "attachment_info": att_info,
                         "attachment_id": att_id,
+                        "ack": ack_val,
                         "contact": None,
                     },
                 )
@@ -307,6 +334,7 @@ def _event_from_message(
                 "msg_type": msg_type,
                 "attachment_info": None,
                 "attachment_id": None,
+                "ack": ack_val,
                 "contact": None,
             },
         )

@@ -102,18 +102,18 @@ class WhatsAppBackend(ChatBackend):
         if not isinstance(raw, dict):
             return False
 
-        # ── message.ack: extract & ingest BEFORE event normalisation ──────
-        # Fix: WAHA sends message.ack INSTEAD of a separate message event for
-        # outgoing echoes (including messages synced from another linked device).
-        # The ack may have status < 3 (SERVER_ACK) which causes _event_from_ack
-        # to return None, so we must process the ack content *before* the
-        # event-is-None early-return.  Additionally, even when the ack yields a
-        # receipt event (status >= 3), the TUI's _handle_receipt_event only
-        # updates statuses of existing messages — it NEVER mounts new messages.
-        # We therefore build a synthetic message ChatEvent when a new outgoing
-        # message is ingested and enqueue it ahead of the receipt so the TUI
-        # displays the message in real-time.
-        added_from_ack = False
+        # ── message.ack: translate into a synthetic message event only ────
+        # WAHA sends message.ack INSTEAD of a separate message event for
+        # outgoing echoes (including messages synced from another linked
+        # device).  The ack may have status < 3 (SERVER_ACK), which makes
+        # ``_event_from_ack`` return None, so we must build the message event
+        # from the ack content *before* the event-is-None early-return.
+        #
+        # Single-mutation-point rule: we do NOT call ``ingest_message`` here.
+        # The consumer (``_handle_message_event``) performs the ingestion and
+        # UI mirroring, so the bubble is born WITH the real id and a later
+        # receipt can upgrade its status by id.  We only dedup the synthetic
+        # event by (contact, id, text) so WAHA retries are not enqueued twice.
         ack_msg_event = None
         evt_name = raw.get("event", "")
         if "ack" in str(evt_name).lower():
@@ -134,6 +134,7 @@ class WhatsAppBackend(ChatBackend):
                         int(content.get("timestamp") or 0) * 1000
                     )  # WAHA uses seconds, we use ms
                     ack_text = content.get("body") or content.get("text") or ""
+                    ack_id = content.get("id")
 
                     # ── Extract image/attachment metadata from ack payload ──
                     # WAHA message.ack payloads carry the same hasMedia/media
@@ -163,23 +164,15 @@ class WhatsAppBackend(ChatBackend):
                                 or "Media"
                             )
 
-                    added_from_ack = self.ingest_message(
+                    # Dedup by (contact, id, normalized text) so a retry of the
+                    # same ack does not enqueue the synthetic message twice.
+                    ack_key = (
                         ack_contact,
-                        {
-                            "id": content.get("id"),
-                            "text": ack_text,
-                            "is_mine": True,
-                            "sender": "You",
-                            "msg_type": ack_msg_type,
-                            "attachment_id": ack_attachment_id,
-                            "attachment_info": ack_attachment_info,
-                        },
-                        ack_ts,
+                        str(ack_id),
+                        " ".join(str(ack_text).split()),
                     )
-                    if added_from_ack:
-                        # Synthetic message event: lets _handle_message_event
-                        # mirror the message into the UI cache and call
-                        # _add_message so it appears in real-time.
+                    if ack_id and ack_key not in self._seen_message_keys:
+                        self._seen_message_keys.add(ack_key)
                         ack_msg_event = ChatEvent(
                             type="message",
                             protocol=PROTOCOL_WHATSAPP,
@@ -189,7 +182,7 @@ class WhatsAppBackend(ChatBackend):
                                 "is_mine": True,
                                 "sender": "You",
                                 "timestamp": ack_ts,
-                                "id": content.get("id"),
+                                "id": ack_id,
                                 "is_group": ack_contact.endswith("@g.us")
                                 if ack_contact
                                 else False,
@@ -202,19 +195,17 @@ class WhatsAppBackend(ChatBackend):
         events = _event_from_raw(raw, self._contacts_by_jid)
         if not events:
             # Even when the raw event is not recognised as a receipt/typing
-            # (e.g. message.ack with status < 3), a new outgoing message may
-            # have been ingested above.  Enqueue the synthetic message event
-            # so the TUI displays it immediately.
+            # (e.g. message.ack with status < 3), enqueue the synthetic message
+            # event so the TUI mounts and ingests it.
             if ack_msg_event is not None:
                 self._enqueue_event(ack_msg_event)
                 return True
 
             return False
 
-        # When a message.ack resulted in a new message being ingested AND also
-        # produced a receipt event, enqueue the synthetic message event first
-        # so the TUI mounts the message BEFORE the receipt tries to update its
-        # status.  The receipt is still enqueued afterwards.
+        # When a message.ack also produced a receipt event (status >= 3),
+        # enqueue the synthetic message event first so the TUI mounts the
+        # message BEFORE the receipt tries to update its status.
         if ack_msg_event is not None:
             self._enqueue_event(ack_msg_event)
 
@@ -491,6 +482,11 @@ class WhatsAppBackend(ChatBackend):
         # cronologicamente, poi li ingeriamo nel cache.
         msgs = [m for m in raw if isinstance(m, dict)]
         msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
+        # Riconciliazione read/delivery dallo storico: per i messaggi MIEI già
+        # confermati (ack >= 3) emettiamo eventi receipt (single mutation point:
+        # nessuna scrittura cache/DB qui — sarà process_receipt ad applicarli).
+        read_ids: set[str] = set()
+        delivered_ids: set[str] = set()
         for m in msgs:
             events = _event_from_message(m, self._contacts_by_jid)
             for event in events:
@@ -514,6 +510,33 @@ class WhatsAppBackend(ChatBackend):
                     },
                     payload.get("timestamp", 0),
                 )
+
+                ack = payload.get("ack")
+                mid = payload.get("id")
+                if is_mine and isinstance(ack, int) and ack >= 3 and mid:
+                    (read_ids if ack >= 4 else delivered_ids).add(str(mid))
+
+        # Enqueue aggregated receipt events AFTER the ingestion, so the
+        # consumer mounts the messages before applying their read/delivered
+        # status (same ordering contract as the live webhook path).
+        for mid in sorted(delivered_ids - read_ids):
+            self._enqueue_event(
+                ChatEvent(
+                    type="receipt",
+                    protocol=PROTOCOL_WHATSAPP,
+                    contact_id=contact_id,
+                    payload={"message_ids": [mid], "is_read": False},
+                )
+            )
+        for mid in sorted(read_ids):
+            self._enqueue_event(
+                ChatEvent(
+                    type="receipt",
+                    protocol=PROTOCOL_WHATSAPP,
+                    contact_id=contact_id,
+                    payload={"message_ids": [mid], "is_read": True},
+                )
+            )
 
         # Ordina la cache della chat per timestamp (idempotente — ingest ha già
         # riordinato a ogni aggiunta, ma riordinare qui è gratuito e garantisce
@@ -602,6 +625,28 @@ class WhatsAppBackend(ChatBackend):
             reply_to_message_id=reply_to_message_id,
         )
 
+    @staticmethod
+    def _extract_message_id(result: dict) -> str | None:
+        """Return the Baileys message id from a WAHA ``sendText`` response.
+
+        WAHA versions disagree on the field name: some return a flat ``id``,
+        others nest it under ``key.id`` (same shape as ``/api/messages``) and a
+        few older builds use ``messageId``/``msgId``.  We probe all of them so
+        the real id reaches the UI cache regardless of the WAHA version.
+        """
+        if not isinstance(result, dict):
+            return None
+        for key in ("id", "messageId", "msgId", "message_id", "msg_id"):
+            val = result.get(key)
+            if isinstance(val, str) and val:
+                return val
+        key_obj = result.get("key")
+        if isinstance(key_obj, dict):
+            val = key_obj.get("id")
+            if isinstance(val, str) and val:
+                return val
+        return None
+
     def send_message_sync(
         self,
         contact_id: str,
@@ -610,14 +655,19 @@ class WhatsAppBackend(ChatBackend):
         quote_author: str | None = None,
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
-    ) -> str:
-        """Send *text* to *contact_id*; returns the client timestamp (ms).
+    ) -> str | None:
+        """Send *text* to *contact_id*; returns the Baileys message id.
 
         Used by the TUI's sync worker threads (same pattern as Signal).  Raises
         ``RuntimeError`` if the API is unreachable or answers with an error, so
         the caller can surface a visible error instead of silently failing.
+
+        Returns the server-assigned message id (string) so the caller can attach
+        it to the optimistic entry (mirroring Telegram's ``send_message_sync``).
+        When the WAHA response does not carry an id (older/odd builds), returns
+        ``None``: the caller then skips the id-upgrade and lets the subsequent
+        echo (webhook ack) attach the real id as before.
         """
-        ts = int(time.time() * 1000)
         if not self._rest:
             raise RuntimeError("WhatsApp API is not configured")
         result = self._rest.send_message(
@@ -630,7 +680,7 @@ class WhatsAppBackend(ChatBackend):
         )
         if result is None:
             raise RuntimeError("WhatsApp API send failed / unreachable")
-        return ts
+        return self._extract_message_id(result)
 
     async def mark_read(self, contact_id: str) -> None:
         """Async mark-read (interface contract)."""
@@ -931,44 +981,59 @@ class WhatsAppBackend(ChatBackend):
     def process_receipt(self, envelope: dict) -> list[dict]:
         """Handle a receipt batch against the in-memory cache.
 
-        Updates ``status`` for sent messages matching the reported ids.  Kept
-        simple for the generic API contract (Signal's richer receipt handling
-        lives in the Signal backend).
+        Updates ``status`` for sent messages matching the reported ids, with a
+        rank guard (pending/failed < sent < delivered < read), persists the
+        change by ``msg_id`` (``_update_message_status_by_id``) so it survives
+        restarts, and returns the updated entries (id/timestamp/status/text/
+        is_mine) for the UI to mirror and refresh the widgets.
         """
         ids = envelope.get("message_ids") or []
         if not ids:
             return []
         is_read = bool(envelope.get("is_read"))
         target = "read" if is_read else "delivered"
-        updated: list[dict] = []
-        to_persist: list[tuple[str, dict]] = []
-        for contact_id, msgs in self.cache.items():
-            for msg in msgs:
-                if msg.get("is_mine") and str(msg.get("id", "")) in {
-                    str(i) for i in ids
-                }:
-                    old = msg.get("status", "sent")
-                    rank = {
-                        "pending": 0,
-                        "failed": 0,
-                        "sent": 1,
-                        "delivered": 2,
-                        "read": 3,
-                    }
-                    if old != target and rank.get(target, 0) > rank.get(old, 0):
-                        msg["status"] = target
-                        updated.append(msg)
-                        to_persist.append((contact_id, msg))
-        # Persist status changes to SQLite so they survive restarts.
-        if to_persist:
-            from backend import _update_message_status
+        rank = {
+            "pending": 0,
+            "failed": 0,
+            "sent": 1,
+            "delivered": 2,
+            "read": 3,
+        }
+        target_rank = rank.get(target, 0)
+        id_set = {str(i) for i in ids}
+        scoped_contact = envelope.get("contact_id")
 
-            for contact_id, msg in to_persist:
-                _update_message_status(
-                    msg["timestamp"],
+        updated: list[dict] = []
+        contacts_to_scan = [scoped_contact] if scoped_contact else list(self.cache)
+        for contact_id in contacts_to_scan:
+            for msg in self.cache.get(contact_id, []):
+                if not msg.get("is_mine"):
+                    continue
+                mid = str(msg.get("id", ""))
+                if mid not in id_set:
+                    continue
+                old = msg.get("status", "sent")
+                if target_rank > rank.get(old, 0):
+                    msg["status"] = target
+                    updated.append(
+                        {
+                            "id": mid,
+                            "timestamp": msg.get("timestamp", 0),
+                            "status": target,
+                            "text": msg.get("text", ""),
+                            "is_mine": True,
+                        }
+                    )
+        # Persist status changes to SQLite so they survive restarts.
+        if updated:
+            from backend import _update_message_status_by_id
+
+            for msg in updated:
+                _update_message_status_by_id(
+                    msg["id"],
                     msg["status"],
                     protocol=PROTOCOL_WHATSAPP,
-                    contact_number=contact_id,
+                    contact_number=scoped_contact,
                 )
         return updated
 

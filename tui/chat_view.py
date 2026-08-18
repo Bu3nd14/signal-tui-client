@@ -20,6 +20,15 @@ from ui_components import (
 
 logger = logging.getLogger(__name__)
 
+# Delivery status rank: used to decide whether a merge may overwrite the status
+# of an already-present entry (never downgrade read → sent).
+_STATUS_RANK = {"pending": 0, "failed": 0, "sent": 1, "delivered": 2, "read": 3}
+
+
+def _status_rank(status: str | None) -> int:
+    """Return the numeric rank of a delivery status (default 0)."""
+    return _STATUS_RANK.get(status, 0)
+
 
 def _media_display_text(text: str, attachment_info: str | None, msg_type: str) -> str:
     """Return the user-facing label for non-image media."""
@@ -490,7 +499,7 @@ class ChatViewMixin:
         ui_key = contact.cache_key
         ui_msgs = self._cache.setdefault(ui_key, [])
 
-        def _already_present(m: dict) -> bool:
+        def _find_existing(m: dict) -> dict | None:
             is_mine = bool(m.get("is_mine", False))
             text = m.get("text", "")
             ts = int(m.get("timestamp") or 0)
@@ -503,24 +512,29 @@ class ChatViewMixin:
                 existing_ts = int(existing.get("timestamp") or 0)
                 if not is_mine:
                     if mid and existing.get("id") == mid:
-                        return True
+                        return existing
                     # Incoming: id unreliable -> text + fuzzy timestamp (+/-5s).
                     if abs(existing_ts - ts) <= 5000:
-                        return True
+                        return existing
                 elif mid:
                     # Outgoing: stable id first, then text + echo window (10 min).
                     cached_id = existing.get("id")
                     if cached_id and cached_id == mid:
-                        return True
+                        return existing
                     if abs(existing_ts - ts) <= 600000:
-                        return True
+                        return existing
                 elif abs(existing_ts - ts) <= 5000:
-                    return True
-            return False
+                    return existing
+            return None
 
         added = False
         for m in backend_msgs:
-            if _already_present(m):
+            existing = _find_existing(m)
+            if existing is not None:
+                # Already present: still upgrade the status if the incoming
+                # rank is higher (never downgrade read → sent).
+                if _status_rank(m.get("status")) > _status_rank(existing.get("status")):
+                    existing["status"] = m.get("status")
                 continue
             ui_msgs.append(m)
             added = True
