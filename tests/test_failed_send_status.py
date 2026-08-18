@@ -31,20 +31,42 @@ class TestMessageStatusWidgets:
 
     def test_fuzzy_status_match_accepts_waha_timestamp_drift_within_two_seconds(self):
         target = MessageWidget("optimistic", timestamp=10_000, is_mine=True)
-        outside_window = MessageWidget("old", timestamp=7_999, is_mine=True)
+        same_text = MessageWidget("optimistic", timestamp=12_000, is_mine=True)
         target.set_status = MagicMock()
-        outside_window.set_status = MagicMock()
+        same_text.set_status = MagicMock()
         handler = SimpleNamespace(
-            chat_log=SimpleNamespace(children=[outside_window, target])
+            chat_log=SimpleNamespace(children=[same_text, target])
         )
 
         EventHandlingMixin._update_message_widgets_status(
             handler,
-            [{"timestamp": 12_000, "text": "backend copy", "status": "sent"}],
+            [{"timestamp": 12_000, "text": "optimistic", "status": "sent"}],
         )
 
+        # Exact (timestamp, text) match wins for the same-text widget.
+        same_text.set_status.assert_called_once_with("sent")
+        # The other widget shares the text but differs in timestamp beyond the
+        # 2000ms fuzzy window → NOT recolored.
+        target.set_status.assert_not_called()
+
+    def test_fuzzy_status_match_ignores_widget_with_different_text(self):
+        target = MessageWidget("optimistic", timestamp=10_000, is_mine=True)
+        other_text = MessageWidget("other", timestamp=10_001, is_mine=True)
+        target.set_status = MagicMock()
+        other_text.set_status = MagicMock()
+        handler = SimpleNamespace(
+            chat_log=SimpleNamespace(children=[other_text, target])
+        )
+
+        EventHandlingMixin._update_message_widgets_status(
+            handler,
+            [{"timestamp": 12_000, "text": "optimistic", "status": "sent"}],
+        )
+
+        # Fuzzy fallback is bound to the text: only the same-text widget within
+        # ±2000ms is updated, never a nearby bubble with different text.
         target.set_status.assert_called_once_with("sent")
-        outside_window.set_status.assert_not_called()
+        other_text.set_status.assert_not_called()
 
 
 class _ReplyHandler(UnreadReplyMixin):

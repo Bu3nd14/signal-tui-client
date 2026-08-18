@@ -10,6 +10,7 @@ from emoji_picker import EmojiCompletionWidget
 from emoji_picker import replace_emoji_aliases as _replace_emoji_aliases
 from models import (
     PROTOCOL_TELEGRAM,
+    PROTOCOL_WHATSAPP,
 )
 from ui_components import MessageTextArea
 
@@ -244,8 +245,10 @@ class SendMixin:
             self._transition_outgoing_status(
                 protocol, contact_id, timestamp, message, "sent", ("pending",)
             )
-            # For Telegram, ingest the real message id to upgrade the optimistic entry
-            if protocol == PROTOCOL_TELEGRAM and result:
+            # For Telegram and WhatsApp, ingest the real server message id to
+            # upgrade the optimistic entry (so the echo matches by id and never
+            # rewrites the timestamp).
+            if protocol in (PROTOCOL_TELEGRAM, PROTOCOL_WHATSAPP) and result:
                 ingest_backend = self.manager.get(protocol)
                 if ingest_backend is not None:
                     ingest_backend.ingest_message(
@@ -325,7 +328,13 @@ class SendMixin:
         text: str,
         message_id: str,
     ) -> None:
-        """Synchronize Telegram's real id into backend, UI cache and widget."""
+        """Synchronize the real server id into the UI cache and widget.
+
+        Used for Telegram and WhatsApp: their send paths return the
+        server-assigned message id, which must be mirrored into the UI cache so
+        a later receipt/echo can be matched by id (and never rewrite the
+        optimistic timestamp).
+        """
         from models import contact_cache_key
 
         for msg in self._cache.get(contact_cache_key(protocol, contact_id), []):

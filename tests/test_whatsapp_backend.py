@@ -984,7 +984,7 @@ class TestWhatsAppBackend:
         with patch.object(
             backend._rest, "send_message", return_value={"id": "m"}
         ) as mock_send:
-            ts = backend.send_message_sync(
+            msg_id = backend.send_message_sync(
                 "wa:1@s.whatsapp.net", "Ciao!", reply_to_message_id="message-id-1"
             )
         mock_send.assert_called_once_with(
@@ -995,7 +995,7 @@ class TestWhatsAppBackend:
             quote_message=None,
             reply_to_message_id="message-id-1",
         )
-        assert ts > 0
+        assert msg_id == "m"
 
     def test_send_message_forwards_reply_to_message_id(self):
         backend = _make_backend()
@@ -1354,11 +1354,17 @@ class TestWhatsAppWebhook:
         }
         with (
             patch.object(backend, "_persist_message"),
-            patch.object(backend_mod, "_update_message_status"),
+            patch.object(backend_mod, "_update_message_status_by_id"),
         ):
+            # status 2 (SERVER_ACK) → synthetic message event only (no receipt);
+            # handle_webhook must NOT mutate the cache (single mutation point).
             assert backend.handle_webhook({"event": "message.ack", "payload": payload})
             echo = backend.poll_once()
             assert [event.type for event in echo] == ["message"]
+            # The consumer performs the ingestion.
+            backend.ingest_message(
+                echo[0].contact_id, echo[0].payload, echo[0].payload["timestamp"]
+            )
             assert backend.cache["1@c.us"][0]["id"] == "outgoing-parent"
 
             payload["status"] = 4
