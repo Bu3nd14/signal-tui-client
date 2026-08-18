@@ -159,6 +159,31 @@ file/reference id e implementare il download lazy al click.
 
 ---
 
+### #35 — Read receipt Telegram non riflessa in UI dopo riconnessione/re-link (`backends/telegram.py` `_reconcile_read_state`; `tui/backend_connect.py` `_on_backend_ready`) ✅ RISOLTO
+
+`_reconcile_read_state` marca `status="read"` in cache e SQLite **prima** di accodare
+l'evento receipt. Quando il TUI processa quell'evento, `process_receipt` trova il
+messaggio già `read` e restituisce `[]` → `_handle_receipt_event` esce senza fare il
+mirror nella UI cache. Su un riavvio completo è innocuo (la UI cache è vuota e viene
+popolata con lo stato già riconciliato), ma su una **riconnessione/re-link a caldo**
+(Ctrl+L → QR flow → `_connect_telegram`) la UI cache è già popolata con `sent` e
+`_on_backend_ready` salta i messaggi con id già visto senza aggiornarne lo status:
+un messaggio letto a TUI chiusa resta visualizzato `sent` fino al riavvio completo.
+
+**Scenario:** il destinatario legge un messaggio mentre la TUI è chiusa, poi l'utente
+effettua un re-link senza riavviare completamente l'applicazione.
+
+**Fix suggerito:** far accodare a `_reconcile_read_state` solo l'evento (lasciando a
+`process_receipt` mutazione + mirror UI), oppure far aggiornare anche lo status in
+`_on_backend_ready` per gli id già visti (non solo il dedup). L'attuale evento receipt
+di riconciliazione è di fatto codice morto.
+
+**Fix:** S2 del fix WhatsApp (PR #18) — `_on_backend_ready` e `_merge_backend_cache` ora
+aggiornano lo status (rank-guard) delle entry già presenti invece di saltarle. Resta
+solo l'evento receipt di `_reconcile_read_state` come codice morto (cosmetico, non funzionale).
+
+---
+
 ### #5 — `_identify_contact_for_envelope` logica duplicata per `sent` (`backends/signal.py`, righe 320-351) ✅ RISOLTO
 
 **Fix:** rimosso il secondo blocco `sent` ridondante (cercava solo `dest` senza
