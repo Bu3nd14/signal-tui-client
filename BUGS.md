@@ -146,7 +146,7 @@ dell'account locale per messaggi propri.
 
 ---
 
-### #32 — Le foto Telegram dello storico non sono scaricabili né apribili (`backends/telegram.py`, righe 411-427, 460-466, 482-500)
+### #32 — Le foto Telegram dello storico non sono scaricabili né apribili (`backends/telegram.py`, righe 411-427, 460-466, 482-500) ✅ RISOLTO
 
 Il download della foto avviene solo nel gestore live. Lo storico costruisce il
 placeholder senza path e, diversamente dai documenti, senza un identificatore
@@ -156,6 +156,25 @@ utile al download lazy/on-demand.
 
 **Fix suggerito:** scaricare le foto anche durante il fetch dello storico o conservare
 file/reference id e implementare il download lazy al click.
+
+**Fix** (branch `fix/telegram-history-photos`, design in `DESIGN_FIX_32.md`):
+- Download **lazy on-demand** (pattern già usato da WhatsApp): le foto e i documenti
+  dello storico (e i live con download fallito) persistono `attachment_id` come
+  riferimento strutturato `tgref:<chat_id>:<msg_id>` in `_message_to_chat_event`.
+- `get_attachment_path` risolve in 4 passi: path vuoto → file locale esistente
+  (live/legacy) → parse `tgref:` → download lazy sul loop Telethon
+  (`get_input_entity` + `get_messages(ids=<int>)` + `download_media`), con nome
+  deterministico `{chat_id}-{msg_id}-{nome}`, dedup su file già presente, timeout
+  30s e fallimento non bloccante (→ `None`, la UI usa i fallback esistenti).
+- Niente download eager in `fetch_recent_history` (limit=20 × tutti i contatti a ogni
+  backend-ready), niente migrazione schema (dedup e `ChatEvent` invariati).
+- Test: 11 nuovi + 2 aggiornati in `tests/test_telegram.py`, 2 aggiornati in
+  `Telegram/test_telegram_backend.py`. Suite completa: 914 passed (unico fallimento
+  pre-esistente non correlato in `test_address_book.py`).
+- Limiti noti: le righe legacy già persistite con `attachment_id=NULL` o bare
+  `msg.id` restano non apribili (dedup impedisce la riscrittura); il click su una
+  foto storica può bloccare la UI fino a 30s (stesso comportamento WhatsApp già
+  accettato; follow-up: risoluzione del click in worker thread).
 
 ---
 
