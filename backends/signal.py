@@ -17,6 +17,7 @@ import re
 import subprocess
 import threading
 import time
+from dataclasses import replace
 
 from models import (
     PROTOCOL_SIGNAL,
@@ -25,6 +26,7 @@ from models import (
 )
 
 from .base import ChatBackend
+from .config import get_address_book_ttl_s
 
 logger = logging.getLogger(__name__)
 _fh = logging.FileHandler("/tmp/signal-sse.log", mode="w")
@@ -91,6 +93,10 @@ class SignalBackend(ChatBackend):
         # Normalized contact list
         self.contacts: list[ChatContact] = []
         self._contacts_by_key: dict[str, ChatContact] = {}
+
+        # Address book (rubrica completa) — cache + TTL
+        self._address_book: list[ChatContact] | None = None
+        self._address_book_ts: float = 0.0
 
         # Protocol-aware message cache: key = contact_cache_key(protocol, id)
         self.cache: dict[str, list[dict]] = {}
@@ -265,6 +271,42 @@ class SignalBackend(ChatBackend):
 
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
+
+    # ─── Address book (rubrica completa) ──────────────────────────────
+
+    def list_address_book_sync(self, force: bool = False) -> list[ChatContact]:
+        """Rubrica Signal = ``self.contacts`` (già completa via ``listContacts``).
+
+        Copia arricchita in-place-safe: ``phone`` (cifre dell'id E.164),
+        ``address_book=True`` e ``is_chat_active`` dal timestamp dell'ultimo
+        messaggio recuperato da SQLite in ``_set_contacts``.  TTL come da
+        contratto; non solleva mai.
+        """
+        now = time.monotonic()
+        if (
+            not force
+            and self._address_book is not None
+            and (now - self._address_book_ts) < get_address_book_ttl_s()
+        ):
+            return list(self._address_book)
+
+        result: list[ChatContact] = []
+        for c in self.contacts:
+            phone = "".join(ch for ch in c.id if ch.isdigit())
+            result.append(
+                replace(
+                    c,
+                    extras={
+                        **c.extras,
+                        "phone": phone,
+                        "address_book": True,
+                        "is_chat_active": c.last_message_ts > 0,
+                    },
+                )
+            )
+        self._address_book = result
+        self._address_book_ts = now
+        return list(self._address_book)
 
     # ─── Cache ────────────────────────────────────────────────────────
     # NOTE: ``self.cache`` is keyed by the *raw* contact id (e.g. the phone

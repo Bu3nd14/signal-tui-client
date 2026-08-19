@@ -17,6 +17,8 @@ import asyncio
 import logging
 import queue
 import threading
+import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,7 @@ from models import (
 
 from .base import ChatBackend
 from .config import (
+    get_address_book_ttl_s,
     get_telegram_api_hash,
     get_telegram_api_id,
     get_telegram_session_path,
@@ -71,6 +74,10 @@ class TelegramBackend(ChatBackend):
         # Normalised contact list
         self.contacts: list[ChatContact] = []
         self._contacts_by_id: dict[int, ChatContact] = {}
+
+        # Address book (rubrica completa) — cache + TTL
+        self._address_book: list[ChatContact] | None = None
+        self._address_book_ts: float = 0.0
 
         # Protocol-aware message cache (contact_id → list[dict])
         self.cache: dict[str, list[dict]] = {}
@@ -394,6 +401,169 @@ class TelegramBackend(ChatBackend):
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
 
+    # ─── Address book (rubrica completa) ──────────────────────────────────
+
+    @staticmethod
+    def _user_to_address_book_contact(user: Any) -> ChatContact:
+        """Convert a Telethon ``User`` (or mock) into a rubrica ``ChatContact``.
+
+        Extends ``_entity_to_contact`` with the address-book schema: normalized
+        ``phone`` digits (may be ``""`` for contacts without a number, e.g.
+        "Mamma Vod"), ``access_hash`` (required for ``InputPeerUser`` sends) and
+        the ``address_book``/``source`` markers.
+        """
+        eid: int = getattr(user, "id", 0)
+        first = getattr(user, "first_name", "") or ""
+        last = getattr(user, "last_name", "") or ""
+        username = getattr(user, "username", "") or ""
+        raw_phone = getattr(user, "phone", "") or ""
+        phone = "".join(ch for ch in raw_phone if ch.isdigit())
+        name = (
+            f"{first} {last}".strip()
+            or username
+            or (f"+{phone}" if phone else "")
+            or str(eid)
+        )
+        return ChatContact(
+            id=str(eid),
+            display_name=name.strip() or str(eid),
+            protocol=PROTOCOL_TELEGRAM,
+            extras={
+                "phone": phone,
+                "username": username,
+                "access_hash": str(getattr(user, "access_hash", "") or ""),
+                "is_group": False,
+                "address_book": True,
+                "source": "tg_book",
+            },
+        )
+
+    async def _fetch_address_book(self) -> list[ChatContact]:
+        """Fetch the full Telegram contacts book via ``GetContactsRequest``.
+
+        Runs on the dedicated Telethon event loop (scheduled from
+        ``list_address_book_sync`` via ``run_coroutine_threadsafe``).  Skips
+        bots and deleted accounts ("Deleted Account").
+        """
+        from telethon.tl.functions.contacts import GetContactsRequest
+
+        result = await self._client(GetContactsRequest(hash=0))
+        users = getattr(result, "users", []) or []
+        contacts: list[ChatContact] = []
+        for user in users:
+            if getattr(user, "bot", False):
+                continue
+            first = getattr(user, "first_name", "") or ""
+            last = getattr(user, "last_name", "") or ""
+            name = f"{first} {last}".strip()
+            if getattr(user, "deleted", False) or "deleted account" in name.lower():
+                continue
+            contacts.append(self._user_to_address_book_contact(user))
+        return contacts
+
+    def list_address_book_sync(self, force: bool = False) -> list[ChatContact]:
+        """Telegram rubrica = contacts book ∪ dialogs (TTL-cached, never raises).
+
+        Bloccante (chiamare da worker thread).  Esegue ``_fetch_address_book``
+        sul loop Telethon dedicato via ``run_coroutine_threadsafe``; su errore
+        remoto / non connesso serve la copia cached (stale) o ``[]``.
+        """
+        now = time.monotonic()
+        if (
+            not force
+            and self._address_book is not None
+            and (now - self._address_book_ts) < get_address_book_ttl_s()
+        ):
+            return list(self._address_book)
+
+        if self._loop is None or self._client is None or not self._connected:
+            return list(self._address_book) if self._address_book is not None else []
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._fetch_address_book(), self._loop
+            )
+            book = future.result(timeout=20)
+        except Exception:
+            logger.warning("Telegram address book build failed", exc_info=True)
+            return list(self._address_book) if self._address_book is not None else []
+
+        # Merge with dialogs (self.contacts, loaded at connect).  Book users
+        # without a dialog stay as-is; groups/channels/non-book users with a
+        # dialog are carried over from self.contacts only.
+        dialogs_by_id: dict[int, ChatContact] = {}
+        for c in self.contacts:
+            try:
+                dialogs_by_id[int(c.id)] = c
+            except (ValueError, TypeError):
+                continue
+
+        entries: list[ChatContact] = []
+        for cc in book:
+            eid = int(cc.id)
+            dialog = dialogs_by_id.pop(eid, None)
+            if dialog is not None:
+                cc.last_message_ts = dialog.last_message_ts
+                cc.extras["is_chat_active"] = True
+                read_max = dialog.extras.get("read_outbox_max_id")
+                if read_max:
+                    cc.extras["read_outbox_max_id"] = read_max
+            entries.append(cc)
+
+        for dialog in dialogs_by_id.values():
+            entries.append(
+                replace(
+                    dialog,
+                    extras={
+                        **dialog.extras,
+                        "address_book": True,
+                        "is_chat_active": True,
+                        "source": "tg_dialogs",
+                    },
+                )
+            )
+
+        self._address_book = entries
+        self._address_book_ts = now
+
+        # Extend the lookup index with book users (used by _identify_contact
+        # and the send fallback) without touching self.contacts (main list).
+        for cc in book:
+            try:
+                self._contacts_by_id.setdefault(int(cc.id), cc)
+            except (ValueError, TypeError):
+                continue
+
+        return list(self._address_book)
+
+    async def _resolve_input_entity(self, eid: int):
+        """Resolve a Telegram user id to an entity usable by ``send_message``.
+
+        1. ``get_input_entity(eid)`` — fast path (entity already in session).
+        2. Fallback: ``InputPeerUser(eid, access_hash)`` from the address book.
+        3. No ``access_hash`` available → ``RuntimeError`` with a clear message.
+        """
+        try:
+            return await self._client.get_input_entity(eid)
+        except Exception:
+            logger.debug(
+                "Telegram get_input_entity failed, falling back to address book",
+                exc_info=True,
+            )
+            contact = self._contacts_by_id.get(eid)
+            raw_hash = contact.extras.get("access_hash") if contact else None
+            try:
+                access_hash = int(raw_hash) if raw_hash else None
+            except (ValueError, TypeError):
+                access_hash = None
+            if access_hash is None:
+                raise RuntimeError(
+                    f"Telegram: access_hash mancante per {eid}"
+                ) from None
+            from telethon.tl.types import InputPeerUser
+
+            return InputPeerUser(eid, access_hash)
+
     # ─── Messaging ─────────────────────────────────────────────────────────
 
     async def send_message(
@@ -415,7 +585,7 @@ class TelegramBackend(ChatBackend):
             except (ValueError, TypeError):
                 raise ValueError(f"Invalid Telegram contact id: {contact_id}")
             reply_to = self._validated_reply_to_message_id(reply_to_message_id)
-            entity = await self._client.get_input_entity(eid)
+            entity = await self._resolve_input_entity(eid)
             msg = await self._client.send_message(entity, text, reply_to=reply_to)
             return str(msg.id)
 
@@ -444,7 +614,7 @@ class TelegramBackend(ChatBackend):
             except (ValueError, TypeError):
                 raise ValueError(f"Invalid Telegram contact id: {contact_id}")
             reply_to = self._validated_reply_to_message_id(reply_to_message_id)
-            entity = await self._client.get_input_entity(eid)
+            entity = await self._resolve_input_entity(eid)
             msg = await self._client.send_message(entity, text, reply_to=reply_to)
             return str(msg.id)
 

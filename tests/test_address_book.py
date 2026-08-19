@@ -15,16 +15,27 @@ import json
 import sys
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backends import config
 from backends.base import ChatBackend
+from backends.manager import BackendManager
+from backends.signal import SignalBackend
+from backends.telegram import TelegramBackend
 from backends.whatsapp import WhatsAppBackend, _dedup_book_contacts
 from backends.whatsapp_rest import WhatsAppRESTClient
-from models import PROTOCOL_WHATSAPP, ChatContact
+from models import (
+    PROTOCOL_SIGNAL,
+    PROTOCOL_TELEGRAM,
+    PROTOCOL_WHATSAPP,
+    ChatContact,
+)
 
 
 class _MinimalBackend(ChatBackend):
@@ -670,3 +681,354 @@ class TestWALidResolver:
         assert backend._rest.resolve_contact.call_count == 30
         mock_save.assert_called_once()
         assert backend._address_book is None
+
+
+# ─── Telegram rubrica (milestone 3) ───────────────────────────────────────────
+
+
+def _tg_user(**overrides) -> SimpleNamespace:
+    """Mock Telethon ``User`` (SimpleNamespace) with address-book fields."""
+    fields = {
+        "id": 42,
+        "first_name": "Ada",
+        "last_name": "Lovelace",
+        "username": "ada",
+        "phone": "+391234567890",
+        "access_hash": 123456789,
+        "bot": False,
+        "deleted": False,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def _tg_dialog_contact(
+    eid, name, ts=0, read_max=None, group=False, channel=False
+) -> ChatContact:
+    """Build a dialog ``ChatContact`` shaped like ``_load_contacts`` output."""
+    extras: dict = {"last_message_ts": ts}
+    if read_max:
+        extras["read_outbox_max_id"] = read_max
+    if group:
+        extras["is_group"] = True
+    elif channel:
+        extras["is_channel"] = True
+    else:
+        extras["is_group"] = False
+    return ChatContact(
+        id=str(eid),
+        display_name=name,
+        protocol=PROTOCOL_TELEGRAM,
+        extras=extras,
+    )
+
+
+def _tg_backend_with_book(monkeypatch, users, dialogs=None) -> TelegramBackend:
+    """TelegramBackend connected to a fake client returning *users* from RPC."""
+    backend = TelegramBackend()
+    backend._api_id = 123
+    backend._api_hash = "hash"
+    backend._connected = True
+    backend._loop = MagicMock()
+    backend._client = AsyncMock(return_value=SimpleNamespace(users=users))
+    backend.contacts = list(dialogs or [])
+    backend._contacts_by_id = {}
+    for c in backend.contacts:
+        try:
+            backend._contacts_by_id[int(c.id)] = c
+        except (ValueError, TypeError):
+            pass
+    monkeypatch.setattr(
+        "backends.telegram.asyncio.run_coroutine_threadsafe",
+        lambda coro, loop: SimpleNamespace(
+            result=lambda timeout: asyncio.run(coro)
+        ),
+    )
+    return backend
+
+
+class TestTelegramAddressBook:
+    """📨 Rubrica Telegram: build + merge + lookup esteso."""
+
+    def test_build_skips_bots_deleted_and_sets_extras(self, monkeypatch):
+        users = [
+            _tg_user(id=1, first_name="Ada", last_name="Lovelace", username="ada",
+                     phone="+391234567890", access_hash=111),
+            _tg_user(id=2, first_name="Mamma", last_name="Vod", username="",
+                     phone="", access_hash=222),  # senza numero
+            _tg_user(id=3, first_name="Bot", bot=True),
+            _tg_user(id=4, first_name="Deleted Account", deleted=True),
+        ]
+        backend = _tg_backend_with_book(monkeypatch, users)
+
+        result = backend.list_address_book_sync()
+
+        assert [c.id for c in result] == ["1", "2"]
+        ada = result[0]
+        assert ada.extras["phone"] == "391234567890"
+        assert ada.extras["username"] == "ada"
+        assert ada.extras["access_hash"] == "111"
+        assert ada.extras["is_group"] is False
+        assert ada.extras["address_book"] is True
+        assert ada.extras["source"] == "tg_book"
+        assert ada.display_name == "Ada Lovelace"
+        mamma = result[1]
+        assert mamma.extras["phone"] == ""
+        assert mamma.display_name == "Mamma Vod"
+
+    def test_display_name_falls_back_to_phone_then_id(self, monkeypatch):
+        users = [
+            _tg_user(id=5, first_name="", last_name="", username="",
+                     phone="+393331234567", access_hash=5),
+            _tg_user(id=6, first_name="", last_name="", username="",
+                     phone="", access_hash=6),
+        ]
+        backend = _tg_backend_with_book(monkeypatch, users)
+
+        result = backend.list_address_book_sync()
+        by_id = {c.id: c for c in result}
+
+        assert by_id["5"].display_name == "+393331234567"
+        assert by_id["6"].display_name == "6"
+
+    def test_merge_with_dialogs_and_lookup_extension(self, monkeypatch):
+        users = [
+            _tg_user(id=10, first_name="Ada", last_name="", username="",
+                     phone="+391234567890", access_hash=111),
+            _tg_user(id=20, first_name="Book", last_name="Only", username="",
+                     phone="", access_hash=222),  # nessun dialogo
+        ]
+        dialogs = [
+            _tg_dialog_contact(10, "Ada", ts=12345, read_max=99),
+            _tg_dialog_contact(-100999, "Channel", ts=1, channel=True),
+            _tg_dialog_contact(-42, "Group", ts=2, group=True),
+            _tg_dialog_contact(30, "NonBookUser", ts=3),  # utente non-rubrica
+        ]
+        backend = _tg_backend_with_book(monkeypatch, users, dialogs)
+
+        result = backend.list_address_book_sync()
+        by_id = {c.id: c for c in result}
+
+        # book-user con dialogo: merge ts + read_outbox_max_id
+        assert by_id["10"].extras["is_chat_active"] is True
+        assert by_id["10"].last_message_ts == 12345
+        assert by_id["10"].extras["read_outbox_max_id"] == 99
+        assert by_id["10"].extras["access_hash"] == "111"
+        # book-user senza dialogo: nessun marker di chat attiva
+        assert "is_chat_active" not in by_id["20"].extras
+        assert "read_outbox_max_id" not in by_id["20"].extras
+        assert by_id["20"].extras["access_hash"] == "222"
+        # gruppi/canali/utenti-non-rubrica: solo da dialogs
+        assert by_id["-100999"].extras["is_channel"] is True
+        assert by_id["-100999"].extras["source"] == "tg_dialogs"
+        assert by_id["-42"].extras["is_group"] is True
+        assert by_id["30"].display_name == "NonBookUser"
+        assert by_id["30"].extras["source"] == "tg_dialogs"
+        assert by_id["30"].extras["address_book"] is True
+        # lookup esteso con i book-user; self.contacts invariato
+        assert backend._contacts_by_id[20] is by_id["20"]
+        assert backend.contacts == dialogs
+
+    def test_error_returns_stale_or_empty(self, monkeypatch):
+        backend = _tg_backend_with_book(monkeypatch, [])
+        backend._client = AsyncMock(
+            side_effect=RuntimeError("RPC error")
+        )
+
+        assert backend.list_address_book_sync() == []
+        assert backend._address_book is None
+
+    def test_not_connected_returns_empty(self):
+        backend = TelegramBackend()
+        backend._connected = False
+        assert backend.list_address_book_sync() == []
+
+
+class TestTelegramResolveInputEntity:
+    """📤 Send fallback verso contatti senza dialogo (``_resolve_input_entity``)."""
+
+    def test_get_input_entity_fast_path(self):
+        backend = TelegramBackend()
+        backend._client = SimpleNamespace(
+            get_input_entity=AsyncMock(return_value="entity")
+        )
+
+        result = asyncio.run(backend._resolve_input_entity(42))
+
+        assert result == "entity"
+        backend._client.get_input_entity.assert_awaited_once_with(42)
+
+    def test_fallback_builds_input_peer_user_with_access_hash(self):
+        from telethon.tl.types import InputPeerUser
+
+        backend = TelegramBackend()
+        backend._client = SimpleNamespace(
+            get_input_entity=AsyncMock(side_effect=ValueError("no entity"))
+        )
+        backend._contacts_by_id = {
+            42: ChatContact(
+                id="42",
+                display_name="Ada",
+                protocol=PROTOCOL_TELEGRAM,
+                extras={"access_hash": "123456789"},
+            )
+        }
+
+        result = asyncio.run(backend._resolve_input_entity(42))
+
+        assert isinstance(result, InputPeerUser)
+        assert result.user_id == 42
+        assert result.access_hash == 123456789
+
+    def test_fallback_without_hash_raises_runtime_error(self):
+        backend = TelegramBackend()
+        backend._client = SimpleNamespace(
+            get_input_entity=AsyncMock(side_effect=ValueError("no entity"))
+        )
+        backend._contacts_by_id = {
+            42: ChatContact(
+                id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM
+            )
+        }
+
+        with pytest.raises(RuntimeError, match="access_hash mancante per 42"):
+            asyncio.run(backend._resolve_input_entity(42))
+
+
+# ─── Signal rubrica (milestone 3) ─────────────────────────────────────────────
+
+
+class TestSignalAddressBook:
+    """📱 Rubrica Signal: markers phone/address_book/is_chat_active + copia."""
+
+    def test_markers_and_no_mutation_of_originals(self):
+        backend = SignalBackend()
+        active = ChatContact(
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "aci-1", "number": "+391234567890"},
+        )
+        active.last_message_ts = 5000
+        inactive = ChatContact(
+            id="+391111111111",
+            display_name="Luigi",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "aci-2", "number": "+391111111111"},
+        )
+        backend.contacts = [active, inactive]
+
+        result = backend.list_address_book_sync()
+
+        mario = next(c for c in result if c.id == "+391234567890")
+        luigi = next(c for c in result if c.id == "+391111111111")
+        assert mario.extras["phone"] == "391234567890"
+        assert mario.extras["address_book"] is True
+        assert mario.extras["is_chat_active"] is True
+        assert luigi.extras["phone"] == "391111111111"
+        assert luigi.extras["is_chat_active"] is False
+        # originali non mutati
+        assert "phone" not in active.extras
+        assert "address_book" not in active.extras
+        assert "is_chat_active" not in active.extras
+        assert mario is not active
+
+    def test_cache_until_force(self):
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+        )
+        backend.contacts = [contact]
+
+        result = backend.list_address_book_sync()
+        assert len(result) == 1
+
+        backend.contacts = []  # cache serve finché non forzo
+        assert backend.list_address_book_sync() == result
+        assert backend.list_address_book_sync(force=True) == []
+
+
+# ─── Manager aggregazione (milestone 3) ───────────────────────────────────────
+
+
+class TestManagerAddressBook:
+    """🗂️ Aggregazione multi-backend, isolamento errori, scoping protocols."""
+
+    def test_aggregates_across_backends(self):
+        manager = BackendManager()
+        sig = _MinimalBackend(
+            [ChatContact(id="+391234567890", display_name="Mario",
+                         protocol=PROTOCOL_SIGNAL)]
+        )
+        sig.protocol = PROTOCOL_SIGNAL
+        wa = _MinimalBackend(
+            [ChatContact(id="391234567890@c.us", display_name="MarioWA",
+                         protocol=PROTOCOL_WHATSAPP)]
+        )
+        wa.protocol = PROTOCOL_WHATSAPP
+        manager.register(sig)
+        manager.register(wa)
+
+        result = manager.list_address_book_sync()
+
+        assert len(result) == 2
+        assert all(c.extras["address_book"] is True for c in result)
+        assert manager.address_book_errors == {}
+
+    def test_error_isolation_keeps_other_backends(self):
+        manager = BackendManager()
+        ok = _MinimalBackend(
+            [ChatContact(id="1", display_name="Ok", protocol=PROTOCOL_SIGNAL)]
+        )
+        ok.protocol = PROTOCOL_SIGNAL
+        bad = _MinimalBackend()
+        bad.protocol = PROTOCOL_TELEGRAM
+        bad.list_address_book_sync = MagicMock(
+            side_effect=RuntimeError("boom")
+        )
+        manager.register(ok)
+        manager.register(bad)
+
+        result = manager.list_address_book_sync()
+
+        assert len(result) == 1
+        assert result[0].display_name == "Ok"
+        assert manager.address_book_errors == {PROTOCOL_TELEGRAM: "boom"}
+
+    def test_protocols_scoping(self):
+        manager = BackendManager()
+        sig = _MinimalBackend(
+            [ChatContact(id="+391234567890", display_name="Mario",
+                         protocol=PROTOCOL_SIGNAL)]
+        )
+        sig.protocol = PROTOCOL_SIGNAL
+        wa = _MinimalBackend(
+            [ChatContact(id="391234567890@c.us", display_name="MarioWA",
+                         protocol=PROTOCOL_WHATSAPP)]
+        )
+        wa.protocol = PROTOCOL_WHATSAPP
+        manager.register(sig)
+        manager.register(wa)
+
+        result = manager.list_address_book_sync(protocols={PROTOCOL_WHATSAPP})
+
+        assert len(result) == 1
+        assert result[0].protocol == PROTOCOL_WHATSAPP
+
+    def test_errors_reset_between_calls(self):
+        manager = BackendManager()
+        bad = _MinimalBackend()
+        bad.protocol = PROTOCOL_TELEGRAM
+        bad.list_address_book_sync = MagicMock(
+            side_effect=RuntimeError("boom")
+        )
+        manager.register(bad)
+
+        manager.list_address_book_sync()
+        assert manager.address_book_errors == {PROTOCOL_TELEGRAM: "boom"}
+
+        bad.list_address_book_sync = MagicMock(return_value=[])
+        manager.list_address_book_sync()
+        assert manager.address_book_errors == {}
