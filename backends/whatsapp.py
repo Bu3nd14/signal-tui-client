@@ -11,10 +11,14 @@ backend pattern so the TUI stays protocol-agnostic.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import queue
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 from models import (
@@ -25,6 +29,8 @@ from models import (
 
 from .base import ChatBackend
 from .config import (
+    get_address_book_ttl_s,
+    get_wa_lid_cache_ttl_days,
     get_whatsapp_api_key,  # noqa: F401  re-export (whatsapp_rest reads it via backends.whatsapp)
     get_whatsapp_media_dir,
     get_whatsapp_session_name,
@@ -42,6 +48,73 @@ from .whatsapp_events import (
 from .whatsapp_rest import WhatsAppRESTClient
 
 logger = logging.getLogger(__name__)
+
+
+def _jid_digits(jid: str) -> str:
+    """Return only the digits of a JID (the phone for ``@c.us``), or ``""``."""
+    return "".join(ch for ch in jid if ch.isdigit())
+
+
+def _dedup_book_contacts(raw: list[dict]) -> list[dict]:
+    """Deduplicate the WAHA address book by phone number (pure, unit-testable).
+
+    Key = digits of the number extracted from ``id`` (``_serialized`` handled
+    when ``id`` is a dict), discarding every non-digit and the ``@c.us``/
+    ``@s.whatsapp.net`` domain.  Entries with an empty key or ``@broadcast``/
+    ``@newsletter``/``@g.us`` are dropped.  Among duplicates of the same number
+    the winner is chosen by: (1) a non-empty ``name`` over only-``pushname``,
+    (2) the ``@c.us`` domain, (3) first occurrence (stable).
+    """
+    by_phone: dict[str, dict] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        jid = _jid_string(entry.get("id"))
+        if not jid:
+            continue
+        if "@broadcast" in jid or "@newsletter" in jid or jid.endswith("@g.us"):
+            continue
+        digits = _jid_digits(jid)
+        if not digits:
+            continue
+        name = entry.get("name") or ""
+        pushname = entry.get("pushname") or entry.get("pushName") or None
+        current = by_phone.get(digits)
+        if current is None:
+            by_phone[digits] = {
+                "phone": digits,
+                "name": name,
+                "pushname": pushname,
+                "_jid": jid,
+            }
+            continue
+        # (1) name non vuoto batte solo-pushname
+        candidate_has_name = bool(name)
+        current_has_name = bool(current["name"])
+        if candidate_has_name != current_has_name:
+            if candidate_has_name:
+                by_phone[digits] = {
+                    "phone": digits,
+                    "name": name,
+                    "pushname": pushname,
+                    "_jid": jid,
+                }
+            continue
+        # (2) a parità, preferisci il dominio @c.us
+        candidate_is_c = jid.endswith("@c.us")
+        current_is_c = current["_jid"].endswith("@c.us")
+        if candidate_is_c and not current_is_c:
+            by_phone[digits] = {
+                "phone": digits,
+                "name": name,
+                "pushname": pushname,
+                "_jid": jid,
+            }
+        # (3) a parità, vince la prima occorrenza (keep current)
+    return [
+        {"phone": v["phone"], "name": v["name"], "pushname": v["pushname"]}
+        for v in by_phone.values()
+    ]
 
 
 class WhatsAppBackend(ChatBackend):
@@ -83,6 +156,14 @@ class WhatsAppBackend(ChatBackend):
         #: caso di retry, quindi teniamo gli id già visti per non accodare in
         #: doppio un messaggio (il dedup definitivo avviene in ``ingest_message``).
         self._seen_message_keys: set[tuple[str, str, str]] = set()
+
+        # ── Address book (rubrica completa) ────────────────────────────
+        self._address_book: list[ChatContact] | None = None
+        self._address_book_ts: float = 0.0
+        #: Persistent cache ``@lid`` → phone number (lazy-loaded from disk).
+        self._lid_map: dict[str, dict] | None = None
+        self._lid_lock = threading.Lock()
+        self._lid_resolver_started = False
 
     def handle_webhook(self, raw: dict) -> bool:
         """Elabora un payload webhook WAHA (modalità Push/event-driven).
@@ -296,6 +377,9 @@ class WhatsAppBackend(ChatBackend):
         # Best-effort: se il server non risponde, parte comunque.
         self._configure_webhook()
         self._connected = True
+        # Opportunistico: se già connesso, avvia il resolver @lid in background
+        # (idempotente) così la prossima apertura della rubrica beneficia.
+        self.start_lid_resolver()
 
     def _wait_session_ready(self, timeout: float = 40.0) -> bool:
         """Poll get_session_status finché la sessione WAHA è pronta (WORKING).
@@ -460,6 +544,242 @@ class WhatsAppBackend(ChatBackend):
 
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
+
+    # ─── Address book (rubrica completa) ──────────────────────────────
+
+    def list_address_book_sync(self, force: bool = False) -> list[ChatContact]:
+        """Rubrica WhatsApp completa = rubrica dedup ∪ chat attive.
+
+        Bloccante (chiamare da worker thread); non solleva mai eccezioni: su
+        errore remoto serve la copia cached (stale) o ``[]``.  I ``@lid`` non
+        in cache NON vengono risolti qui (zero rete): restano standalone con
+        ``lid_unresolved=True`` e li risolve in background ``start_lid_resolver``.
+        """
+        self.start_lid_resolver()
+        now = time.monotonic()
+        if (
+            not force
+            and self._address_book is not None
+            and (now - self._address_book_ts) < get_address_book_ttl_s()
+        ):
+            return list(self._address_book)
+        try:
+            raw = self._rest.list_all_contacts() if self._rest else None
+            book = _dedup_book_contacts(raw or [])
+            chats = list(self.contacts)
+
+            by_phone: dict[str, ChatContact] = {}
+            for b in book:
+                by_phone[b["phone"]] = ChatContact(
+                    id=f"{b['phone']}@c.us",
+                    display_name=b["name"] or b["pushname"] or f"+{b['phone']}",
+                    protocol=PROTOCOL_WHATSAPP,
+                    extras={
+                        "phone": b["phone"],
+                        "jid": f"{b['phone']}@c.us",
+                        "address_book": True,
+                        "is_chat_active": False,
+                        "source": "wa_book",
+                    },
+                )
+
+            out_extra: list[ChatContact] = []
+            for chat in chats:
+                cid = chat.id
+                if cid.endswith("@g.us"):
+                    # Gruppi: SOLO da /chats, mai dalla rubrica.
+                    out_extra.append(
+                        replace(
+                            chat,
+                            extras={
+                                **chat.extras,
+                                "address_book": True,
+                                "is_chat_active": True,
+                                "source": "wa_chats",
+                            },
+                        )
+                    )
+                    continue
+                phone = _jid_digits(cid) if cid.endswith("@c.us") else self._lid_lookup(cid)
+                if phone and phone in by_phone:
+                    # MERGE: l'id diventa quello della chat attiva (anche @lid)
+                    # per mantenere continuity con cache/send path esistenti.
+                    merged = by_phone[phone]
+                    merged.id = cid
+                    merged.extras["is_chat_active"] = True
+                    merged.last_message_ts = chat.last_message_ts
+                    if cid.endswith("@lid"):
+                        merged.extras["lid"] = cid
+                    # display_name: vince il nome rubrica; si usa quello della
+                    # chat solo se la rubrica non aveva un nome reale.
+                    if (
+                        merged.display_name == f"+{phone}"
+                        and chat.display_name
+                        and chat.display_name != cid
+                    ):
+                        merged.display_name = chat.display_name
+                elif phone:
+                    # Chat @c.us attiva NON in rubrica.
+                    out_extra.append(
+                        replace(
+                            chat,
+                            extras={
+                                **chat.extras,
+                                "address_book": True,
+                                "is_chat_active": True,
+                                "source": "wa_chats",
+                                "phone": phone,
+                            },
+                        )
+                    )
+                else:
+                    # @lid non risolto: standalone non raggruppabile.
+                    out_extra.append(
+                        replace(
+                            chat,
+                            extras={
+                                **chat.extras,
+                                "address_book": True,
+                                "is_chat_active": True,
+                                "lid_unresolved": True,
+                                "source": "wa_chats",
+                            },
+                        )
+                    )
+
+            self._address_book = list(by_phone.values()) + out_extra
+            self._address_book_ts = now
+        except Exception:
+            logger.warning("WhatsApp address book build failed", exc_info=True)
+            if self._address_book is not None:
+                return list(self._address_book)
+            return []
+        return list(self._address_book)
+
+    # ─── Persistent @lid → phone cache ────────────────────────────────
+
+    def _lid_cache_path(self) -> Path:
+        """Return ``CACHE_DIR/wa_lid_map.json`` (respects test override)."""
+        from backend import CACHE_DIR
+
+        return Path(CACHE_DIR) / "wa_lid_map.json"
+
+    def _lid_cache_load(self) -> None:
+        """Load the lid map from disk (idempotent, never raises)."""
+        if self._lid_map is not None:
+            return
+        with self._lid_lock:
+            if self._lid_map is not None:
+                return
+            self._lid_map = {}
+            try:
+                path = self._lid_cache_path()
+                if not path.exists():
+                    return
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and isinstance(data.get("entries"), dict):
+                    self._lid_map = {
+                        k: v for k, v in data["entries"].items() if isinstance(v, dict)
+                    }
+            except (OSError, json.JSONDecodeError, ValueError):
+                self._lid_map = {}
+
+    def _lid_cache_save(self) -> None:
+        """Persist the lid map atomically (tmp + ``os.replace``), never raises."""
+        with self._lid_lock:
+            entries = self._lid_map if self._lid_map is not None else {}
+            payload = {"version": 1, "entries": entries}
+            try:
+                path = self._lid_cache_path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_name(path.name + ".tmp")
+                tmp.write_text(json.dumps(payload), encoding="utf-8")
+                os.replace(tmp, path)
+            except OSError:
+                logger.warning("Failed to persist WhatsApp lid cache", exc_info=True)
+
+    def _lid_lookup(self, jid: str) -> str | None:
+        """Return the cached phone for a ``@lid`` JID (memory only, no network)."""
+        self._lid_cache_load()
+        entry = self._lid_map.get(jid)
+        if not isinstance(entry, dict):
+            return None
+        phone = entry.get("phone")
+        if not phone:
+            return None
+        age = int(time.time()) - int(entry.get("resolved_at") or 0)
+        if age > get_wa_lid_cache_ttl_days() * 86400:
+            return None
+        return str(phone)
+
+    def _lid_cached(self, jid: str) -> bool:
+        """True if ``jid`` has a valid cache entry (positive or negative in TTL)."""
+        self._lid_cache_load()
+        entry = self._lid_map.get(jid)
+        if not isinstance(entry, dict):
+            return False
+        age = int(time.time()) - int(entry.get("resolved_at") or 0)
+        if entry.get("phone"):
+            return age <= get_wa_lid_cache_ttl_days() * 86400
+        return age <= 24 * 3600
+
+    def _lid_resolve_remote(self, jid: str) -> str | None:
+        """Resolve a ``@lid`` via REST and update the cache; return the phone."""
+        if not self._rest:
+            return None
+        result = self._rest.resolve_contact(jid)
+        if not isinstance(result, dict):
+            return None  # transport/HTTP error → no negative cache, retry later
+        resolved_jid = _jid_string(result.get("id"))
+        phone = None
+        if resolved_jid and not resolved_jid.endswith("@lid"):
+            phone = _jid_digits(resolved_jid) or None
+        name = (
+            result.get("name") or result.get("pushname") or result.get("pushName")
+        ) or None
+        self._lid_cache_load()
+        with self._lid_lock:
+            self._lid_map[jid] = {
+                "phone": phone,
+                "name": name,
+                "resolved_at": int(time.time()),
+            }
+        return phone
+
+    def start_lid_resolver(self) -> None:
+        """Start the background ``@lid``→number resolver (idempotent)."""
+        if self._lid_resolver_started or not self._rest:
+            return
+        self._lid_resolver_started = True
+        threading.Thread(
+            target=self._lid_resolver_run,
+            name="wa-lid-resolver",
+            daemon=True,
+        ).start()
+
+    def _lid_resolver_run(self) -> None:
+        """Resolve up to 30 uncached ``@lid`` chats, then save and invalidate."""
+        try:
+            self._lid_cache_load()
+            candidates = [
+                contact.id
+                for contact in list(self.contacts)
+                if contact.id
+                and contact.id.endswith("@lid")
+                and not self._lid_cached(contact.id)
+            ]
+            if not candidates:
+                return
+            for jid in candidates[:30]:
+                try:
+                    self._lid_resolve_remote(jid)
+                except Exception:
+                    logger.debug("lid resolve failed for %s", jid, exc_info=True)
+                time.sleep(0.3)
+            self._lid_cache_save()
+            self._address_book = None
+        except Exception:
+            logger.warning("WhatsApp lid resolver run failed", exc_info=True)
 
     def fetch_history(self, contact_id: str, limit: int = 20) -> list[dict]:
         """Scarica lo storico remoto di una chat da WAHA e lo salva nel cache.

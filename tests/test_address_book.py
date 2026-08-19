@@ -13,14 +13,18 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backends import config
 from backends.base import ChatBackend
-from models import ChatContact
+from backends.whatsapp import WhatsAppBackend, _dedup_book_contacts
+from backends.whatsapp_rest import WhatsAppRESTClient
+from models import PROTOCOL_WHATSAPP, ChatContact
 
 
 class _MinimalBackend(ChatBackend):
@@ -246,3 +250,423 @@ class TestAddressBookConfig:
             json.dumps({"picker_preferred_backend": "whatsapp"})
         )
         assert config.get_picker_preferred_backend() == "whatsapp"
+
+
+# ─── WhatsApp REST + rubrica (milestone 2) ────────────────────────────────────
+
+
+def _json_response(payload):
+    """Return a mock urlopen context manager that yields a JSON body."""
+    data = json.dumps(payload).encode("utf-8")
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = data
+    mock_resp.status = 200
+    mock_urlopen = MagicMock()
+    mock_urlopen.return_value.__enter__.return_value = mock_resp
+    return mock_urlopen
+
+
+def _boom(*args, **kwargs):
+    import urllib.error
+
+    raise urllib.error.URLError("refused")
+
+
+def _wa_backend() -> WhatsAppBackend:
+    backend = WhatsAppBackend(api_url="http://api.test", media_dir="")
+    backend._rest = MagicMock()
+    return backend
+
+
+def _chat(jid: str, name: str | None = None, ts: int = 0) -> ChatContact:
+    return ChatContact(
+        id=jid,
+        display_name=name or jid,
+        protocol=PROTOCOL_WHATSAPP,
+        extras={"jid": jid, "last_message_ts": ts},
+    )
+
+
+class TestWADedup:
+    """🔀 Dedup 2x della rubrica WhatsApp (``_dedup_book_contacts``)."""
+
+    def test_duplicates_collapse_to_one(self):
+        raw = [
+            {"id": "393331234567@c.us", "name": "Mario", "pushname": None},
+            {"id": "393331234567@c.us", "name": "Mario", "pushname": None},
+        ]
+        assert _dedup_book_contacts(raw) == [
+            {"phone": "393331234567", "name": "Mario", "pushname": None}
+        ]
+
+    def test_name_beats_pushname(self):
+        raw = [
+            {"id": "393331234567@c.us", "name": None, "pushname": "MarioP"},
+            {"id": "393331234567@c.us", "name": "Mario Rossi", "pushname": None},
+        ]
+        assert _dedup_book_contacts(raw) == [
+            {"phone": "393331234567", "name": "Mario Rossi", "pushname": None}
+        ]
+
+    def test_c_us_tiebreak(self):
+        raw = [
+            {"id": "393331234567@s.whatsapp.net", "name": "OldName", "pushname": None},
+            {"id": "393331234567@c.us", "name": "NewName", "pushname": None},
+        ]
+        assert _dedup_book_contacts(raw) == [
+            {"phone": "393331234567", "name": "NewName", "pushname": None}
+        ]
+
+    def test_discards_groups_broadcast_and_no_digits(self):
+        raw = [
+            {"id": "123456789@g.us", "name": "Group", "pushname": None},
+            {"id": "status@broadcast", "name": "Status", "pushname": None},
+            {"id": "abc@newsletter", "name": "News", "pushname": None},
+            {"id": "no-digits-here", "name": "NoDigits", "pushname": None},
+            {"id": "393331234567@c.us", "name": "Mario", "pushname": None},
+        ]
+        assert _dedup_book_contacts(raw) == [
+            {"phone": "393331234567", "name": "Mario", "pushname": None}
+        ]
+
+    def test_serialized_dict_id(self):
+        raw = [
+            {
+                "id": {"_serialized": "393331234567@c.us"},
+                "name": "Mario",
+                "pushname": None,
+            }
+        ]
+        assert _dedup_book_contacts(raw) == [
+            {"phone": "393331234567", "name": "Mario", "pushname": None}
+        ]
+
+
+class TestWARestAddressBook:
+    """🔌 Nuovi metodi REST del client WhatsApp."""
+
+    def test_list_all_contacts_accepts_str_and_dict_id(self):
+        client = WhatsAppRESTClient("http://api.test")
+        payload = [
+            {"id": "393331234567@c.us", "name": "Mario", "pushname": None},
+            {"id": {"_serialized": "393331111111@c.us"}, "name": "Luigi"},
+        ]
+        with patch("urllib.request.urlopen", _json_response(payload)):
+            assert client.list_all_contacts() == payload
+
+    def test_list_all_contacts_unwraps_nested_data(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch(
+            "urllib.request.urlopen", _json_response({"data": [{"id": "1@c.us"}]})
+        ):
+            assert client.list_all_contacts() == [{"id": "1@c.us"}]
+
+    def test_list_all_contacts_error_returns_none(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch("urllib.request.urlopen", _boom):
+            assert client.list_all_contacts() is None
+
+    def test_resolve_contact_percent_encodes_path(self):
+        client = WhatsAppRESTClient("http://api.test")
+        seen = []
+
+        def fake_urlopen(req, timeout=30):
+            seen.append(req.full_url)
+            resp = MagicMock()
+            resp.read.return_value = json.dumps({"id": "393331234567@c.us"}).encode()
+            resp.status = 200
+            ctx = MagicMock()
+            ctx.__enter__.return_value = resp
+            return ctx
+
+        with patch("urllib.request.urlopen", fake_urlopen):
+            result = client.resolve_contact("220988985864200@lid")
+
+        assert result == {"id": "393331234567@c.us"}
+        assert "%40" in seen[0]
+        assert "@" not in seen[0]
+
+    def test_resolve_contact_error_returns_none(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch("urllib.request.urlopen", _boom):
+            assert client.resolve_contact("220988985864200@lid") is None
+
+    def test_check_number_exists_exists(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch("urllib.request.urlopen", _json_response({"exists": True})):
+            assert client.check_number_exists("393331234567") is True
+
+    def test_check_number_exists_number_exists(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch("urllib.request.urlopen", _json_response({"numberExists": False})):
+            assert client.check_number_exists("393331234567") is False
+
+    def test_check_number_exists_missing_key_returns_none(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch("urllib.request.urlopen", _json_response({"foo": 1})):
+            assert client.check_number_exists("393331234567") is None
+
+    def test_check_number_exists_error_returns_none(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch("urllib.request.urlopen", _boom):
+            assert client.check_number_exists("393331234567") is None
+
+
+class TestWALidCache:
+    """💾 Cache persistente ``@lid`` → numero."""
+
+    def test_roundtrip_on_tmp_path(self, monkeypatch, tmp_path):
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        now = int(time.time())
+        b1 = _wa_backend()
+        b1._lid_cache_load()
+        with b1._lid_lock:
+            b1._lid_map["220988985864200@lid"] = {
+                "phone": "393331234567",
+                "name": "Mario",
+                "resolved_at": now,
+            }
+        b1._lid_cache_save()
+
+        b2 = _wa_backend()
+        assert b2._lid_lookup("220988985864200@lid") == "393331234567"
+
+    def test_positive_ttl(self, monkeypatch, tmp_path):
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        now = int(time.time())
+        backend = _wa_backend()
+        backend._lid_cache_load()
+        with backend._lid_lock:
+            backend._lid_map["fresh@lid"] = {"phone": "391234567890", "resolved_at": now}
+            backend._lid_map["stale@lid"] = {
+                "phone": "391234567890",
+                "resolved_at": now - 31 * 86400,
+            }
+        assert backend._lid_lookup("fresh@lid") == "391234567890"
+        assert backend._lid_lookup("stale@lid") is None
+
+    def test_negative_ttl_24h(self, monkeypatch, tmp_path):
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        now = int(time.time())
+        backend = _wa_backend()
+        backend._lid_cache_load()
+        with backend._lid_lock:
+            backend._lid_map["neg_fresh@lid"] = {"phone": None, "resolved_at": now}
+            backend._lid_map["neg_stale@lid"] = {
+                "phone": None,
+                "resolved_at": now - 25 * 3600,
+            }
+        assert backend._lid_cached("neg_fresh@lid") is True
+        assert backend._lid_cached("neg_stale@lid") is False
+
+    def test_corrupt_file_starts_empty(self, monkeypatch, tmp_path):
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        (tmp_path / "wa_lid_map.json").write_text("{not valid json")
+        backend = _wa_backend()
+        backend._lid_cache_load()
+        assert backend._lid_map == {}
+        assert backend._lid_lookup("x@lid") is None
+
+    def test_lookup_is_memory_only_no_network(self):
+        backend = _wa_backend()
+        backend._lid_cache_load()
+        with backend._lid_lock:
+            backend._lid_map["1@lid"] = {
+                "phone": "391234567890",
+                "resolved_at": int(time.time()),
+            }
+        assert backend._lid_lookup("1@lid") == "391234567890"
+        backend._rest.resolve_contact.assert_not_called()
+
+
+class TestWAMerge:
+    """🧩 Merge rubrica ∪ chat attive in ``list_address_book_sync``."""
+
+    def test_c_us_in_book_merges(self):
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._rest.list_all_contacts.return_value = [
+            {"id": "393331234567@c.us", "name": "Mario Rossi", "pushname": None}
+        ]
+        backend.contacts = [_chat("393331234567@c.us", ts=12345)]
+
+        result = backend.list_address_book_sync()
+
+        assert len(result) == 1
+        contact = result[0]
+        assert contact.id == "393331234567@c.us"  # id = chat (continuity)
+        assert contact.extras["phone"] == "393331234567"
+        assert contact.extras["is_chat_active"] is True
+        assert contact.extras["address_book"] is True
+        assert contact.extras["source"] == "wa_book"
+        assert contact.last_message_ts == 12345
+        assert contact.display_name == "Mario Rossi"
+
+    def test_c_us_not_in_book_extra(self):
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._rest.list_all_contacts.return_value = []
+        backend.contacts = [_chat("393331111111@c.us", "Luigi", ts=1)]
+
+        result = backend.list_address_book_sync()
+
+        assert len(result) == 1
+        contact = result[0]
+        assert contact.id == "393331111111@c.us"
+        assert contact.extras["phone"] == "393331111111"
+        assert contact.extras["is_chat_active"] is True
+        assert contact.extras["source"] == "wa_chats"
+
+    def test_lid_resolved_from_cache_merges(self):
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._lid_cache_load()
+        with backend._lid_lock:
+            backend._lid_map["220988985864200@lid"] = {
+                "phone": "393331234567",
+                "resolved_at": int(time.time()),
+            }
+        backend._rest.list_all_contacts.return_value = [
+            {"id": "393331234567@c.us", "name": "Mario Rossi", "pushname": None}
+        ]
+        backend.contacts = [_chat("220988985864200@lid", "Mario", ts=999)]
+
+        result = backend.list_address_book_sync()
+
+        assert len(result) == 1
+        contact = result[0]
+        assert contact.id == "220988985864200@lid"
+        assert contact.extras["phone"] == "393331234567"
+        assert contact.extras["lid"] == "220988985864200@lid"
+        assert contact.extras["is_chat_active"] is True
+        assert contact.display_name == "Mario Rossi"
+
+    def test_lid_unresolved_standalone_no_network(self):
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._rest.list_all_contacts.return_value = []
+        backend.contacts = [_chat("220988985864200@lid", ts=5)]
+
+        result = backend.list_address_book_sync()
+
+        assert len(result) == 1
+        contact = result[0]
+        assert contact.id == "220988985864200@lid"
+        assert contact.extras["lid_unresolved"] is True
+        assert contact.extras["is_chat_active"] is True
+        # Zero rete per i lid al load: solo cache, mai resolve_contact.
+        backend._rest.resolve_contact.assert_not_called()
+
+    def test_groups_included_marked(self):
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._rest.list_all_contacts.return_value = [
+            {"id": "393331234567@c.us", "name": "Mario", "pushname": None}
+        ]
+        backend.contacts = [
+            _chat("123456789@g.us", "Gruppo", ts=7),
+            _chat("393331234567@c.us", ts=1),
+        ]
+
+        result = backend.list_address_book_sync()
+
+        ids = [c.id for c in result]
+        assert "123456789@g.us" in ids
+        group = next(c for c in result if c.id == "123456789@g.us")
+        assert group.extras["is_chat_active"] is True
+        assert group.extras["source"] == "wa_chats"
+        assert group.extras["address_book"] is True
+
+    def test_display_name_falls_back_to_chat_when_book_empty(self):
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._rest.list_all_contacts.return_value = [
+            {"id": "393331234567@c.us", "name": None, "pushname": None}
+        ]
+        backend.contacts = [_chat("393331234567@c.us", "Luigi", ts=1)]
+
+        result = backend.list_address_book_sync()
+
+        assert len(result) == 1
+        assert result[0].display_name == "Luigi"
+
+
+class TestWAAddressBookCache:
+    """⏱️ TTL della rubrica + errori (mai eccezioni)."""
+
+    def test_ttl_cache_and_force(self):
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._rest.list_all_contacts.return_value = []
+        backend.contacts = []
+
+        assert backend.list_address_book_sync() == []
+        assert backend.list_address_book_sync() == []
+        assert backend._rest.list_all_contacts.call_count == 1  # cached
+        assert backend.list_address_book_sync(force=True) == []
+        assert backend._rest.list_all_contacts.call_count == 2
+
+    def test_error_returns_stale_cache(self):
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._rest.list_all_contacts.return_value = [
+            {"id": "393331234567@c.us", "name": "Mario", "pushname": None}
+        ]
+        backend.contacts = []
+
+        first = backend.list_address_book_sync()
+        assert len(first) == 1
+        backend._rest.list_all_contacts.side_effect = Exception("boom")
+        assert backend.list_address_book_sync(force=True) == first
+
+    def test_error_returns_empty(self):
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._rest.list_all_contacts.side_effect = Exception("boom")
+        backend.contacts = []
+
+        assert backend.list_address_book_sync() == []
+
+
+class TestWALidResolver:
+    """🧵 Resolver @lid in background (idempotente, batch ≤30, save finale)."""
+
+    def test_start_idempotent(self):
+        backend = _wa_backend()
+        with patch("threading.Thread") as mock_thread:
+            backend.start_lid_resolver()
+            backend.start_lid_resolver()
+            assert mock_thread.call_count == 1
+        assert backend._lid_resolver_started is True
+
+    def test_batch_max_30_and_save_once(self, monkeypatch, tmp_path):
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        backend = _wa_backend()
+        backend.contacts = [
+            _chat(f"{i}@lid", ts=i) for i in range(35)
+        ]
+        backend._rest.resolve_contact.return_value = {
+            "id": "391234567890@c.us",
+            "name": "X",
+        }
+        backend._address_book = ["stale"]
+
+        with (
+            patch("time.sleep"),
+            patch.object(backend, "_lid_cache_save") as mock_save,
+        ):
+            backend._lid_resolver_run()
+
+        assert backend._rest.resolve_contact.call_count == 30
+        mock_save.assert_called_once()
+        assert backend._address_book is None
