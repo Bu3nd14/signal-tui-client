@@ -159,6 +159,60 @@ file/reference id e implementare il download lazy al click.
 
 ---
 
+### #31 — Foto inviate renderizzate da cache allineate come ricevute e senza colore `$success` (`tui/chat_view.py`, righe 567-577)
+
+Nel ramo cache `_build_message_widgets` crea l'`ImageWidget` senza assegnare
+`msg-left`/`msg-right` in base a `is_mine`, a differenza del rendering live
+(`_render_image_in_chat`, righe 230 e 240). Una foto **inviata**
+(`is_mine=True`) caricata da cache perde così due proprietà visive: resta
+allineata a sinistra come una foto ricevuta e non riceve il colore `$success`
+che `msg-right` applicherebbe (`tui/css.py`, righe 98-102). L'attribuzione è
+ingannevole per l'utente, che non distingue le proprie foto inviate da quelle
+ricevute. Il difetto riguarda qualsiasi protocollo che passa dal ramo cache
+(Signal, Telegram, WhatsApp); l'esempio più evidente è una foto WhatsApp inviata
+riaperta da cache.
+
+**Scenario:** riaprire una chat e vedere una propria foto inviata (es. WhatsApp)
+allineata a sinistra e nel colore `$text` anziché `$success`, come se fosse un
+messaggio ricevuto.
+
+**Fix suggerito:** assegnare `msg-left`/`msg-right` in base a `is_mine` anche nel
+ramo cache, come già fatto nel percorso live.
+
+---
+
+### #36 — La caption delle foto non è mai una bolla di testo dedicata: Signal/WhatsApp la mostrano solo nel placeholder da cache e il live la sovrascrive col filename, Telegram la perde del tutto (`backends/signal.py`, righe 476-489; `backends/whatsapp_events.py`, righe 162, 184-186, 205-215, 233-239; `backends/telegram.py`, righe 711, 731-733; `tui/chat_view.py`, righe 117-124, 265-276, 567-577)
+
+La caption della foto (inviata o ricevuta) non è mai renderizzata come messaggio di
+testo dedicato, su nessuno dei tre protocolli.
+
+- **Signal / WhatsApp:** la caption è catturata in `attachment_info`
+  (`backends/signal.py`, righe 476-489; `backends/whatsapp_events.py`, righe 184-186,
+  205-215, 233-239), ma per i messaggi immagine è usata solo come etichetta del
+  placeholder. Dal ramo cache appare come `[🖼️ <caption>]` (`tui/chat_view.py`,
+  righe 567-577), mentre nel percorso live viene sovrascritta dal filename in
+  `_finish_attachment_resolve` (`tui/chat_view.py`, righe 265-276), quindi sparisce
+  appena l'allegato è risolto.
+- **Telegram:** la caption è presente in `text` (`backends/telegram.py`, riga 711),
+  ma `attachment_info` è hardcoded a `"🖼️ Photo"` (riga 733) e ha precedenza su
+  `text`: la caption non compare mai e il placeholder da cache diventa
+  `[🖼️ 🖼️ Photo]` (doppia emoji).
+
+La modale `ImageModalScreen` (`ui_components.py`) mostra solo l'immagine.
+
+**Scenario:** ricevere o inviare una foto con didascalia su Signal, WhatsApp o Telegram.
+
+**Impatto:** la didascalia è indisponibile all'utente come testo dedicato su tutti i
+protocolli — su Telegram in modo totale (con placeholder ridondante), su
+Signal/WhatsApp solo fuori dal percorso live.
+
+**Fix suggerito:** renderizzare `attachment_info` (o la caption Telegram in `text`)
+come testo dedicato accanto/sotto il placeholder — o nella modale — distinguendo la
+caption reale da mime/filename tecnici, ed evitare di hardcodare `"🖼️ Photo"`
+quando è disponibile una caption in `text`.
+
+---
+
 ### #35 — Read receipt Telegram non riflessa in UI dopo riconnessione/re-link (`backends/telegram.py` `_reconcile_read_state`; `tui/backend_connect.py` `_on_backend_ready`) ✅ RISOLTO
 
 `_reconcile_read_state` marca `status="read"` in cache e SQLite **prima** di accodare
@@ -228,15 +282,6 @@ testo ANSI vuoto senza errore visibile.
 
 **Fix suggerito:** controllare `ansi_output.strip()` e mostrare un messaggio d'errore
 esplicito quando l'output è vuoto.
-
----
-
-### #31 — `ImageWidget` ricostruito dalla cache perde classe e allineamento (`tui/chat_view.py`, righe 541-551)
-
-Il ramo cache crea `ImageWidget` senza assegnare `msg-left` o `msg-right`, a differenza
-del rendering live. Immagini ricaricate perdono quindi allineamento e colore previsti.
-
-**Fix suggerito:** assegnare la classe in base a `is_mine`, come nel percorso live.
 
 ---
 
