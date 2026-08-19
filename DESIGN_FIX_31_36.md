@@ -63,7 +63,7 @@ widget = ImageWidget(
     attachment_id=attachment_id or "",
     fallback_text=...,
 )
-widget.classes = "msg-right" if is_mine else "msg-left"   # ← FIX #31
+widget.classes = "msg-right" if is_mine else "msg-left"  # ← FIX #31
 widgets.append(widget)
 ```
 
@@ -89,13 +89,20 @@ Aggiungere in cima a `tui/chat_view.py` (accanto a `_media_display_text`, riga 3
 import re  # aggiungere in testa al file
 
 _TECHNICAL_LABELS = frozenset({"🖼️ Image", "🖼️ Photo", "Media", "Image", "Photo"})
-_TECHNICAL_PREFIXES = ("Image: ", "Video: ", "Audio: ")   # fallback di backends/signal.py:479-485
-_MIME_RE = re.compile(r"^[\w.-]+/[\w.+-]+$")               # "image/jpeg"
-_MEDIA_KEY_RE = re.compile(r"^(image|video|audio|document|sticker)Message( \(.+\))?$")  # fallback WA nested
+_TECHNICAL_PREFIXES = (
+    "Image: ",
+    "Video: ",
+    "Audio: ",
+)  # fallback di backends/signal.py:479-485
+_MIME_RE = re.compile(r"^[\w.-]+/[\w.+-]+$")  # "image/jpeg"
+_MEDIA_KEY_RE = re.compile(
+    r"^(image|video|audio|document|sticker)Message( \(.+\))?$"
+)  # fallback WA nested
 _MEDIA_EXT_RE = re.compile(
     r"\.(jpe?g|png|gif|webp|bmp|tiff?|heic|heif|mp4|mov|mkv|webm|avi|mp3|ogg|opus|aac|m4a|wav|pdf)$",
     re.IGNORECASE,
 )
+
 
 def _is_technical_media_label(label: str) -> bool:
     """True se `label` è un'etichetta tecnica (filename/mime/fallback), non una caption."""
@@ -112,24 +119,28 @@ def _is_technical_media_label(label: str) -> bool:
         return True
     if s.startswith(("http://", "https://")):
         return True
-    if " " not in s and _MEDIA_EXT_RE.search(s):   # bare filename "photo.jpg"
+    if " " not in s and _MEDIA_EXT_RE.search(s):  # bare filename "photo.jpg"
         return True
     return False
 
-def _is_synthetic_media_text(text: str, attachment_info: str | None, attachment_id: str | None) -> bool:
+
+def _is_synthetic_media_text(
+    text: str, attachment_info: str | None, attachment_id: str | None
+) -> bool:
     """True se `text` è un'identità sintetica generata dal backend, non una caption."""
     t = (text or "").strip()
     if not t:
         return True
-    if t.startswith("Media: "):                    # WhatsApp, whatsapp_events.py:296
+    if t.startswith("Media: "):  # WhatsApp, whatsapp_events.py:296
         return True
     info = (attachment_info or "").strip()
     att = str(attachment_id or "").strip()
-    if info and t == info:                          # Signal: echo del label senza id
+    if info and t == info:  # Signal: echo del label senza id
         return True
-    if info and att and t == f"{info}: {att}":      # Signal: f"{label}: {att_id}"
+    if info and att and t == f"{info}: {att}":  # Signal: f"{label}: {att_id}"
         return True
     return False
+
 
 def _image_caption(text, attachment_info, attachment_id, protocol) -> str | None:
     """Caption reale di una foto, o None. Regole per protocollo (deterministiche):
@@ -141,7 +152,7 @@ def _image_caption(text, attachment_info, attachment_id, protocol) -> str | None
     """
     t = (text or "").strip()
     info = (attachment_info or "").strip()
-    if protocol == PROTOCOL_TELEGRAM:               # estendere import da models
+    if protocol == PROTOCOL_TELEGRAM:  # estendere import da models
         return t or None
     if protocol == PROTOCOL_SIGNAL:
         if t and not _is_synthetic_media_text(text, attachment_info, attachment_id):
@@ -177,7 +188,7 @@ if msg_type == "image":
     caption = _image_caption(text, attachment_info, attachment_id, protocol)
     info_for_placeholder = attachment_info or text
     if caption and (info_for_placeholder or "").strip() == caption:
-        info_for_placeholder = None          # la caption vive nella bolla: placeholder generico
+        info_for_placeholder = None  # la caption vive nella bolla: placeholder generico
     self._render_image_in_chat(
         attachment_id=attachment_id,
         attachment_info=info_for_placeholder or "Photo",
@@ -219,15 +230,15 @@ if msg_type == "image":
     caption = _image_caption(text, attachment_info, attachment_id, protocol)
     display = attachment_info or text or "Photo"
     if caption and display.strip() == caption:
-        display = "Photo"                       # niente caption duplicata nel placeholder
-    if not display.startswith("🖼️"):            # fix doppia emoji "[🖼️ 🖼️ Photo]"
+        display = "Photo"  # niente caption duplicata nel placeholder
+    if not display.startswith("🖼️"):  # fix doppia emoji "[🖼️ 🖼️ Photo]"
         display = f"🖼️ {display}"
     image_widget = ImageWidget(
         attachment_path=None,
         attachment_id=attachment_id or "",
         fallback_text=f"[{display}]",
     )
-    image_widget.classes = "msg-right" if is_mine else "msg-left"   # FIX #31
+    image_widget.classes = "msg-right" if is_mine else "msg-left"  # FIX #31
     widgets.append(image_widget)
     if caption:
         widgets.append(
@@ -253,7 +264,7 @@ Nota: rimuovere l'import locale `from ui_components import ImageWidget` (riga 56
 ```python
 if msg.photo:
     msg_type = "image"
-    attachment_info = text or "Photo"   # era: "🖼️ Photo" hardcoded
+    attachment_info = text or "Photo"  # era: "🖼️ Photo" hardcoded
 ```
 
 - Con caption: `attachment_info` = caption → il placeholder live diventa `[🖼️ Image: <caption> — loading…]` (ma `_add_message` lo neutralizza a `"Photo"` perché `info == caption`) e da cache `[🖼️ Photo]` + bolla caption.
