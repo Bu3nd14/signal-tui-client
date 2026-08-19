@@ -4,6 +4,7 @@ import logging
 
 from textual.widgets import Label, ListItem, ListView
 
+from contact_picker import contact_sort_key
 from models import (
     ChatContact,
     protocol_emoji,
@@ -18,26 +19,12 @@ class ContactListMixin:
     def _contact_sort_key(c: ChatContact) -> tuple:
         """Key per ordinare i contatti: ultimi messaggi in alto.
 
-        Gruppi (in ordine):
-          1. contatti CON messaggi      -> per ``last_message_ts`` desc;
-          2. contatti SENZA messaggi ma con un nome -> alfabetici;
-          3. contatti SENZA messaggi e SOLO numero (display_name == id) -> in coda.
+        Delega a ``contact_picker.contact_sort_key`` (funzione condivisa con il
+        picker della rubrica) per garantire la stessa semantica in entrambi i
+        punti: (1) contatti con messaggi per ``last_message_ts`` desc; (2)
+        senza messaggi ma con nome, alfabetici; (3) solo numero in coda.
         """
-        ts = c.last_message_ts or 0
-        name = (c.display_name or "").lower()
-        unnamed = True  # "solo numero": display_name manca o coincide con l'id
-        if c.display_name and c.display_name != c.id:
-            unnamed = False
-        has_messages = ts > 0
-        return (
-            not has_messages,  # 0 = con messaggi (prima), 1 = senza
-            -ts,  # più recente in alto (solo se has_messages)
-            1
-            if (not has_messages and unnamed)
-            else 0,  # "solo numero senza msg" in coda
-            name,  # alfabetico per i senza messaggi
-            c.id,
-        )
+        return contact_sort_key(c)
 
     def _sort_contacts(self):
         """Sort contacts: contacts with messages first (most recent first),
