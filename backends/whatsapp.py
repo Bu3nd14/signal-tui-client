@@ -239,6 +239,9 @@ class WhatsAppBackend(ChatBackend):
                             ack_attachment_id = media.get("url") or content.get("id")
                             ack_attachment_info = (
                                 content.get("caption")
+                                or str(
+                                    content.get("body") or content.get("text") or ""
+                                ).strip()
                                 or media.get("caption")
                                 or media.get("filename")
                                 or mime
@@ -1204,17 +1207,21 @@ class WhatsAppBackend(ChatBackend):
         for msg in self.cache.get(contact_id, []):
             if msg.get("is_mine") != is_mine:
                 continue
+            # Outgoing: l'id è l'identità primaria e stabile (echo message.ack con
+            # body=caption condivide il msg_id del messaggio media reale, ma text
+            # diverso).  Il match per id DEVE precedere quello sul testo, altrimenti
+            # l'evento ack sintetico viene ingerito come nuovo messaggio di testo.
+            if is_mine and msg_id and msg.get("id") and msg.get("id") == msg_id:
+                return msg
             if msg.get("text") != text:
                 continue
             if not is_mine:
                 if msg_id and msg.get("id") == msg_id:
                     return msg
-                # Text + fuzzy timestamp — the only stable identity
-                # across WAHA's webhook and REST API paths.
+                # Text + fuzzy timestamp — unica identità stabile webhook/REST.
                 if abs(msg.get("timestamp", 0) - ts) <= 5000:
                     return msg
             elif msg_id:
-                # Outgoing: id-based dedup first (echo), then text + window.
                 cached_id = msg.get("id")
                 if cached_id and cached_id == msg_id:
                     return msg

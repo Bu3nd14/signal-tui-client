@@ -159,7 +159,7 @@ file/reference id e implementare il download lazy al click.
 
 ---
 
-### #31 — Foto inviate renderizzate da cache allineate come ricevute e senza colore `$success` (`tui/chat_view.py`, righe 567-577)
+### #31 — Foto inviate renderizzate da cache allineate come ricevute e senza colore `$success` (`tui/chat_view.py`, righe 567-577) ✅ RISOLTO
 
 Nel ramo cache `_build_message_widgets` crea l'`ImageWidget` senza assegnare
 `msg-left`/`msg-right` in base a `is_mine`, a differenza del rendering live
@@ -179,9 +179,16 @@ messaggio ricevuto.
 **Fix suggerito:** assegnare `msg-left`/`msg-right` in base a `is_mine` anche nel
 ramo cache, come già fatto nel percorso live.
 
+**Fix:** `_build_message_widgets` ora assegna `widget.classes = "msg-right" if
+is_mine else "msg-left"` all'`ImageWidget` (stessa logica del live). Fix applicato
+contestualmente al #36 (branch `fix/image-caption-alignment`, design in
+`DESIGN_FIX_31_36.md`). Test: `TestCacheImageAlignment` in `tests/test_image_caption.py`
+(parametrizzato su Signal/WhatsApp/Telegram). Suite completa 903 passed (unico
+fallimento pre-esistente non correlato in `test_address_book.py`) ✅.
+
 ---
 
-### #36 — La caption delle foto non è mai una bolla di testo dedicata: Signal/WhatsApp la mostrano solo nel placeholder da cache e il live la sovrascrive col filename, Telegram la perde del tutto (`backends/signal.py`, righe 476-489; `backends/whatsapp_events.py`, righe 162, 184-186, 205-215, 233-239; `backends/telegram.py`, righe 711, 731-733; `tui/chat_view.py`, righe 117-124, 265-276, 567-577)
+### #36 — La caption delle foto non è mai una bolla di testo dedicata: Signal/WhatsApp la mostrano solo nel placeholder da cache e il live la sovrascrive col filename, Telegram la perde del tutto (`backends/signal.py`, righe 476-489; `backends/whatsapp_events.py`, righe 162, 184-186, 205-215, 233-239; `backends/telegram.py`, righe 711, 731-733; `tui/chat_view.py`, righe 117-124, 265-276, 567-577) ✅ RISOLTO
 
 La caption della foto (inviata o ricevuta) non è mai renderizzata come messaggio di
 testo dedicato, su nessuno dei tre protocolli.
@@ -210,6 +217,42 @@ Signal/WhatsApp solo fuori dal percorso live.
 come testo dedicato accanto/sotto il placeholder — o nella modale — distinguendo la
 caption reale da mime/filename tecnici, ed evitare di hardcodare `"🖼️ Photo"`
 quando è disponibile una caption in `text`.
+
+**Fix** (branch `fix/image-caption-alignment`, design in `DESIGN_FIX_31_36.md`):
+- `tui/chat_view.py`: aggiunto il resolver `_image_caption()` (euristica UI-side,
+  nessun campo/schema nuovo) che distingue la caption reale dalle etichette tecniche
+  (filename, mime, fallback, testi sintetici `Media:`/`<label>: <id>`).
+- La caption è ora una bolla `MessageWidget` dedicata (stesso allineamento/status/
+  sender della foto) montata sotto l'`ImageWidget`, sia nel percorso **live**
+  (`_add_message`) sia in **cache/storico** (`_build_message_widgets`). Vale per foto
+  inviate **e** ricevute su tutti e tre i protocolli.
+- `backends/telegram.py`: `attachment_info = text or "Photo"` (rimosso l'hardcode
+  `"🖼️ Photo"` che sopprimeva la caption Telegram, che vive in `msg.text`).
+- Normalizzazione placeholder: niente doppia emoji `[🖼️ 🖼️ Photo]` e niente caption
+  duplicata dentro le quadre quando la caption vive nella bolla.
+- `backends/whatsapp_events.py`: WAHA consegna la caption dei media in `payload.body`
+  (documentazione ufficiale); la caption ora considera anche `body`/`text`, quindi
+  `attachment_info` porta la caption reale invece di cascare sul mime (`image/jpeg`).
+- `backends/whatsapp.py` (percorso ack): stessa sorgente caption per i media inviati,
+  e fix del **doppio rendering**: per gli outgoing `_message_already_cached` ora
+  confronta l'`id` PRIMA del testo. Senza questo, l'evento sintetico `message.ack`
+  (text=caption, senza `hasMedia`, stesso `msg_id`) non veniva deduplicato contro il
+  messaggio media reale (`text="Media: <url>"`) e la caption compariva due volte
+  (bolla caption + bolla di testo). Stessa precedenza id-su-testo nel mirror UI
+  (`_merge_backend_cache._find_existing`).
+- Test: `tests/test_image_caption.py` (suite `TestImageCaptionResolver`,
+  `TestCaptionBubbleLive`, `TestCaptionBubbleCache`) + `test_message_photo_with_caption_uses_text_as_info`
+  in `tests/test_telegram.py` + `test_hasMedia_caption_in_body`/`test_hasMedia_no_caption_keeps_mime`/
+  `test_handle_webhook_image_ack_caption_in_body`/`test_ack_echo_media_does_not_duplicate`/
+  `test_ack_echo_text_still_dedups_optimistic`/`test_ack_echo_media_reverse_order`
+  in `tests/test_whatsapp_backend.py`. Suite completa: 903 passed (unico fallimento
+  pre-esistente e non correlato: `tests/test_address_book.py::TestWAMerge::test_lid_unresolved_standalone_no_network`).
+- Caso limite noto (documentato nel docstring di `_image_caption`): una caption utente
+  identica a un'etichetta tecnica (es. `"photo.jpg"`) resta nel placeholder e non
+  diventa bolla.
+- Limite noto (bassa severità): se l'`ack` arrivasse PRIMA dell'echo media (ordine
+  inverso), il dedup per id lascerebbe 1 entry di tipo `text`; in pratica WAHA emette
+  l'echo `message` prima dell'`ack`, quindi lo scenario è improbabile.
 
 ---
 

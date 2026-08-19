@@ -749,6 +749,47 @@ class TestWhatsAppEvents:
         assert ev.payload["attachment_id"] == "https://wa.to/img/abc123.jpg"
         assert ev.payload["attachment_info"] == "Guarda!"  # caption
 
+    def test_hasMedia_caption_in_body(self):
+        """WAHA reale: la caption dei media arriva nel campo `body` (non `caption`)."""
+        ev = _msg(
+            {
+                "id": "false_12345@lid_ABC",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "pushName": "Mario",
+                "hasMedia": True,
+                "body": "Nice, or?",
+                "media": {
+                    "mimetype": "image/jpeg",
+                    "url": "https://wa.to/img/x.jpg",
+                },
+            }
+        )
+        assert ev is not None
+        assert ev.payload["msg_type"] == "image"
+        assert ev.payload["attachment_info"] == "Nice, or?"
+
+    def test_hasMedia_no_caption_keeps_mime(self):
+        """Media senza caption (`body` vuoto) → attachment_info cade sul mime."""
+        ev = _msg(
+            {
+                "id": "img_nocap",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "hasMedia": True,
+                "body": "",
+                "media": {
+                    "mimetype": "image/jpeg",
+                    "url": "https://wa.to/img/x.jpg",
+                },
+            }
+        )
+        assert ev is not None
+        assert ev.payload["msg_type"] == "image"
+        assert ev.payload["attachment_info"] == "image/jpeg"
+
     def test_hasMedia_video(self):
         """WAHA video message via hasMedia/media fields."""
         ev = _msg(
@@ -1235,6 +1276,112 @@ class TestWhatsAppBackend:
             )  # echo entro finestra
             mock_add.assert_called_once()
 
+    def test_ack_echo_media_does_not_duplicate(self):
+        """🛡️ Regressione: il message.ack di un'immagine uscente con caption in
+        `body` (stesso msg_id del media reale ma text=caption) NON deve essere
+        ingerito come nuovo messaggio di testo.
+
+        Il match per id (outgoing) deve precedere il confronto sul testo:
+        altrimenti "Media: <url>" ≠ caption e l'evento ack diventa una bolla
+        di testo duplicata accanto alla caption reale.
+        """
+        import backend as backend_mod
+
+        backend = _make_backend()
+        cid = "wa:1@s.whatsapp.net"
+        msg_id = "true_189025889575055@lid_3A268CF00E4ECCEA4474"
+        image = {
+            "id": msg_id,
+            "text": "Media: https://wa.to/img/abc123.jpg",
+            "is_mine": True,
+            "sender": "You",
+            "msg_type": "image",
+            "attachment_info": "Yes, nice",
+            "attachment_id": "https://wa.to/img/abc123.jpg",
+        }
+        ack = {
+            "id": msg_id,
+            "text": "Yes, nice",
+            "is_mine": True,
+            "sender": "You",
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+        }
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            assert backend.ingest_message(cid, image, 1700000000) is True
+            assert backend.ingest_message(cid, ack, 1700000001) is False
+            mock_add.assert_called_once()
+        assert len(backend.cache[cid]) == 1
+        assert backend.cache[cid][0]["msg_type"] == "image"
+
+    def test_ack_echo_text_still_dedups_optimistic(self):
+        """🛡️ Regressione: il dedup ottimistico (TUI-send senza id) + echo con
+        id resta funzionante dopo il reorder id-su-testo per gli outgoing."""
+        import backend as backend_mod
+
+        backend = _make_backend()
+        cid = "wa:1@s.whatsapp.net"
+        optimistic = {
+            "text": "hello",
+            "is_mine": True,
+            "sender": "You",
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+        }
+        echo = {
+            "id": "echo-id-1",
+            "text": "hello",
+            "is_mine": True,
+            "sender": "You",
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+        }
+        with (
+            patch.object(backend_mod, "_add_message_to_cache") as mock_add,
+            patch.object(backend_mod, "_update_message_id") as mock_upd,
+        ):
+            assert backend.ingest_message(cid, optimistic, 1700000000) is True
+            assert backend.ingest_message(cid, echo, 1700000002) is False
+            mock_add.assert_called_once()
+            mock_upd.assert_called_once()
+        assert len(backend.cache[cid]) == 1
+        assert backend.cache[cid][0]["id"] == "echo-id-1"
+
+    def test_ack_echo_media_reverse_order(self):
+        """🛡️ Regressione: ack sintetico (text=caption, id=msg_id) ingerito
+        PRIMA del messaggio immagine (stesso id) non crea due righe."""
+        import backend as backend_mod
+
+        backend = _make_backend()
+        cid = "wa:1@s.whatsapp.net"
+        msg_id = "true_reverse_189025889575055@lid"
+        ack = {
+            "id": msg_id,
+            "text": "Yes, nice",
+            "is_mine": True,
+            "sender": "You",
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+        }
+        image = {
+            "id": msg_id,
+            "text": "Media: https://wa.to/img/abc123.jpg",
+            "is_mine": True,
+            "sender": "You",
+            "msg_type": "image",
+            "attachment_info": "Yes, nice",
+            "attachment_id": "https://wa.to/img/abc123.jpg",
+        }
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            assert backend.ingest_message(cid, ack, 1700000000) is True
+            assert backend.ingest_message(cid, image, 1700000001) is False
+            mock_add.assert_called_once()
+        assert len(backend.cache[cid]) == 1
+
 
 class TestWhatsAppWebhook:
     """📥 Ricezione PUSH via webhook di WAHA (niente più polling).
@@ -1454,6 +1601,42 @@ class TestWhatsAppWebhook:
         )
         assert ev.payload["attachment_id"] == "https://wa.to/img/echo-photo.jpg"
         assert ev.payload["attachment_info"] == "Guarda qua!"
+
+    def test_handle_webhook_image_ack_caption_in_body(self):
+        """message.ack per un'immagine uscente con caption in `body` (WAHA reale).
+
+        WAHA consegna la caption dei media inviati in `body`/`text`, non in
+        `caption`/`media.caption`.  Il synthetic event accodato deve portare
+        msg_type=image e attachment_info con la caption reale.
+        """
+        import time
+
+        now = int(time.time())
+        backend = self._backend()
+        envelope = {
+            "session": "default",
+            "event": "message.ack",
+            "payload": {
+                "id": "ACK_IMG_BODY",
+                "to": "3912345678@c.us",
+                "fromMe": True,
+                "timestamp": now,
+                "status": 2,  # SERVER_ACK (< 3 → _event_from_ack returns None)
+                "body": "Nice, or?",
+                "hasMedia": True,
+                "media": {
+                    "mimetype": "image/jpeg",
+                    "url": "https://wa.to/img/x.jpg",
+                },
+            },
+        }
+        assert backend.handle_webhook(envelope) is True
+        events = backend.poll_once()
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.type == "message"
+        assert ev.payload["msg_type"] == "image"
+        assert ev.payload["attachment_info"] == "Nice, or?"
 
     def test_handle_webhook_image_message_ack_without_hasMedia_is_plain(self):
         """message.ack senza hasMedia → synthetic event resta text (nessun crash)."""

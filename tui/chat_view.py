@@ -1,6 +1,7 @@
 """Chat rendering: message widgets, chat window, history loading."""
 
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from backends import (
 )
 from models import (
     PROTOCOL_SIGNAL,
+    PROTOCOL_TELEGRAM,
 )
 from ui_components import (
     ImageWidget,
@@ -37,6 +39,82 @@ def _media_display_text(text: str, attachment_info: str | None, msg_type: str) -
     if msg_type == "attachment":
         return f"📎 {attachment_info or '[File]'}"
     return text
+
+
+_TECHNICAL_LABELS = frozenset({"🖼️ Image", "🖼️ Photo", "Media", "Image", "Photo"})
+_TECHNICAL_PREFIXES = ("Image: ", "Video: ", "Audio: ")
+_MIME_RE = re.compile(r"^[\w.-]+/[\w.+-]+$")
+_MEDIA_KEY_RE = re.compile(r"^(image|video|audio|document|sticker)Message( \(.+\))?$")
+_MEDIA_EXT_RE = re.compile(
+    r"\.(jpe?g|png|gif|webp|bmp|tiff?|heic|heif|mp4|mov|mkv|webm|avi|mp3|ogg|opus|aac|m4a|wav|pdf)$",
+    re.IGNORECASE,
+)
+
+
+def _is_technical_media_label(label: str) -> bool:
+    """True se `label` è un'etichetta tecnica (filename/mime/fallback), non una caption."""
+    s = (label or "").strip()
+    if not s:
+        return True
+    if s in _TECHNICAL_LABELS:
+        return True
+    if s.startswith(_TECHNICAL_PREFIXES):
+        return True
+    if _MIME_RE.match(s):
+        return True
+    if _MEDIA_KEY_RE.match(s):
+        return True
+    if s.startswith(("http://", "https://")):
+        return True
+    return bool(" " not in s and _MEDIA_EXT_RE.search(s))
+
+
+def _is_synthetic_media_text(
+    text: str, attachment_info: str | None, attachment_id: str | None
+) -> bool:
+    """True se `text` è un'identità sintetica generata dal backend, non una caption."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if t.startswith("Media: "):
+        return True
+    info = (attachment_info or "").strip()
+    att = str(attachment_id or "").strip()
+    if info and t == info:
+        return True
+    return bool(info and att and t == f"{info}: {att}")
+
+
+def _image_caption(
+    text: str,
+    attachment_info: str | None,
+    attachment_id: str | None,
+    protocol: str | None,
+) -> str | None:
+    """Caption reale di una foto, o None. Regole per protocollo (deterministiche):
+
+    - Telegram: la caption è ``text`` (``attachment_info`` è un'etichetta statica).
+    - Signal: la caption è il body ``dataMessage.message`` (in ``text`` sul primo
+      attachment); se assente/sintetico, la caption per-attachment in ``attachment_info``.
+    - WhatsApp: la caption è in ``attachment_info`` (il ``text`` è sempre sintetico).
+
+    Caso limite noto e accettato: una caption utente identica a un bare
+    filename (``"photo.jpg"``) viene classificata tecnica e non mostrata come
+    bolla (resta nel placeholder).
+    """
+    t = (text or "").strip()
+    info = (attachment_info or "").strip()
+    if protocol == PROTOCOL_TELEGRAM:
+        return t or None
+    if (
+        protocol == PROTOCOL_SIGNAL
+        and t
+        and not _is_synthetic_media_text(text, attachment_info, attachment_id)
+    ):
+        return t
+    if info and not _is_technical_media_label(info):
+        return info
+    return None
 
 
 class ChatViewMixin:
@@ -115,13 +193,33 @@ class ChatViewMixin:
 
         # ── Image messages: render inline via async worker ──────────────
         if msg_type == "image":
+            caption = _image_caption(text, attachment_info, attachment_id, protocol)
+            info_for_placeholder = attachment_info or text
+            if caption and (info_for_placeholder or "").strip() == caption:
+                info_for_placeholder = None
             self._render_image_in_chat(
                 attachment_id=attachment_id,
-                attachment_info=attachment_info or text,
+                attachment_info=info_for_placeholder or "Photo",
                 is_mine=is_mine,
                 chat_log=chat_log,
                 protocol=protocol,
             )
+            if caption:
+                is_group = bool(
+                    self.selected_contact and self.selected_contact.id.endswith("@g.us")
+                )
+                caption_widget = self._make_message_widget(
+                    text=caption,
+                    is_mine=is_mine,
+                    timestamp=timestamp,
+                    sender=sender,
+                    status=status,
+                    protocol=protocol or "",
+                    is_group=is_group,
+                    message_id=message_id,
+                )
+                chat_log.mount(caption_widget)
+                chat_log.scroll_end(animate=False)
             return
 
         # ── Non-image messages ──────────────────────────────────────────
@@ -507,6 +605,11 @@ class ChatViewMixin:
             for existing in ui_msgs:
                 if bool(existing.get("is_mine", False)) != is_mine:
                     continue
+                # Outgoing: id-first mirror of _message_already_cached (echo
+                # message.ack per un media con caption condivide l'id ma ha text
+                # diverso: il match per id deve precedere quello sul testo).
+                if is_mine and mid and existing.get("id") and existing.get("id") == mid:
+                    return existing
                 if existing.get("text", "") != text:
                     continue
                 existing_ts = int(existing.get("timestamp") or 0)
@@ -565,16 +668,32 @@ class ChatViewMixin:
             widgets.append(Static(f"▎ {quote_text}", classes=quote_class))
 
         if msg_type == "image":
-            from ui_components import ImageWidget
-
-            display = attachment_info or text or "Image"
-            widgets.append(
-                ImageWidget(
-                    attachment_path=None,
-                    attachment_id=attachment_id or "",
-                    fallback_text=f"[🖼️ {display}]",
-                )
+            caption = _image_caption(text, attachment_info, attachment_id, protocol)
+            display = attachment_info or text or "Photo"
+            if caption and display.strip() == caption:
+                display = "Photo"
+            if not display.startswith("🖼️"):
+                display = f"🖼️ {display}"
+            image_widget = ImageWidget(
+                attachment_path=None,
+                attachment_id=attachment_id or "",
+                fallback_text=f"[{display}]",
             )
+            image_widget.classes = "msg-right" if is_mine else "msg-left"
+            widgets.append(image_widget)
+            if caption:
+                widgets.append(
+                    self._make_message_widget(
+                        text=caption,
+                        is_mine=is_mine,
+                        timestamp=ts,
+                        sender=sender,
+                        status=status,
+                        protocol=protocol,
+                        is_group=is_group,
+                        message_id=message_id,
+                    )
+                )
         else:
             display_text = _media_display_text(text, attachment_info, msg_type)
             widgets.append(
