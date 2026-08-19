@@ -267,9 +267,10 @@ def _fetch_whatsapp() -> tuple[list, list]:
     if backend._rest is None:
         raise RuntimeError("WhatsApp REST client is not configured")
     contacts_all = backend._rest.list_all_contacts() or []
-    chats = backend._rest._request(
-        "GET", f"/api/{backend.session_name}/chats", timeout=10
-    ) or []
+    chats = (
+        backend._rest._request("GET", f"/api/{backend.session_name}/chats", timeout=10)
+        or []
+    )
     return contacts_all, chats if isinstance(chats, list) else []
 
 

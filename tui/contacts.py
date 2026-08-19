@@ -404,9 +404,7 @@ class ContactListMixin:
             logger.debug("WhatsApp number-exists check failed", exc_info=True)
             return
         if exists is False:
-            self.call_from_thread(
-                self._status, f"⚠️ {phone} non risulta su WhatsApp", 0
-            )
+            self.call_from_thread(self._status, f"⚠️ {phone} non risulta su WhatsApp", 0)
 
     def _select_contact(self, contact: ChatContact) -> None:
         """Select a contact and show its chat.

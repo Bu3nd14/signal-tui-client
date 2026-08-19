@@ -610,7 +610,9 @@ class WhatsAppBackend(ChatBackend):
                         )
                     )
                     continue
-                phone = _jid_digits(cid) if cid.endswith("@c.us") else self._lid_lookup(cid)
+                phone = (
+                    _jid_digits(cid) if cid.endswith("@c.us") else self._lid_lookup(cid)
+                )
                 if phone and phone in by_phone:
                     # MERGE: l'id diventa quello della chat attiva (anche @lid)
                     # per mantenere continuity con cache/send path esistenti.

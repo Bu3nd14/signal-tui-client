@@ -130,9 +130,7 @@ class TestGhostWhatsAppNumberCheck:
 
         app._check_ghost_whatsapp_number(_ghost_whatsapp())
 
-        app._status.assert_called_once_with(
-            "⚠️ 393331234567 non risulta su WhatsApp", 0
-        )
+        app._status.assert_called_once_with("⚠️ 393331234567 non risulta su WhatsApp", 0)
 
     def test_true_no_warning(self):
         backend = MagicMock()
@@ -200,7 +198,9 @@ class TestSendGhostTelegram:
 
         monkeypatch.setattr(
             "backends.telegram.asyncio.run_coroutine_threadsafe",
-            lambda coro, loop: SimpleNamespace(result=lambda timeout: asyncio.run(coro)),
+            lambda coro, loop: SimpleNamespace(
+                result=lambda timeout: asyncio.run(coro)
+            ),
         )
 
         result = backend.send_message_sync("42", "ciao")
@@ -218,14 +218,14 @@ class TestSendGhostTelegram:
         backend._client.get_input_entity = AsyncMock(
             side_effect=ValueError("entity not in session")
         )
-        ghost = ChatContact(
-            id="42", display_name="NoHash", protocol=PROTOCOL_TELEGRAM
-        )
+        ghost = ChatContact(id="42", display_name="NoHash", protocol=PROTOCOL_TELEGRAM)
         backend.register_contact(ghost)
 
         monkeypatch.setattr(
             "backends.telegram.asyncio.run_coroutine_threadsafe",
-            lambda coro, loop: SimpleNamespace(result=lambda timeout: asyncio.run(coro)),
+            lambda coro, loop: SimpleNamespace(
+                result=lambda timeout: asyncio.run(coro)
+            ),
         )
 
         with pytest.raises(RuntimeError, match="access_hash mancante per 42"):

@@ -455,7 +455,10 @@ class TestWALidCache:
         backend = _wa_backend()
         backend._lid_cache_load()
         with backend._lid_lock:
-            backend._lid_map["fresh@lid"] = {"phone": "391234567890", "resolved_at": now}
+            backend._lid_map["fresh@lid"] = {
+                "phone": "391234567890",
+                "resolved_at": now,
+            }
             backend._lid_map["stale@lid"] = {
                 "phone": "391234567890",
                 "resolved_at": now - 31 * 86400,
@@ -666,9 +669,7 @@ class TestWALidResolver:
 
         monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
         backend = _wa_backend()
-        backend.contacts = [
-            _chat(f"{i}@lid", ts=i) for i in range(35)
-        ]
+        backend.contacts = [_chat(f"{i}@lid", ts=i) for i in range(35)]
         backend._rest.resolve_contact.return_value = {
             "id": "391234567890@c.us",
             "name": "X",
@@ -743,9 +744,7 @@ def _tg_backend_with_book(monkeypatch, users, dialogs=None) -> TelegramBackend:
             pass
     monkeypatch.setattr(
         "backends.telegram.asyncio.run_coroutine_threadsafe",
-        lambda coro, loop: SimpleNamespace(
-            result=lambda timeout: asyncio.run(coro)
-        ),
+        lambda coro, loop: SimpleNamespace(result=lambda timeout: asyncio.run(coro)),
     )
     return backend
 
@@ -755,10 +754,22 @@ class TestTelegramAddressBook:
 
     def test_build_skips_bots_deleted_and_sets_extras(self, monkeypatch):
         users = [
-            _tg_user(id=1, first_name="Ada", last_name="Lovelace", username="ada",
-                     phone="+391234567890", access_hash=111),
-            _tg_user(id=2, first_name="Mamma", last_name="Vod", username="",
-                     phone="", access_hash=222),  # senza numero
+            _tg_user(
+                id=1,
+                first_name="Ada",
+                last_name="Lovelace",
+                username="ada",
+                phone="+391234567890",
+                access_hash=111,
+            ),
+            _tg_user(
+                id=2,
+                first_name="Mamma",
+                last_name="Vod",
+                username="",
+                phone="",
+                access_hash=222,
+            ),  # senza numero
             _tg_user(id=3, first_name="Bot", bot=True),
             _tg_user(id=4, first_name="Deleted Account", deleted=True),
         ]
@@ -781,10 +792,17 @@ class TestTelegramAddressBook:
 
     def test_display_name_falls_back_to_phone_then_id(self, monkeypatch):
         users = [
-            _tg_user(id=5, first_name="", last_name="", username="",
-                     phone="+393331234567", access_hash=5),
-            _tg_user(id=6, first_name="", last_name="", username="",
-                     phone="", access_hash=6),
+            _tg_user(
+                id=5,
+                first_name="",
+                last_name="",
+                username="",
+                phone="+393331234567",
+                access_hash=5,
+            ),
+            _tg_user(
+                id=6, first_name="", last_name="", username="", phone="", access_hash=6
+            ),
         ]
         backend = _tg_backend_with_book(monkeypatch, users)
 
@@ -796,10 +814,22 @@ class TestTelegramAddressBook:
 
     def test_merge_with_dialogs_and_lookup_extension(self, monkeypatch):
         users = [
-            _tg_user(id=10, first_name="Ada", last_name="", username="",
-                     phone="+391234567890", access_hash=111),
-            _tg_user(id=20, first_name="Book", last_name="Only", username="",
-                     phone="", access_hash=222),  # nessun dialogo
+            _tg_user(
+                id=10,
+                first_name="Ada",
+                last_name="",
+                username="",
+                phone="+391234567890",
+                access_hash=111,
+            ),
+            _tg_user(
+                id=20,
+                first_name="Book",
+                last_name="Only",
+                username="",
+                phone="",
+                access_hash=222,
+            ),  # nessun dialogo
         ]
         dialogs = [
             _tg_dialog_contact(10, "Ada", ts=12345, read_max=99),
@@ -834,9 +864,7 @@ class TestTelegramAddressBook:
 
     def test_error_returns_stale_or_empty(self, monkeypatch):
         backend = _tg_backend_with_book(monkeypatch, [])
-        backend._client = AsyncMock(
-            side_effect=RuntimeError("RPC error")
-        )
+        backend._client = AsyncMock(side_effect=RuntimeError("RPC error"))
 
         assert backend.list_address_book_sync() == []
         assert backend._address_book is None
@@ -889,9 +917,7 @@ class TestTelegramResolveInputEntity:
             get_input_entity=AsyncMock(side_effect=ValueError("no entity"))
         )
         backend._contacts_by_id = {
-            42: ChatContact(
-                id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM
-            )
+            42: ChatContact(id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM)
         }
 
         with pytest.raises(RuntimeError, match="access_hash mancante per 42"):
@@ -962,13 +988,21 @@ class TestManagerAddressBook:
     def test_aggregates_across_backends(self):
         manager = BackendManager()
         sig = _MinimalBackend(
-            [ChatContact(id="+391234567890", display_name="Mario",
-                         protocol=PROTOCOL_SIGNAL)]
+            [
+                ChatContact(
+                    id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+                )
+            ]
         )
         sig.protocol = PROTOCOL_SIGNAL
         wa = _MinimalBackend(
-            [ChatContact(id="391234567890@c.us", display_name="MarioWA",
-                         protocol=PROTOCOL_WHATSAPP)]
+            [
+                ChatContact(
+                    id="391234567890@c.us",
+                    display_name="MarioWA",
+                    protocol=PROTOCOL_WHATSAPP,
+                )
+            ]
         )
         wa.protocol = PROTOCOL_WHATSAPP
         manager.register(sig)
@@ -988,9 +1022,7 @@ class TestManagerAddressBook:
         ok.protocol = PROTOCOL_SIGNAL
         bad = _MinimalBackend()
         bad.protocol = PROTOCOL_TELEGRAM
-        bad.list_address_book_sync = MagicMock(
-            side_effect=RuntimeError("boom")
-        )
+        bad.list_address_book_sync = MagicMock(side_effect=RuntimeError("boom"))
         manager.register(ok)
         manager.register(bad)
 
@@ -1003,13 +1035,21 @@ class TestManagerAddressBook:
     def test_protocols_scoping(self):
         manager = BackendManager()
         sig = _MinimalBackend(
-            [ChatContact(id="+391234567890", display_name="Mario",
-                         protocol=PROTOCOL_SIGNAL)]
+            [
+                ChatContact(
+                    id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+                )
+            ]
         )
         sig.protocol = PROTOCOL_SIGNAL
         wa = _MinimalBackend(
-            [ChatContact(id="391234567890@c.us", display_name="MarioWA",
-                         protocol=PROTOCOL_WHATSAPP)]
+            [
+                ChatContact(
+                    id="391234567890@c.us",
+                    display_name="MarioWA",
+                    protocol=PROTOCOL_WHATSAPP,
+                )
+            ]
         )
         wa.protocol = PROTOCOL_WHATSAPP
         manager.register(sig)
@@ -1024,9 +1064,7 @@ class TestManagerAddressBook:
         manager = BackendManager()
         bad = _MinimalBackend()
         bad.protocol = PROTOCOL_TELEGRAM
-        bad.list_address_book_sync = MagicMock(
-            side_effect=RuntimeError("boom")
-        )
+        bad.list_address_book_sync = MagicMock(side_effect=RuntimeError("boom"))
         manager.register(bad)
 
         manager.list_address_book_sync()
