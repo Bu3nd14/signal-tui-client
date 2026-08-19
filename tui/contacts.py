@@ -6,6 +6,7 @@ from textual.widgets import Label, ListItem, ListView
 
 from contact_picker import contact_sort_key
 from models import (
+    PROTOCOL_WHATSAPP,
     ChatContact,
     protocol_emoji,
 )
@@ -350,6 +351,63 @@ class ContactListMixin:
 
     # ─── Contact selection ─────────────────────────────────────────────────
 
+    def _ensure_contact_selectable(self, contact: ChatContact) -> ChatContact | None:
+        """Return the canonical contact to open for *contact*.
+
+        If a contact with the same ``cache_key`` is already in ``self.contacts``
+        that object is returned (the comparison is by ``cache_key`` ONLY — the
+        dataclass ``__eq__`` includes ``extras``, so two address-book copies of
+        the same chat would otherwise be treated as different).  Otherwise the
+        contact is OPEN-OR-CREATED as a "ghost": marked ``extras["ghost"]``,
+        appended to ``self.contacts``, registered in its backend via
+        ``register_contact`` and rendered in-place (superset branch).
+
+        Returns ``None`` when the contact's protocol has no registered backend;
+        the caller then shows ``❌ backend non disponibile`` and aborts.
+        """
+        for existing in self.contacts:
+            if existing.cache_key == contact.cache_key:
+                return existing
+
+        backend = self.manager.get(contact.protocol)
+        if backend is None:
+            return None
+
+        contact.extras["ghost"] = True
+        self.contacts.append(contact)
+        backend.register_contact(contact)
+        self._sort_contacts()
+        self._render_contact_list(list(self.contacts))
+        return contact
+
+    def _check_ghost_whatsapp_number(self, contact: ChatContact) -> None:
+        """Worker thread: best-effort check che un numero WhatsApp ghost esista.
+
+        Chiamato solo per contatti WhatsApp appena aperti via open-or-create
+        (``extras["ghost"]``).  Un ``False`` esplicito da ``check_number_exists``
+        produce un warning informativo (non bloccante) nello status bar;
+        ``True``/``None`` (endpoint assente o errore) non fanno nulla.
+        """
+        backend = self.manager.get(PROTOCOL_WHATSAPP)
+        if backend is None:
+            return
+        rest = getattr(backend, "_rest", None)
+        check = getattr(rest, "check_number_exists", None)
+        if check is None:
+            return
+        phone = contact.phone
+        if not phone:
+            return
+        try:
+            exists = check(phone)
+        except Exception:
+            logger.debug("WhatsApp number-exists check failed", exc_info=True)
+            return
+        if exists is False:
+            self.call_from_thread(
+                self._status, f"⚠️ {phone} non risulta su WhatsApp", 0
+            )
+
     def _select_contact(self, contact: ChatContact) -> None:
         """Select a contact and show its chat.
 
@@ -359,7 +417,9 @@ class ContactListMixin:
         messages as read, updates unread badges, and returns focus to the
         message input.
         """
-        if contact not in self.contacts:
+        contact = self._ensure_contact_selectable(contact)
+        if contact is None:
+            self._status("❌ backend non disponibile")
             return
 
         self.selected_contact = contact
@@ -438,6 +498,16 @@ class ContactListMixin:
             self.query_one("#message-input", MessageTextArea).focus()
         except Exception as _e:
             logger.debug("Failed to focus message input", exc_info=True)
+
+        # Open-or-create: per un ghost WhatsApp appena aperto, verifica in
+        # background (worker thread, NON sul thread UI) che il numero esista.
+        # Un False esplicito produce un warning non bloccante; True/None no.
+        if contact.protocol == PROTOCOL_WHATSAPP and contact.extras.get("ghost"):
+            self.run_worker(
+                lambda c=contact: self._check_ghost_whatsapp_number(c),
+                exclusive=False,
+                thread=True,
+            )
 
     def on_list_view_selected(self, event: ListView.Selected):
         """When a contact is selected, show the chat."""

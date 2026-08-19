@@ -272,6 +272,16 @@ class SignalBackend(ChatBackend):
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
 
+    def register_contact(self, contact: ChatContact) -> None:
+        """Registra un contatto (open-or-create) anche nella lookup cache_key→contact.
+
+        Oltre all'append in ``self.contacts`` (default di ``ChatBackend``),
+        aggiorna ``_contacts_by_key`` (popolato in ``_set_contacts``) così il
+        ghost è risolvibile per cache key come gli altri contatti.
+        """
+        super().register_contact(contact)
+        self._contacts_by_key[contact.cache_key] = contact
+
     # ─── Address book (rubrica completa) ──────────────────────────────
 
     def list_address_book_sync(self, force: bool = False) -> list[ChatContact]:

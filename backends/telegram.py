@@ -398,6 +398,20 @@ class TelegramBackend(ChatBackend):
             return None
         return self._contacts_by_id.get(eid)
 
+    def register_contact(self, contact: ChatContact) -> None:
+        """Registra un contatto (open-or-create) anche nella lookup id→contact.
+
+        Oltre all'append in ``self.contacts`` (default di ``ChatBackend``),
+        estende ``_contacts_by_id`` così ``_identify_contact`` e il fallback di
+        invio (``_resolve_input_entity``) riconoscono il ghost.  Un id non
+        intero viene ignorato (guard ``ValueError``/``TypeError``).
+        """
+        super().register_contact(contact)
+        try:
+            self._contacts_by_id[int(contact.id)] = contact
+        except (ValueError, TypeError):
+            pass
+
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
 

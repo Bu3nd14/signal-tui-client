@@ -542,6 +542,16 @@ class WhatsAppBackend(ChatBackend):
         """Resolve a JID to a known ``ChatContact`` (or a placeholder)."""
         return self._contacts_by_jid.get(jid)
 
+    def register_contact(self, contact: ChatContact) -> None:
+        """Registra un contatto (open-or-create) anche nella lookup JID→contact.
+
+        Oltre all'append in ``self.contacts`` (default di ``ChatBackend``),
+        aggiorna ``_contacts_by_jid`` così ``_identify_contact`` e il webhook
+        riconoscono subito il ghost senza creare placeholder duplicati.
+        """
+        super().register_contact(contact)
+        self._contacts_by_jid[contact.id] = contact
+
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
 

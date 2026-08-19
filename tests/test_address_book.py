@@ -22,6 +22,9 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+
+from dump_address_book_fixtures import anonymize_payload
 
 from backends import config
 from backends.base import ChatBackend
@@ -1032,3 +1035,154 @@ class TestManagerAddressBook:
         bad.list_address_book_sync = MagicMock(return_value=[])
         manager.list_address_book_sync()
         assert manager.address_book_errors == {}
+
+
+# ─── Fixture anonimizzate (milestone 5) ───────────────────────────────────────
+
+
+class TestFixtureAnonymizer:
+    """🕵️ Anonimizzazione deterministica delle fixture (``anonymize_payload``)."""
+
+    def test_deterministic_same_input(self):
+        data = [{"number": "+391234567890", "name": "Mario"}]
+        assert anonymize_payload(data) == anonymize_payload(data)
+
+    def test_seed_shifts_tokens_but_stays_deterministic(self):
+        data = [{"number": "+391234567890", "name": "Mario"}]
+        assert anonymize_payload(data, seed=0) != anonymize_payload(data, seed=10)
+        assert anonymize_payload(data, seed=10) == anonymize_payload(data, seed=10)
+
+    def test_phone_number_format(self):
+        out = anonymize_payload([{"number": "+391234567890"}])
+        assert out[0]["number"].startswith("39 0000")
+
+    def test_duplicate_numbers_stay_equal(self):
+        data = [
+            {"id": "393331234567@c.us", "name": "Mario"},
+            {"id": "393331234567@c.us", "name": "Mario"},
+        ]
+        out = anonymize_payload(data)
+        assert out[0]["id"] == out[1]["id"]
+
+    def test_names_usernames_uuid(self):
+        data = [{"first_name": "Ada", "username": "ada", "uuid": "uuid-1"}]
+        out = anonymize_payload(data)
+        assert out[0]["first_name"].startswith("Contatto ")
+        assert out[0]["username"] == "user0"
+        assert out[0]["uuid"].startswith("00000000-0000-0000-0000-")
+
+    def test_access_hash_zeroed_and_ids_sequential(self):
+        data = {
+            "users": [
+                {"id": 42, "access_hash": 123},
+                {"id": 99, "access_hash": 456},
+            ]
+        }
+        out = anonymize_payload(data)
+        assert out["users"][0]["access_hash"] == 0
+        assert out["users"][1]["access_hash"] == 0
+        assert out["users"][0]["id"] != out["users"][1]["id"]
+
+    def test_shape_preserved_and_input_not_mutated(self):
+        data = {"users": [{"id": 42, "name": "X", "nested": [1, 2, {"k": "v"}]}]}
+        original = json.dumps(data)
+        out = anonymize_payload(data)
+        assert json.dumps(data) == original  # input intatto
+        assert list(out["users"][0].keys()) == list(data["users"][0].keys())
+        assert out["users"][0]["nested"] == [1, 2, {"k": "v"}]
+
+    def test_lid_jid_preserves_suffix(self):
+        data = [{"id": {"_serialized": "220988985864200@lid"}}]
+        out = anonymize_payload(data)
+        assert out[0]["id"]["_serialized"].endswith("@lid")
+
+    def test_empty_values_preserved(self):
+        data = [{"name": None, "pushname": "", "phone": ""}]
+        out = anonymize_payload(data)
+        assert out[0]["name"] is None
+        assert out[0]["pushname"] == ""
+        assert out[0]["phone"] == ""
+
+
+class TestFixtureIntegration:
+    """🧩 Fixture anonime nei mock WAHA/Telethon: conteggi dedup/merge."""
+
+    def test_wa_fixture_dedup_counts(self):
+        raw = [
+            {"id": "393331234567@c.us", "name": "Mario Rossi", "pushname": None},
+            {"id": "393331234567@c.us", "name": None, "pushname": "MarioP"},
+            {"id": "393331234568@c.us", "name": None, "pushname": None},
+        ]
+        anon = anonymize_payload(raw)
+
+        # Duplicati preservati (stesso numero → stesso id anonimizzato).
+        assert anon[0]["id"] == anon[1]["id"]
+        assert anon[1]["id"] != anon[2]["id"]
+
+        deduped = _dedup_book_contacts(anon)
+        assert len(deduped) == 2
+        # Il vincitore è quello con nome (su solo-pushname).
+        mario = next(d for d in deduped if d["phone"] == "390000000000")
+        assert mario["name"].startswith("Contatto ")
+
+    def test_wa_fixture_merge_with_chat(self, monkeypatch, tmp_path):
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        raw = [
+            {"id": "393331234567@c.us", "name": "Mario Rossi", "pushname": None},
+            {"id": "393331234567@c.us", "name": None, "pushname": "MarioP"},
+        ]
+        anon_book = anonymize_payload(raw)
+        # Il numero anonimizzato della coppia duplicata (id senza dominio).
+        anon_phone = anon_book[0]["id"].split("@")[0]
+
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._rest.list_all_contacts.return_value = anon_book
+        backend.contacts = [_chat(f"{anon_phone}@c.us", "Mario", ts=123)]
+
+        result = backend.list_address_book_sync()
+
+        assert len(result) == 1
+        contact = result[0]
+        assert contact.id == f"{anon_phone}@c.us"  # merge: id = chat attiva
+        assert contact.extras["is_chat_active"] is True
+        assert contact.extras["phone"] == anon_phone
+        assert contact.last_message_ts == 123
+
+    def test_tg_fixture_counts_skip_bots(self, monkeypatch):
+        raw_users = [
+            {
+                "id": 42,
+                "first_name": "Ada",
+                "last_name": "Lovelace",
+                "username": "ada",
+                "phone": "+391234567890",
+                "bot": False,
+                "access_hash": 111,
+            },
+            {
+                "id": 43,
+                "first_name": "Mamma",
+                "last_name": "Vod",
+                "username": "",
+                "phone": "",
+                "bot": False,
+                "access_hash": 222,
+            },
+            {"id": 44, "first_name": "Bot", "bot": True, "access_hash": 0},
+        ]
+        anon_users = anonymize_payload(raw_users)
+        users = [SimpleNamespace(**u) for u in anon_users]
+
+        backend = _tg_backend_with_book(monkeypatch, users)
+
+        result = backend.list_address_book_sync()
+
+        # Bot scartato; id anonimizzati sequenziali (0, 1).
+        assert [c.id for c in result] == ["0", "1"]
+        mamma = next(c for c in result if c.id == "1")
+        assert mamma.extras["phone"] == ""  # contatto senza numero preservato
+        # access_hash anonimizzato a 0 → backend lo mappa a "" (nessun hash).
+        assert mamma.extras["access_hash"] == ""
