@@ -75,6 +75,20 @@ def _get(key: str, env_name: str, default: str = "") -> str:
     return value if value is not None else default
 
 
+def _get_int(key: str, env_name: str, default: int) -> int:
+    """Return an int setting: env var, else config.json, else *default*.
+
+    Invalid values fall back to *default*.
+    """
+    raw = os.environ.get(env_name)
+    if not raw:
+        raw = _load_config().get(key, default)
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        return default
+
+
 def get_whatsapp_api_url() -> str:
     """Return the configured WhatsApp API base URL, or ``""`` if not set."""
     return _get("whatsapp_api_url", "WHATSAPP_API_URL").strip().rstrip("/")
@@ -242,3 +256,26 @@ def get_telegram_session_path() -> Path:
 def telegram_enabled() -> bool:
     """Return True if Telegram credentials are configured."""
     return get_telegram_api_id() != 0 and bool(get_telegram_api_hash())
+
+
+# ─── Address book / picker configuration ────────────────────────────────────
+
+
+def get_address_book_ttl_s() -> int:
+    """Return the address-book cache TTL in seconds (default ``300``)."""
+    return _get_int("address_book_ttl_s", "ADDRESS_BOOK_TTL_S", 300)
+
+
+def get_wa_lid_cache_ttl_days() -> int:
+    """Return the WhatsApp ``@lid``→number cache TTL in days (default ``30``)."""
+    return _get_int("wa_lid_cache_ttl_days", "WA_LID_CACHE_TTL_DAYS", 30)
+
+
+def get_picker_max_results() -> int:
+    """Return the max number of rendered picker results (default ``50``)."""
+    return _get_int("picker_max_results", "PICKER_MAX_RESULTS", 50)
+
+
+def get_picker_preferred_backend() -> str:
+    """Return the preferred picker backend, or ``""`` (most recent) if unset."""
+    return _get("picker_preferred_backend", "PICKER_PREFERRED_BACKEND").strip()

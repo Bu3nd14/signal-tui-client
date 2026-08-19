@@ -14,8 +14,10 @@ Textual reactive event loop.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 
 from models import ChatContact, ChatEvent
@@ -89,6 +91,39 @@ class ChatBackend(ABC):
         Default returns ``None`` (no attachment support).
         """
         return None
+
+    # ─── Address book (rubrica completa) ──────────────────────────────
+
+    def list_address_book_sync(self, force: bool = False) -> list[ChatContact]:
+        """Rubrica COMPLETA del backend (non solo chat attive).
+
+        Bloccante: chiamare SOLO da worker thread (pattern esistente di
+        ``send_message_sync`` / ``mark_read_sync``).  Non solleva mai
+        eccezioni: in caso di errore remoto ritorna l'ultima copia cached o
+        ``[]``.
+
+        Default: i contatti già caricati (``self.contacts``) marcati come
+        rubrica — sufficiente per backend la cui lista è già completa.
+        """
+        return [
+            replace(
+                contact,
+                extras={**contact.extras, "address_book": True},
+            )
+            for contact in self.contacts
+        ]
+
+    async def list_address_book(self) -> list[ChatContact]:
+        """Wrapper async del contratto (symmetry con ``list_contacts``).
+
+        Delega a ``list_address_book_sync`` via ``asyncio.to_thread``.
+        """
+        return await asyncio.to_thread(self.list_address_book_sync)
+
+    def register_contact(self, contact: ChatContact) -> None:
+        """Rende il contatto noto al backend (lookup per eventi/invio)."""
+        if contact not in self.contacts:
+            self.contacts.append(contact)
 
     # ─── Pairing ──────────────────────────────────────────────────────
 
