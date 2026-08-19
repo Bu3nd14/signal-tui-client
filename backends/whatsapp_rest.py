@@ -264,6 +264,60 @@ class WhatsAppRESTClient:
         data = result.get("data") or result.get("contacts") or []
         return data if isinstance(data, list) else []
 
+    def list_all_contacts(self) -> list[dict] | None:
+        """Return the full address book via ``GET /api/contacts/all``.
+
+        The response is a flat list of raw WAHA contact dicts (``id`` may be a
+        plain string or a ``{"_serialized": ...}`` object, plus ``name`` and
+        ``pushname``), normalized through ``_unwrap_contacts``.  Returns ``None``
+        on transport/HTTP error (the existing ``_request`` contract).
+        """
+        result = self._request(
+            "GET",
+            f"/api/contacts/all?session={self.session_name}",
+            timeout=10,
+        )
+        if result is None:
+            return None
+        return self._unwrap_contacts(result)
+
+    def resolve_contact(self, jid: str) -> dict | None:
+        """Resolve a JID via ``GET /api/{session}/contacts/{jid}`` (timeout 5).
+
+        The path is percent-encoded (``quote(jid, safe="")``, same pattern as
+        ``download_media``) so ``@lid``/``@c.us`` don't become URL userinfo.
+        Used to map a ``@lid`` chat to its ``@c.us`` number.
+        """
+        from urllib.parse import quote
+
+        encoded = quote(jid, safe="")
+        return self._request(
+            "GET",
+            f"/api/{self.session_name}/contacts/{encoded}",
+            timeout=5,
+        )
+
+    def check_number_exists(self, phone_digits: str) -> bool | None:
+        """Best-effort check ``GET /api/contacts/check-exists`` (timeout 5).
+
+        Tolerates both ``{"exists": bool}`` and ``{"numberExists": bool}``
+        response shapes.  Returns ``None`` when the endpoint is absent/errors
+        (best-effort contract, §5).
+        """
+        result = self._request(
+            "GET",
+            f"/api/contacts/check-exists?phone={phone_digits}"
+            f"&session={self.session_name}",
+            timeout=5,
+        )
+        if not isinstance(result, dict):
+            return None
+        if "exists" in result:
+            return bool(result.get("exists"))
+        if "numberExists" in result:
+            return bool(result.get("numberExists"))
+        return None
+
     # ── Messaging ─────────────────────────────────────────────────────
 
     def send_message(

@@ -59,7 +59,8 @@ class ChatContact:
     protocol:
         One of the ``PROTOCOL_*`` constants.
     extras:
-        Protocol-specific metadata (e.g. Signal ACI, WhatsApp profile pic).
+        Protocol-specific metadata (e.g. Signal ACI, WhatsApp profile pic,
+        normalized ``phone`` number, address-book provenance markers).
     """
 
     id: str
@@ -71,6 +72,15 @@ class ChatContact:
     def cache_key(self) -> str:
         """Unique key for this contact across all protocols."""
         return contact_cache_key(self.protocol, self.id)
+
+    @property
+    def phone(self) -> str:
+        """Normalized phone number (E.164 without ``+``), or ``""`` if unknown.
+
+        Stored in ``extras`` by the address-book backends; used as the
+        cross-backend grouping key and for search.
+        """
+        return str(self.extras.get("phone", "") or "")
 
     @property
     def last_message_ts(self) -> int:

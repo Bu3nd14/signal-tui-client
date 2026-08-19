@@ -22,6 +22,7 @@ from backends import (
     WhatsAppBackend,
 )
 from backends.config import telegram_enabled, whatsapp_enabled
+from contact_picker import BackendChoiceScreen, ContactPickerScreen
 from models import (
     ChatContact,
 )
@@ -128,6 +129,9 @@ class SignalTUI(
         # Incremented on every contact selection; a load worker checks it to
         # detect a stale reload after a newer _clear_chat (prevents duplicates).
         self._chat_reload_token = 0
+        # Incremented on every contact-picker open/close; an address-book worker
+        # checks it to detect a stale fetch after the picker was dismissed.
+        self._address_book_token = 0
         # Identities of real messages already mounted in the current chat log,
         # used as a render-level de-dup safety net so _refresh_chat and the
         # load workers never mount the same message twice.
@@ -226,6 +230,21 @@ class SignalTUI(
             except Exception as _e:
                 logger.debug("Telegram disconnect on exit failed", exc_info=True)
         # No flush needed — SQLite writes are incremental
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Gate the global Ctrl+W filter while the contact picker modal is open.
+
+        Textual resolves *priority* bindings from the App down, so the app-level
+        ``ctrl+w → cycle_protocol_filter`` binding would otherwise win over the
+        picker's own ``ctrl+w → cycle_filter`` binding.  Returning ``False`` here
+        (for that action, while a picker screen is active) lets the modal binding
+        win and keeps the main contact-list filter untouched.
+        """
+        if action == "cycle_protocol_filter" and isinstance(
+            self.screen, (ContactPickerScreen, BackendChoiceScreen)
+        ):
+            return False
+        return super().check_action(action, parameters)
 
     def _status(self, text: str, duration: float = 3.0) -> None:
         """Update the status bar (bottom-right, thread-safe).

@@ -10,6 +10,7 @@ send/mark-read calls to the correct backend.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 from models import ChatContact
 
@@ -23,6 +24,8 @@ class BackendManager:
 
     def __init__(self) -> None:
         self._backends: dict[str, ChatBackend] = {}
+        #: protocol → error message for the last ``list_address_book_sync`` run.
+        self.address_book_errors: dict[str, str] = {}
 
     # ─── Registry ─────────────────────────────────────────────────────
 
@@ -69,6 +72,44 @@ class BackendManager:
                 contacts.extend(backend.contacts)
             except AttributeError:
                 pass
+        return contacts
+
+    def list_address_book_sync(
+        self, protocols: set[str] | None = None, force: bool = False
+    ) -> list[ChatContact]:
+        """Rubrica aggregata dei backend registrati (filtrata per *protocols*).
+
+        Fan-out parallelo (``ThreadPoolExecutor``, max 3 worker) con
+        ``future.result(timeout=25)`` per backend.  Un backend che fallisce o
+        va in timeout → log + ``address_book_errors`` + si continua con gli
+        altri (risultato parziale ammesso).  Concatena e ritorna.
+        """
+        self.address_book_errors = {}
+        backends = [
+            backend
+            for backend in self._backends.values()
+            if protocols is None or backend.protocol in protocols
+        ]
+        if not backends:
+            return []
+
+        contacts: list[ChatContact] = []
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {
+                pool.submit(backend.list_address_book_sync, force=force): backend
+                for backend in backends
+            }
+            for future, backend in futures.items():
+                try:
+                    contacts.extend(future.result(timeout=25))
+                except Exception as exc:
+                    self.address_book_errors[backend.protocol] = str(exc)
+                    logger.warning(
+                        "Address book failed for %s: %s",
+                        backend.protocol,
+                        exc,
+                        exc_info=True,
+                    )
         return contacts
 
     async def send_message(

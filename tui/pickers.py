@@ -44,9 +44,24 @@ class PickerMixin:
     # ─── Contact picker ───────────────────────────────────────────────────────
 
     def _open_contact_picker(self) -> None:
-        """Open the contact search picker modal."""
+        """Open the contact search picker modal.
 
-        def _on_contact_selected(contact: ChatContact | None) -> None:
+        Shows the active chats immediately (fast path) and, in parallel, fetches
+        the full address book from the backends on a worker thread.  A token is
+        bumped on open/close so an in-flight worker never writes to a screen
+        that has already been dismissed or replaced.
+        """
+        self._address_book_token += 1
+        token = self._address_book_token
+        scope = None if self._protocol_filter == "all" else {self._protocol_filter}
+        screen = ContactPickerScreen(
+            self._filtered_contacts(),
+            protocol_filter=self._protocol_filter,
+            loading=True,
+        )
+
+        def _on_done(contact: ChatContact | None) -> None:
+            self._address_book_token += 1  # invalidate any in-flight worker
             if contact:
                 # Select the contact's chat (also highlights it in the left list).
                 # _select_contact already reloads the full chat from cache, so
@@ -60,9 +75,38 @@ class PickerMixin:
                 # messages that arrived while the picker was open.
                 self._refresh_chat()
 
-        self.push_screen(
-            ContactPickerScreen(self._filtered_contacts()), _on_contact_selected
-        )
+        self.push_screen(screen, _on_done)
+        # The worker runs only when the app is actually running (in plain unit
+        # tests the app is never started, so ``run_worker`` would raise "no
+        # running event loop").
+        if self.is_running:
+            self.run_worker(
+                lambda: self._address_book_worker(token, scope, screen),
+                thread=True,
+                exclusive=False,
+            )
+
+    def _address_book_worker(self, token: int, scope, screen) -> None:
+        """Fetch the full address book on a worker thread and apply it to the UI.
+
+        Runs off the UI thread: resolves WhatsApp lids opportunistically, calls
+        the manager's parallel fan-out, then applies the result (and any partial
+        errors) back on the UI thread via ``call_from_thread`` — but only if the
+        token is still current and the screen is still mounted.
+        """
+        if self.whatsapp_backend is not None:
+            self.whatsapp_backend.start_lid_resolver()
+        contacts = self.manager.list_address_book_sync(protocols=scope)
+        errors = dict(self.manager.address_book_errors)
+
+        def _apply() -> None:
+            if token != self._address_book_token or not screen.is_mounted:
+                return
+            screen.set_contacts(contacts)
+            if errors:
+                self._status(f"⚠️ Rubrica parziale: {', '.join(errors)}")
+
+        self.call_from_thread(_apply)
 
     def action_open_contact_picker(self) -> None:
         """Action to open the contact picker (bound to Ctrl+S)."""
