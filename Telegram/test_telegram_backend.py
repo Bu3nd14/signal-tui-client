@@ -248,6 +248,7 @@ class TestMessageMapping:
         )
         evt = backend._message_to_chat_event(msg)
         assert evt.payload["msg_type"] == "image"
+        assert evt.payload["attachment_id"] == "tgref:111:3"
 
     def test_message_sticker_type(self):
         backend = _make_backend()
@@ -274,7 +275,7 @@ class TestMessageMapping:
         )
         evt = backend._message_to_chat_event(msg)
         assert evt.payload["msg_type"] == "attachment"
-        assert evt.payload["attachment_id"] == "5"
+        assert evt.payload["attachment_id"] == "tgref:111:5"
 
     def test_message_video_audio_types(self):
         backend = _make_backend()

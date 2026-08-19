@@ -56,6 +56,162 @@ class TestTelegramContacts:
         assert backend.get_attachment_path(str(existing)) == existing
         assert backend.get_attachment_path(str(tmp_path / "missing")) is None
 
+    def test_get_attachment_path_tgref_not_connected(self):
+        backend = _backend()
+
+        assert backend.get_attachment_path("tgref:42:99") is None
+
+    def test_get_attachment_path_tgref_loop_not_running(self, monkeypatch):
+        backend = _backend()
+        backend._client = SimpleNamespace()
+        backend._connected = True
+        backend._loop = MagicMock()
+        backend._loop.is_running.return_value = False
+        run_threadsafe = MagicMock()
+        monkeypatch.setattr(
+            "backends.telegram.asyncio.run_coroutine_threadsafe", run_threadsafe
+        )
+
+        assert backend.get_attachment_path("tgref:42:99") is None
+        run_threadsafe.assert_not_called()
+
+    def _ready_backend_with_media_msg(self, monkeypatch, tmp_path, msg):
+        backend = _backend()
+        backend._connected = True
+        backend._loop = MagicMock()
+        backend._loop.is_running.return_value = True
+        backend._client = SimpleNamespace(
+            get_input_entity=AsyncMock(return_value="entity"),
+            get_messages=AsyncMock(return_value=msg),
+        )
+        monkeypatch.setattr("backends.telegram._media_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            lambda coro, _loop: SimpleNamespace(
+                result=lambda timeout: asyncio.run(coro)
+            ),
+        )
+        return backend
+
+    def test_get_attachment_path_tgref_lazy_download_success(
+        self, monkeypatch, tmp_path
+    ):
+        target = tmp_path / "42-99-photo.jpg"
+        msg = SimpleNamespace(
+            id=99,
+            photo=True,
+            document=None,
+            file=SimpleNamespace(name="photo.jpg"),
+            download_media=AsyncMock(return_value=str(target)),
+        )
+        backend = self._ready_backend_with_media_msg(monkeypatch, tmp_path, msg)
+
+        assert backend.get_attachment_path("tgref:42:99") == target
+        backend._client.get_messages.assert_awaited_once_with("entity", ids=99)
+        msg.download_media.assert_awaited_once_with(file=str(target))
+
+    def test_get_attachment_path_tgref_dedup_existing_file(self, monkeypatch, tmp_path):
+        target = tmp_path / "42-99-photo.jpg"
+        target.write_text("data")
+        msg = SimpleNamespace(
+            id=99,
+            photo=True,
+            document=None,
+            file=SimpleNamespace(name="photo.jpg"),
+            download_media=AsyncMock(),
+        )
+        backend = self._ready_backend_with_media_msg(monkeypatch, tmp_path, msg)
+
+        assert backend.get_attachment_path("tgref:42:99") == target
+        msg.download_media.assert_not_awaited()
+
+    def test_get_attachment_path_tgref_message_gone(self, monkeypatch):
+        backend = _backend()
+        backend._connected = True
+        backend._loop = MagicMock()
+        backend._loop.is_running.return_value = True
+        backend._client = SimpleNamespace(
+            get_input_entity=AsyncMock(return_value="entity"),
+            get_messages=AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            lambda coro, _loop: SimpleNamespace(
+                result=lambda timeout: asyncio.run(coro)
+            ),
+        )
+
+        assert backend.get_attachment_path("tgref:42:99") is None
+
+    def test_get_attachment_path_tgref_no_media(self, monkeypatch):
+        msg = SimpleNamespace(
+            id=99,
+            photo=None,
+            document=None,
+            file=SimpleNamespace(name="photo.jpg"),
+            download_media=AsyncMock(),
+        )
+        backend = _backend()
+        backend._connected = True
+        backend._loop = MagicMock()
+        backend._loop.is_running.return_value = True
+        backend._client = SimpleNamespace(
+            get_input_entity=AsyncMock(return_value="entity"),
+            get_messages=AsyncMock(return_value=msg),
+        )
+        monkeypatch.setattr(
+            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            lambda coro, _loop: SimpleNamespace(
+                result=lambda timeout: asyncio.run(coro)
+            ),
+        )
+
+        assert backend.get_attachment_path("tgref:42:99") is None
+        msg.download_media.assert_not_awaited()
+
+    def test_get_attachment_path_tgref_download_fails(self, monkeypatch, tmp_path):
+        msg = SimpleNamespace(
+            id=99,
+            photo=True,
+            document=None,
+            file=SimpleNamespace(name="photo.jpg"),
+            download_media=AsyncMock(side_effect=RuntimeError("boom")),
+        )
+        backend = self._ready_backend_with_media_msg(monkeypatch, tmp_path, msg)
+
+        assert backend.get_attachment_path("tgref:42:99") is None
+
+    def test_get_attachment_path_tgref_future_raises(self, monkeypatch):
+        msg = SimpleNamespace(
+            id=99,
+            photo=True,
+            document=None,
+            file=SimpleNamespace(name="photo.jpg"),
+            download_media=AsyncMock(),
+        )
+        backend = _backend()
+        backend._connected = True
+        backend._loop = MagicMock()
+        backend._loop.is_running.return_value = True
+        backend._client = SimpleNamespace(
+            get_input_entity=AsyncMock(return_value="entity"),
+            get_messages=AsyncMock(return_value=msg),
+        )
+
+        def raise_now(coro, _loop):
+            coro.close()
+
+            def result(timeout):
+                raise TimeoutError("timeout")
+
+            return SimpleNamespace(result=result)
+
+        monkeypatch.setattr(
+            "backends.telegram.asyncio.run_coroutine_threadsafe", raise_now
+        )
+
+        assert backend.get_attachment_path("tgref:42:99") is None
+
     def test_entity_to_contact_handles_duck_types_and_real_telethon_entities(self):
         user = TelegramBackend._entity_to_contact(
             SimpleNamespace(
@@ -191,10 +347,31 @@ class TestTelegramMessages:
         )
         assert with_caption.payload["msg_type"] == "image"
         assert with_caption.payload["attachment_info"] == "che bello"
+        assert with_caption.payload["attachment_id"] == "tgref:42:99"
 
         without_text = backend._message_to_chat_event(_message(photo=object(), text=""))
         assert without_text.payload["msg_type"] == "image"
         assert without_text.payload["attachment_info"] == "Photo"
+
+    def test_message_photo_without_download_gets_tgref(self):
+        backend = _backend()
+
+        event = backend._message_to_chat_event(_message(photo=object(), text=""))
+
+        assert event.payload["msg_type"] == "image"
+        assert event.payload["attachment_info"] == "Photo"
+        assert event.payload["attachment_id"] == "tgref:42:99"
+
+    def test_message_photo_with_caption_gets_tgref(self):
+        backend = _backend()
+
+        event = backend._message_to_chat_event(
+            _message(photo=object(), text="che bello")
+        )
+
+        assert event.payload["msg_type"] == "image"
+        assert event.payload["attachment_info"] == "che bello"
+        assert event.payload["attachment_id"] == "tgref:42:99"
 
     def test_message_to_event_uses_document_filename_and_id_fallback(self):
         backend = _backend()
@@ -204,7 +381,7 @@ class TestTelegramMessages:
 
         assert event.payload["msg_type"] == "attachment"
         assert event.payload["attachment_info"] == "📎 report.pdf"
-        assert event.payload["attachment_id"] == "99"
+        assert event.payload["attachment_id"] == "tgref:42:99"
 
     def test_receipts_polling_and_ingest_deduplication(self, monkeypatch):
         backend = _backend()
@@ -429,6 +606,33 @@ class TestTelegramBackendOperations:
         )
         assert backend.complete_2fa("password") is True
         assert backend._connected is True
+
+    def test_fetch_history_photo_persists_tgref(self, monkeypatch):
+        backend = _backend()
+        backend._connected = True
+        backend._loop = MagicMock()
+        backend.contacts = [
+            ChatContact(id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM)
+        ]
+        photo_msg = _message(photo=object(), text="")
+        photo_msg.download_media = AsyncMock()
+        backend._client = SimpleNamespace(
+            get_input_entity=AsyncMock(return_value="entity"),
+            get_messages=AsyncMock(return_value=[photo_msg]),
+        )
+        ingest = MagicMock()
+        monkeypatch.setattr(backend, "ingest_message", ingest)
+        monkeypatch.setattr(
+            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            lambda coro, _loop: SimpleNamespace(
+                result=lambda timeout: asyncio.run(coro)
+            ),
+        )
+
+        assert backend.fetch_recent_history() == 1
+        assert ingest.call_count == 1
+        assert ingest.call_args.args[1]["attachment_id"] == "tgref:42:99"
+        photo_msg.download_media.assert_not_awaited()
 
     def test_complete_2fa_failure_and_qr_missing_configuration(self):
         backend = _backend()

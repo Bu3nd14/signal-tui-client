@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import tempfile
 import threading
 import time
 from dataclasses import replace
@@ -50,6 +51,14 @@ _MAX_CACHE_PER_CONTACT = 50
 
 # Dedup window (ms) for incoming messages from the same (contact, text).
 _INCOMING_DEDUP_WINDOW_MS = 2000
+
+# Prefix for lazy-download media references (``tgref:<chat_id>:<msg_id>``).
+_TGREF_PREFIX = "tgref:"
+
+
+def _media_dir() -> Path:
+    """Return the Telegram media cache directory (system temp)."""
+    return Path(tempfile.gettempdir()) / "telegram-media"
 
 
 # ─── TelegramBackend ──────────────────────────────────────────────────────────
@@ -93,10 +102,80 @@ class TelegramBackend(ChatBackend):
 
     # ─── Attachments ──────────────────────────────────────────────────────
 
+    @staticmethod
+    def _media_ref(chat_id: str, msg_id: int) -> str | None:
+        """Build a lazy-download reference for a Telegram media message."""
+        if msg_id is None:
+            return None
+        return f"{_TGREF_PREFIX}{chat_id}:{msg_id}"
+
     def get_attachment_path(self, attachment_id: str) -> Path | None:
-        """Resolve an attachment id to a local file path."""
+        """Resolve an attachment id to a local file path.
+
+        1. Empty id → ``None``.
+        2. Existing local file → its ``Path`` (live download, legacy rows).
+        3. ``tgref:<chat_id>:<msg_id>`` → lazy download via Telethon.
+        4. Anything else → ``None``.
+        """
+        if not attachment_id:
+            return None
+
         p = Path(attachment_id)
-        return p if p.is_file() else None
+        if p.is_file():
+            return p
+
+        if not attachment_id.startswith(_TGREF_PREFIX):
+            return None
+
+        rest = attachment_id[len(_TGREF_PREFIX) :]
+        try:
+            chat_id_s, msg_id_s = rest.rsplit(":", 1)
+            chat_id = int(chat_id_s)
+            msg_id = int(msg_id_s)
+        except (ValueError, TypeError):
+            return None
+
+        return self._download_media_by_ref(chat_id, msg_id)
+
+    def _download_media_by_ref(self, chat_id: int, msg_id: int) -> Path | None:
+        """Lazily download a media message referenced by ``tgref:``.
+
+        Runs on the Telethon event loop (blocking, max 30s), mirroring the
+        pattern already used by ``fetch_recent_history`` and
+        ``send_message_sync``.  Returns the local file path or ``None``.
+        """
+        if self._client is None or self._loop is None:
+            return None
+        if not self._connected or not self._loop.is_running():
+            return None
+
+        async def _download() -> Path | None:
+            entity = await self._client.get_input_entity(chat_id)
+            msg = await self._client.get_messages(entity, ids=msg_id)
+            if msg is None or not (msg.photo or msg.document):
+                return None
+
+            msg_file = getattr(msg, "file", None)
+            original = getattr(msg_file, "name", None) or ""
+            if original:
+                name = Path(original).name
+            else:
+                ext = getattr(msg_file, "ext", None) or ".jpg"
+                name = f"photo{ext}"
+
+            target = _media_dir() / f"{chat_id}-{msg_id}-{name}"
+            if target.is_file():
+                return target
+
+            await msg.download_media(file=str(target))
+            return target
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_download(), self._loop)
+            return future.result(timeout=30)
+        except Exception:
+            logger.exception("Telegram: lazy media download failed")
+            return None
 
     # ─── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -679,12 +758,9 @@ class TelegramBackend(ChatBackend):
         attachment_id: str | None = None
         if msg.photo or msg.document:
             try:
-                import os
-                import tempfile
-
-                media_dir = os.path.join(tempfile.gettempdir(), "telegram-media")
-                os.makedirs(media_dir, exist_ok=True)
-                path = await msg.download_media(file=media_dir)
+                media_dir = _media_dir()
+                media_dir.mkdir(parents=True, exist_ok=True)
+                path = await msg.download_media(file=str(media_dir))
                 if path:
                     attachment_id = str(path)
                     logger.info("Telegram: downloaded media to %s", path)
@@ -733,8 +809,6 @@ class TelegramBackend(ChatBackend):
             attachment_info = text or "Photo"
         elif msg.document:
             msg_type = "attachment"
-            if not att_id:
-                att_id = str(msg.id) if msg.id else None
             attachment_info = "📎 Document"
             for attr in getattr(msg.document, "attributes", []):
                 name = getattr(attr, "file_name", None)
@@ -753,6 +827,11 @@ class TelegramBackend(ChatBackend):
         elif msg.audio:
             msg_type = "attachment"
             attachment_info = "🎵 Audio"
+
+        # Lazy-download fallback: photos and documents without a downloaded
+        # path (history fetch, failed live download) get a ``tgref:`` reference.
+        if not att_id and (msg.photo or msg.document) and msg.id:
+            att_id = self._media_ref(chat_id, msg.id)
 
         # Quote / reply
         quote_text: str | None = None
