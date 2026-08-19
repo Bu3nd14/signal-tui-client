@@ -146,6 +146,29 @@ dell'account locale per messaggi propri.
 
 ---
 
+### #37 — Quote di un'immagine: non visibile in ingresso e impossibile da creare dalla TUI (`tui/chat_view.py`; `tui/send.py`; backends)
+
+Quando un contatto quota un'immagine da un altro client, la TUI non mostra il
+quoting (la bolla quote risulta vuota/assente). Nello stesso tema, non esiste un
+modo per **quotare un'immagine dalla TUI**: il click su un'immagine la apre
+(modal `ImageModalScreen`) e il flusso di reply/quote è pensato solo per i
+messaggi di testo (click sul `MessageWidget` → reply).
+
+**Scenario:** ricevere una reply a un'immagine (es. da Signal) oppure voler
+rispondere quotando una foto dall'interno della TUI.
+
+**Verifiche:** quote in ingresso confermato NON visibile su **Signal**; da
+verificare per **WhatsApp** e **Telegram**. Da capire anche l'interazione di
+input per la creazione (es. tasto dedicato / modifica del comportamento del
+click, che oggi apre l'immagine).
+
+**Fix suggerito:** rendere il quoting visibile anche per i messaggi media
+(caption/nome file nel `quote_text`), e aggiungere un'azione "quote/reply" per le
+immagini senza rompere l'apertura in modal (es. scorciatoia dedicata o menu),
+propagando `reply_to_message_id`/quote anche per i media.
+
+---
+
 ### #32 — Le foto Telegram dello storico non sono scaricabili né apribili (`backends/telegram.py`, righe 411-427, 460-466, 482-500) ✅ RISOLTO
 
 Il download della foto avviene solo nel gestore live. Lo storico costruisce il
