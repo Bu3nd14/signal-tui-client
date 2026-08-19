@@ -159,7 +159,11 @@ def _event_from_message(
         ts_ms = t * 1000 if t < 10**12 else t
     msg_id = raw.get("id") or (raw.get("key") or {}).get("id") or str(ts_ms)
     msg_type = _msg_type(raw)
-    caption = raw.get("caption") or ""
+    caption = (
+        raw.get("caption")
+        or str(raw.get("body") or raw.get("text") or "").strip()
+        or ""
+    )
 
     # ── Attachment extraction ──────────────────────────────────────────
     # WAHA can deliver media in three shapes:

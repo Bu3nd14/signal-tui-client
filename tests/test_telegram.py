@@ -162,26 +162,39 @@ class TestTelegramMessages:
         assert backend._message_to_chat_event(_message(chat_id=None)) is None
 
     @pytest.mark.parametrize(
-        ("field", "expected_type", "expected_info"),
+        ("field", "expected_type", "expected_info", "extra"),
         [
-            ("photo", "image", "🖼️ Photo"),
-            ("sticker", "sticker", "🎨 Sticker"),
-            ("video", "attachment", "🎬 Video"),
-            ("voice", "attachment", "🎤 Voice"),
-            ("audio", "attachment", "🎵 Audio"),
+            ("photo", "image", "Photo", {"text": ""}),
+            ("sticker", "sticker", "🎨 Sticker", {}),
+            ("video", "attachment", "🎬 Video", {}),
+            ("voice", "attachment", "🎤 Voice", {}),
+            ("audio", "attachment", "🎵 Audio", {}),
         ],
     )
     def test_message_to_event_normalizes_media(
-        self, field, expected_type, expected_info
+        self, field, expected_type, expected_info, extra
     ):
         backend = _backend()
         event = backend._message_to_chat_event(
-            _message(**{field: object()}), "/tmp/media"
+            _message(**{field: object(), **extra}), "/tmp/media"
         )
 
         assert event.payload["msg_type"] == expected_type
         assert event.payload["attachment_info"] == expected_info
         assert event.payload["attachment_id"] == "/tmp/media"
+
+    def test_message_photo_with_caption_uses_text_as_info(self):
+        backend = _backend()
+
+        with_caption = backend._message_to_chat_event(
+            _message(photo=object(), text="che bello")
+        )
+        assert with_caption.payload["msg_type"] == "image"
+        assert with_caption.payload["attachment_info"] == "che bello"
+
+        without_text = backend._message_to_chat_event(_message(photo=object(), text=""))
+        assert without_text.payload["msg_type"] == "image"
+        assert without_text.payload["attachment_info"] == "Photo"
 
     def test_message_to_event_uses_document_filename_and_id_fallback(self):
         backend = _backend()

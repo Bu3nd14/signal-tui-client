@@ -730,7 +730,7 @@ class TelegramBackend(ChatBackend):
 
         if msg.photo:
             msg_type = "image"
-            attachment_info = "🖼️ Photo"
+            attachment_info = text or "Photo"
         elif msg.document:
             msg_type = "attachment"
             if not att_id:
