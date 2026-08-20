@@ -165,8 +165,8 @@ async def test_edit_request_populates_state(app_for_test):
         assert editing["contact_id"] == contact.id
         assert editing["cache_key"] == contact.cache_key
         assert editing["timestamp"] == 1000
-        # Per Signal l'identità è il timestamp, non l'id del server.
-        assert editing["message_id"] == "1000"
+        # Per Signal l'id reale del server ha precedenza (id-first).
+        assert editing["message_id"] == "sig-1000"
         assert editing["old_text"] == "vecchio"
 
         reply_bar = app.query_one("#reply-bar")
@@ -226,7 +226,7 @@ async def test_submit_edit_updates_cache_widget_and_backend(app_for_test_with_mo
 
         # Backend chiamato con (contact_id, message_id, new_text).
         signal_backend.edit_message_sync.assert_called_once_with(
-            contact.id, "1000", "nuovo"
+            contact.id, "sig-1000", "nuovo"
         )
 
         # Input svuotato e barra nascosta.
@@ -559,6 +559,6 @@ async def test_double_edit_consecutive(app_for_test_with_mocks):
         assert widget._msg_text == "nuovo2"
 
         assert signal_backend.edit_message_sync.call_args_list == [
-            call(contact.id, "1000", "nuovo1"),
-            call(contact.id, "1000", "nuovo2"),
+            call(contact.id, "sig-1000", "nuovo1"),
+            call(contact.id, "sig-1000", "nuovo2"),
         ]

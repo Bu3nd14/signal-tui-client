@@ -180,7 +180,7 @@ class TestSendPersistOffthread:
         assert len(rows) == 1
         row = rows[0]
         assert row["protocol"] == "signal"
-        assert row["msg_id"] is None  # Signal optimistic rows carry no id
+        assert row["msg_id"] == "ts-1"  # Signal now persists the real server id
         assert row["text"] == "risposta"
         assert row["quote_text"] == "domanda"
         assert row["is_mine"] == 1

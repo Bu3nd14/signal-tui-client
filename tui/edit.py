@@ -40,7 +40,11 @@ class EditMessageMixin:
         protocol = contact.protocol
         message_id = entry.get("id") or event.message_id
         if protocol == PROTOCOL_SIGNAL:
-            message_id = str(int(event.timestamp))  # identità Signal = ts
+            message_id = entry.get("id") or str(int(event.timestamp))
+            if not entry.get("id"):
+                self._status(
+                    "⚠️ ID server non noto — la modifica potrebbe non propagarsi", 5
+                )
         elif not message_id:
             self._status("❌ Server message ID unavailable — reopen the chat", 0)
             return

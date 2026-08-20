@@ -49,6 +49,7 @@ from backend import (
     _require_user_number,
     _run_subprocess,
     _send_subprocess,
+    _update_message_id,
     _update_message_status,
     find_signal_cli,
     get_attachment_path,
@@ -363,6 +364,14 @@ class SignalBackend(ChatBackend):
         quote_message: str | None,
         reply_to_message_id: str | None = None,
     ) -> str:
+        """Send *text* and return the real server timestamp (ms) when available.
+
+        signal-cli ignores the client ``timestamp`` option and assigns the real
+        timestamp itself.  In daemon mode that value is ``result.timestamp`` of
+        the JSON-RPC response; in subprocess mode it is the value printed on
+        stdout.  When the real timestamp cannot be resolved we fall back to the
+        optimistic ``ts`` (still used as the entry/DB identity).
+        """
         ts = int(time.time() * 1000)
         if self._use_daemon and self._rpc:
             result = self._rpc.send_message(
@@ -375,15 +384,21 @@ class SignalBackend(ChatBackend):
             )
             if "error" in result:
                 raise RuntimeError(result["error"])
-        else:
-            _send_subprocess(
-                text,
-                contact_id,
-                quote_timestamp=quote_timestamp,
-                quote_author=quote_author,
-                quote_message=quote_message,
-            )
-        return ts
+            real = (result.get("result") or {}).get("timestamp")
+            if real is not None:
+                return int(real)
+            return ts
+        stdout = _send_subprocess(
+            text,
+            contact_id,
+            quote_timestamp=quote_timestamp,
+            quote_author=quote_author,
+            quote_message=quote_message,
+        )
+        try:
+            return int(stdout.strip())
+        except (TypeError, ValueError):
+            return ts
 
     def send_message_sync(
         self,
@@ -769,12 +784,18 @@ class SignalBackend(ChatBackend):
         ts = self._get_message_timestamp(envelope)
         events: list[ChatEvent] = []
         for data in data_list:
+            payload = {**data, "timestamp": ts, "contact": contact}
+            if data.get("is_mine"):
+                # sync sentMessage: ``ts`` is the real ``sentMessage.timestamp``;
+                # expose it as the stable id so the echo matches by id and the
+                # edit target is the real server timestamp.
+                payload["id"] = str(ts)
             events.append(
                 ChatEvent(
                     type="message",
                     protocol=self.protocol,
                     contact_id=contact.id,
-                    payload={**data, "timestamp": ts, "contact": contact},
+                    payload=payload,
                 )
             )
         return events
@@ -826,6 +847,7 @@ class SignalBackend(ChatBackend):
             attachment_id=data.get("attachment_id"),
             status=data.get("status"),
             protocol=data.get("protocol", PROTOCOL_SIGNAL),
+            msg_id=data.get("id"),
             quote_timestamp=data.get("quote_timestamp"),
             quote_author=data.get("quote_author"),
             reply_to_message_id=data.get("reply_to_message_id"),
@@ -850,6 +872,31 @@ class SignalBackend(ChatBackend):
         text = data["text"]
         is_mine = data["is_mine"]
 
+        # Upgrade branch: an outgoing echo carrying the real server id attaches
+        # it to the optimistic twin (matched by text + dedup window) WITHOUT
+        # touching its optimistic timestamp — that timestamp stays the entry's
+        # identity for receipts and the DB.  Idempotent: a second echo falls
+        # through to the normal dedup below.
+        mid = data.get("id")
+        if mid and is_mine:
+            for m in self.cache.get(contact_id, []):
+                if (
+                    m.get("is_mine")
+                    and not m.get("id")
+                    and m.get("text") == text
+                    and abs(int(m.get("timestamp", 0)) - ts) <= _SEND_DEDUP_WINDOW_MS
+                ):
+                    m["id"] = str(mid)  # ts entry INVARIATO (ottimistico)
+                    try:
+                        _update_message_id(
+                            contact_id, text, True,
+                            m["timestamp"], str(mid),   # ts OTTIMISTICO nel DB
+                            protocol=PROTOCOL_SIGNAL,
+                        )
+                    except Exception:
+                        logger.exception("Signal: _update_message_id failed")
+                    return False
+
         if self._message_already_cached(contact_id, ts, is_mine, text):
             return False
 
@@ -858,6 +905,7 @@ class SignalBackend(ChatBackend):
         self._add_cached_message(
             contact_id,
             {
+                "id": data.get("id"),
                 "text": text,
                 "is_mine": is_mine,
                 "sender": data["sender"],
@@ -906,10 +954,15 @@ class SignalBackend(ChatBackend):
         try:
             target_ts = int(message_id)
         except (TypeError, ValueError):
-            return None
+            target_ts = None
         for msg in self.cache.get(contact_id, []):
-            if int(msg.get("timestamp") or 0) != target_ts:
-                continue
+            if not msg.get("id"):
+                # entry legacy senza id: match per timestamp
+                if target_ts is None or int(msg.get("timestamp") or 0) != target_ts:
+                    continue
+            else:
+                if str(msg.get("id")) != str(message_id):
+                    continue
             if is_mine is not None and bool(msg.get("is_mine")) != bool(is_mine):
                 continue
             if msg.get("msg_type", "text") != "text":
@@ -922,12 +975,13 @@ class SignalBackend(ChatBackend):
             _update_message_text(
                 contact_id, new_text,
                 protocol=PROTOCOL_SIGNAL,
-                timestamp=target_ts, old_text=old_text,
+                timestamp=int(msg["timestamp"]),  # ts della ENTRY (ottimistico)
+                old_text=old_text,
                 is_mine=msg.get("is_mine"),
             )
             return {
-                "message_id": str(target_ts),
-                "timestamp": target_ts,
+                "message_id": str(message_id),
+                "timestamp": int(msg["timestamp"]),
                 "old_text": old_text,
                 "text": new_text,
                 "is_mine": bool(msg.get("is_mine")),

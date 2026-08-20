@@ -352,9 +352,12 @@ class SignalRPCClient:
         recipient:
             The recipient's phone number.
         timestamp:
-            Explicit timestamp (ms) to use as the message ID.
-            If provided, signal-cli will use this timestamp instead of
-            generating one, ensuring the receiptMessage timestamps match.
+            Client timestamp (ms) passed to signal-cli.  NOTE: signal-cli has
+            no ``timestamp`` option for ``send`` and IGNORES this value — it
+            assigns the real timestamp itself.  The real timestamp is available
+            in ``result.timestamp`` of the JSON-RPC response (and on stdout in
+            subprocess mode).  The parameter is retained for call-site symmetry,
+            not because it has any effect on the send.
         quote_timestamp:
             Timestamp (ms) of the message being replied to.
         quote_author:

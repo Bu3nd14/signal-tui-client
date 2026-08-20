@@ -116,16 +116,30 @@ async def test_send_message_mocked(app_for_test_with_mocks):
         input_widget.focus()
         input_widget.text = "Ciao!"
 
+        signal_backend.send_message_sync.return_value = "ts-1"
+
         # Run the send worker synchronously so the backend call is deterministic.
-        with patch.object(app, "run_worker", side_effect=lambda work, **kwargs: work()):
+        # ``call_from_thread`` is stubbed to run inline: in production the worker
+        # runs on a real thread, so the real Textual ``call_from_thread`` is the
+        # correct path — here we only neutralize the inline-worker limitation.
+        with (
+            patch.object(app, "run_worker", side_effect=lambda work, **kwargs: work()),
+            patch.object(
+                app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
+            ),
+        ):
             await pilot.press("enter")
 
         await pilot.pause()
 
         contact = app.contacts[0]
-        signal_backend.ingest_message.assert_called_once()
+        # The optimistic seed (on_input_submitted, persist=False) plus the real-id
+        # ingestion in the send worker: Signal now enters the "real id" path, so
+        # ingest is called twice — first id-less, then with the real server id.
+        assert signal_backend.ingest_message.call_count == 2
         assert signal_backend.ingest_message.call_args.args[0] == contact.id
         assert signal_backend.ingest_message.call_args.args[1]["text"] == "Ciao!"
+        assert signal_backend.ingest_message.call_args.args[1]["id"] == "ts-1"
 
         signal_backend.send_message_sync.assert_called_once_with(
             contact.id,
@@ -134,6 +148,9 @@ async def test_send_message_mocked(app_for_test_with_mocks):
             quote_author=None,
             quote_message=None,
         )
+
+        # The real server id is mirrored into the UI cache for later matching.
+        assert app._cache[contact.cache_key][-1]["id"] == "ts-1"
 
 
 @pytest.mark.integration
@@ -207,13 +224,22 @@ async def test_multiline_message_is_sent_and_normalized(app_for_test_with_mocks)
         editor.focus()
         editor.text = "first\r\nsecond\rthird"
 
-        with patch.object(app, "run_worker", side_effect=lambda work, **kwargs: work()):
+        signal_backend.send_message_sync.return_value = "ts-1"
+
+        with (
+            patch.object(app, "run_worker", side_effect=lambda work, **kwargs: work()),
+            patch.object(
+                app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
+            ),
+        ):
             await pilot.press("enter")
 
         assert (
             signal_backend.send_message_sync.call_args.args[1] == "first\nsecond\nthird"
         )
         assert editor.text == ""
+        # Signal now propagates the real server id into the optimistic entry.
+        assert app._cache[app.contacts[0].cache_key][-1]["id"] == "ts-1"
 
 
 @pytest.mark.integration
