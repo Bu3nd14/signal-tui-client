@@ -139,6 +139,7 @@ class ChatViewMixin:
         status: str = "sent",
         protocol: str | None = None,
         message_id: str | None = None,
+        edited: bool = False,
     ):
         """Add a message to the chat with correct alignment.
 
@@ -255,6 +256,7 @@ class ChatViewMixin:
                 protocol=protocol or "",
                 sender_color=sender_color,
                 message_id=message_id,
+                edited=edited,
             )
 
         chat_log.mount(widget)
@@ -271,6 +273,7 @@ class ChatViewMixin:
         protocol: str = "",
         is_group: bool = False,
         message_id: str | None = None,
+        edited: bool = False,
     ) -> Static:
         """Build a message widget without mounting it.
 
@@ -296,6 +299,7 @@ class ChatViewMixin:
             protocol=protocol,
             sender_color=sender_color,
             message_id=message_id,
+            edited=edited,
         )
 
     def _render_image_in_chat(
@@ -588,7 +592,9 @@ class ChatViewMixin:
         (text, timestamp +/-5s); for OUTGOING messages the id is stable (echo
         fallback by text + a wider window).
 
-        Returns ``True`` if at least one new message was added.
+        Returns ``True`` if at least one new message was added or an existing
+        message's text was updated (an edit).  A status-only upgrade does NOT
+        count as a change (nothing to re-render).
         """
         backend_msgs = getattr(backend, "cache", {}).get(contact.id, [])
         if not backend_msgs:
@@ -605,25 +611,20 @@ class ChatViewMixin:
             for existing in ui_msgs:
                 if bool(existing.get("is_mine", False)) != is_mine:
                     continue
-                # Outgoing: id-first mirror of _message_already_cached (echo
-                # message.ack per un media con caption condivide l'id ma ha text
-                # diverso: il match per id deve precedere quello sul testo).
-                if is_mine and mid and existing.get("id") and existing.get("id") == mid:
+                # Id-first for BOTH directions: an edit keeps the id but
+                # changes the text, so the id match must precede the text
+                # comparison (mirror of _message_already_cached).
+                if mid and existing.get("id") and existing.get("id") == mid:
                     return existing
                 if existing.get("text", "") != text:
                     continue
                 existing_ts = int(existing.get("timestamp") or 0)
                 if not is_mine:
-                    if mid and existing.get("id") == mid:
-                        return existing
                     # Incoming: id unreliable -> text + fuzzy timestamp (+/-5s).
                     if abs(existing_ts - ts) <= 5000:
                         return existing
                 elif mid:
-                    # Outgoing: stable id first, then text + echo window (10 min).
-                    cached_id = existing.get("id")
-                    if cached_id and cached_id == mid:
-                        return existing
+                    # Outgoing: text + echo window (10 min) when id absent.
                     if abs(existing_ts - ts) <= 600000:
                         return existing
                 elif abs(existing_ts - ts) <= 5000:
@@ -631,11 +632,22 @@ class ChatViewMixin:
             return None
 
         added = False
+        changed = False
         for m in backend_msgs:
             existing = _find_existing(m)
             if existing is not None:
-                # Already present: still upgrade the status if the incoming
-                # rank is higher (never downgrade read → sent).
+                # Already present: reconcile an edit in place (update text and
+                # mark edited) WITHOUT touching timestamp/id; the caller re-
+                # renders the window when `changed` is reported.
+                if (
+                    existing.get("msg_type", "text") == "text"
+                    and existing.get("text", "") != m.get("text", "")
+                ):
+                    existing["text"] = m.get("text")
+                    existing["edited"] = True
+                    changed = True
+                # Still upgrade the status if the incoming rank is higher
+                # (never downgrade read → sent).
                 if _status_rank(m.get("status")) > _status_rank(existing.get("status")):
                     existing["status"] = m.get("status")
                 continue
@@ -644,7 +656,7 @@ class ChatViewMixin:
 
         if added:
             ui_msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
-        return added
+        return added or changed
 
     def _build_message_widgets(self, protocol: str, is_group: bool, msg: dict) -> list:
         """Build the widgets for a single cached message (quote + message).
@@ -706,6 +718,7 @@ class ChatViewMixin:
                     protocol=protocol,
                     is_group=is_group,
                     message_id=message_id,
+                    edited=msg.get("edited", False),
                 )
             )
         return widgets
@@ -766,6 +779,7 @@ class ChatViewMixin:
                 sender=sender,
                 status=status,
                 message_id=msg.get("id"),
+                edited=msg.get("edited", False),
             )
 
         self._loaded_all = True

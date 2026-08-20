@@ -19,7 +19,7 @@ CACHE_RETENTION_DAYS = 3
 
 # Current schema version, persisted via ``PRAGMA user_version`` so the legacy
 # migration below is skipped once the schema is known to be up to date.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 # ─── Message cache (SQLite) ─────────────────────────────────────────────────
@@ -53,10 +53,18 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
     Works on the connection passed in; the caller is responsible for
     committing / closing.
     """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+
+    # Track whether a message's text was edited in place, so the
+    # " (modificato)" indicator survives a restart.  Ensured unconditionally
+    # (not gated by the user_version check below): a DB can already carry
+    # user_version == 3 from an earlier migration path while still lacking
+    # this column, and ``_load_cache`` / ``_update_message_text`` rely on it.
+    if "edited" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
+
     if _current_schema_version(conn) >= _SCHEMA_VERSION:
         return
-
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
 
     if "protocol" not in columns:
         conn.execute(
@@ -121,7 +129,8 @@ def _init_db():
                     msg_id TEXT,
                     quote_timestamp INTEGER,
                     quote_author TEXT,
-                    reply_to_message_id TEXT
+                    reply_to_message_id TEXT,
+                    edited INTEGER NOT NULL DEFAULT 0
                 )
             """)
             # Upgrade a pre-existing legacy DB in place (idempotent).
@@ -178,6 +187,7 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
                 "quote_timestamp": row["quote_timestamp"],
                 "quote_author": row["quote_author"],
                 "reply_to_message_id": row["reply_to_message_id"],
+                "edited": bool(row["edited"]),
                 "read": bool(row["read"]),
                 "status": row["status"],
                 "protocol": row["protocol"],
@@ -418,6 +428,54 @@ def _update_message_status_by_id(
                 "<= CASE ? WHEN 'pending' THEN 0 WHEN 'failed' THEN 0 WHEN 'sent' THEN 1 "
                 "WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END",
                 [status, *params, status],
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+def _update_message_text(
+    contact_number: str,
+    new_text: str,
+    protocol: str,
+    msg_id: str | None = None,
+    timestamp: int | None = None,
+    old_text: str | None = None,
+    is_mine: bool | None = None,
+    mark_edited: bool = True,
+) -> bool:
+    """Rewrite the text of an existing row in place (edit of a message).
+
+    Matching is by ``(protocol, contact_number, msg_id)`` when ``msg_id`` is
+    given, otherwise ``(protocol, contact_number, timestamp)``.  The temporal
+    identity (timestamp/id) never changes — only the text does.  ``old_text``
+    and ``is_mine`` are optional defensive constraints added to the WHERE
+    clause when provided.  ``mark_edited`` drives the ``edited`` column (the
+    rollback path sets it back to 0).  Returns ``True`` when a row was
+    updated, following the ``_update_message_status`` pattern.
+    """
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            if msg_id is not None:
+                where = "protocol = ? AND contact_number = ? AND msg_id = ?"
+                params: list = [protocol, contact_number, msg_id]
+            elif timestamp is not None:
+                where = "protocol = ? AND contact_number = ? AND timestamp = ?"
+                params = [protocol, contact_number, timestamp]
+            else:
+                return False
+            if old_text is not None:
+                where += " AND text = ?"
+                params.append(old_text)
+            if is_mine is not None:
+                where += " AND is_mine = ?"
+                params.append(int(is_mine))
+            cursor = conn.execute(
+                f"UPDATE messages SET text = ?, edited = ? WHERE {where}",
+                [new_text, 1 if mark_edited else 0, *params],
             )
             conn.commit()
             return cursor.rowcount > 0

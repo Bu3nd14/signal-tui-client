@@ -342,6 +342,23 @@ class WhatsAppRESTClient:
             payload["reply_to"] = reply_to_message_id
         return self._request("POST", "/api/sendText", payload)
 
+    def edit_message(self, chat_id: str, message_id: str, text: str) -> dict | None:
+        """WAHA ``PUT /api/{session}/chats/{chatId}/messages/{messageId}``.
+
+        Body ``EditMessageRequest``: ``{"text": ..., "linkPreview": true}``.
+        I path segment sono percent-encoded (pattern di ``resolve_contact``):
+        gli id Baileys contengono ``@``/``=`` che romperebbero l'URL.
+        Ritorna il messaggio aggiornato, ``None`` su errore (contratto _request).
+        """
+        from urllib.parse import quote
+
+        return self._request(
+            "PUT",
+            f"/api/{self.session_name}/chats/{quote(chat_id, safe='')}"
+            f"/messages/{quote(message_id, safe='')}",
+            {"text": text, "linkPreview": True},
+        )
+
     def list_messages(self, chat_id: str, limit: int = 1) -> list[dict]:
         """Fetch recent messages of a chat via ``GET /api/messages``.
 

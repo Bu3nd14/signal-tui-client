@@ -434,6 +434,7 @@ class ContactListMixin:
         # Per le chat non aperte basta lo storico all'apertura + il webhook.
         # Cancel any pending reply so we don't reply to the wrong contact
         self._cancel_reply()
+        self._cancel_edit()
         self._clear_chat()
         self._add_message(
             f"[{protocol_emoji(contact.protocol)} {contact.protocol.title()}] Chat with: "

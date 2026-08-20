@@ -85,10 +85,19 @@ class UnreadReplyMixin:
     # ─── Reply-to (quote) handling ───────────────────────────────────────────
 
     def _update_reply_bar(self):
-        """Show or hide the reply bar based on ``self._reply_to``."""
+        """Show or hide the reply bar based on edit state or ``self._reply_to``."""
         bar = self.query_one("#reply-bar", Horizontal)
         text_widget = self.query_one("#reply-text", Static)
-        if self._reply_to:
+        editing = getattr(self, "_editing_message", None)
+        if editing is not None:
+            t = editing.get("old_text", "")
+            # Truncate long messages for display
+            if len(t) > 60:
+                t = t[:57] + "..."
+            text_widget.update(f"✏️ Modifica: {t}")
+            bar.remove_class("reply-bar-hidden")
+            bar.styles.display = "block"
+        elif self._reply_to:
             reply_text = self._reply_to.get("text", "")
             # Truncate long messages for display
             if len(reply_text) > 60:
@@ -154,6 +163,12 @@ class UnreadReplyMixin:
                     logger.debug(
                         "Failed to deselect previous reply widget", exc_info=True
                     )
+
+        # Mutua esclusione reply↔edit: un nuovo reply cancella un edit attivo.
+        # (getattr: il mixin può essere usato standalone nei test senza edit.)
+        cancel_edit = getattr(self, "_cancel_edit", None)
+        if cancel_edit is not None:
+            cancel_edit()
 
         # Store the new reply target
         self._reply_to = {

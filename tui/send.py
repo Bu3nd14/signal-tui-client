@@ -60,6 +60,11 @@ class SendMixin:
         if not message:
             return
 
+        if self._editing_message is not None:
+            self._submit_edit(message)
+            event.text_area.text = ""
+            return
+
         contact = self.selected_contact
         contact_id = contact.id
         protocol = contact.protocol

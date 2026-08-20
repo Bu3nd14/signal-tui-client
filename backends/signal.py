@@ -406,6 +406,22 @@ class SignalBackend(ChatBackend):
             quote_message=quote_message,
         )
 
+    def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> bool:
+        """message_id = timestamp (ms) del messaggio originale, come stringa."""
+        try:
+            target_ts = int(message_id)
+        except (TypeError, ValueError):
+            return False
+        if self._use_daemon and self._rpc:
+            result = self._rpc.send_message(
+                new_text, contact_id, edit_timestamp=target_ts
+            )
+            if "error" in result:
+                raise RuntimeError(result["error"])
+        else:
+            _send_subprocess(new_text, contact_id, edit_timestamp=target_ts)
+        return True
+
     async def mark_read(self, contact_id: str) -> None:
         await asyncio.to_thread(_mark_as_read, contact_id)
 
@@ -623,6 +639,85 @@ class SignalBackend(ChatBackend):
             ts = (sync.get("sentMessage", {}) or {}).get("timestamp", 0)
         return ts
 
+    def _edit_envelope_to_event(self, envelope: dict) -> ChatEvent | None:
+        """Riconosce un edit Signal e lo normalizza in ChatEvent("message_edit").
+
+        Due forme gestite:
+
+        1. Edit INCOMING dal contatto (forma verificata, top-level)::
+
+               {"source": ..., "timestamp": <ts edit>,
+                "editMessage": {"targetSentTimestamp": <ts originale>,
+                                "dataMessage": {"timestamp": <ts edit>,
+                                                "message": "testo nuovo"}}}
+
+        2. Nostro edit fatto da UN ALTRO device linked (difensivo): il sync
+           transcript incapsula l'edit dentro ``syncMessage.sentMessage``; i
+           campi ``destination*`` restano fratelli di ``editMessage``, quindi
+           ``_identify_contact_for_envelope`` funziona invariato.
+
+        ``payload["timestamp"]`` è SEMPRE il timestamp del messaggio ORIGINALE
+        (``targetSentTimestamp``): l'identità temporale non cambia con l'edit.
+        """
+        is_mine = False
+        edit = envelope.get("editMessage")
+        if not edit:
+            sent = (envelope.get("syncMessage") or {}).get("sentMessage") or {}
+            edit = sent.get("editMessage")
+            is_mine = bool(edit)
+        if not edit:
+            return None
+
+        target = edit.get("targetSentTimestamp")
+        data = edit.get("dataMessage") or {}
+        new_text = data.get("message") or ""
+        if not target or not new_text:
+            return None
+        # Caption/media edit fuori scope: se il dataMessage trasporta attachment
+        # lasciamo perdere (apply_edit rifiuterebbe comunque msg_type != "text").
+        if data.get("attachments"):
+            return None
+
+        contact = self._identify_contact_for_envelope(envelope)
+        if contact is None:
+            return None
+
+        sender = "You" if is_mine else (
+            envelope.get("sourceName")
+            or envelope.get("sourceNumber")
+            or envelope.get("source", "")
+        )
+        return ChatEvent(
+            type="message_edit",
+            protocol=self.protocol,
+            contact_id=contact.id,
+            payload={
+                "edit_message_id": str(target),
+                "text": new_text,
+                "timestamp": int(target),                       # ts ORIGINALE
+                "edit_timestamp": int(
+                    data.get("timestamp") or envelope.get("timestamp") or 0
+                ) or None,
+                "is_mine": is_mine,
+                "sender": sender,
+                "contact": contact,
+                "msg_type": "text",
+            },
+        )
+
+    def _has_edit_content(self, envelope: dict) -> bool:
+        """Return True if *envelope* carries an ``editMessage`` in either of the
+        two edit shapes (top-level, or nested under ``syncMessage.sentMessage``).
+
+        Only the *presence* of the field matters — not its validity.  An
+        envelope that carries an edit must never be re-interpreted as a new
+        message, even when the edit itself is malformed/unprocessable.
+        """
+        if "editMessage" in envelope:
+            return True
+        sent = (envelope.get("syncMessage") or {}).get("sentMessage") or {}
+        return "editMessage" in sent
+
     def envelope_to_event(self, envelope: dict) -> list[ChatEvent]:
         """Classify a Signal envelope into zero or more ``ChatEvent`` objects.
 
@@ -630,6 +725,14 @@ class SignalBackend(ChatBackend):
         (e.g. unknown contact, empty message).  An envelope with N
         attachments produces N events (one per attachment).
         """
+        edit_event = self._edit_envelope_to_event(envelope)
+        if edit_event is not None:
+            return [edit_event]
+        if self._has_edit_content(envelope):
+            # An edit envelope must never fall through to normal parsing and
+            # produce a spurious empty "message" bubble.
+            return []
+
         # Typing indicator
         typing = _process_typing(envelope)
         if typing is not None:
@@ -788,6 +891,48 @@ class SignalBackend(ChatBackend):
                 contact_number=source,
             )
         return updated
+
+    def apply_edit(
+        self,
+        contact_id: str,
+        message_id: str,
+        new_text: str,
+        *,
+        is_mine: bool | None = None,
+        edit_timestamp: int | None = None,
+    ) -> dict | None:
+        from backend import _update_message_text
+
+        try:
+            target_ts = int(message_id)
+        except (TypeError, ValueError):
+            return None
+        for msg in self.cache.get(contact_id, []):
+            if int(msg.get("timestamp") or 0) != target_ts:
+                continue
+            if is_mine is not None and bool(msg.get("is_mine")) != bool(is_mine):
+                continue
+            if msg.get("msg_type", "text") != "text":
+                return None                       # mai riscrivere label media
+            old_text = msg.get("text", "")
+            if old_text == new_text:
+                return None                       # idempotente (echo nostro edit)
+            msg["text"] = new_text
+            msg["edited"] = True
+            _update_message_text(
+                contact_id, new_text,
+                protocol=PROTOCOL_SIGNAL,
+                timestamp=target_ts, old_text=old_text,
+                is_mine=msg.get("is_mine"),
+            )
+            return {
+                "message_id": str(target_ts),
+                "timestamp": target_ts,
+                "old_text": old_text,
+                "text": new_text,
+                "is_mine": bool(msg.get("is_mine")),
+            }
+        return None
 
     # ─── Receive loop (SSE real-time) ───────────────────────────────────
 

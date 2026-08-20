@@ -153,6 +153,10 @@ class ChatEvent:
     ``type`` is one of:
 
     - ``"message"``: a new message (payload is a ``ChatMessage`` dict).
+    - ``"message_edit"``: un messaggio esistente è stato modificato.
+      payload: ``{"edit_message_id": str, "text": str, "timestamp": int (ts ORIGINALE),
+      "edit_timestamp": int|None, "is_mine": bool, "sender": str,
+      "contact": ChatContact|None, "msg_type": "text"}``.
     - ``"typing"``: a typing indicator (payload: ``{"action": "STARTED"|"STOPPED"}``).
     - ``"receipt"``: a delivery/read receipt (payload: list of updated messages).
     - ``"contact_update"``: contact metadata changed (payload: ``ChatContact`` dict).

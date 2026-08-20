@@ -217,64 +217,102 @@ class WhatsAppBackend(ChatBackend):
                     ack_text = content.get("body") or content.get("text") or ""
                     ack_id = content.get("id")
 
-                    # ── Extract image/attachment metadata from ack payload ──
-                    # WAHA message.ack payloads carry the same hasMedia/media
-                    # fields as normal message events.  Without extracting
-                    # them the synthetic event would lack msg_type/image and
-                    # the TUI would show an empty text bubble instead of [🖼️].
-                    ack_msg_type = "text"
-                    ack_attachment_id = None
-                    ack_attachment_info = None
-                    if content.get("hasMedia"):
-                        media = content.get("media")
-                        if isinstance(media, dict):
-                            mime = (media.get("mimetype") or "").lower()
-                            if mime.startswith("image/"):
-                                ack_msg_type = "image"
-                            elif any(
-                                mime.startswith(p)
-                                for p in ("video/", "audio/", "application/")
-                            ):
-                                ack_msg_type = "attachment"
-                            ack_attachment_id = media.get("url") or content.get("id")
-                            ack_attachment_info = (
-                                content.get("caption")
-                                or str(
-                                    content.get("body") or content.get("text") or ""
-                                ).strip()
-                                or media.get("caption")
-                                or media.get("filename")
-                                or mime
-                                or "Media"
-                            )
-
-                    # Dedup by (contact, id, normalized text) so a retry of the
-                    # same ack does not enqueue the synthetic message twice.
-                    ack_key = (
-                        ack_contact,
-                        str(ack_id),
-                        " ".join(str(ack_text).split()),
-                    )
-                    if ack_id and ack_key not in self._seen_message_keys:
-                        self._seen_message_keys.add(ack_key)
-                        ack_msg_event = ChatEvent(
-                            type="message",
-                            protocol=PROTOCOL_WHATSAPP,
-                            contact_id=ack_contact,
-                            payload={
-                                "text": ack_text,
-                                "is_mine": True,
-                                "sender": "You",
-                                "timestamp": ack_ts,
-                                "id": ack_id,
-                                "is_group": ack_contact.endswith("@g.us")
-                                if ack_contact
-                                else False,
-                                "msg_type": ack_msg_type,
-                                "attachment_id": ack_attachment_id,
-                                "attachment_info": ack_attachment_info,
-                            },
+                    # ── Edit detection (message.ack with a new body) ──────
+                    # An outgoing edit arrives as message.ack with the SAME id
+                    # and a NEW body.  Detect it against the cache and emit a
+                    # message_edit event instead of a synthetic "message" (which
+                    # would mount a duplicate bubble).
+                    if ack_id and self._detect_edit(
+                        ack_contact, str(ack_id), ack_text, True, ack_ts
+                    ):
+                        ack_key = (
+                            ack_contact,
+                            str(ack_id),
+                            " ".join(str(ack_text).split()),
                         )
+                        if ack_key not in self._seen_message_keys:
+                            self._seen_message_keys.add(ack_key)
+                            self._enqueue_event(
+                                ChatEvent(
+                                    type="message_edit",
+                                    protocol=PROTOCOL_WHATSAPP,
+                                    contact_id=ack_contact,
+                                    payload={
+                                        "edit_message_id": str(ack_id),
+                                        "text": ack_text,
+                                        "timestamp": ack_ts,
+                                        "edit_timestamp": None,
+                                        "is_mine": True,
+                                        "sender": "You",
+                                        "contact": self._contacts_by_jid.get(
+                                            ack_contact
+                                        ),
+                                        "msg_type": "text",
+                                    },
+                                )
+                            )
+                        # niente evento sintetico "message"; gli eventuali
+                        # receipt (ack>=3) prodotti da _event_from_raw
+                        # proseguono invariati.
+                    else:
+                        # ── Extract image/attachment metadata from ack payload ──
+                        # WAHA message.ack payloads carry the same hasMedia/media
+                        # fields as normal message events.  Without extracting
+                        # them the synthetic event would lack msg_type/image and
+                        # the TUI would show an empty text bubble instead of [🖼️].
+                        ack_msg_type = "text"
+                        ack_attachment_id = None
+                        ack_attachment_info = None
+                        if content.get("hasMedia"):
+                            media = content.get("media")
+                            if isinstance(media, dict):
+                                mime = (media.get("mimetype") or "").lower()
+                                if mime.startswith("image/"):
+                                    ack_msg_type = "image"
+                                elif any(
+                                    mime.startswith(p)
+                                    for p in ("video/", "audio/", "application/")
+                                ):
+                                    ack_msg_type = "attachment"
+                                ack_attachment_id = media.get("url") or content.get("id")
+                                ack_attachment_info = (
+                                    content.get("caption")
+                                    or str(
+                                        content.get("body") or content.get("text") or ""
+                                    ).strip()
+                                    or media.get("caption")
+                                    or media.get("filename")
+                                    or mime
+                                    or "Media"
+                                )
+
+                        # Dedup by (contact, id, normalized text) so a retry of the
+                        # same ack does not enqueue the synthetic message twice.
+                        ack_key = (
+                            ack_contact,
+                            str(ack_id),
+                            " ".join(str(ack_text).split()),
+                        )
+                        if ack_id and ack_key not in self._seen_message_keys:
+                            self._seen_message_keys.add(ack_key)
+                            ack_msg_event = ChatEvent(
+                                type="message",
+                                protocol=PROTOCOL_WHATSAPP,
+                                contact_id=ack_contact,
+                                payload={
+                                    "text": ack_text,
+                                    "is_mine": True,
+                                    "sender": "You",
+                                    "timestamp": ack_ts,
+                                    "id": ack_id,
+                                    "is_group": ack_contact.endswith("@g.us")
+                                    if ack_contact
+                                    else False,
+                                    "msg_type": ack_msg_type,
+                                    "attachment_id": ack_attachment_id,
+                                    "attachment_info": ack_attachment_info,
+                                },
+                            )
 
         events = _event_from_raw(raw, self._contacts_by_jid)
         if not events:
@@ -299,6 +337,30 @@ class WhatsAppBackend(ChatBackend):
         for event in events:
             if event.type == "message":
                 mid = event.payload.get("id")
+                hit = self._detect_edit(
+                    event.contact_id,
+                    str(mid) if mid else None,
+                    event.payload.get("text") or "",
+                    bool(event.payload.get("is_mine")),
+                    int(event.payload.get("timestamp") or 0),
+                )
+                if hit is not None:
+                    event = ChatEvent(
+                        type="message_edit",
+                        protocol=PROTOCOL_WHATSAPP,
+                        contact_id=event.contact_id,
+                        payload={
+                            "edit_message_id": str(hit.get("id") or mid),
+                            "text": event.payload.get("text") or "",
+                            "timestamp": int(hit.get("timestamp") or 0),  # ts ORIGINALE
+                            "edit_timestamp": int(event.payload.get("timestamp") or 0)
+                            or None,
+                            "is_mine": bool(hit.get("is_mine")),
+                            "sender": event.payload.get("sender", ""),
+                            "contact": self._contacts_by_jid.get(event.contact_id),
+                            "msg_type": "text",
+                        },
+                    )
                 key = (
                     event.contact_id,
                     str(mid),
@@ -828,6 +890,23 @@ class WhatsAppBackend(ChatBackend):
                 payload = event.payload
 
                 is_mine = payload.get("is_mine", False)
+                # Uno storico WAHA riporta il testo GIÀ editato con id/ts
+                # originali: se il messaggio è già in cache con testo diverso,
+                # aggiorna la riga esistente invece di ingerire un duplicato.
+                if self._detect_edit(
+                    contact_id,
+                    str(payload.get("id") or ""),
+                    payload.get("text", ""),
+                    is_mine,
+                    int(payload.get("timestamp") or 0),
+                ):
+                    self.apply_edit(
+                        contact_id,
+                        str(payload.get("id")),
+                        payload.get("text", ""),
+                        is_mine=is_mine,
+                    )
+                    continue
                 # ingest_message fa dedup interno (stesso (contact, ts, text) non
                 # viene ri-salvato) e aggiorna il cache locale + SQLite.  Includiamo
                 # sia i ricevuti sia i miei inviati così lo storico è completo.
@@ -1016,6 +1095,11 @@ class WhatsAppBackend(ChatBackend):
         if result is None:
             raise RuntimeError("WhatsApp API send failed / unreachable")
         return self._extract_message_id(result)
+
+    def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> bool:
+        if not self._rest:
+            return False
+        return self._rest.edit_message(contact_id, message_id, new_text) is not None
 
     async def mark_read(self, contact_id: str) -> None:
         """Async mark-read (interface contract)."""
@@ -1316,6 +1400,81 @@ class WhatsAppBackend(ChatBackend):
             },
         )
         return True
+
+    def _detect_edit(
+        self,
+        contact_id: str,
+        msg_id: str | None,
+        text: str,
+        is_mine: bool,
+        ts_ms: int,
+    ) -> dict | None:
+        """Ritorna l'entry cached target di un edit, o None.
+
+        1) Match per id (stabile per outgoing; per incoming stabile tra webhook
+           e webhook, che è il caso dell'edit live).
+        2) Fallback incoming per ts (±2s, candidato UNICO): gli id incoming
+           possono differire tra webhook e REST (/api/messages), quindi un edit
+           di un messaggio caricato via fetch_history potrebbe non matchare
+           per id.  Il timestamp WhatsApp dell'edit è quello ORIGINALE.
+        """
+        if not text:
+            return None
+        entries = self.cache.get(contact_id, [])
+        if msg_id:
+            for msg in entries:
+                if bool(msg.get("is_mine")) != bool(is_mine):
+                    continue
+                if msg.get("msg_type", "text") != "text":
+                    continue
+                if str(msg.get("id") or "") == str(msg_id):
+                    return msg if msg.get("text", "") != text else None
+        if not is_mine and ts_ms:
+            candidates = [
+                m for m in entries
+                if not m.get("is_mine")
+                and m.get("msg_type", "text") == "text"
+                and abs(int(m.get("timestamp") or 0) - ts_ms) <= 2000
+                and m.get("text", "") != text
+            ]
+            if len(candidates) == 1:              # ambiguità → skip (vedi §9)
+                return candidates[0]
+        return None
+
+    def apply_edit(self, contact_id, message_id, new_text, *, is_mine=None,
+                   edit_timestamp=None) -> dict | None:
+        from backend import _update_message_text
+
+        target = None
+        for msg in self.cache.get(contact_id, []):
+            if str(msg.get("id") or "") == str(message_id):
+                if is_mine is not None and bool(msg.get("is_mine")) != bool(is_mine):
+                    continue
+                target = msg
+                break
+        if target is None or target.get("msg_type", "text") != "text":
+            return None
+        old_text = target.get("text", "")
+        if old_text == new_text:
+            return None                            # echo nostro edit: no-op
+        target["text"] = new_text
+        target["edited"] = True
+        # niente _sort_contact_cache: il timestamp non cambia
+        if target.get("id"):
+            _update_message_text(contact_id, new_text,
+                                 protocol=PROTOCOL_WHATSAPP, msg_id=str(target["id"]))
+        else:
+            _update_message_text(contact_id, new_text,
+                                 protocol=PROTOCOL_WHATSAPP,
+                                 timestamp=int(target.get("timestamp") or 0),
+                                 old_text=old_text)
+        return {
+            "message_id": str(target.get("id") or message_id),
+            "timestamp": int(target.get("timestamp") or 0),
+            "old_text": old_text,
+            "text": new_text,
+            "is_mine": bool(target.get("is_mine")),
+        }
 
     def process_receipt(self, envelope: dict) -> list[dict]:
         """Handle a receipt batch against the in-memory cache.

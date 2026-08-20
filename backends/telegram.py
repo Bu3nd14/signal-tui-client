@@ -255,6 +255,10 @@ class TelegramBackend(ChatBackend):
         async def _on_new_message(event: Any) -> None:
             await self._handle_new_message(event)
 
+        @self._client.on(events.MessageEdited)
+        async def _on_message_edited(event: Any) -> None:
+            await self._handle_message_edited(event)
+
         @self._client.on(events.Raw)
         async def _on_raw(update: Any) -> None:
             from telethon.tl.types import UpdateReadHistoryOutbox
@@ -714,6 +718,26 @@ class TelegramBackend(ChatBackend):
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
         return future.result(timeout=30)
 
+    def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> bool:
+        """Edit via Telethon; gira sul loop dedicato (pattern di send_message_sync)."""
+        if self._loop is None or self._client is None:
+            raise RuntimeError("Telegram backend not connected")
+        try:
+            eid = int(contact_id)
+            mid = int(message_id)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid Telegram contact/message id") from None
+        if mid <= 0:
+            raise ValueError("Invalid Telegram message id")
+
+        async def _edit() -> bool:
+            entity = await self._resolve_input_entity(eid)
+            await self._client.edit_message(entity, mid, new_text)
+            return True
+
+        future = asyncio.run_coroutine_threadsafe(_edit(), self._loop)
+        return future.result(timeout=30)
+
     @staticmethod
     def _validated_reply_to_message_id(reply_to_message_id: str | None) -> int | None:
         """Return a valid Telegram reply id, rejecting invalid reply targets."""
@@ -771,6 +795,41 @@ class TelegramBackend(ChatBackend):
         if evt is not None:
             self._events.put(evt)
             logger.info("Telegram: enqueued event for chat %s", evt.contact_id)
+
+    async def _handle_message_edited(self, event: Any) -> None:
+        """Telethon event handler: normalise and enqueue an edited message."""
+        msg = event.message
+        if msg is None or msg.chat_id is None:
+            return
+        # Solo testo: caption/media edit fuori scope.
+        if msg.photo or msg.document or msg.sticker or msg.video or msg.voice or msg.audio:
+            return
+        new_text = msg.text or ""
+        if not new_text.strip():
+            return                                # edit di sola formattazione/altro
+        chat_id = str(msg.chat_id)
+        ts = int(msg.date.timestamp() * 1000) if msg.date else 0
+        edit_ts = (
+            int(msg.edit_date.timestamp() * 1000)
+            if getattr(msg, "edit_date", None) else None
+        )
+        self._events.put(
+            ChatEvent(
+                type="message_edit",
+                protocol=PROTOCOL_TELEGRAM,
+                contact_id=chat_id,
+                payload={
+                    "edit_message_id": str(msg.id),
+                    "text": new_text,
+                    "timestamp": ts,              # msg.date = ts ORIGINALE
+                    "edit_timestamp": edit_ts,
+                    "is_mine": bool(getattr(msg, "out", False)),
+                    "sender": "",
+                    "contact": self._identify_contact(chat_id),
+                    "msg_type": "text",
+                },
+            )
+        )
 
     def _message_to_chat_event(
         self, msg: Any, attachment_id: str | None = None
@@ -1041,6 +1100,18 @@ class TelegramBackend(ChatBackend):
         # (1) Cross-session dedup by stable msg_id.  Never touch status on hit.
         if mid:
             if mid in self._seen_msg_ids:
+                entry = next(
+                    (m for m in self.cache.get(contact_id, [])
+                     if str(m.get("id") or "") == str(mid)),
+                    None,
+                )
+                if (
+                    entry is not None
+                    and entry.get("msg_type", "text") == "text"
+                    and entry.get("text", "") != text
+                    and text
+                ):
+                    self.apply_edit(contact_id, str(mid), text)
                 return False
             for m in self.cache.get(contact_id, []):
                 if (
@@ -1110,6 +1181,42 @@ class TelegramBackend(ChatBackend):
             self.cache[contact_id] = self.cache[contact_id][-_MAX_CACHE_PER_CONTACT:]
 
         return True
+
+    def apply_edit(
+        self,
+        contact_id: str,
+        message_id: str,
+        new_text: str,
+        *,
+        is_mine: bool | None = None,
+        edit_timestamp: int | None = None,
+    ) -> dict | None:
+        from backend import _update_message_text
+
+        for msg in self.cache.get(contact_id, []):
+            if str(msg.get("id") or "") != str(message_id):
+                continue
+            if is_mine is not None and bool(msg.get("is_mine")) != bool(is_mine):
+                continue
+            if msg.get("msg_type", "text") != "text":
+                return None
+            old_text = msg.get("text", "")
+            if old_text == new_text:
+                return None                       # echo del nostro edit: no-op
+            msg["text"] = new_text
+            msg["edited"] = True
+            _update_message_text(
+                contact_id, new_text,
+                protocol=PROTOCOL_TELEGRAM, msg_id=str(message_id),
+            )
+            return {
+                "message_id": str(message_id),
+                "timestamp": int(msg.get("timestamp") or 0),
+                "old_text": old_text,
+                "text": new_text,
+                "is_mine": bool(msg.get("is_mine")),
+            }
+        return None
 
     # ─── Pairing ───────────────────────────────────────────────────────────
 
