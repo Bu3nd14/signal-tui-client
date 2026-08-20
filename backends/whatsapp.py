@@ -1043,22 +1043,42 @@ class WhatsAppBackend(ChatBackend):
     def _extract_message_id(result: dict) -> str | None:
         """Return the Baileys message id from a WAHA ``sendText`` response.
 
-        WAHA versions disagree on the field name: some return a flat ``id``,
-        others nest it under ``key.id`` (same shape as ``/api/messages``) and a
-        few older builds use ``messageId``/``msgId``.  We probe all of them so
-        the real id reaches the UI cache regardless of the WAHA version.
+        WAHA versions disagree on both the field name and its shape: some return
+        a flat ``id`` string, others nest it under ``key.id`` (same shape as
+        ``/api/messages``), and a few older builds use ``messageId``/``msgId``.
+        Recent builds return the id as a **dict** (Baileys ``MsgKey``-like)::
+
+            {"id": {"fromMe": True, "remote": "…@lid", "id": "<hex>",
+                    "$1": "true_…@lid_<hex>", "_serialized": "true_…@lid_<hex>"}}
+
+        For a dict value we prefer ``_serialized``, then ``$1``, then ``id``:
+        ``_serialized``/``$1`` carry the full ``true_…@lid_<hex>`` id used by the
+        DB and the edit endpoint, while ``id`` alone is only the hex part.  We
+        probe every field so the real id reaches the UI cache regardless of the
+        WAHA version.
         """
         if not isinstance(result, dict):
             return None
-        for key in ("id", "messageId", "msgId", "message_id", "msg_id"):
-            val = result.get(key)
+
+        def _pick(val: object) -> str | None:
             if isinstance(val, str) and val:
                 return val
+            if isinstance(val, dict):
+                for sub in ("_serialized", "$1", "id"):
+                    candidate = val.get(sub)
+                    if isinstance(candidate, str) and candidate:
+                        return candidate
+            return None
+
+        for key in ("id", "messageId", "msgId", "message_id", "msg_id"):
+            extracted = _pick(result.get(key))
+            if extracted:
+                return extracted
         key_obj = result.get("key")
         if isinstance(key_obj, dict):
-            val = key_obj.get("id")
-            if isinstance(val, str) and val:
-                return val
+            extracted = _pick(key_obj.get("id"))
+            if extracted:
+                return extracted
         return None
 
     def send_message_sync(

@@ -120,6 +120,57 @@ class TestWhatsAppRESTClientEdit:
             assert client.edit_message(_CID, "m1", "nuovo") is None
 
 
+# ─── _extract_message_id ───────────────────────────────────────────────────────
+
+
+class TestExtractMessageId:
+    """🆔 ``_extract_message_id`` gestisce id stringa e id dict (WAHA recente)."""
+
+    def test_id_dict_prefers_serialized(self):
+        result = {
+            "id": {
+                "fromMe": True,
+                "remote": "189025889575055@lid",
+                "id": "3EB0CFB50E158CFB92131E",
+                "$1": "true_189025889575055@lid_3EB0CFB50E158CFB92131E",
+                "_serialized": "true_189025889575055@lid_3EB0CFB50E158CFB92131E",
+            },
+            "key": None,
+        }
+        assert (
+            WhatsAppBackend._extract_message_id(result)
+            == "true_189025889575055@lid_3EB0CFB50E158CFB92131E"
+        )
+
+    def test_id_dict_falls_back_to_dollar1(self):
+        result = {
+            "id": {
+                "id": "3EB0CFB50E158CFB92131E",
+                "$1": "true_189025889575055@lid_3EB0CFB50E158CFB92131E",
+            }
+        }
+        assert (
+            WhatsAppBackend._extract_message_id(result)
+            == "true_189025889575055@lid_3EB0CFB50E158CFB92131E"
+        )
+
+    def test_id_dict_hex_only_uses_id(self):
+        result = {"id": {"id": "3EB0CFB50E158CFB92131E"}}
+        assert WhatsAppBackend._extract_message_id(result) == "3EB0CFB50E158CFB92131E"
+
+    def test_flat_string_id_regression(self):
+        assert WhatsAppBackend._extract_message_id({"id": "BAYES-123"}) == "BAYES-123"
+
+    def test_key_id(self):
+        assert (
+            WhatsAppBackend._extract_message_id({"key": {"id": "NESTED-9"}})
+            == "NESTED-9"
+        )
+
+    def test_no_id_returns_none(self):
+        assert WhatsAppBackend._extract_message_id({"status": "ok"}) is None
+
+
 # ─── _detect_edit ──────────────────────────────────────────────────────────────
 
 
