@@ -94,7 +94,9 @@ class ChatBackend(ABC):
 
     # ─── Editing ─────────────────────────────────────────────────────
 
-    def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> bool:
+    def edit_message_sync(
+        self, contact_id: str, message_id: str, new_text: str
+    ) -> bool:
         """Modifica un messaggio proprio già inviato.
 
         Bloccante: chiamare SOLO da worker thread (come ``send_message_sync``).
@@ -110,7 +112,9 @@ class ChatBackend(ABC):
         """
         return False
 
-    async def edit_message(self, contact_id: str, message_id: str, new_text: str) -> bool:
+    async def edit_message(
+        self, contact_id: str, message_id: str, new_text: str
+    ) -> bool:
         """Wrapper async del contratto (symmetry con ``list_address_book``).
 
         Delega a ``edit_message_sync`` via ``asyncio.to_thread``.

@@ -214,8 +214,9 @@ class MessageWidget(Static):
     class EditRequested(Message):
         """Posted on Alt+click / Alt+e: request to edit this (own) message."""
 
-        def __init__(self, text, timestamp, sender, is_mine, status,
-                     message_id=None) -> None:
+        def __init__(
+            self, text, timestamp, sender, is_mine, status, message_id=None
+        ) -> None:
             super().__init__()
             self.text = text
             self.timestamp = timestamp

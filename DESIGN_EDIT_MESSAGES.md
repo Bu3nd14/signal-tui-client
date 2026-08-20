@@ -36,6 +36,7 @@ Due metodi **opzionali con default** (pattern di `get_attachment_path`, non abst
 ```python
 # backends/base.py — ChatBackend
 
+
 def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> bool:
     """Modifica un messaggio proprio già inviato.  Bloccante: chiamare da
     worker thread (come ``send_message_sync``).  Ritorna True se il backend
@@ -48,11 +49,13 @@ def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> 
     """
     return False
 
+
 async def edit_message(self, contact_id: str, message_id: str, new_text: str) -> bool:
     """Wrapper async (symmetry con ``list_address_book``)."""
     return await asyncio.to_thread(
         self.edit_message_sync, contact_id, message_id, new_text
     )
+
 
 def apply_edit(
     self,
@@ -156,9 +159,7 @@ def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> 
     except (TypeError, ValueError):
         return False
     if self._use_daemon and self._rpc:
-        result = self._rpc.send_message(
-            new_text, contact_id, edit_timestamp=target_ts
-        )
+        result = self._rpc.send_message(new_text, contact_id, edit_timestamp=target_ts)
         if "error" in result:
             raise RuntimeError(result["error"])
     else:
@@ -233,10 +234,14 @@ def _edit_envelope_to_event(self, envelope: dict) -> ChatEvent | None:
     if contact is None:
         return None
 
-    sender = "You" if is_mine else (
-        envelope.get("sourceName")
-        or envelope.get("sourceNumber")
-        or envelope.get("source", "")
+    sender = (
+        "You"
+        if is_mine
+        else (
+            envelope.get("sourceName")
+            or envelope.get("sourceNumber")
+            or envelope.get("source", "")
+        )
     )
     return ChatEvent(
         type="message_edit",
@@ -245,10 +250,11 @@ def _edit_envelope_to_event(self, envelope: dict) -> ChatEvent | None:
         payload={
             "edit_message_id": str(target),
             "text": new_text,
-            "timestamp": int(target),                       # ts ORIGINALE
+            "timestamp": int(target),  # ts ORIGINALE
             "edit_timestamp": int(
                 data.get("timestamp") or envelope.get("timestamp") or 0
-            ) or None,
+            )
+            or None,
             "is_mine": is_mine,
             "sender": sender,
             "contact": contact,
@@ -281,16 +287,18 @@ def apply_edit(
         if is_mine is not None and bool(msg.get("is_mine")) != bool(is_mine):
             continue
         if msg.get("msg_type", "text") != "text":
-            return None                       # mai riscrivere label media
+            return None  # mai riscrivere label media
         old_text = msg.get("text", "")
         if old_text == new_text:
-            return None                       # idempotente (echo nostro edit)
+            return None  # idempotente (echo nostro edit)
         msg["text"] = new_text
         msg["edited"] = True
         _update_message_text(
-            contact_id, new_text,
+            contact_id,
+            new_text,
             protocol=PROTOCOL_SIGNAL,
-            timestamp=target_ts, old_text=old_text,
+            timestamp=target_ts,
+            old_text=old_text,
             is_mine=msg.get("is_mine"),
         )
         return {
@@ -355,12 +363,13 @@ async def _handle_message_edited(self, event: Any) -> None:
         return
     new_text = msg.text or ""
     if not new_text.strip():
-        return                                # edit di sola formattazione/altro
+        return  # edit di sola formattazione/altro
     chat_id = str(msg.chat_id)
     ts = int(msg.date.timestamp() * 1000) if msg.date else 0
     edit_ts = (
         int(msg.edit_date.timestamp() * 1000)
-        if getattr(msg, "edit_date", None) else None
+        if getattr(msg, "edit_date", None)
+        else None
     )
     self._events.put(
         ChatEvent(
@@ -370,10 +379,10 @@ async def _handle_message_edited(self, event: Any) -> None:
             payload={
                 "edit_message_id": str(msg.id),
                 "text": new_text,
-                "timestamp": ts,              # msg.date = ts ORIGINALE
+                "timestamp": ts,  # msg.date = ts ORIGINALE
                 "edit_timestamp": edit_ts,
                 "is_mine": bool(getattr(msg, "out", False)),
-                "sender": "",                 # risolto lato UI se serve
+                "sender": "",  # risolto lato UI se serve
                 "contact": self._identify_contact(chat_id),
                 "msg_type": "text",
             },
@@ -384,8 +393,9 @@ async def _handle_message_edited(self, event: Any) -> None:
 ### `apply_edit` (match per server id)
 
 ```python
-def apply_edit(self, contact_id, message_id, new_text, *, is_mine=None,
-               edit_timestamp=None) -> dict | None:
+def apply_edit(
+    self, contact_id, message_id, new_text, *, is_mine=None, edit_timestamp=None
+) -> dict | None:
     from backend import _update_message_text
 
     for msg in self.cache.get(contact_id, []):
@@ -397,12 +407,14 @@ def apply_edit(self, contact_id, message_id, new_text, *, is_mine=None,
             return None
         old_text = msg.get("text", "")
         if old_text == new_text:
-            return None                       # echo del nostro edit: no-op
+            return None  # echo del nostro edit: no-op
         msg["text"] = new_text
         msg["edited"] = True
         _update_message_text(
-            contact_id, new_text,
-            protocol=PROTOCOL_TELEGRAM, msg_id=str(message_id),
+            contact_id,
+            new_text,
+            protocol=PROTOCOL_TELEGRAM,
+            msg_id=str(message_id),
         )
         return {
             "message_id": str(message_id),
@@ -421,8 +433,7 @@ def apply_edit(self, contact_id, message_id, new_text, *, is_mine=None,
 ```python
 # in ingest_message, dentro `if mid and mid in self._seen_msg_ids:`
 entry = next(
-    (m for m in self.cache.get(contact_id, [])
-     if str(m.get("id") or "") == str(mid)),
+    (m for m in self.cache.get(contact_id, []) if str(m.get("id") or "") == str(mid)),
     None,
 )
 if (
@@ -506,13 +517,14 @@ def _detect_edit(
                 return msg if msg.get("text", "") != text else None
     if not is_mine and ts_ms:
         candidates = [
-            m for m in entries
+            m
+            for m in entries
             if not m.get("is_mine")
             and m.get("msg_type", "text") == "text"
             and abs(int(m.get("timestamp") or 0) - ts_ms) <= 2000
             and m.get("text", "") != text
         ]
-        if len(candidates) == 1:              # ambiguità → skip (vedi §9)
+        if len(candidates) == 1:  # ambiguità → skip (vedi §9)
             return candidates[0]
     return None
 ```
@@ -526,21 +538,23 @@ if ack_id and self._detect_edit(ack_contact, str(ack_id), ack_text, True, ack_ts
     ack_key = (ack_contact, str(ack_id), " ".join(str(ack_text).split()))
     if ack_key not in self._seen_message_keys:
         self._seen_message_keys.add(ack_key)
-        self._enqueue_event(ChatEvent(
-            type="message_edit",
-            protocol=PROTOCOL_WHATSAPP,
-            contact_id=ack_contact,
-            payload={
-                "edit_message_id": str(ack_id),
-                "text": ack_text,
-                "timestamp": ack_ts,
-                "edit_timestamp": None,
-                "is_mine": True,
-                "sender": "You",
-                "contact": self._contacts_by_jid.get(ack_contact),
-                "msg_type": "text",
-            },
-        ))
+        self._enqueue_event(
+            ChatEvent(
+                type="message_edit",
+                protocol=PROTOCOL_WHATSAPP,
+                contact_id=ack_contact,
+                payload={
+                    "edit_message_id": str(ack_id),
+                    "text": ack_text,
+                    "timestamp": ack_ts,
+                    "edit_timestamp": None,
+                    "is_mine": True,
+                    "sender": "You",
+                    "contact": self._contacts_by_jid.get(ack_contact),
+                    "msg_type": "text",
+                },
+            )
+        )
     # niente evento sintetico "message"; gli eventuali receipt (ack>=3)
     # prodotti da _event_from_raw proseguono invariati.
 else:
@@ -551,7 +565,8 @@ else:
 
 ```python
 hit = self._detect_edit(
-    event.contact_id, str(mid),
+    event.contact_id,
+    str(mid),
     event.payload.get("text") or "",
     bool(event.payload.get("is_mine")),
     int(event.payload.get("timestamp") or 0),
@@ -564,7 +579,7 @@ if hit is not None:
         payload={
             "edit_message_id": str(hit.get("id") or mid),
             "text": event.payload.get("text") or "",
-            "timestamp": int(hit.get("timestamp") or 0),   # ts ORIGINALE
+            "timestamp": int(hit.get("timestamp") or 0),  # ts ORIGINALE
             "edit_timestamp": int(event.payload.get("timestamp") or 0) or None,
             "is_mine": bool(hit.get("is_mine")),
             "sender": event.payload.get("sender", ""),
@@ -582,15 +597,20 @@ Nel loop di `fetch_history` (`backends/whatsapp.py:825-847`), prima di `ingest_m
 
 ```python
 if self._detect_edit(
-    contact_id, str(payload.get("id") or ""),
-    payload.get("text", ""), is_mine, int(payload.get("timestamp") or 0),
+    contact_id,
+    str(payload.get("id") or ""),
+    payload.get("text", ""),
+    is_mine,
+    int(payload.get("timestamp") or 0),
 ):
     self.apply_edit(
-        contact_id, str(payload.get("id")),
-        payload.get("text", ""), is_mine=is_mine,
+        contact_id,
+        str(payload.get("id")),
+        payload.get("text", ""),
+        is_mine=is_mine,
     )
     continue
-self.ingest_message(...)   # come oggi
+self.ingest_message(...)  # come oggi
 ```
 
 Così uno storico WAHA (che riporta il testo **già editato** con id/ts originali) aggiorna la riga esistente invece di inserire un duplicato (ricordo che `_dedup_messages_by_id` partiziona per `(protocol, contact, msg_id, text)`: due righe con stesso id e testo diverso sopravvivrebbero entrambe).
@@ -598,8 +618,9 @@ Così uno storico WAHA (che riporta il testo **già editato** con id/ts original
 ### `apply_edit`
 
 ```python
-def apply_edit(self, contact_id, message_id, new_text, *, is_mine=None,
-               edit_timestamp=None) -> dict | None:
+def apply_edit(
+    self, contact_id, message_id, new_text, *, is_mine=None, edit_timestamp=None
+) -> dict | None:
     from backend import _update_message_text
 
     target = None
@@ -613,18 +634,22 @@ def apply_edit(self, contact_id, message_id, new_text, *, is_mine=None,
         return None
     old_text = target.get("text", "")
     if old_text == new_text:
-        return None                            # echo nostro edit: no-op
+        return None  # echo nostro edit: no-op
     target["text"] = new_text
     target["edited"] = True
     # niente _sort_contact_cache: il timestamp non cambia
     if target.get("id"):
-        _update_message_text(contact_id, new_text,
-                             protocol=PROTOCOL_WHATSAPP, msg_id=str(target["id"]))
+        _update_message_text(
+            contact_id, new_text, protocol=PROTOCOL_WHATSAPP, msg_id=str(target["id"])
+        )
     else:
-        _update_message_text(contact_id, new_text,
-                             protocol=PROTOCOL_WHATSAPP,
-                             timestamp=int(target.get("timestamp") or 0),
-                             old_text=old_text)
+        _update_message_text(
+            contact_id,
+            new_text,
+            protocol=PROTOCOL_WHATSAPP,
+            timestamp=int(target.get("timestamp") or 0),
+            old_text=old_text,
+        )
     return {
         "message_id": str(target.get("id") or message_id),
         "timestamp": int(target.get("timestamp") or 0),
@@ -646,8 +671,9 @@ def apply_edit(self, contact_id, message_id, new_text, *, is_mine=None,
 class EditRequested(Message):
     """Posted on Alt+click / Alt+e: request to edit this (own) message."""
 
-    def __init__(self, text, timestamp, sender, is_mine, status,
-                 message_id=None) -> None:
+    def __init__(
+        self, text, timestamp, sender, is_mine, status, message_id=None
+    ) -> None:
         super().__init__()
         self.text = text
         self.timestamp = timestamp
@@ -661,14 +687,19 @@ class EditRequested(Message):
 
 ```python
 def on_click(self, event: events.Click) -> None:
-    if event.meta:                       # Alt+click → edit
-        self.post_message(self.EditRequested(
-            text=self._msg_text, timestamp=self._msg_timestamp,
-            sender=self._msg_sender, is_mine=self._msg_is_mine,
-            status=self._status, message_id=self._message_id,
-        ))
+    if event.meta:  # Alt+click → edit
+        self.post_message(
+            self.EditRequested(
+                text=self._msg_text,
+                timestamp=self._msg_timestamp,
+                sender=self._msg_sender,
+                is_mine=self._msg_is_mine,
+                status=self._status,
+                message_id=self._message_id,
+            )
+        )
         return
-    self.post_message(self.MessageClicked(...))   # invariato (reply)
+    self.post_message(self.MessageClicked(...))  # invariato (reply)
 ```
 
 **(c) Controparte tastiera** — `alt+enter` scartato (il parser legacy di Textual 8.2.8 aggiunge il prefisso `alt+` solo ai nomi di tasto di un carattere; `enter` perde il modificatore — verificato in `_xterm_parser.py`). Scelta definitiva: **`alt+e`** sul widget focuseato (i `MessageWidget` sono `can_focus = True`):
@@ -678,12 +709,18 @@ BINDINGS: ClassVar[list] = [
     Binding("alt+e", "request_edit", "Edit message", show=False),
 ]
 
+
 def action_request_edit(self) -> None:
-    self.post_message(self.EditRequested(
-        text=self._msg_text, timestamp=self._msg_timestamp,
-        sender=self._msg_sender, is_mine=self._msg_is_mine,
-        status=self._status, message_id=self._message_id,
-    ))
+    self.post_message(
+        self.EditRequested(
+            text=self._msg_text,
+            timestamp=self._msg_timestamp,
+            sender=self._msg_sender,
+            is_mine=self._msg_is_mine,
+            status=self._status,
+            message_id=self._message_id,
+        )
+    )
 ```
 
 **(d) `update_text` + indicatore " (modificato)"** — refactoring minimo: estrarre la costruzione del contenuto da `__init__` in `_build_content()`; nuovo parametro `edited: bool = False` in `__init__`; suffisso `" (modificato)"` quando `_edited` (valutazione costi/benefici: costo ≈ zero, atteso su tutte e tre le app ufficiali, e la colonna DB §5 lo rende persistente → **si fa**):
@@ -697,6 +734,7 @@ def _build_content(self):
         rt.append(text)
         return rt
     return text
+
 
 def update_text(self, new_text: str, edited: bool = True) -> None:
     """Rewrite the bubble text in place (no unmount/remount)."""
@@ -714,7 +752,9 @@ Registrato in `SignalTUI` (`tui/app.py`): aggiungere alla lista basi (dopo `Send
 
 ```python
 class EditMessageMixin:
-    def on_message_widget_edit_requested(self, event: MessageWidget.EditRequested) -> None:
+    def on_message_widget_edit_requested(
+        self, event: MessageWidget.EditRequested
+    ) -> None:
         if self._download_mode:
             return
         if not event.is_mine:
@@ -728,8 +768,12 @@ class EditMessageMixin:
             return
         cache_key = contact.cache_key
         entry = next(
-            (m for m in self._cache.get(cache_key, [])
-             if m.get("is_mine") and int(m.get("timestamp") or 0) == int(event.timestamp)),
+            (
+                m
+                for m in self._cache.get(cache_key, [])
+                if m.get("is_mine")
+                and int(m.get("timestamp") or 0) == int(event.timestamp)
+            ),
             None,
         )
         if entry is None:
@@ -741,18 +785,21 @@ class EditMessageMixin:
         protocol = contact.protocol
         message_id = entry.get("id") or event.message_id
         if protocol == PROTOCOL_SIGNAL:
-            message_id = str(int(event.timestamp))      # identità Signal = ts
+            message_id = str(int(event.timestamp))  # identità Signal = ts
         elif not message_id:
             self._status("❌ Server message ID unavailable — reopen the chat", 0)
             return
         # Mutua esclusione reply/edit:
         self._cancel_reply()
-        self._cancel_edit()                              # edit precedente
+        self._cancel_edit()  # edit precedente
         widget = next(
-            (c for c in self.chat_log.children
-             if isinstance(c, MessageWidget)
-             and c._msg_timestamp == event.timestamp
-             and c._msg_text == event.text),
+            (
+                c
+                for c in self.chat_log.children
+                if isinstance(c, MessageWidget)
+                and c._msg_timestamp == event.timestamp
+                and c._msg_text == event.text
+            ),
             None,
         )
         self._editing_message = {
@@ -797,7 +844,8 @@ if editing is not None:
     if len(t) > 60:
         t = t[:57] + "..."
     text_widget.update(f"✏️ Modifica: {t}")
-    bar.remove_class("reply-bar-hidden"); bar.styles.display = "block"
+    bar.remove_class("reply-bar-hidden")
+    bar.styles.display = "block"
 elif self._reply_to:
     ...  # invariato
 ```
@@ -816,24 +864,29 @@ if self._editing_message is not None:
 ```
 
 ```python
-def _submit_edit(self, new_text: str) -> None:          # in EditMessageMixin
+def _submit_edit(self, new_text: str) -> None:  # in EditMessageMixin
     snap = self._editing_message
     old_text = snap["old_text"]
     if new_text == old_text:
         self._cancel_edit()
         return
-    self._apply_local_edit(snap, new_text)               # ottimistico
+    self._apply_local_edit(snap, new_text)  # ottimistico
     self._cancel_edit()
     self.run_worker(
         lambda: self._edit_message_worker(snap, old_text, new_text),
-        exclusive=False, thread=True,
+        exclusive=False,
+        thread=True,
     )
+
 
 def _apply_local_edit(self, snap: dict, new_text: str) -> None:
     """Ottimistico: cache UI + cache backend + DB + identity sets + widget."""
     entry = next(
-        (m for m in self._cache.get(snap["cache_key"], [])
-         if m.get("is_mine") and int(m.get("timestamp") or 0) == snap["timestamp"]),
+        (
+            m
+            for m in self._cache.get(snap["cache_key"], [])
+            if m.get("is_mine") and int(m.get("timestamp") or 0) == snap["timestamp"]
+        ),
         None,
     )
     if entry is not None:
@@ -841,18 +894,25 @@ def _apply_local_edit(self, snap: dict, new_text: str) -> None:
         entry["edited"] = True
     backend = self.manager.get(snap["protocol"])
     if backend is not None:
-        backend.apply_edit(snap["contact_id"], snap["message_id"], new_text,
-                           is_mine=True)
+        backend.apply_edit(
+            snap["contact_id"], snap["message_id"], new_text, is_mine=True
+        )
     self._rewrite_message_identity(
-        snap["protocol"], snap["cache_key"], snap["timestamp"],
-        snap["old_text"], new_text, snap["message_id"],
+        snap["protocol"],
+        snap["cache_key"],
+        snap["timestamp"],
+        snap["old_text"],
+        new_text,
+        snap["message_id"],
     )
     w = snap.get("_widget")
     if w is not None and w.is_mounted:
         w.update_text(new_text)
 
-def _rewrite_message_identity(self, protocol, cache_key, ts, old_text,
-                              new_text, message_id=None) -> None:
+
+def _rewrite_message_identity(
+    self, protocol, cache_key, ts, old_text, new_text, message_id=None
+) -> None:
     """L'identità (ts, text) cambia col testo: senza questa chirurgia
     ``_refresh_chat`` rimonterebbe il messaggio editato come NUOVO (duplicato)
     e la guardia ``_shown_in_log`` di ``_add_message`` non lo riconoscerebbe."""
@@ -871,8 +931,12 @@ def _rewrite_message_identity(self, protocol, cache_key, ts, old_text,
 def _edit_message_worker(self, snap: dict, old_text: str, new_text: str) -> None:
     backend = self.manager.get(snap["protocol"])
     if backend is None:
-        self.call_from_thread(self._restore_local_edit, snap, old_text,
-                              f"no backend for {snap['protocol']}")
+        self.call_from_thread(
+            self._restore_local_edit,
+            snap,
+            old_text,
+            f"no backend for {snap['protocol']}",
+        )
         return
     try:
         ok = backend.edit_message_sync(snap["contact_id"], snap["message_id"], new_text)
@@ -880,16 +944,21 @@ def _edit_message_worker(self, snap: dict, old_text: str, new_text: str) -> None
         self.call_from_thread(self._restore_local_edit, snap, old_text, str(e))
         return
     if not ok:
-        self.call_from_thread(self._restore_local_edit, snap, old_text,
-                              "edit rejected by server")
+        self.call_from_thread(
+            self._restore_local_edit, snap, old_text, "edit rejected by server"
+        )
     else:
         self.call_from_thread(self._status, "✏️ Message edited")
+
 
 def _restore_local_edit(self, snap: dict, old_text: str, error: str) -> None:
     """UI thread: ripristino completo del testo originale."""
     entry = next(
-        (m for m in self._cache.get(snap["cache_key"], [])
-         if m.get("is_mine") and int(m.get("timestamp") or 0) == snap["timestamp"]),
+        (
+            m
+            for m in self._cache.get(snap["cache_key"], [])
+            if m.get("is_mine") and int(m.get("timestamp") or 0) == snap["timestamp"]
+        ),
         None,
     )
     if entry is not None:
@@ -897,11 +966,15 @@ def _restore_local_edit(self, snap: dict, old_text: str, error: str) -> None:
         entry["edited"] = False
     backend = self.manager.get(snap["protocol"])
     if backend is not None:
-        backend.apply_edit(snap["contact_id"], snap["message_id"], old_text,
-                           is_mine=True)      # riscrive cache backend + DB
+        backend.apply_edit(
+            snap["contact_id"], snap["message_id"], old_text, is_mine=True
+        )  # riscrive cache backend + DB
     self._rewrite_message_identity(
-        snap["protocol"], snap["cache_key"], snap["timestamp"],
-        snap["new_text"] if "new_text" in snap else old_text, old_text,
+        snap["protocol"],
+        snap["cache_key"],
+        snap["timestamp"],
+        snap["new_text"] if "new_text" in snap else old_text,
+        old_text,
         snap["message_id"],
     )
     w = snap.get("_widget")
@@ -1010,14 +1083,16 @@ def _handle_edit_event(self, event: ChatEvent) -> bool:
         if identify is not None:
             contact = identify(event.contact_id)
     if contact is None:
-        contact = ChatContact(id=event.contact_id,
-                              display_name=event.contact_id,
-                              protocol=event.protocol)
+        contact = ChatContact(
+            id=event.contact_id, display_name=event.contact_id, protocol=event.protocol
+        )
 
     # Single mutation point: cache backend + SQLite.  Idempotente:
     # testo già nuovo / target ignoto / media → None → no-op.
     info = apply_edit(
-        event.contact_id, str(edit_id), new_text,
+        event.contact_id,
+        str(edit_id),
+        new_text,
         is_mine=payload.get("is_mine"),
         edit_timestamp=payload.get("edit_timestamp"),
     )
@@ -1028,22 +1103,31 @@ def _handle_edit_event(self, event: ChatEvent) -> bool:
     cache_key = contact.cache_key
     ui_msgs = self._cache.get(cache_key) or []
     target = next(
-        (m for m in ui_msgs
-         if m.get("id") is not None and str(m["id"]) == str(info["message_id"])),
+        (
+            m
+            for m in ui_msgs
+            if m.get("id") is not None and str(m["id"]) == str(info["message_id"])
+        ),
         None,
     )
     if target is None:
         target = next(
-            (m for m in ui_msgs
-             if int(m.get("timestamp") or 0) == int(info["timestamp"])
-             and bool(m.get("is_mine")) == bool(info["is_mine"])
-             and m.get("text") == info["old_text"]),
+            (
+                m
+                for m in ui_msgs
+                if int(m.get("timestamp") or 0) == int(info["timestamp"])
+                and bool(m.get("is_mine")) == bool(info["is_mine"])
+                and m.get("text") == info["old_text"]
+            ),
             None,
         )
     if target is not None:
         self._rewrite_message_identity(
-            event.protocol, cache_key, info["timestamp"],
-            info["old_text"], new_text,
+            event.protocol,
+            cache_key,
+            info["timestamp"],
+            info["old_text"],
+            new_text,
             target.get("id") or info["message_id"],
         )
         target["text"] = new_text
@@ -1055,6 +1139,7 @@ def _handle_edit_event(self, event: ChatEvent) -> bool:
         self.call_from_thread(self._update_edited_widget, info, new_text)
     return True
 
+
 def _update_edited_widget(self, info: dict, new_text: str) -> None:
     try:
         for child in self.chat_log.children:
@@ -1063,8 +1148,10 @@ def _update_edited_widget(self, info: dict, new_text: str) -> None:
             if child._message_id and str(child._message_id) == str(info["message_id"]):
                 child.update_text(new_text)
                 return
-            if (child._msg_timestamp == info["timestamp"]
-                    and child._msg_text == info["old_text"]):
+            if (
+                child._msg_timestamp == info["timestamp"]
+                and child._msg_text == info["old_text"]
+            ):
                 child.update_text(new_text)
                 return
     except Exception:

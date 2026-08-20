@@ -61,7 +61,9 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
     # user_version == 3 from an earlier migration path while still lacking
     # this column, and ``_load_cache`` / ``_update_message_text`` rely on it.
     if "edited" not in columns:
-        conn.execute("ALTER TABLE messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0"
+        )
 
     if _current_schema_version(conn) >= _SCHEMA_VERSION:
         return

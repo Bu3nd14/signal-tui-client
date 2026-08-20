@@ -150,9 +150,7 @@ class TestEditMessageSync:
             result = backend.edit_message_sync("+391234567890", "1000", "nuovo")
 
         assert result is True
-        mock_send.assert_called_once_with(
-            "nuovo", "+391234567890", edit_timestamp=1000
-        )
+        mock_send.assert_called_once_with("nuovo", "+391234567890", edit_timestamp=1000)
 
     def test_daemon_rpc_error_raises_runtime_error(self):
         """Daemon: ``{"error": ...}`` → RuntimeError propagato al worker."""
@@ -171,9 +169,7 @@ class TestEditMessageSync:
             result = backend.edit_message_sync("+391234567890", "1000", "nuovo")
 
         assert result is True
-        mock_sub.assert_called_once_with(
-            "nuovo", "+391234567890", edit_timestamp=1000
-        )
+        mock_sub.assert_called_once_with("nuovo", "+391234567890", edit_timestamp=1000)
 
     def test_non_numeric_message_id_returns_false(self):
         """``message_id`` non numerico → False (nessun invio)."""
@@ -409,7 +405,11 @@ class TestApplyEdit:
     def test_hit_updates_cache_and_db(self, tmp_db):
         """Hit per ts → cache (text+edited) e riga SQLite (text + edited=1)."""
         backend_mod._add_message_to_cache(
-            "+391234567890", "vecchio", False, "Mario", 1755001000,
+            "+391234567890",
+            "vecchio",
+            False,
+            "Mario",
+            1755001000,
             protocol="signal",
         )
         backend = SignalBackend()
@@ -501,9 +501,7 @@ class TestApplyEdit:
     def test_is_mine_matching_applies(self):
         """``is_mine`` combaciante → edit applicato."""
         backend = SignalBackend()
-        backend.cache["+391234567890"] = [
-            _cached_message(is_mine=True, sender="You")
-        ]
+        backend.cache["+391234567890"] = [_cached_message(is_mine=True, sender="You")]
 
         with patch.object(backend_mod, "_update_message_text") as mock_update:
             mock_update.return_value = True

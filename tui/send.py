@@ -255,7 +255,10 @@ class SendMixin:
             # id to upgrade the optimistic entry (so the echo matches by id and
             # never rewrites the timestamp).  Signal's ingest has an upgrade
             # branch that attaches the id without touching the timestamp.
-            if protocol in (PROTOCOL_TELEGRAM, PROTOCOL_WHATSAPP, PROTOCOL_SIGNAL) and result:
+            if (
+                protocol in (PROTOCOL_TELEGRAM, PROTOCOL_WHATSAPP, PROTOCOL_SIGNAL)
+                and result
+            ):
                 ingest_backend = self.manager.get(protocol)
                 if ingest_backend is not None:
                     ingest_backend.ingest_message(

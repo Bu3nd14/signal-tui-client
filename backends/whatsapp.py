@@ -274,7 +274,9 @@ class WhatsAppBackend(ChatBackend):
                                     for p in ("video/", "audio/", "application/")
                                 ):
                                     ack_msg_type = "attachment"
-                                ack_attachment_id = media.get("url") or content.get("id")
+                                ack_attachment_id = media.get("url") or content.get(
+                                    "id"
+                                )
                                 ack_attachment_info = (
                                     content.get("caption")
                                     or str(
@@ -1116,7 +1118,9 @@ class WhatsAppBackend(ChatBackend):
             raise RuntimeError("WhatsApp API send failed / unreachable")
         return self._extract_message_id(result)
 
-    def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> bool:
+    def edit_message_sync(
+        self, contact_id: str, message_id: str, new_text: str
+    ) -> bool:
         if not self._rest:
             return False
         return self._rest.edit_message(contact_id, message_id, new_text) is not None
@@ -1451,18 +1455,20 @@ class WhatsAppBackend(ChatBackend):
                     return msg if msg.get("text", "") != text else None
         if not is_mine and ts_ms:
             candidates = [
-                m for m in entries
+                m
+                for m in entries
                 if not m.get("is_mine")
                 and m.get("msg_type", "text") == "text"
                 and abs(int(m.get("timestamp") or 0) - ts_ms) <= 2000
                 and m.get("text", "") != text
             ]
-            if len(candidates) == 1:              # ambiguità → skip (vedi §9)
+            if len(candidates) == 1:  # ambiguità → skip (vedi §9)
                 return candidates[0]
         return None
 
-    def apply_edit(self, contact_id, message_id, new_text, *, is_mine=None,
-                   edit_timestamp=None) -> dict | None:
+    def apply_edit(
+        self, contact_id, message_id, new_text, *, is_mine=None, edit_timestamp=None
+    ) -> dict | None:
         from backend import _update_message_text
 
         target = None
@@ -1476,18 +1482,25 @@ class WhatsAppBackend(ChatBackend):
             return None
         old_text = target.get("text", "")
         if old_text == new_text:
-            return None                            # echo nostro edit: no-op
+            return None  # echo nostro edit: no-op
         target["text"] = new_text
         target["edited"] = True
         # niente _sort_contact_cache: il timestamp non cambia
         if target.get("id"):
-            _update_message_text(contact_id, new_text,
-                                 protocol=PROTOCOL_WHATSAPP, msg_id=str(target["id"]))
+            _update_message_text(
+                contact_id,
+                new_text,
+                protocol=PROTOCOL_WHATSAPP,
+                msg_id=str(target["id"]),
+            )
         else:
-            _update_message_text(contact_id, new_text,
-                                 protocol=PROTOCOL_WHATSAPP,
-                                 timestamp=int(target.get("timestamp") or 0),
-                                 old_text=old_text)
+            _update_message_text(
+                contact_id,
+                new_text,
+                protocol=PROTOCOL_WHATSAPP,
+                timestamp=int(target.get("timestamp") or 0),
+                old_text=old_text,
+            )
         return {
             "message_id": str(target.get("id") or message_id),
             "timestamp": int(target.get("timestamp") or 0),

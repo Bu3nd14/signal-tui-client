@@ -9,7 +9,9 @@ logger = logging.getLogger(__name__)
 
 
 class EditMessageMixin:
-    def on_message_widget_edit_requested(self, event: MessageWidget.EditRequested) -> None:
+    def on_message_widget_edit_requested(
+        self, event: MessageWidget.EditRequested
+    ) -> None:
         """Handle ``EditRequested`` (Alt+click / Alt+e on an own text message)."""
         if self._download_mode:
             return
@@ -27,7 +29,8 @@ class EditMessageMixin:
             (
                 m
                 for m in self._cache.get(cache_key, [])
-                if m.get("is_mine") and int(m.get("timestamp") or 0) == int(event.timestamp)
+                if m.get("is_mine")
+                and int(m.get("timestamp") or 0) == int(event.timestamp)
             ),
             None,
         )
@@ -116,7 +119,8 @@ class EditMessageMixin:
             (
                 m
                 for m in self._cache.get(snap["cache_key"], [])
-                if m.get("is_mine") and int(m.get("timestamp") or 0) == snap["timestamp"]
+                if m.get("is_mine")
+                and int(m.get("timestamp") or 0) == snap["timestamp"]
             ),
             None,
         )
@@ -125,17 +129,24 @@ class EditMessageMixin:
             entry["edited"] = True
         backend = self.manager.get(snap["protocol"])
         if backend is not None:
-            backend.apply_edit(snap["contact_id"], snap["message_id"], new_text, is_mine=True)
+            backend.apply_edit(
+                snap["contact_id"], snap["message_id"], new_text, is_mine=True
+            )
         self._rewrite_message_identity(
-            snap["protocol"], snap["cache_key"], snap["timestamp"],
-            snap["old_text"], new_text, snap["message_id"],
+            snap["protocol"],
+            snap["cache_key"],
+            snap["timestamp"],
+            snap["old_text"],
+            new_text,
+            snap["message_id"],
         )
         w = snap.get("_widget")
         if w is not None and w.is_mounted:
             w.update_text(new_text)
 
-    def _rewrite_message_identity(self, protocol, cache_key, ts, old_text,
-                                  new_text, message_id=None) -> None:
+    def _rewrite_message_identity(
+        self, protocol, cache_key, ts, old_text, new_text, message_id=None
+    ) -> None:
         """L'identità (ts, text) cambia col testo: senza questa chirurgia
         ``_refresh_chat`` rimonterebbe il messaggio editato come NUOVO (duplicato)
         e la guardia ``_shown_in_log`` di ``_add_message`` non lo riconoscerebbe."""
@@ -152,18 +163,23 @@ class EditMessageMixin:
         backend = self.manager.get(snap["protocol"])
         if backend is None:
             self.call_from_thread(
-                self._restore_local_edit, snap, old_text,
+                self._restore_local_edit,
+                snap,
+                old_text,
                 f"no backend for {snap['protocol']}",
             )
             return
         try:
-            ok = backend.edit_message_sync(snap["contact_id"], snap["message_id"], new_text)
+            ok = backend.edit_message_sync(
+                snap["contact_id"], snap["message_id"], new_text
+            )
         except Exception as e:  # noqa: BLE001
             self.call_from_thread(self._restore_local_edit, snap, old_text, str(e))
             return
         if not ok:
-            self.call_from_thread(self._restore_local_edit, snap, old_text,
-                                  "edit rejected by server")
+            self.call_from_thread(
+                self._restore_local_edit, snap, old_text, "edit rejected by server"
+            )
         else:
             self.call_from_thread(self._status, "✏️ Message edited")
 
@@ -173,7 +189,8 @@ class EditMessageMixin:
             (
                 m
                 for m in self._cache.get(snap["cache_key"], [])
-                if m.get("is_mine") and int(m.get("timestamp") or 0) == snap["timestamp"]
+                if m.get("is_mine")
+                and int(m.get("timestamp") or 0) == snap["timestamp"]
             ),
             None,
         )
@@ -182,10 +199,15 @@ class EditMessageMixin:
             entry["edited"] = False
         backend = self.manager.get(snap["protocol"])
         if backend is not None:
-            backend.apply_edit(snap["contact_id"], snap["message_id"], old_text, is_mine=True)
+            backend.apply_edit(
+                snap["contact_id"], snap["message_id"], old_text, is_mine=True
+            )
         self._rewrite_message_identity(
-            snap["protocol"], snap["cache_key"], snap["timestamp"],
-            snap.get("new_text", old_text), old_text,
+            snap["protocol"],
+            snap["cache_key"],
+            snap["timestamp"],
+            snap.get("new_text", old_text),
+            old_text,
             snap["message_id"],
         )
         w = snap.get("_widget")

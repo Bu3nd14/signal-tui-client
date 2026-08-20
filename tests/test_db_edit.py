@@ -112,8 +112,13 @@ class TestUpdateMessageText:
     def test_update_by_msg_id(self, tmp_db):
         """Per ``msg_id``: testo aggiornato, ``edited=1``, ritorna True."""
         backend_mod._add_message_to_cache(
-            "391234567890@c.us", "old", True, "You", 1000,
-            protocol="whatsapp", msg_id="WA-mid-1",
+            "391234567890@c.us",
+            "old",
+            True,
+            "You",
+            1000,
+            protocol="whatsapp",
+            msg_id="WA-mid-1",
         )
 
         updated = backend_mod._update_message_text(
@@ -124,15 +129,19 @@ class TestUpdateMessageText:
         msg = backend_mod._load_cache(protocol="whatsapp")["391234567890@c.us"][0]
         assert msg["text"] == "new"
         assert msg["edited"] is True
-        assert msg["id"] == "WA-mid-1"          # identity untouched
-        assert msg["timestamp"] == 1000          # timestamp untouched
+        assert msg["id"] == "WA-mid-1"  # identity untouched
+        assert msg["timestamp"] == 1000  # timestamp untouched
         # raw DB carries the numeric 1 flag
         assert _db_rows(tmp_db)[0][0:2] == ("new", 1)
 
     def test_update_by_timestamp_with_old_text_guard(self, tmp_db):
         """``timestamp`` + ``old_text``: match solo sulla riga attesa."""
-        backend_mod._add_message_to_cache("+39", "aaa", True, "You", 1000, protocol="signal")
-        backend_mod._add_message_to_cache("+39", "bbb", True, "You", 1000, protocol="signal")
+        backend_mod._add_message_to_cache(
+            "+39", "aaa", True, "You", 1000, protocol="signal"
+        )
+        backend_mod._add_message_to_cache(
+            "+39", "bbb", True, "You", 1000, protocol="signal"
+        )
 
         updated = backend_mod._update_message_text(
             "+39", "nuovo", "signal", timestamp=1000, old_text="aaa"
@@ -144,7 +153,9 @@ class TestUpdateMessageText:
 
     def test_wrong_old_text_returns_false_and_leaves_row_intact(self, tmp_db):
         """``old_text`` errato → False e riga intatta (timestamp path)."""
-        backend_mod._add_message_to_cache("+39", "original", True, "You", 1000, protocol="signal")
+        backend_mod._add_message_to_cache(
+            "+39", "original", True, "You", 1000, protocol="signal"
+        )
 
         updated = backend_mod._update_message_text(
             "+39", "new", "signal", timestamp=1000, old_text="wrong"
@@ -152,19 +163,27 @@ class TestUpdateMessageText:
 
         assert updated is False
         row = _db_rows(tmp_db)[0]
-        assert row[0] == "original"     # text unchanged
-        assert row[1] == 0              # edited still 0
+        assert row[0] == "original"  # text unchanged
+        assert row[1] == 0  # edited still 0
 
     def test_wrong_old_text_returns_false_on_msg_id_path(self, tmp_db):
         """``old_text`` errato → False anche sul path ``msg_id``."""
         backend_mod._add_message_to_cache(
-            "391234567890@c.us", "original", True, "You", 1000,
-            protocol="whatsapp", msg_id="WA-mid-1",
+            "391234567890@c.us",
+            "original",
+            True,
+            "You",
+            1000,
+            protocol="whatsapp",
+            msg_id="WA-mid-1",
         )
 
         updated = backend_mod._update_message_text(
-            "391234567890@c.us", "new", "whatsapp",
-            msg_id="WA-mid-1", old_text="wrong",
+            "391234567890@c.us",
+            "new",
+            "whatsapp",
+            msg_id="WA-mid-1",
+            old_text="wrong",
         )
 
         assert updated is False
@@ -172,7 +191,9 @@ class TestUpdateMessageText:
 
     def test_mark_edited_false_sets_edited_to_zero(self, tmp_db):
         """``mark_edited=False`` → ``edited=0`` (rollback path)."""
-        backend_mod._add_message_to_cache("+39", "old", True, "You", 1000, protocol="signal")
+        backend_mod._add_message_to_cache(
+            "+39", "old", True, "You", 1000, protocol="signal"
+        )
         backend_mod._update_message_text(
             "+39", "new", "signal", timestamp=1000, old_text="old"
         )
@@ -189,7 +210,9 @@ class TestUpdateMessageText:
 
     def test_no_key_returns_false(self, tmp_db):
         """Nessuna chiave (``msg_id=None, timestamp=None``) → False, nessun crash."""
-        backend_mod._add_message_to_cache("+39", "old", True, "You", 1000, protocol="signal")
+        backend_mod._add_message_to_cache(
+            "+39", "old", True, "You", 1000, protocol="signal"
+        )
 
         assert backend_mod._update_message_text("+39", "new", "signal") is False
         # no accidental full-table update
@@ -197,19 +220,31 @@ class TestUpdateMessageText:
 
     def test_is_mine_guard(self, tmp_db):
         """``is_mine`` errato → False; giusto → True."""
-        backend_mod._add_message_to_cache("+39", "ciao", True, "You", 1000, protocol="signal")
+        backend_mod._add_message_to_cache(
+            "+39", "ciao", True, "You", 1000, protocol="signal"
+        )
 
-        assert backend_mod._update_message_text(
-            "+39", "new", "signal", timestamp=1000, is_mine=False
-        ) is False
-        assert backend_mod._update_message_text(
-            "+39", "new", "signal", timestamp=1000, is_mine=True
-        ) is True
+        assert (
+            backend_mod._update_message_text(
+                "+39", "new", "signal", timestamp=1000, is_mine=False
+            )
+            is False
+        )
+        assert (
+            backend_mod._update_message_text(
+                "+39", "new", "signal", timestamp=1000, is_mine=True
+            )
+            is True
+        )
 
     def test_update_scoped_by_protocol(self, tmp_db):
         """Stesso (contact, ts) su due protocolli → aggiorna solo quello giusto."""
-        backend_mod._add_message_to_cache("+39", "ciao", True, "You", 1000, protocol="signal")
-        backend_mod._add_message_to_cache("+39", "ciao", True, "You", 1000, protocol="whatsapp")
+        backend_mod._add_message_to_cache(
+            "+39", "ciao", True, "You", 1000, protocol="signal"
+        )
+        backend_mod._add_message_to_cache(
+            "+39", "ciao", True, "You", 1000, protocol="whatsapp"
+        )
 
         backend_mod._update_message_text("+39", "nuovo", "signal", timestamp=1000)
 
@@ -219,8 +254,12 @@ class TestUpdateMessageText:
 
     def test_update_scoped_by_contact(self, tmp_db):
         """Stesso (protocol, ts) su due contatti → aggiorna solo quello giusto."""
-        backend_mod._add_message_to_cache("+391", "ciao", True, "You", 1000, protocol="signal")
-        backend_mod._add_message_to_cache("+392", "ciao", True, "You", 1000, protocol="signal")
+        backend_mod._add_message_to_cache(
+            "+391", "ciao", True, "You", 1000, protocol="signal"
+        )
+        backend_mod._add_message_to_cache(
+            "+392", "ciao", True, "You", 1000, protocol="signal"
+        )
 
         backend_mod._update_message_text("+391", "nuovo", "signal", timestamp=1000)
 
@@ -254,8 +293,13 @@ class TestUpdateMessageText:
     def test_update_preserves_timestamp_and_id(self, tmp_db):
         """L'identità temporale (ts/id) non cambia mai con l'edit."""
         backend_mod._add_message_to_cache(
-            "391234567890@c.us", "old", True, "You", 123456,
-            protocol="whatsapp", msg_id="WA-mid-9",
+            "391234567890@c.us",
+            "old",
+            True,
+            "You",
+            123456,
+            protocol="whatsapp",
+            msg_id="WA-mid-9",
         )
 
         backend_mod._update_message_text(
@@ -333,7 +377,9 @@ class TestEditedColumnMigration:
 
     def test_fresh_rows_have_edited_false(self, tmp_db):
         """Un DB fresco (v3) crea righe con ``edited=0`` / ``edited=False``."""
-        backend_mod._add_message_to_cache("+39", "ciao", True, "You", 1000, protocol="signal")
+        backend_mod._add_message_to_cache(
+            "+39", "ciao", True, "You", 1000, protocol="signal"
+        )
 
         assert _db_rows(tmp_db)[0][1] == 0
         assert backend_mod._load_cache()["+39"][0]["edited"] is False

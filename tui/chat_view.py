@@ -639,10 +639,9 @@ class ChatViewMixin:
                 # Already present: reconcile an edit in place (update text and
                 # mark edited) WITHOUT touching timestamp/id; the caller re-
                 # renders the window when `changed` is reported.
-                if (
-                    existing.get("msg_type", "text") == "text"
-                    and existing.get("text", "") != m.get("text", "")
-                ):
+                if existing.get("msg_type", "text") == "text" and existing.get(
+                    "text", ""
+                ) != m.get("text", ""):
                     existing["text"] = m.get("text")
                     existing["edited"] = True
                     changed = True

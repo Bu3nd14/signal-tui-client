@@ -183,14 +183,18 @@ class EventHandlingMixin:
             if identify is not None:
                 contact = identify(event.contact_id)
         if contact is None:
-            contact = ChatContact(id=event.contact_id,
-                                  display_name=event.contact_id,
-                                  protocol=event.protocol)
+            contact = ChatContact(
+                id=event.contact_id,
+                display_name=event.contact_id,
+                protocol=event.protocol,
+            )
 
         # Single mutation point: cache backend + SQLite.  Idempotente:
         # testo già nuovo / target ignoto / media → None → no-op.
         info = apply_edit(
-            event.contact_id, str(edit_id), new_text,
+            event.contact_id,
+            str(edit_id),
+            new_text,
             is_mine=payload.get("is_mine"),
             edit_timestamp=payload.get("edit_timestamp"),
         )
@@ -201,22 +205,31 @@ class EventHandlingMixin:
         cache_key = contact.cache_key
         ui_msgs = self._cache.get(cache_key) or []
         target = next(
-            (m for m in ui_msgs
-             if m.get("id") is not None and str(m["id"]) == str(info["message_id"])),
+            (
+                m
+                for m in ui_msgs
+                if m.get("id") is not None and str(m["id"]) == str(info["message_id"])
+            ),
             None,
         )
         if target is None:
             target = next(
-                (m for m in ui_msgs
-                 if int(m.get("timestamp") or 0) == int(info["timestamp"])
-                 and bool(m.get("is_mine")) == bool(info["is_mine"])
-                 and m.get("text") == info["old_text"]),
+                (
+                    m
+                    for m in ui_msgs
+                    if int(m.get("timestamp") or 0) == int(info["timestamp"])
+                    and bool(m.get("is_mine")) == bool(info["is_mine"])
+                    and m.get("text") == info["old_text"]
+                ),
                 None,
             )
         if target is not None:
             self._rewrite_message_identity(
-                event.protocol, cache_key, info["timestamp"],
-                info["old_text"], new_text,
+                event.protocol,
+                cache_key,
+                info["timestamp"],
+                info["old_text"],
+                new_text,
                 target.get("id") or info["message_id"],
             )
             target["text"] = new_text
@@ -234,11 +247,15 @@ class EventHandlingMixin:
             for child in self.chat_log.children:
                 if not isinstance(child, MessageWidget):
                     continue
-                if child._message_id and str(child._message_id) == str(info["message_id"]):
+                if child._message_id and str(child._message_id) == str(
+                    info["message_id"]
+                ):
                     child.update_text(new_text)
                     return
-                if (child._msg_timestamp == info["timestamp"]
-                        and child._msg_text == info["old_text"]):
+                if (
+                    child._msg_timestamp == info["timestamp"]
+                    and child._msg_text == info["old_text"]
+                ):
                     child.update_text(new_text)
                     return
         except Exception:

@@ -421,7 +421,9 @@ class SignalBackend(ChatBackend):
             quote_message=quote_message,
         )
 
-    def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> bool:
+    def edit_message_sync(
+        self, contact_id: str, message_id: str, new_text: str
+    ) -> bool:
         """message_id = timestamp (ms) del messaggio originale, come stringa."""
         try:
             target_ts = int(message_id)
@@ -697,10 +699,14 @@ class SignalBackend(ChatBackend):
         if contact is None:
             return None
 
-        sender = "You" if is_mine else (
-            envelope.get("sourceName")
-            or envelope.get("sourceNumber")
-            or envelope.get("source", "")
+        sender = (
+            "You"
+            if is_mine
+            else (
+                envelope.get("sourceName")
+                or envelope.get("sourceNumber")
+                or envelope.get("source", "")
+            )
         )
         return ChatEvent(
             type="message_edit",
@@ -709,10 +715,11 @@ class SignalBackend(ChatBackend):
             payload={
                 "edit_message_id": str(target),
                 "text": new_text,
-                "timestamp": int(target),                       # ts ORIGINALE
+                "timestamp": int(target),  # ts ORIGINALE
                 "edit_timestamp": int(
                     data.get("timestamp") or envelope.get("timestamp") or 0
-                ) or None,
+                )
+                or None,
                 "is_mine": is_mine,
                 "sender": sender,
                 "contact": contact,
@@ -889,8 +896,11 @@ class SignalBackend(ChatBackend):
                     m["id"] = str(mid)  # ts entry INVARIATO (ottimistico)
                     try:
                         _update_message_id(
-                            contact_id, text, True,
-                            m["timestamp"], str(mid),   # ts OTTIMISTICO nel DB
+                            contact_id,
+                            text,
+                            True,
+                            m["timestamp"],
+                            str(mid),  # ts OTTIMISTICO nel DB
                             protocol=PROTOCOL_SIGNAL,
                         )
                     except Exception:
@@ -966,14 +976,15 @@ class SignalBackend(ChatBackend):
             if is_mine is not None and bool(msg.get("is_mine")) != bool(is_mine):
                 continue
             if msg.get("msg_type", "text") != "text":
-                return None                       # mai riscrivere label media
+                return None  # mai riscrivere label media
             old_text = msg.get("text", "")
             if old_text == new_text:
-                return None                       # idempotente (echo nostro edit)
+                return None  # idempotente (echo nostro edit)
             msg["text"] = new_text
             msg["edited"] = True
             _update_message_text(
-                contact_id, new_text,
+                contact_id,
+                new_text,
                 protocol=PROTOCOL_SIGNAL,
                 timestamp=int(msg["timestamp"]),  # ts della ENTRY (ottimistico)
                 old_text=old_text,

@@ -41,8 +41,8 @@ from models import PROTOCOL_TELEGRAM, ChatContact
 # ─── Helpers / fixtures ───────────────────────────────────────────────────────
 
 # Original message timestamp (ms) and edit timestamp (ms) used in assertions.
-_ORIG_TS = 1735787045000   # 2025-01-02 03:04:05 UTC (msg.date)
-_EDIT_TS = 1735787100000   # 2025-01-02 03:05:00 UTC (msg.edit_date, +55s)
+_ORIG_TS = 1735787045000  # 2025-01-02 03:04:05 UTC (msg.date)
+_EDIT_TS = 1735787100000  # 2025-01-02 03:05:00 UTC (msg.edit_date, +55s)
 
 
 def _backend() -> TelegramBackend:
@@ -143,9 +143,9 @@ class TestHandleMessageEdited:
         assert ev.contact_id == "42"
         assert ev.payload["edit_message_id"] == "99"
         assert ev.payload["text"] == "nuovo testo"
-        assert ev.payload["timestamp"] == _ORIG_TS          # msg.date = ts ORIGINALE
-        assert ev.payload["edit_timestamp"] == _EDIT_TS     # msg.edit_date
-        assert ev.payload["is_mine"] is True                # msg.out
+        assert ev.payload["timestamp"] == _ORIG_TS  # msg.date = ts ORIGINALE
+        assert ev.payload["edit_timestamp"] == _EDIT_TS  # msg.edit_date
+        assert ev.payload["is_mine"] is True  # msg.out
         assert ev.payload["sender"] == ""
         assert ev.payload["contact"] is contact
         assert ev.payload["msg_type"] == "text"
@@ -304,8 +304,13 @@ class TestApplyEdit:
     def test_hit_updates_cache_and_db(self, tmp_db):
         """Hit per id → cache (text+edited) e riga SQLite (text + edited=1)."""
         backend_mod._add_message_to_cache(
-            "42", "vecchio", False, "Mario", _ORIG_TS,
-            protocol=PROTOCOL_TELEGRAM, msg_id="99",
+            "42",
+            "vecchio",
+            False,
+            "Mario",
+            _ORIG_TS,
+            protocol=PROTOCOL_TELEGRAM,
+            msg_id="99",
         )
         backend = _backend()
         backend.cache["42"] = [_cached_message()]
@@ -428,8 +433,13 @@ class TestIngestMessageEdit:
     def test_known_id_different_text_updates_cache_and_db(self, tmp_db):
         """Flusso reale (senza mock di ``apply_edit``): cache e DB aggiornati."""
         backend_mod._add_message_to_cache(
-            "42", "vecchio", False, "Mario", _ORIG_TS,
-            protocol=PROTOCOL_TELEGRAM, msg_id="99",
+            "42",
+            "vecchio",
+            False,
+            "Mario",
+            _ORIG_TS,
+            protocol=PROTOCOL_TELEGRAM,
+            msg_id="99",
         )
         backend = _backend()
         backend.cache["42"] = [_cached_message(text="vecchio")]
@@ -508,11 +518,18 @@ class TestIngestMessageEdit:
 class TestFetchRecentHistoryEdit:
     """🕰️ Riconciliazione: uno storico già editato aggiorna la riga esistente."""
 
-    def test_fetch_recent_history_applies_edit_to_cached_message(self, tmp_db, monkeypatch):
+    def test_fetch_recent_history_applies_edit_to_cached_message(
+        self, tmp_db, monkeypatch
+    ):
         """Messaggio già noto ri-fetchato col testo nuovo → cache/DB aggiornati."""
         backend_mod._add_message_to_cache(
-            "42", "vecchio", False, "Mario", _ORIG_TS,
-            protocol=PROTOCOL_TELEGRAM, msg_id="99",
+            "42",
+            "vecchio",
+            False,
+            "Mario",
+            _ORIG_TS,
+            protocol=PROTOCOL_TELEGRAM,
+            msg_id="99",
         )
         backend = _backend()
         backend._connected = True

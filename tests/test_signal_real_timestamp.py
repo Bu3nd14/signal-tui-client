@@ -177,9 +177,10 @@ class TestIngestEchoUpgrade:
     def test_echo_upgrades_optimistic_twin_keeps_optimistic_ts(self, tmp_db):
         """Echo con id → False; entry id==REAL, ts INVARIATO; DB msg_id + ts."""
         backend = SignalBackend()
-        assert backend.ingest_message(
-            self.CID, _optimistic_data(self.TEXT), self.OTT
-        ) is True
+        assert (
+            backend.ingest_message(self.CID, _optimistic_data(self.TEXT), self.OTT)
+            is True
+        )
 
         result = backend.ingest_message(
             self.CID, _echo_data(self.TEXT, self.REAL), self.REAL
@@ -379,7 +380,9 @@ class TestSignalWorkerRealId:
         timestamp = 1787250930000
         text = "ciao"
         real = 1787250931234
-        bubble = MessageWidget(text, timestamp=timestamp, is_mine=True, status="pending")
+        bubble = MessageWidget(
+            text, timestamp=timestamp, is_mine=True, status="pending"
+        )
         handler = _SendHandler(
             contact,
             [{"is_mine": True, "timestamp": timestamp, "text": text}],
@@ -448,7 +451,11 @@ class TestEditUIRealId:
         }
         handler = _EditHandler(self._contact(), entry)
         event = MessageWidget.EditRequested(
-            "vecchio", 1000, "You", is_mine=True, status="sent",
+            "vecchio",
+            1000,
+            "You",
+            is_mine=True,
+            status="sent",
             message_id="sig-1000",
         )
 

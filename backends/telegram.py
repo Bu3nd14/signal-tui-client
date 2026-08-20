@@ -718,7 +718,9 @@ class TelegramBackend(ChatBackend):
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
         return future.result(timeout=30)
 
-    def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> bool:
+    def edit_message_sync(
+        self, contact_id: str, message_id: str, new_text: str
+    ) -> bool:
         """Edit via Telethon; gira sul loop dedicato (pattern di send_message_sync)."""
         if self._loop is None or self._client is None:
             raise RuntimeError("Telegram backend not connected")
@@ -802,16 +804,24 @@ class TelegramBackend(ChatBackend):
         if msg is None or msg.chat_id is None:
             return
         # Solo testo: caption/media edit fuori scope.
-        if msg.photo or msg.document or msg.sticker or msg.video or msg.voice or msg.audio:
+        if (
+            msg.photo
+            or msg.document
+            or msg.sticker
+            or msg.video
+            or msg.voice
+            or msg.audio
+        ):
             return
         new_text = msg.text or ""
         if not new_text.strip():
-            return                                # edit di sola formattazione/altro
+            return  # edit di sola formattazione/altro
         chat_id = str(msg.chat_id)
         ts = int(msg.date.timestamp() * 1000) if msg.date else 0
         edit_ts = (
             int(msg.edit_date.timestamp() * 1000)
-            if getattr(msg, "edit_date", None) else None
+            if getattr(msg, "edit_date", None)
+            else None
         )
         self._events.put(
             ChatEvent(
@@ -821,7 +831,7 @@ class TelegramBackend(ChatBackend):
                 payload={
                     "edit_message_id": str(msg.id),
                     "text": new_text,
-                    "timestamp": ts,              # msg.date = ts ORIGINALE
+                    "timestamp": ts,  # msg.date = ts ORIGINALE
                     "edit_timestamp": edit_ts,
                     "is_mine": bool(getattr(msg, "out", False)),
                     "sender": "",
@@ -1101,8 +1111,11 @@ class TelegramBackend(ChatBackend):
         if mid:
             if mid in self._seen_msg_ids:
                 entry = next(
-                    (m for m in self.cache.get(contact_id, [])
-                     if str(m.get("id") or "") == str(mid)),
+                    (
+                        m
+                        for m in self.cache.get(contact_id, [])
+                        if str(m.get("id") or "") == str(mid)
+                    ),
                     None,
                 )
                 if (
@@ -1202,12 +1215,14 @@ class TelegramBackend(ChatBackend):
                 return None
             old_text = msg.get("text", "")
             if old_text == new_text:
-                return None                       # echo del nostro edit: no-op
+                return None  # echo del nostro edit: no-op
             msg["text"] = new_text
             msg["edited"] = True
             _update_message_text(
-                contact_id, new_text,
-                protocol=PROTOCOL_TELEGRAM, msg_id=str(message_id),
+                contact_id,
+                new_text,
+                protocol=PROTOCOL_TELEGRAM,
+                msg_id=str(message_id),
             )
             return {
                 "message_id": str(message_id),
