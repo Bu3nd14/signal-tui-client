@@ -31,6 +31,8 @@ class EventHandlingMixin:
             return self._handle_typing_event(event)
         if event.type == "receipt":
             return self._handle_receipt_event(event)
+        if event.type == "message_edit":
+            return self._handle_edit_event(event)
         if event.type == "message":
             return self._handle_message_event(event)
         return False
@@ -159,6 +161,88 @@ class EventHandlingMixin:
             self._dirty_contact_keys.add(cache_key)
 
         return True
+
+    def _handle_edit_event(self, event: ChatEvent) -> bool:
+        """Applica un edit ricevuto: backend cache + DB (via apply_edit),
+        cache UI, identity sets e widget — senza mai creare una bolla nuova."""
+        backend = self.manager.get(event.protocol)
+        if backend is None:
+            return False
+        apply_edit = getattr(backend, "apply_edit", None)
+        if apply_edit is None:
+            return False
+        payload = event.payload
+        new_text = payload.get("text", "")
+        edit_id = payload.get("edit_message_id")
+        if edit_id is None or not new_text:
+            return False
+
+        contact = payload.get("contact")
+        if contact is None:
+            identify = getattr(backend, "_identify_contact", None)
+            if identify is not None:
+                contact = identify(event.contact_id)
+        if contact is None:
+            contact = ChatContact(id=event.contact_id,
+                                  display_name=event.contact_id,
+                                  protocol=event.protocol)
+
+        # Single mutation point: cache backend + SQLite.  Idempotente:
+        # testo già nuovo / target ignoto / media → None → no-op.
+        info = apply_edit(
+            event.contact_id, str(edit_id), new_text,
+            is_mine=payload.get("is_mine"),
+            edit_timestamp=payload.get("edit_timestamp"),
+        )
+        if not info:
+            return False
+
+        # Mirror nella cache UI + chirurgia identità.
+        cache_key = contact.cache_key
+        ui_msgs = self._cache.get(cache_key) or []
+        target = next(
+            (m for m in ui_msgs
+             if m.get("id") is not None and str(m["id"]) == str(info["message_id"])),
+            None,
+        )
+        if target is None:
+            target = next(
+                (m for m in ui_msgs
+                 if int(m.get("timestamp") or 0) == int(info["timestamp"])
+                 and bool(m.get("is_mine")) == bool(info["is_mine"])
+                 and m.get("text") == info["old_text"]),
+                None,
+            )
+        if target is not None:
+            self._rewrite_message_identity(
+                event.protocol, cache_key, info["timestamp"],
+                info["old_text"], new_text,
+                target.get("id") or info["message_id"],
+            )
+            target["text"] = new_text
+            target["edited"] = True
+
+        # Widget, solo se la chat è aperta (altrimenti il prossimo render
+        # leggerà il testo già aggiornato dalla cache).
+        if self.selected_contact and self.selected_contact.cache_key == cache_key:
+            self.call_from_thread(self._update_edited_widget, info, new_text)
+        return True
+
+    def _update_edited_widget(self, info: dict, new_text: str) -> None:
+        """UI thread: riscrive la bolla esistente in place, mai una nuova."""
+        try:
+            for child in self.chat_log.children:
+                if not isinstance(child, MessageWidget):
+                    continue
+                if child._message_id and str(child._message_id) == str(info["message_id"]):
+                    child.update_text(new_text)
+                    return
+                if (child._msg_timestamp == info["timestamp"]
+                        and child._msg_text == info["old_text"]):
+                    child.update_text(new_text)
+                    return
+        except Exception:
+            logger.debug("edited widget update failed", exc_info=True)
 
     def _handle_receipt_event(self, event: ChatEvent) -> bool:
         """Process a receipt event (delivery / read receipts).

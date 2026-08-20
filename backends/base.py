@@ -92,6 +92,55 @@ class ChatBackend(ABC):
         """
         return None
 
+    # ─── Editing ─────────────────────────────────────────────────────
+
+    def edit_message_sync(self, contact_id: str, message_id: str, new_text: str) -> bool:
+        """Modifica un messaggio proprio già inviato.
+
+        Bloccante: chiamare SOLO da worker thread (come ``send_message_sync``).
+        Ritorna ``True`` se il backend ha accettato l'operazione.
+
+        Semantica di ``message_id`` per protocollo:
+
+        - signal:   timestamp (ms) del messaggio originale, come stringa;
+        - telegram: id server del messaggio (int come stringa);
+        - whatsapp: Baileys message id (es. ``true_39...@c.us_ABC``).
+
+        Default: nessun supporto → ``False``.
+        """
+        return False
+
+    async def edit_message(self, contact_id: str, message_id: str, new_text: str) -> bool:
+        """Wrapper async del contratto (symmetry con ``list_address_book``).
+
+        Delega a ``edit_message_sync`` via ``asyncio.to_thread``.
+        """
+        return await asyncio.to_thread(
+            self.edit_message_sync, contact_id, message_id, new_text
+        )
+
+    def apply_edit(
+        self,
+        contact_id: str,
+        message_id: str,
+        new_text: str,
+        *,
+        is_mine: bool | None = None,
+        edit_timestamp: int | None = None,
+    ) -> dict | None:
+        """Applica un edit (ricevuto o echo) a cache in-memory + SQLite.
+
+        Punto UNICO di mutazione lato backend per gli edit (specchio di
+        ``ingest_message`` per i messaggi nuovi).  Idempotente: se il testo è
+        già ``new_text`` ritorna ``None`` (niente da fare).  Ritorna un dict
+        ``{"message_id", "timestamp", "old_text", "text", "is_mine"}`` quando
+        ha davvero modificato qualcosa, ``None`` altrimenti (target ignoto,
+        media, testo identico).  Non aggiorna mai ``timestamp`` né ``id``.
+
+        Default: ``None`` (nessun supporto).
+        """
+        return None
+
     # ─── Address book (rubrica completa) ──────────────────────────────
 
     def list_address_book_sync(self, force: bool = False) -> list[ChatContact]:

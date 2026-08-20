@@ -145,6 +145,18 @@ class BackendManager:
             return None
         return backend.get_attachment_path(attachment_id)
 
+    def edit_message_sync(
+        self, protocol: str, contact_id: str, message_id: str, new_text: str
+    ) -> bool:
+        """Route an edit to the backend for *protocol*.
+
+        Returns ``False`` if the backend is absent or does not support edits.
+        """
+        backend = self._backends.get(protocol)
+        if backend is None:
+            return False
+        return backend.edit_message_sync(contact_id, message_id, new_text)
+
     # ─── Helpers ──────────────────────────────────────────────────────
 
     def _get_or_raise(self, protocol: str) -> ChatBackend:

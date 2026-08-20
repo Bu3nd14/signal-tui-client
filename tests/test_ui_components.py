@@ -10,6 +10,7 @@ from asyncio import run
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from textual import events
 from textual.widgets import RichLog, Static
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -143,6 +144,120 @@ class TestMessageWidget:
         rendered = str(w.render())
         assert "<:>" not in rendered
         assert "Ciao!" in rendered
+
+
+class TestMessageWidgetEditing:
+    """✏️ MessageWidget — editing (Fase 6): suffix, Alt+click/Alt+e, update_text."""
+
+    def _click(self, meta: bool) -> events.Click:
+        return events.Click(
+            widget=None,
+            x=0,
+            y=0,
+            delta_x=0,
+            delta_y=0,
+            button=1,
+            shift=False,
+            meta=meta,
+            ctrl=False,
+        )
+
+    def test_constructor_edited_shows_suffix(self):
+        """``edited=True`` → contenuto con suffisso " (modificato)"."""
+        w = MessageWidget(text="ciao", timestamp=1, edited=True)
+        assert w._edited is True
+        assert w._Static__content == "ciao (modificato)"
+
+    def test_constructor_not_edited_no_suffix(self):
+        """``edited=False`` (default) → contenuto senza suffisso."""
+        w = MessageWidget(text="ciao", timestamp=1)
+        assert w._edited is False
+        assert w._Static__content == "ciao"
+
+    def test_update_text_updates_msg_text_and_suffix(self):
+        """``update_text`` aggiorna ``_msg_text`` e il contenuto renderizzato."""
+        w = MessageWidget(text="ciao", timestamp=1)
+        w.update_text("nuovo", edited=True)
+        assert w._msg_text == "nuovo"
+        assert w._edited is True
+        assert w._Static__content == "nuovo (modificato)"
+
+        w.update_text("altro", edited=False)
+        assert w._msg_text == "altro"
+        assert w._edited is False
+        assert w._Static__content == "altro"
+
+    def test_update_text_preserves_sender_color(self):
+        """Con ``sender_color``, il prefisso ``<sender:>`` è preservato dopo l'edit.
+
+        ``Static.update`` → ``visualize`` richiede un'app attiva per i contenuti
+        RichText; qui stub-iamo ``update``/``refresh`` per asserire sul contenuto
+        prodotto da ``_build_content()`` (oggetto passato a ``update``).
+        """
+        w = MessageWidget(
+            text="ciao", timestamp=1, sender="Mario", sender_color="#DAA520"
+        )
+        captured = []
+        w.update = captured.append
+        w.refresh = lambda: None
+        w.update_text("nuovo", edited=True)
+
+        assert w._msg_text == "nuovo"
+        assert w._edited is True
+        assert len(captured) == 1
+        content = captured[0]
+        assert isinstance(content, RichText)
+        assert "<Mario:>" in str(content)
+        assert "nuovo (modificato)" in str(content)
+
+    def test_on_click_meta_posts_edit_requested(self):
+        """Alt+click (``meta=True``) → posta ``EditRequested`` con i dati."""
+        w = MessageWidget(
+            text="ciao", timestamp=1, sender="You", is_mine=True, message_id="42"
+        )
+        events = []
+        w.post_message = events.append
+
+        w.on_click(self._click(meta=True))
+
+        assert len(events) == 1
+        ev = events[0]
+        assert isinstance(ev, MessageWidget.EditRequested)
+        assert ev.text == "ciao"
+        assert ev.timestamp == 1
+        assert ev.sender == "You"
+        assert ev.is_mine is True
+        assert ev.message_id == "42"
+
+    def test_on_click_no_meta_posts_message_clicked(self):
+        """Click normale (``meta=False``) → ``MessageClicked`` (regressione reply)."""
+        w = MessageWidget(text="ciao", timestamp=1, sender="Mario", is_mine=False)
+        events = []
+        w.post_message = events.append
+
+        w.on_click(self._click(meta=False))
+
+        assert len(events) == 1
+        assert isinstance(events[0], MessageWidget.MessageClicked)
+        assert not isinstance(events[0], MessageWidget.EditRequested)
+
+    def test_action_request_edit_posts_edit_requested(self):
+        """``alt+e`` (``action_request_edit``) → posta ``EditRequested``."""
+        w = MessageWidget(
+            text="ciao", timestamp=1, sender="You", is_mine=True, message_id="42"
+        )
+        events = []
+        w.post_message = events.append
+
+        w.action_request_edit()
+
+        assert len(events) == 1
+        ev = events[0]
+        assert isinstance(ev, MessageWidget.EditRequested)
+        assert ev.text == "ciao"
+        assert ev.timestamp == 1
+        assert ev.is_mine is True
+        assert ev.message_id == "42"
 
 
 class TestImageWidget:

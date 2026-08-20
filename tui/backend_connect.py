@@ -88,6 +88,11 @@ class BackendConnectMixin:
                 elif identity in by_identity:
                     existing = by_identity[identity]
                 if existing is not None:
+                    # An entry reconciled without an id now learns its id
+                    # (e.g. a Signal optimistic send upgraded by its echo).
+                    if mid and not existing.get("id"):
+                        existing["id"] = mid
+                        by_id[mid] = existing
                     # Already present: still upgrade the status if the incoming
                     # rank is higher (never downgrade read → sent).
                     if _status_rank(m.get("status")) > _status_rank(

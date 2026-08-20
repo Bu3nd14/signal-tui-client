@@ -9,6 +9,7 @@ from textual.widgets import Input
 from emoji_picker import EmojiCompletionWidget
 from emoji_picker import replace_emoji_aliases as _replace_emoji_aliases
 from models import (
+    PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
     PROTOCOL_WHATSAPP,
 )
@@ -58,6 +59,11 @@ class SendMixin:
         )
 
         if not message:
+            return
+
+        if self._editing_message is not None:
+            self._submit_edit(message)
+            event.text_area.text = ""
             return
 
         contact = self.selected_contact
@@ -245,10 +251,11 @@ class SendMixin:
             self._transition_outgoing_status(
                 protocol, contact_id, timestamp, message, "sent", ("pending",)
             )
-            # For Telegram and WhatsApp, ingest the real server message id to
-            # upgrade the optimistic entry (so the echo matches by id and never
-            # rewrites the timestamp).
-            if protocol in (PROTOCOL_TELEGRAM, PROTOCOL_WHATSAPP) and result:
+            # For Telegram, WhatsApp and Signal, ingest the real server message
+            # id to upgrade the optimistic entry (so the echo matches by id and
+            # never rewrites the timestamp).  Signal's ingest has an upgrade
+            # branch that attaches the id without touching the timestamp.
+            if protocol in (PROTOCOL_TELEGRAM, PROTOCOL_WHATSAPP, PROTOCOL_SIGNAL) and result:
                 ingest_backend = self.manager.get(protocol)
                 if ingest_backend is not None:
                     ingest_backend.ingest_message(

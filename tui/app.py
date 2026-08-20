@@ -31,6 +31,7 @@ from tui.chat_view import ChatViewMixin
 from tui.contacts import ContactListMixin
 from tui.css import APP_CSS
 from tui.download import DownloadModeMixin
+from tui.edit import EditMessageMixin
 from tui.events import EventHandlingMixin
 from tui.pickers import PickerMixin
 from tui.polling import PollingMixin
@@ -52,6 +53,7 @@ class SignalTUI(
     BackendConnectMixin,
     PollingMixin,
     SendMixin,
+    EditMessageMixin,
     UnreadReplyMixin,
     DownloadModeMixin,
     PickerMixin,
@@ -141,6 +143,7 @@ class SignalTUI(
         self._shown_in_log: set[tuple[str, str, int, str]] = set()
 
         self._reply_to: dict | None = None  # message being replied to
+        self._editing_message: dict | None = None  # message being edited
         self._download_mode = False  # Ctrl+D download mode active
         self._typing_contacts: dict[
             str, float
@@ -280,5 +283,6 @@ class SignalTUI(
             self._load_all_messages()
         elif event.button.id == "reply-cancel":
             self._cancel_reply()
+            self._cancel_edit()
         elif event.button.id == "emoji-btn":
             self._open_emoji_picker()

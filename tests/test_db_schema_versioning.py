@@ -133,7 +133,7 @@ class TestSchemaVersioning:
 
         backend_mod._init_db()
 
-        assert _user_version(tmp_db) == 2
+        assert _user_version(tmp_db) == 3
         assert "protocol" in _table_columns(tmp_db)
         assert "msg_id" in _table_columns(tmp_db)
         assert "reply_to_message_id" in _table_columns(tmp_db)

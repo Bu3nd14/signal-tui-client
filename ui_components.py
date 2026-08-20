@@ -10,6 +10,7 @@ from typing import ClassVar
 
 from rich.text import Text as RichText
 from textual import events
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -210,6 +211,23 @@ class MessageWidget(Static):
             self.status = status
             self.message_id = message_id
 
+    class EditRequested(Message):
+        """Posted on Alt+click / Alt+e: request to edit this (own) message."""
+
+        def __init__(self, text, timestamp, sender, is_mine, status,
+                     message_id=None) -> None:
+            super().__init__()
+            self.text = text
+            self.timestamp = timestamp
+            self.sender = sender
+            self.is_mine = is_mine
+            self.status = status
+            self.message_id = message_id
+
+    BINDINGS: ClassVar[list] = [
+        Binding("alt+e", "request_edit", "Edit message", show=False),
+    ]
+
     def __init__(
         self,
         text: str,
@@ -221,6 +239,7 @@ class MessageWidget(Static):
         protocol: str = "",
         sender_color: str | None = None,
         message_id: str | None = None,
+        edited: bool = False,
     ) -> None:
         """Initialise the message widget.
 
@@ -257,16 +276,9 @@ class MessageWidget(Static):
         self._message_id = message_id
         self._protocol = protocol
         self._sender_color = sender_color
+        self._edited = edited
 
-        # Build the display content.  If a sender color is provided and the
-        # sender is non-empty, render "<sender:> text" with the sender in color.
-        if sender_color and sender:
-            rt = RichText()
-            rt.append(f"<{sender}:> ", style=sender_color)
-            rt.append(text)
-            super().__init__(rt, markup=False, classes=classes)
-        else:
-            super().__init__(text, markup=False, classes=classes)
+        super().__init__(self._build_content(), markup=False, classes=classes)
         self.can_focus = True
         self._apply_status_style()
         self.set_class(status == "pending", "msg-pending")
@@ -339,8 +351,20 @@ class MessageWidget(Static):
             self.styles.border = None
             self._apply_protocol_accent()
 
-    def on_click(self) -> None:
-        """Mouse click → emit ``MessageClicked``."""
+    def on_click(self, event: events.Click | None = None) -> None:
+        """Mouse click → Alt+click edits, otherwise emit ``MessageClicked``."""
+        if event is not None and event.meta:
+            self.post_message(
+                self.EditRequested(
+                    text=self._msg_text,
+                    timestamp=self._msg_timestamp,
+                    sender=self._msg_sender,
+                    is_mine=self._msg_is_mine,
+                    status=self._status,
+                    message_id=self._message_id,
+                )
+            )
+            return
         self.post_message(
             self.MessageClicked(
                 text=self._msg_text,
@@ -351,6 +375,35 @@ class MessageWidget(Static):
                 message_id=self._message_id,
             )
         )
+
+    def action_request_edit(self) -> None:
+        """Alt+e → emit ``EditRequested``."""
+        self.post_message(
+            self.EditRequested(
+                text=self._msg_text,
+                timestamp=self._msg_timestamp,
+                sender=self._msg_sender,
+                is_mine=self._msg_is_mine,
+                status=self._status,
+                message_id=self._message_id,
+            )
+        )
+
+    def _build_content(self):
+        text = self._msg_text + (" (modificato)" if self._edited else "")
+        if self._sender_color and self._msg_sender:
+            rt = RichText()
+            rt.append(f"<{self._msg_sender}:> ", style=self._sender_color)
+            rt.append(text)
+            return rt
+        return text
+
+    def update_text(self, new_text: str, edited: bool = True) -> None:
+        """Rewrite the bubble text in place (no unmount/remount)."""
+        self._msg_text = new_text
+        self._edited = edited
+        self.update(self._build_content())
+        self.refresh()
 
     def on_focus(self) -> None:
         """Visual feedback when focused."""

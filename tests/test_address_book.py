@@ -566,7 +566,13 @@ class TestWAMerge:
         assert contact.extras["is_chat_active"] is True
         assert contact.display_name == "Mario Rossi"
 
-    def test_lid_unresolved_standalone_no_network(self):
+    def test_lid_unresolved_standalone_no_network(self, monkeypatch, tmp_path):
+        import backend as backend_mod
+
+        # Isola la cache @lid reale (wa_lid_map.json): senza questa patch il
+        # test leggerebbe il file della macchina su cui gira (su alcune
+        # macchine "220988985864200@lid" è risolto → ramo diverso → KeyError).
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
         backend = _wa_backend()
         backend.start_lid_resolver = MagicMock()
         backend._rest.list_all_contacts.return_value = []
