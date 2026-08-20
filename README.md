@@ -11,13 +11,13 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 - **Telegram**: optional backend using [Telethon](https://docs.telethon.dev/) (MTProto) —
   native Python, no external daemon required. QR login with 2FA support.
 
-![Main interface](screenshot.png)
+![Main interface](assets/screenshots/screenshot.png)
 *Main chat interface*
 
-![Image modal viewer](screenshot2.png)
+![Image modal viewer](assets/screenshots/screenshot2.png)
 *Fullscreen image viewer modal*
 
-![Image modal viewer (alternate)](screenshot3.png)
+![Image modal viewer (alternate)](assets/screenshots/screenshot3.png)
 *Fullscreen image viewer modal (alternate view)*
 
 ## Features
@@ -422,8 +422,7 @@ Vedi [profiling/README.md](profiling/README.md) per istruzioni dettagliate, inte
 ```
 signal-tui-client/
 ├── signal_tui.py            # Main TUI application (Textual App) — multi-protocol
-├── backend.py               # Shared backend: SQLite persistence, signal-cli RPC/subprocess, webhook/HTTP server, receipts
-├── models.py                # Shared data models (ChatContact, ChatMessage, ChatEvent)
+├── backend/                 # Shared backend: SQLite persistence, signal-cli RPC/subprocess, webhook/HTTP server, receipts
 ├── backends/                # Per-protocol backend implementations
 │   ├── __init__.py          #   Package init — exports ChatBackend, BackendManager, SignalBackend, WhatsAppBackend, TelegramBackend
 │   ├── base.py              #   Abstract ChatBackend interface
@@ -432,6 +431,8 @@ signal-tui-client/
 │   ├── whatsapp.py          #   WhatsApp backend (WAHA REST + webhook push)
 │   ├── telegram.py          #   Telegram backend (Telethon MTProto, QR login, read receipts)
 │   └── config.py            #   WhatsApp + Telegram configuration helpers
+├── tui/                     # TUI screens, mixins and widgets (Textual App composition)
+├── models.py                # Shared data models (ChatContact, ChatMessage, ChatEvent)
 ├── ui_components.py         # Custom Textual widgets (MessageWidget, ImageWidget, ImageModalScreen, …)
 ├── emoji_picker.py          # Emoji picker modal screen and auto-completion widget (Ctrl+E)
 ├── emoji_data.py            # Emoji database (categories, aliases, search index)
@@ -447,7 +448,7 @@ signal-tui-client/
 ├── Telegram/                # Telegram test suite (74 tests)
 │   ├── test_telegram_backend.py  (35 tests)
 │   └── test_regression.py        (39 tests)
-├── tests/                   # Test suite (pytest, 433 tests)
+├── tests/                   # Test suite (pytest, 1006 tests)
 │   ├── conftest.py
 │   ├── test_whatsapp_backend.py (102 tests)
 │   ├── test_ui_protocol.py      (55 tests)
@@ -457,6 +458,13 @@ signal-tui-client/
 │   └── run_regression_tests.sh  # legacy (superseded by Makefile)
 ├── profiling/               # Performance profiling tools (CPU, RAM, I/O)
 ├── scripts/                 # Helper scripts (start_whatsapp.sh)
+├── docs/                    # Documentation & design notes
+│   ├── BUGS.md              #   Known bugs and limitations
+│   ├── TEST_REPORT.md       #   Test report (last run: 1080/1080 ✅)
+│   ├── PERF_ANALYSIS.md     #   Performance analysis (UI reactivity hotspots)
+│   ├── DESIGN_*.md          #   Design documents (edit messages, ctrls rubrica, UI freeze, fixes)
+│   └── PLAN_*.md            #   Work/implementation plans (testing, UI block analysis, …)
+├── assets/screenshots/      # README screenshots (main UI, image viewer)
 ├── docker-compose.yml       # WAHA (WhatsApp HTTP API) Docker container
 ├── .env.example             # Template for WAHA + Telegram credentials
 ├── .dockerignore            # Docker build exclusions
@@ -468,9 +476,6 @@ signal-tui-client/
 ├── requirements-dev.txt     # Development dependencies (pytest, pytest-cov, coverage, ruff)
 ├── config.json              # Local configuration (not committed)
 ├── README.md                # This file
-├── TEST_REPORT.md           # Test report (last run: 507/507 ✅)
-├── PERF_ANALYSIS.md         # Performance analysis (UI reactivity hotspots)
-├── BUGS.md                  # Known bugs and limitations
 ├── bin/                     # signal-cli binaries (not committed)
 └── LICENSE                  # GPLv3
 ```
