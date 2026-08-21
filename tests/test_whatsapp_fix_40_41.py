@@ -22,6 +22,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -363,6 +365,12 @@ class TestWebhookDesiredEvents:
 class TestPresenceSubscribe:
     """🔔 Subscribe per-chat: REST, idempotenza, sweep e lazy best-effort."""
 
+    @pytest.fixture(autouse=True)
+    def _enable_presence(self, monkeypatch):
+        # La subscription presence è disabilitata per default (WON'T FIX su
+        # WEBJS): riabilita per esercitare il comportamento sotto test.
+        monkeypatch.setattr(WhatsAppBackend, "_PRESENCE_SUBSCRIBE_ENABLED", True)
+
     def test_rest_endpoint_percent_encodes_jid(self):
         client = WhatsAppRESTClient("http://api.test")
         with patch.object(client, "_request", return_value={}) as mock_req:
@@ -392,6 +400,16 @@ class TestPresenceSubscribe:
         backend = _make_backend()
         backend._presence_subscribe_lazy("39123@c.us")  # no exception
         assert "39123@c.us" in backend._presence_subscribed
+
+    def test_disabled_by_default_noop(self, monkeypatch):
+        monkeypatch.setattr(WhatsAppBackend, "_PRESENCE_SUBSCRIBE_ENABLED", False)
+        backend = _make_backend()
+        backend.start_presence_subscribe()
+        backend._presence_subscribe_lazy("39123@c.us")
+        backend._presence_subscribe("39123@c.us")
+        assert backend._presence_subscribed == set()
+        assert backend._presence_subscribe_started is False
+        backend._rest.presence_subscribe.assert_not_called()
 
     def test_sweep_subscribes_known_chats(self):
         import backends.whatsapp as wa_mod

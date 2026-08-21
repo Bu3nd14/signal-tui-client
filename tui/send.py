@@ -247,7 +247,25 @@ class SendMixin:
             }
             if reply_to_message_id is not None:
                 send_kwargs["reply_to_message_id"] = reply_to_message_id
+            # Instrumentation: la durata di send_message_sync è il tempo in cui
+            # la bolla resta "grigia" (pending).  Log a debug; loggato a warning
+            # oltre la soglia (1000ms) per individuare backoff/degrado del backend.
+            _t0 = time.perf_counter()
             result = backend.send_message_sync(contact_id, message, **send_kwargs)
+            _elapsed_ms = (time.perf_counter() - _t0) * 1000.0
+            if _elapsed_ms >= 1000.0:
+                logger.warning(
+                    "send_message_sync slow: protocol=%s contact=%s %.0f ms",
+                    protocol,
+                    contact_id,
+                    _elapsed_ms,
+                )
+            else:
+                logger.debug(
+                    "send_message_sync took %.1f ms (protocol=%s)",
+                    _elapsed_ms,
+                    protocol,
+                )
             self._transition_outgoing_status(
                 protocol, contact_id, timestamp, message, "sent", ("pending",)
             )

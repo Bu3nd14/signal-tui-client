@@ -94,8 +94,12 @@ logger.setLevel(logging.DEBUG)
 if __name__ == "__main__":
     import logging
 
+    # --debug: logging di livello DEBUG su /tmp/signal-tui.log (default INFO).
+    # Utile per la strumentazione (es. timing di send_message_sync) senza
+    # interferire con stderr usato da Textual per la TUI.
+    level = logging.DEBUG if "--debug" in sys.argv else logging.INFO
     logging.basicConfig(
-        level=logging.INFO,
+        level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         handlers=[logging.FileHandler("/tmp/signal-tui.log", mode="w")],
     )

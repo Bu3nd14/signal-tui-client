@@ -351,6 +351,16 @@ allineato alla shape ufficiale, `presence.update` nel webhook e nel compose) è
 su WEBJS o se si adotta l'engine NOWEB. Il fallimento resta silenzioso
 (best-effort) e non degrada altre funzionalità WhatsApp.
 
+**Follow-up perf (21/08/2026):** lo **sweep presence al connect** (N chat × POST
+fallite + pausa 0.3s) e le **lazy subscribe** per messaggio/ack generavano
+centinaia di richieste 500 inutili verso WAHA e thread extra nel processo TUI
+(con l'endpoint rotto sono lavoro sprecato, percepibile come rallentamento —
+bolla "grigia" più a lungo anche su altri protocolli). La subscription è ora
+**disabilitata per default** (`_PRESENCE_SUBSCRIBE_ENABLED=False` in
+`backends/whatsapp.py`), riabilitabile con l'env `WAHA_PRESENCE_SUBSCRIBE=1`
+(es. passando a NOWEB). `_event_from_typing` resta attivo. Test aggiornati
+(+1: `test_disabled_by_default_noop`); suite completa 1174 passed.
+
 ---
 
 ### #41 — Stato "consegnato" mai mostrato per WhatsApp e Telegram: si passa direttamente da "sent" a "letto" (`backends/whatsapp_events.py` `_event_from_ack`, righe 377-431; `backends/telegram.py` `_handle_read_receipt`, righe 938-976) ✅ RISOLTO

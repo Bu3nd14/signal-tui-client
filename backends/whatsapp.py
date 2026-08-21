@@ -905,6 +905,18 @@ class WhatsAppBackend(ChatBackend):
     # ``POST /api/{session}/presence/{chatId}/subscribe``.  Subscribing is
     # best-effort and idempotent: a missing API or an error degrades silently
     # to "no typing indicator", never to a crash.
+    #
+    # IMPORTANTE (21/08/2026): il typing WhatsApp è WON'T FIX sul deploy
+    # attuale — WAHA 2026.8.1 engine WEBJS non implementa ``subscribePresence``
+    # (ogni subscribe risponde 500).  Lo sweep al connect (N chat × POST
+    # fallite + pausa 0.3s) e le lazy subscribe per messaggio/ack sono quindi
+    # LAVORO INUTILE che carica WAHA e occupa thread del processo TUI.  La
+    # subscription è disattivata per default; riabilitabile con l'env
+    # ``WAHA_PRESENCE_SUBSCRIBE=1`` (utile se si passa a NOWEB o WAHA fixa
+    # WEBJS).  Il parser ``_event_from_typing`` resta attivo e invariato.
+    _PRESENCE_SUBSCRIBE_ENABLED = os.environ.get(
+        "WAHA_PRESENCE_SUBSCRIBE", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
 
     def _presence_subscribe_post(self, chat_id: str) -> None:
         """Perform the presence-subscribe POST (best-effort, never raises)."""
@@ -919,7 +931,10 @@ class WhatsAppBackend(ChatBackend):
         The idempotency guard on ``self._presence_subscribed`` prevents
         duplicate POSTs.  Used directly by the background sweep (already on a
         worker thread); the lazy call sites use ``_presence_subscribe_lazy``.
+        Disabled when presence subscription is off (WON'T FIX su WEBJS).
         """
+        if not self._PRESENCE_SUBSCRIBE_ENABLED:
+            return
         if not chat_id or not self._rest:
             return
         if chat_id in self._presence_subscribed:
@@ -932,8 +947,11 @@ class WhatsAppBackend(ChatBackend):
 
         Marks the chat subscribed immediately (idempotency, no double-POST
         races) and performs the actual POST on a daemon thread so it never
-        blocks the UI/webhook/fetch-history caller.
+        blocks the UI/webhook/fetch-history caller.  Disabled when presence
+        subscription is off (WON'T FIX su WEBJS).
         """
+        if not self._PRESENCE_SUBSCRIBE_ENABLED:
+            return
         if not chat_id or not self._rest:
             return
         if chat_id in self._presence_subscribed:
@@ -948,6 +966,8 @@ class WhatsAppBackend(ChatBackend):
 
     def start_presence_subscribe(self) -> None:
         """Start the background per-chat presence subscription sweep (idempotent)."""
+        if not self._PRESENCE_SUBSCRIBE_ENABLED:
+            return
         if self._presence_subscribe_started or not self._rest:
             return
         self._presence_subscribe_started = True
