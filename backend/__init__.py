@@ -29,6 +29,7 @@ from .db import (
     _update_message_id,
     _update_message_status,
     _update_message_status_by_id,
+    _update_message_status_by_text,
     _update_message_text,
 )
 from .download import (
@@ -121,6 +122,7 @@ __all__ = [
     "_update_message_id",
     "_update_message_status",
     "_update_message_status_by_id",
+    "_update_message_status_by_text",
     "_update_message_text",
     "ensure_webhook_server",
     "find_signal_cli",

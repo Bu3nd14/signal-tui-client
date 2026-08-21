@@ -259,6 +259,18 @@ causa del mancato passaggio pending→sent prima o insieme al fix B.
 - Test: `tests/test_whatsapp_receipt_id_match.py` (20 test). Suite completa:
   1174 passed. Lint/format puliti.
 
+**Fix aggiuntivo (21/08/2026, branch `fix/outgoing-status-fallback`):** su
+produzione è emersa la **race condition pendente→sent**: l'echo di WAHA (spesso
+più veloce del worker) può sostituire il timestamp ottimistico del client con
+quello del server PRIMA della transizione → `_update_message_status` (match per
+`timestamp`) fallisce e la bolla resta grigia finché un receipt successivo la
+corregge (es. chat Tartufi Bolliti, `ts client 1787342685618` vs `ts server
+1787342685000`). Fix: nuova `_update_message_status_by_text` (aggiorna la riga
+outgoing più recente per testo, con expected-status e rank guard) usata come
+fallback in `_transition_outgoing_status`; cache backend/UI aggiornate per
+testo+is_mine quando il timestamp non combacia. Test:
+`tests/test_outgoing_status_fallback.py` (7 test). Suite completa: 1181 passed.
+
 ---
 
 ### #40 — Indicatore di digitazione (typing) non funzionante per Telegram e WhatsApp, solo per Signal (`backends/telegram.py`; `backends/whatsapp.py`/`backends/whatsapp_events.py`; `backends/signal.py`, righe 759-764) ✅ RISOLTO (Telegram) / 🚫 WON'T FIX (WhatsApp)
