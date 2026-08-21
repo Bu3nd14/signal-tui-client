@@ -1,10 +1,17 @@
 """Contact list: sorting, filtering, progressive render, selection."""
 
 import logging
+from dataclasses import dataclass
 
 from textual.widgets import Label, ListItem, ListView
 
-from contact_picker import contact_sort_key
+from contact_picker import (
+    PickerEntry,
+    _protocol_priority,
+    contact_sort_key,
+    entry_default_contact,
+    group_by_person,
+)
 from models import (
     PROTOCOL_WHATSAPP,
     ChatContact,
@@ -13,6 +20,23 @@ from models import (
 from ui_components import MessageTextArea
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _Row:
+    """Flat descriptor for one contact-list row (group header or member).
+
+    ``kind`` is ``"group"`` (header) or ``"member"``; ``key`` is the row's
+    ``_contact_id`` (``person:<group_key>`` for headers, ``cache_key`` for
+    members); ``group_key`` is the owning ``entry.key`` (on headers it equals
+    the entry's own key).
+    """
+
+    kind: str
+    key: str
+    group_key: str | None
+    contact: ChatContact | None = None
+    entry: PickerEntry | None = None
 
 
 class ContactListMixin:
@@ -90,6 +114,73 @@ class ContactListMixin:
             return " - All"
         return ""
 
+    def _visible_rows(self) -> list[_Row]:
+        """Project ``self.contacts`` into flat, sorted rows (header + members).
+
+        Reuses the picker's grouping machine in read-only mode: contacts are
+        grouped per person via ``group_by_person``, groups are ordered by the
+        recency of their default contact (``entry_default_contact`` +
+        ``contact_sort_key``), and members are emitted in a FIXED protocol order
+        (Signal → WhatsApp → Telegram), never by recency.
+
+        Every contact — including single-member entries ("Mamma Vod") — gets a
+        header.  The projection does NOT depend on collapse state nor on the
+        protocol filter: ``want_ids`` stays stable while collapse/filter only
+        toggle ``display``.  Side-effect: refreshes ``_group_members``.
+        """
+        entries = group_by_person(self.contacts)
+        entries.sort(key=lambda e: contact_sort_key(entry_default_contact(e)))
+        self._group_members = {}
+        rows: list[_Row] = []
+        for entry in entries:
+            members = sorted(
+                entry.members.values(),
+                key=lambda c: _protocol_priority(c.protocol),
+            )
+            self._group_members[entry.key] = [m.cache_key for m in members]
+            rows.append(_Row("group", f"person:{entry.key}", entry.key, entry=entry))
+            for member in members:
+                rows.append(_Row("member", member.cache_key, entry.key, contact=member))
+        return rows
+
+    def _group_label(self, entry: PickerEntry) -> str:
+        """Build the neutral group-header label (no emoji, no typing icons).
+
+        The chevron ▸/▾ conveys the collapse state (▸ collapsed, ▾ expanded).
+        The aggregate unread badge is suppressed when the selected contact is
+        one of the group's members (decision 5).
+        """
+        chevron = "▸" if entry.key not in self._expanded_groups else "▾"
+        members = entry.members.values()
+        unread = sum(self._unread_counts.get(m.cache_key, 0) for m in members)
+        if self.selected_contact is not None and self.selected_contact.cache_key in {
+            m.cache_key for m in members
+        }:
+            unread = 0
+        label = f"{chevron} {entry.display_name}"
+        if unread:
+            label += f" *{unread}"
+        return label
+
+    def _row_visible(self, row: _Row, visible_keys: set[str]) -> bool:
+        """Whether *row* should be displayed given *visible_keys* (filtered set).
+
+        Members are shown only when they pass the filter AND their group is
+        expanded (default collapsed).  Group headers are shown when at least one
+        member passes the filter (decision 7).  A member with no ``group_key``
+        (legacy/test rows) behaves like the old member-only list.
+        """
+        if row.kind == "member":
+            if row.key not in visible_keys:
+                return False
+            return row.group_key is None or row.group_key in self._expanded_groups
+        members = self._group_members.get(row.group_key)
+        if members is None and row.entry is not None:
+            members = [m.cache_key for m in row.entry.members.values()]
+        if not members:
+            return False
+        return any(key in visible_keys for key in members)
+
     def _apply_contact_visibility(self) -> None:
         """Toggle ``display`` on ListItems based on the active protocol filter.
 
@@ -109,21 +200,42 @@ class ContactListMixin:
         first_visible: int | None = None
         selected_index: int | None = None
         for i, child in enumerate(contact_list.children):
+            kind: str = getattr(child, "_row_kind", "member")
             key: str | None = getattr(child, "_contact_id", None)
-            show = key in visible
+            group_key: str | None = getattr(child, "_group_key", None)
+            row = _Row(kind=kind, key=key, group_key=group_key)
+            show = self._row_visible(row, visible)
             child.display = show
             if show:
                 if first_visible is None:
                     first_visible = i
                 if (
                     self.selected_contact is not None
+                    and kind == "member"
                     and key == self.selected_contact.cache_key
                 ):
                     selected_index = i
 
+        # Fallback highlight: when the selected contact's member row is not
+        # visible (collapsed group or filtered member), highlight its group
+        # header instead (no auto-expansion).
+        header_index: int | None = None
+        if selected_index is None and self.selected_contact is not None:
+            group_key = self._member_to_group.get(self.selected_contact.cache_key)
+            if group_key is not None:
+                header = self._group_widgets.get(group_key)
+                if header is not None and getattr(header, "display", True):
+                    try:
+                        header_index = contact_list.children.index(header)
+                    except ValueError:
+                        header_index = None
+
         if selected_index is not None:
             # Keep the highlight on the still-visible selected contact.
             contact_list.index = selected_index
+        elif header_index is not None:
+            # Collapsed group / filtered member: highlight the group header.
+            contact_list.index = header_index
         elif first_visible is not None:
             contact_list.index = first_visible
         elif self.selected_contact is not None:
@@ -151,50 +263,74 @@ class ContactListMixin:
         for i, child in enumerate(contact_list.children):
             child.highlighted = index is not None and i == index
 
-    def _start_progressive_render(self, contacts: list[ChatContact]) -> None:
+    def _build_row_item(self, row: _Row) -> ListItem:
+        """Build a fresh ListItem for *row* (shared by superset + chunk paths)."""
+        if row.kind == "member":
+            text = self._member_label(row.contact)
+            item = ListItem(Label(text))
+            item.add_class(self._protocol_class(row.contact))
+            item.add_class("contact-member")
+        else:
+            text = self._group_label(row.entry)
+            item = ListItem(Label(text))
+            item.add_class("contact-group")
+            item._entry = row.entry
+        item._contact_id = row.key
+        item._label_text = text
+        item._row_kind = row.kind
+        item._group_key = row.group_key
+        return item
+
+    def _register_row_widget(self, row: _Row, item: ListItem) -> None:
+        """Record *item* in the O(1) lookup maps for later label/highlight syncs."""
+        if row.kind == "member":
+            self._contact_widgets[row.key] = item
+            self._member_to_group[row.key] = row.group_key
+        else:
+            self._group_widgets[row.group_key] = item
+
+    def _start_progressive_render(self, rows: list[_Row]) -> None:
         """Begin a progressive (chunked) contact-list rebuild.
 
         Cancels any in-progress render, clears the ListView, and schedules
-        ``_render_next_chunk`` to append contacts 50-at-a-time.
+        ``_render_next_chunk`` to append rows 50-at-a-time.
         """
         if self._render_timer is not None:
             self._render_timer.stop()
             self._render_timer = None
 
-        self._pending_contacts = list(contacts)
+        self._pending_rows = list(rows)
         self._render_chunk_index = 0
 
         contact_list = self.query_one("#contact-list", ListView)
         contact_list.clear()
         self._contact_widgets.clear()
+        self._group_widgets.clear()
+        self._member_to_group.clear()
         self._render_next_chunk()
 
     def _render_next_chunk(self) -> None:
-        """Render the next *chunk_size* contacts (progressive startup).
+        """Render the next *chunk_size* rows (progressive startup).
 
         Called initially from ``_on_backend_ready`` and then
-        self-schedules via ``set_timer`` until all pending contacts are
+        self-schedules via ``set_timer`` until all pending rows are
         rendered.  Each chunk yields control back to the Textual event
         loop so the UI never freezes.
         """
         contact_list = self.query_one("#contact-list", ListView)
         visible = {c.cache_key for c in self._filtered_contacts()}
         start = self._render_chunk_index
-        end = min(start + self._render_chunk_size, len(self._pending_contacts))
-        chunk = self._pending_contacts[start:end]
+        end = min(start + self._render_chunk_size, len(self._pending_rows))
+        chunk = self._pending_rows[start:end]
 
-        for c in chunk:
-            text = self._contact_label(c)
-            item = ListItem(Label(text))
-            item._contact_id = c.cache_key
-            item._label_text = text
-            item.add_class(self._protocol_class(c))
-            item.display = c.cache_key in visible
+        for row in chunk:
+            item = self._build_row_item(row)
+            item.display = self._row_visible(row, visible)
             contact_list.append(item)
-            self._contact_widgets[c.cache_key] = item
+            self._register_row_widget(row, item)
 
         self._render_chunk_index = end
-        if end < len(self._pending_contacts):
+        if end < len(self._pending_rows):
             self._render_timer = self.set_timer(0.05, self._render_next_chunk)
         else:
             self._render_timer = None
@@ -219,14 +355,15 @@ class ContactListMixin:
           - stesso ordine        -> aggiorna solo testo/classi in-place;
           - stesso INSIEME ma    -> RIORDINA i ListItem esistenti in-place
             ordine diverso         (nessun clear, nessuna nuova costruzione),
-                                  per via di un nuovo messaggio che sposta un
-                                  contatto in cima;
+                                   per via di un nuovo messaggio che sposta un
+                                   contatto in cima;
           - insieme diverso      -> rebuild completo (solo filtro/startup).
         """
         contact_list = self.query_one("#contact-list", ListView)
         existing = list(contact_list.children)
         cur_ids = [getattr(it, "_contact_id", None) for it in existing]
-        want_ids = [c.cache_key for c in filtered]
+        rows = self._visible_rows()
+        want_ids = [row.key for row in rows]
 
         # Stop any in-flight progressive render so stale chunks
         # don't corrupt this render.
@@ -234,31 +371,48 @@ class ContactListMixin:
             self._render_timer.stop()
             self._render_timer = None
 
-        def _sync_item(item, c):
-            """Aggiorna testo/classe di un ListItem esistente per il contatto c."""
-            label = item.children[0] if item.children else None
-            new_text = self._contact_label(c)
-            if getattr(item, "_label_text", None) != new_text and label is not None:
-                label.update(new_text)
+        def _sync_row(item, row):
+            """Aggiorna testo/classi di un ListItem esistente per la riga row."""
+            if row.kind == "member":
+                new_text = self._member_label(row.contact)
+            else:
+                new_text = self._group_label(row.entry)
+            if getattr(item, "_label_text", None) != new_text:
                 item._label_text = new_text
-            if not item.has_class(self._protocol_class(c)):
+                label = item.children[0] if item.children else None
+                if label is not None:
+                    label.update(new_text)
+            if row.kind == "member":
+                if not item.has_class(self._protocol_class(row.contact)):
+                    for cl in (
+                        "protocol-signal",
+                        "protocol-whatsapp",
+                        "protocol-telegram",
+                    ):
+                        item.remove_class(cl)
+                    item.add_class(self._protocol_class(row.contact))
+                item.add_class("contact-member")
+            else:
                 for cl in ("protocol-signal", "protocol-whatsapp", "protocol-telegram"):
                     item.remove_class(cl)
-                item.add_class(self._protocol_class(c))
+                item.add_class("contact-group")
+                item._entry = row.entry
+            item._row_kind = row.kind
+            item._group_key = row.group_key
 
         if cur_ids == want_ids:
             # Fast path: composizione+ordine invariati -> aggiorna in-place.
-            for item, c in zip(existing, filtered):
-                _sync_item(item, c)
+            for item, row in zip(existing, rows):
+                _sync_row(item, row)
         elif set(cur_ids) == set(want_ids):
-            # Stesso INSIEME di contatti ma ordine diverso (un nuovo messaggio
-            # ha spostato un contatto in cima): riordina i ListItem ESISTENTI
+            # Stesso INSIEME di righe ma ordine diverso (un nuovo messaggio
+            # ha spostato un gruppo in cima): riordina i ListItem ESISTENTI
             # in-place.  Niente clear(), niente costruzione di nuovi widget ->
             # la lista non diventa mai vuota e il main non si blocca.
             by_id = {getattr(it, "_contact_id", None): it for it in existing}
             reordered = [by_id[cid] for cid in want_ids if cid in by_id]
-            for item, c in zip(reordered, filtered):
-                _sync_item(item, c)
+            for item, row in zip(reordered, rows):
+                _sync_row(item, row)
             if existing != reordered:
                 # Move_child sposta i nodi esistenti nel DOM senza smontarli,
                 # un elemento alla volta costruendo l'ordine voluto (idempotente:
@@ -267,22 +421,18 @@ class ContactListMixin:
                 for i in range(1, len(reordered)):
                     contact_list.move_child(reordered[i], after=reordered[i - 1])
         elif cur_ids and set(cur_ids) < set(want_ids):
-            # Superset: nuovi contatti (es. WhatsApp dopo Signal).
+            # Superset: nuove righe (es. WhatsApp dopo Signal).
             # Crea SOLO i ListItem mancanti, preserva quelli esistenti,
             # poi riordina tutto con move_child — nessun clear, nessun flash.
             by_id = {getattr(it, "_contact_id", None): it for it in existing}
-            for c in filtered:
-                text = self._contact_label(c)
-                if c.cache_key not in by_id:
-                    item = ListItem(Label(text))
-                    item._contact_id = c.cache_key
-                    item._label_text = text
-                    item.add_class(self._protocol_class(c))
-                    self._contact_widgets[c.cache_key] = item
-                    by_id[c.cache_key] = item
+            for row in rows:
+                if row.key not in by_id:
+                    item = self._build_row_item(row)
+                    self._register_row_widget(row, item)
+                    by_id[row.key] = item
                     contact_list.append(item)
                 else:
-                    _sync_item(by_id[c.cache_key], c)
+                    _sync_row(by_id[row.key], row)
             reordered = [by_id[cid] for cid in want_ids if cid in by_id]
             if len(reordered) > 1:
                 try:
@@ -293,7 +443,7 @@ class ContactListMixin:
         else:
             # Composizione/insieme cambiato (filtro nuovo / backend aggiunto /
             # stato iniziale) -> rebuild progressivo (chunked, non blocca la UI).
-            self._start_progressive_render(filtered)
+            self._start_progressive_render(rows)
 
         # Re-apply the active protocol filter so newly added items get the
         # right ``display`` and the highlight lands on the correct row.
@@ -473,19 +623,50 @@ class ContactListMixin:
         # list (that only matches when the filter is "all").
         contact_list = self.query_one("#contact-list", ListView)
         item = self._contact_widgets.get(self.selected_contact.cache_key)
+        highlight_index: int | None = None
         if item is not None:
             # Refresh the row label (removes the *N unread badge for this contact).
             label = item.children[0] if item.children else None
             if label is not None:
-                label.update(self._contact_label(self.selected_contact))
+                label.update(self._member_label(self.selected_contact))
             # Only highlight when the row is currently visible (a contact picked
-            # from the picker may be filtered out of the active list).
+            # from the picker may be filtered out of the active list, or its
+            # group may be collapsed).
             if getattr(item, "display", True):
                 try:
-                    contact_list.index = contact_list.children.index(item)
+                    highlight_index = contact_list.children.index(item)
                 except ValueError:
                     # Item not currently mounted (e.g. mid progressive render).
-                    pass
+                    highlight_index = None
+
+        # Fallback: when the member row is hidden (collapsed group / filtered
+        # member), highlight the group header instead — never auto-expand.
+        if highlight_index is None:
+            group_key = self._member_to_group.get(self.selected_contact.cache_key)
+            if group_key is not None:
+                header = self._group_widgets.get(group_key)
+                if header is not None and getattr(header, "display", True):
+                    try:
+                        highlight_index = contact_list.children.index(header)
+                    except ValueError:
+                        highlight_index = None
+
+        if highlight_index is not None:
+            contact_list.index = highlight_index
+
+        # Refresh the group header label too: the aggregate unread badge is
+        # now suppressed for the selected contact (decision 5).
+        group_key = self._member_to_group.get(self.selected_contact.cache_key)
+        if group_key is not None:
+            header = self._group_widgets.get(group_key)
+            entry = getattr(header, "_entry", None) if header is not None else None
+            if header is not None and entry is not None:
+                new_text = self._group_label(entry)
+                if getattr(header, "_label_text", None) != new_text:
+                    header._label_text = new_text
+                    label = header.children[0] if header.children else None
+                    if label is not None:
+                        label.update(new_text)
 
         # Re-sync the `-highlight` class so exactly one row is highlighted even
         # if a previous in-place reorder left a stale highlight behind.
@@ -508,12 +689,56 @@ class ContactListMixin:
                 thread=True,
             )
 
+    def _toggle_group(self, group_key: str | None) -> None:
+        """Toggle the collapse state of *group_key* (display-only).
+
+        Expands/collapses the group by flipping its membership in
+        ``_expanded_groups``, updates the header chevron, and re-applies the
+        visibility rules.  It does NOT re-render the list, does NOT move the
+        focus, and does NOT open any chat.
+        """
+        if group_key is None:
+            return
+        if group_key in self._expanded_groups:
+            self._expanded_groups.discard(group_key)
+        else:
+            self._expanded_groups.add(group_key)
+
+        header = self._group_widgets.get(group_key)
+        entry = getattr(header, "_entry", None) if header is not None else None
+        if header is not None and entry is not None:
+            new_text = self._group_label(entry)
+            if getattr(header, "_label_text", None) != new_text:
+                header._label_text = new_text
+                label = header.children[0] if header.children else None
+                if label is not None:
+                    label.update(new_text)
+
+        # SOLO display: nessun render, nessun clear, nessun cambio di focus.
+        # Preserva la posizione evidenziata: togglare un header non deve far
+        # "saltare" l'highlight in cima alla lista (l'header resta visibile).
+        contact_list = self.query_one("#contact-list", ListView)
+        previous = contact_list.index
+        self._apply_contact_visibility()
+        if (
+            previous is not None
+            and 0 <= previous < len(contact_list.children)
+            and getattr(contact_list.children[previous], "display", True)
+        ):
+            contact_list.index = previous
+            self._sync_contact_highlight(contact_list, previous)
+
     def on_list_view_selected(self, event: ListView.Selected):
         """When a contact is selected, show the chat."""
+        # Header rows (group kind) are NOT contacts: they only toggle the
+        # collapse state (decision 3).  Members follow the existing flow.
+        item = event.item
+        if getattr(item, "_row_kind", "member") == "group":
+            self._toggle_group(getattr(item, "_group_key", None))
+            return
         # Resolve the contact directly from the clicked ListItem's _contact_id.
         # Using ListView.index + _filtered_contacts() fails when hidden
         # children (display=False) are in the ListView (Ctrl+W filter).
-        item = event.item
         cache_key = getattr(item, "_contact_id", None)
         if cache_key is None:
             return

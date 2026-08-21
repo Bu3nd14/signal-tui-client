@@ -585,6 +585,7 @@ class WhatsAppBackend(ChatBackend):
         """Fetch contacts from the API into ``self.contacts``."""
         if not self._rest:
             return
+        self._lid_cache_load()
         # Single call — list_contacts now uses only /chats with 5 s timeout.
         raw_contacts = self._rest.list_contacts() or []
         contacts: list[ChatContact] = []
@@ -594,16 +595,34 @@ class WhatsAppBackend(ChatBackend):
                 continue
             name = c.get("name") or c.get("pushName") or c.get("notifyName") or ""
             last_ts = int(c.get("last_ts") or 0)
+            extras: dict[str, object] = {"jid": jid, "last_message_ts": last_ts}
+            phone = self._contact_phone(jid)
+            if phone:
+                extras["phone"] = phone
             contacts.append(
                 ChatContact(
                     id=jid,
                     display_name=name or jid,
                     protocol=PROTOCOL_WHATSAPP,
-                    extras={"jid": jid, "last_message_ts": last_ts},
+                    extras=extras,
                 )
             )
         self.contacts = contacts
         self._contacts_by_jid = {cc.id: cc for cc in contacts}
+
+    def _contact_phone(self, jid: str) -> str:
+        """Return the phone for a contact JID, or ``""`` when unknown.
+
+        ``@c.us`` JIDs carry the phone in the local part; ``@lid`` JIDs are
+        resolved through the persistent lid→phone cache (possibly empty on first
+        boot, until the background resolver fills it).  Everything else has no
+        phone number (e.g. ``@g.us``/``@s.whatsapp.net``).
+        """
+        if jid.endswith("@c.us"):
+            return _jid_digits(jid.split("@", 1)[0])
+        if jid.endswith("@lid"):
+            return str((self._lid_map or {}).get(jid, {}).get("phone") or "")
+        return ""
 
     def _identify_contact(self, jid: str) -> ChatContact | None:
         """Resolve a JID to a known ``ChatContact`` (or a placeholder)."""

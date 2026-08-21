@@ -9,6 +9,7 @@ from models import (
     ChatEvent,
     contact_cache_key,
     protocol_emoji,
+    protocol_name,
 )
 from ui_components import (
     MessageWidget,
@@ -433,7 +434,7 @@ class EventHandlingMixin:
         contact = next((c for c in self.contacts if c.cache_key == cache_key), None)
         if contact is None:
             return
-        new_text = self._contact_label(contact)
+        new_text = self._member_label(contact)
         item = self._contact_widgets.get(cache_key)
         if item is None:
             return
@@ -444,15 +445,16 @@ class EventHandlingMixin:
             label.update(new_text)
             item._label_text = new_text
 
-    def _contact_label(self, contact: ChatContact) -> str:
-        """Build the contact list label.
+    def _member_label(self, contact: ChatContact) -> str:
+        """Build the member-row label for the grouped contact list.
 
-        Format: ``{emoji} {name}`` + (if unread) `` *{N}`` + (if typing) `` ✍️``.
-        The emoji is chosen per protocol (📱 for Signal, 💬 for WhatsApp).
-        The typing icon appears to the right of the unread badge when present,
-        otherwise to the right of the name.
+        Format: ``{emoji} {protocol name}`` + (if unread) `` *{N}`` + (if typing) `` ✍️``.
+        The contact name is NOT repeated here — it already appears in the group
+        header (which can be repeated up to once per protocol).  The unread badge
+        and the typing/mumbling icons keep the exact same semantics as the old
+        ``_contact_label``.
         """
-        label = f"{protocol_emoji(contact.protocol)} {contact.display_name}"
+        label = f"{protocol_emoji(contact.protocol)} {protocol_name(contact.protocol)}"
         unread = self._unread_counts.get(contact.cache_key, 0)
         if unread > 0 and contact != self.selected_contact:
             label += f" *{unread}"

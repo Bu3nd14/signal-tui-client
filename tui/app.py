@@ -160,8 +160,17 @@ class SignalTUI(
         # cache_key → ListItem: O(1) lookup for _update_typing_label
         self._contact_widgets: dict[str, ListItem] = {}
 
+        # Contact grouping (Sprint 2): group headers, member→group mapping, and
+        # the set of EXPANDED groups.  ``_expanded_groups`` starts EMPTY so every
+        # group is COLLAPSED at startup (only headers visible); expansion is
+        # opt-in per group via toggle (Enter/click/Space on the header).
+        self._group_widgets: dict[str, ListItem] = {}  # group_key → header row
+        self._member_to_group: dict[str, str] = {}  # cache_key → group_key
+        self._expanded_groups: set[str] = set()  # groups currently expanded
+        self._group_members: dict[str, list[str]] = {}  # group_key → member cache_keys
+
         # Progressive render state (avoids UI freeze at startup / Ctrl+W).
-        self._pending_contacts: list[ChatContact] = []
+        self._pending_rows: list = []
         self._render_chunk_index: int = 0
         self._render_chunk_size: int = 50
         self._render_timer: Timer | None = None

@@ -50,7 +50,21 @@ async def test_contact_list_renders(app_for_test):
 
         contact_list = app.query_one("#contact-list", ListView)
         labels = [item._label_text for item in contact_list.children]
-        assert labels == ["📱 Mario", "📱 Luigi", "📱 Giulia"]
+        # One header (▸ = collapsed) + one member per contact, alphabetical.
+        # Member rows show the protocol emoji + name, not the contact name.
+        assert labels == [
+            "▸ Giulia",
+            "📱 Signal",
+            "▸ Luigi",
+            "📱 Signal",
+            "▸ Mario",
+            "📱 Signal",
+        ]
+
+
+def _find_row(contact_list: ListView, label: str):
+    """Return the ListItem whose ``_label_text`` matches *label*."""
+    return next(item for item in contact_list.children if item._label_text == label)
 
 
 @pytest.mark.integration
@@ -61,7 +75,13 @@ async def test_select_contact(app_for_test):
         await pilot.pause()
 
         contact_list = app.query_one("#contact-list", ListView)
-        await pilot.click(contact_list.children[0])
+        # Groups start collapsed: expand Mario's group (click header), then
+        # click the member row to select the contact.
+        await pilot.click(_find_row(contact_list, "▸ Mario"))
+        await pilot.pause()
+        # Member labels are now just the protocol name ("Signal"), which is not
+        # unique across contacts — resolve Mario's member row via the widget map.
+        await pilot.click(app._contact_widgets["signal:+391234567890"])
         await pilot.pause()
 
         assert app.selected_contact is not None
@@ -174,11 +194,37 @@ async def test_chat_title_updates(app_for_test):
         await pilot.pause()
 
         contact_list = app.query_one("#contact-list", ListView)
-        await pilot.click(contact_list.children[0])
+        await pilot.click(_find_row(contact_list, "▸ Mario"))
+        await pilot.pause()
+        await pilot.click(app._contact_widgets["signal:+391234567890"])
         await pilot.pause()
 
         chat_title = app.query_one("#ChatTitle", Label)
         assert chat_title.content == "📱 Chat - Mario"
+
+
+@pytest.mark.integration
+async def test_space_toggles_group(app_for_test):
+    """Space on a focused group header toggles the group collapse state."""
+    app = app_for_test
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        contact_list = app.query_one("#contact-list", ListView)
+        contact_list.focus()
+        mario_header = _find_row(contact_list, "▸ Mario")
+        contact_list.index = contact_list.children.index(mario_header)
+        await pilot.pause()
+
+        assert app._expanded_groups == set()
+        await pilot.press("space")
+        await pilot.pause()
+        assert "phone:391234567890" in app._expanded_groups
+        assert _find_row(contact_list, "▾ Mario") is not None
+
+        await pilot.press("space")
+        await pilot.pause()
+        assert app._expanded_groups == set()
 
 
 @pytest.mark.integration

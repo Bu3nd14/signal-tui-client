@@ -315,6 +315,35 @@ class TestGroupByPerson:
         assert entries[0].key == "phone:393331234567"
         assert set(entries[0].members) == {PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP}
 
+    def test_signal_and_whatsapp_c_us_group_without_explicit_phone(self):
+        """Un JID @c.us deriva il telefono dall'id → si fonde con Signal."""
+        sig = _contact("+393331234567", "Mario", PROTOCOL_SIGNAL)
+        wa = _contact("393331234567@c.us", "Mario", PROTOCOL_WHATSAPP)
+        entries = group_by_person([sig, wa])
+        assert len(entries) == 1
+        assert entries[0].key == "phone:393331234567"
+        assert set(entries[0].members) == {PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP}
+
+    def test_signal_and_resolved_lid_group_via_extras_phone(self):
+        """Un @lid risolto (extras["phone"]) si fonde con Signal."""
+        sig = _contact("+393331234567", "Mario", PROTOCOL_SIGNAL)
+        wa = _contact("139153@lid", "Mario", PROTOCOL_WHATSAPP, phone="393331234567")
+        entries = group_by_person([sig, wa])
+        assert len(entries) == 1
+        assert entries[0].key == "phone:393331234567"
+        assert set(entries[0].members) == {PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP}
+
+    def test_unresolved_lid_without_phone_is_separate(self):
+        """Un @lid senza phone resta standalone (raw:), Signal a parte."""
+        sig = _contact("+393331234567", "Mario", PROTOCOL_SIGNAL)
+        wa = _contact("139153@lid", "Mario", PROTOCOL_WHATSAPP)
+        entries = group_by_person([sig, wa])
+        assert len(entries) == 2
+        assert {e.key for e in entries} == {
+            "phone:393331234567",
+            "raw:whatsapp:139153@lid",
+        }
+
     def test_telegram_without_phone_is_single(self):
         tg = _contact("123456789", "Mamma Vod", PROTOCOL_TELEGRAM)
         entries = group_by_person([tg])

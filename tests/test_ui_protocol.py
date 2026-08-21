@@ -57,19 +57,19 @@ class _FakeListView:
 
 
 class TestProtocolLabel:
-    """🏷️ Label di contatto protocol-aware (emoji)."""
+    """🏷️ Label di contatto protocol-aware (nome protocollo)."""
 
-    def test_signal_label_emoji(self):
+    def test_signal_label_name(self):
         app = _make_app(_signal())
-        label = app._contact_label(app.contacts[0])
-        assert "📱" in label
-        assert "Mario" in label
+        label = app._member_label(app.contacts[0])
+        assert label == "📱 Signal"
+        assert "Mario" not in label
 
-    def test_whatsapp_label_emoji(self):
+    def test_whatsapp_label_name(self):
         app = _make_app(_whatsapp())
-        label = app._contact_label(app.contacts[0])
-        assert "💬" in label
-        assert "Anna" in label
+        label = app._member_label(app.contacts[0])
+        assert label == "💬 WhatsApp"
+        assert "Anna" not in label
 
     def test_protocol_class(self):
         app = _make_app()
@@ -345,14 +345,21 @@ class TestProtocolFilter:
 
         app._reorder_contact_list()
 
-        # Tutti e 3 i contatti restano nel DOM (nessuno perso dal filtro).
-        assert len(fake.items) == 3
-        assert {it._contact_id for it in fake.items} == {
+        # Ogni contatto proietta header + membro: 3 × 2 = 6 righe nel DOM.
+        assert len(fake.items) == 6
+        member_rows = [
+            it for it in fake.items if getattr(it, "_row_kind", "member") == "member"
+        ]
+        assert {it._contact_id for it in member_rows} == {
             c.cache_key for c in app.contacts
         }
-        # Il contatto WhatsApp è nel DOM ma nascosto (display=False).
-        wa_item = next(it for it in fake.items if it._contact_id == wa.cache_key)
+        # Il membro WhatsApp è nel DOM ma nascosto (display=False).
+        wa_item = next(it for it in member_rows if it._contact_id == wa.cache_key)
         assert wa_item.display is False
+        # Anche l'header del gruppo WhatsApp-only sparisce sotto il filtro signal.
+        wa_group_key = app._member_to_group.get(wa.cache_key)
+        wa_header = app._group_widgets.get(wa_group_key)
+        assert wa_header.display is False
 
     def test_filter_render_applies_to_view(self):
         """Il filtro aggiorna dinamicamente la ListView (senza reload DB)."""
@@ -362,9 +369,10 @@ class TestProtocolFilter:
         app._protocol_filter = "whatsapp"
         # _render_contact_list uses the in-memory contact list, not the DB.
         app._render_contact_list(app._filtered_contacts())
-        assert len(fake_list.items) == 1
-        item = fake_list.items[0]
-        assert item.has_class("protocol-whatsapp")
+        # 2 contatti → header + membro ciascuno = 4 righe; il membro WhatsApp
+        # (primo gruppo, alfabetico "Anna") è items[1] con la classe protocol.
+        assert len(fake_list.items) == 4
+        assert fake_list.items[1].has_class("protocol-whatsapp")
 
     def test_filter_title_suffix(self):
         app = _make_app()
@@ -743,9 +751,9 @@ class TestContactListViewCrashFix:
 
         filtered = app._filtered_contacts()
         app._render_contact_list(filtered)  # primo: rebuild
-        assert len(fake.items) == 2
+        assert len(fake.items) == 4
         app._render_contact_list(filtered)  # composizione uguale -> in-place
-        assert len(fake.items) == 2
+        assert len(fake.items) == 4
         # il rebuild completo è avvenuto solo la prima volta
         assert len(clears) == 1
 
@@ -769,8 +777,16 @@ class TestContactListViewCrashFix:
         app._sort_contacts()  # come fa il flusso reale prima del render
         filtered = app._filtered_contacts()
         app._render_contact_list(filtered)  # rebuild iniziale
-        assert len(fake.items) == 2
-        assert [it._contact_id for it in fake.items] == [b.cache_key, a.cache_key]
+        b_group = app._member_to_group[b.cache_key]
+        a_group = app._member_to_group[a.cache_key]
+        # header + membro per ciascuno, gruppo di "+2" (più recente) in cima.
+        assert len(fake.items) == 4
+        assert [it._contact_id for it in fake.items] == [
+            f"person:{b_group}",
+            b.cache_key,
+            f"person:{a_group}",
+            a.cache_key,
+        ]
         objs_before = list(fake.items)
 
         # nuovo messaggio arriva ancora su "+2": l'ordine resta identico
@@ -784,7 +800,12 @@ class TestContactListViewCrashFix:
         app._render_contact_list(filtered)
         # nessun clear (lista mai vuota) e stessi oggetti riusati, solo riordinati
         assert len(clears) == 1  # solo il rebuild iniziale
-        assert [it._contact_id for it in fake.items] == [a.cache_key, b.cache_key]
+        assert [it._contact_id for it in fake.items] == [
+            f"person:{a_group}",
+            a.cache_key,
+            f"person:{b_group}",
+            b.cache_key,
+        ]
         assert set(fake.items) == set(objs_before)  # stessi oggetti, nessun nuovo
 
 
@@ -994,7 +1015,7 @@ class TestContactListFlush:
         assert app._recompute_unread(key) is True
         assert app._unread_counts.get(key) == 1
         # Il badge appare nella label per un contatto non selezionato.
-        label = app._contact_label(contact)
+        label = app._member_label(contact)
         assert " *1" in label, f"badge atteso nella label, avuto: {label!r}"
 
 

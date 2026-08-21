@@ -169,6 +169,77 @@ propagando `reply_to_message_id`/quote anche per i media.
 
 ---
 
+### #38 — Lista principale non aggiornata dopo la risoluzione `@lid` in background: WhatsApp non raggruppato fino a riavvio (`backends/whatsapp.py` `_lid_resolver_run`; `_load_contacts`)
+
+Il raggruppamento dei contatti per persona fonde WhatsApp con Signal/Telegram
+solo se il contatto WhatsApp ha il numero in `extras["phone"]` (derivato dall'id
+`@c.us` o dal lookup in `_lid_map` per gli `@lid`). Al primo avvio con cache
+fredda (`wa_lid_map.json` vuota), `_load_contacts` costruisce `self.contacts`
+PRIMA che il resolver in background (`start_lid_resolver`, avviato
+automaticamente alla connessione) popoli la mappa: i contatti `@lid` restano
+caricati senza phone e la lista principale li mostra come gruppi single-member
+non fusi. `_lid_resolver_run` salva la mappa su disco ma NON ricostruisce
+`self.contacts` né ri-renderizza la lista: il raggruppamento WhatsApp compare
+solo al riavvio/riconnessione successivi (quando `_load_contacts` legge la mappa
+persistita).
+
+**Scenario:** primo avvio con cache lid fredda — i contatti WhatsApp non risultano
+raggruppati con Signal/Telegram per tutta la sessione, nonostante il resolver sia
+già partito in background.
+
+**Impatto:** nessuna perdita dati (dal secondo avvio il raggruppamento è
+automatico), ma la prima esecuzione richiede un riavvio per vedere WhatsApp fuso.
+Colpisce solo chi non ha mai aperto il picker (Ctrl+S) prima.
+
+**Fix suggerito:** al termine di `_lid_resolver_run` (o su notifica), rieseguire
+`_load_contacts()` e ri-renderizzare la lista (es. `_render_contact_list`) per i
+contatti il cui `@lid` è stato risolto; oppure far ripartire la proiezione
+`_visible_rows()` su `self.contacts` con le extras aggiornate.
+
+---
+
+### #39 — Messaggio WhatsApp inviato resta "grigio" (pending) in UI fino a un receipt successivo (`tui/send.py` `_transition_outgoing_status`; `backends/whatsapp_events.py` `_ack_value`/`_event_from_ack`)
+
+Inviando un messaggio WhatsApp dalla TUI, la bolla ottimistica resta nello stato
+`pending` (CSS `.msg-pending` = `$text-muted`, "grigio") invece di avanzare a
+`sent`, e si corregge solo quando arriva un receipt successivo (es. il
+destinatario legge il messaggio per rispondere). Il DB invece raggiunge lo stato
+finale corretto (`delivered`): il problema è solo la **bolla live** che non riceve
+l'aggiornamento in tempo.
+
+Due concause emerse dall'analisi:
+1. **Transizione pending→sent con early-return silenzioso**: `_transition_outgoing_status`
+   (→ `_update_message_status` su SQLite) ritorna `False` **senza aggiornare né DB,
+   né cache UI, né widget** se la riga DB non viene trovata (o lo stato non è più
+   `pending`). La bolla resta pending senza alcun log e si sblocca solo quando un
+   receipt per `msg_id` raggiunge il widget.
+2. **Mappatura ack WAHA divergente dalla docu ufficiale**: l'app usa la propria enum
+   (2=SERVER_ACK, 3=DELIVERY_ACK, 4=READ) mentre la docu WAHA dichiara
+   (1=SERVER, 2=DEVICE→consegnato, 3=READ, 4=PLAYED). Di conseguenza il receipt di
+   *consegna* (DEVICE/ack=2) viene ignorato (`status < 3`) e il *read* (ack=3) viene
+   trattato come `delivered` — gli aggiornamenti intermedi di stato arrivano in modo
+   sporadico, aggravando il "grigio".
+
+**Scenario:** inviare un messaggio a un contatto WhatsApp dalla TUI: resta grigio
+finché il destinatario non legge/risponde.
+
+**Verifiche:** DB reale con stato finale `delivered` (corretto) ma senza traccia di
+uno scatto a `sent` al momento dell'invio; "grigio" corrisponde alla classe
+`.msg-pending`.
+
+**Fix proposto B (preventivo, preferito):** allineare la mappatura ack a quella
+ufficiale WAHA in `_ack_value`/`_event_from_ack`/`process_receipt` (1=SERVER
+ignorato, 2=DEVICE→`delivered`/is_read=False, 3=READ→`read`/is_read=True, 4=PLAYED
+solo vocali), verificando i valori reali emessi dalla build WAHA in uso.
+
+**Aggiunta possibile A (strumentazione):** log in `_transition_outgoing_status`
+quando ritorna `False` (contact_id, ts, text, esito di `_update_message_status`) e
+in `_send_message_worker` (`added`, `persist`, `result`); log dei payload
+`message.ack` reali in `handle_webhook` (valori `ack`/`ackName`) per confermare la
+causa del mancato passaggio pending→sent prima o insieme al fix B.
+
+---
+
 ### #32 — Le foto Telegram dello storico non sono scaricabili né apribili (`backends/telegram.py`, righe 411-427, 460-466, 482-500) ✅ RISOLTO
 
 Il download della foto avviene solo nel gestore live. Lo storico costruisce il
