@@ -198,7 +198,7 @@ contatti il cui `@lid` è stato risolto; oppure far ripartire la proiezione
 
 ---
 
-### #39 — Messaggio WhatsApp inviato resta "grigio" (pending) in UI fino a un receipt successivo (`tui/send.py` `_transition_outgoing_status`; `backends/whatsapp_events.py` `_ack_value`/`_event_from_ack`)
+### #39 — Messaggio WhatsApp inviato resta "grigio" (pending) in UI fino a un receipt successivo (`tui/send.py` `_transition_outgoing_status`; `backends/whatsapp_events.py` `_ack_value`/`_event_from_ack`) ✅ RISOLTO
 
 Inviando un messaggio WhatsApp dalla TUI, la bolla ottimistica resta nello stato
 `pending` (CSS `.msg-pending` = `$text-muted`, "grigio") invece di avanzare a
@@ -237,6 +237,27 @@ quando ritorna `False` (contact_id, ts, text, esito di `_update_message_status`)
 in `_send_message_worker` (`added`, `persist`, `result`); log dei payload
 `message.ack` reali in `handle_webhook` (valori `ack`/`ackName`) per confermare la
 causa del mancato passaggio pending→sent prima o insieme al fix B.
+
+**Fix (branch `fix/wa-receipt-id-match`, mergeato):**
+- **Fix B applicato** con il #41 (enum ack ufficiale WAHA: 1=SERVER ignorato,
+  2=DEVICE→delivered, 3=READ→read).
+- **Root cause del match fallito (scoperta sul campo, 21/08/2026):** WAHA
+  2026.8.1 (WEBJS) usa formati di id diversi a seconda del canale — DB/cache
+  `true_{jid}_{hex}_{participant@lid}` (gruppi, con partecipante) vs payload ack
+  senza partecipante (hex a volte troncato). `process_receipt` matchava per id
+  **esatto** → il receipt non trovava mai la bolla (nel DB reale: 66 messaggi DM
+  bloccati a `sent`). Il fix #41 aveva amplificato il fenomeno abbassando la
+  soglia ack (`>=2`), generando più receipt che tentavano match falliti.
+- **Fix applicato:** nuova funzione pura `canonical_msg_id()` in
+  `backends/whatsapp_events.py` (estrae l'hex canonico da tutte le forme note,
+  validata sui 1124 id reali del DB: 0 errori, 0 collisioni); `_event_from_ack`
+  normalizza l'id nel payload del receipt; `process_receipt` confronta per id
+  canonico con **fallback per unicità** (una sola entry `is_mine` `sent` id-less
+  nella chat) e **logger.warning** solo su vero mismatch (niente rumore sui
+  no-op da rank-guard). Strumentazione in `_transition_outgoing_status`
+  (`logger.warning` su early-return False).
+- Test: `tests/test_whatsapp_receipt_id_match.py` (20 test). Suite completa:
+  1174 passed. Lint/format puliti.
 
 ---
 

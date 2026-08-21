@@ -9,10 +9,15 @@ Pure helpers (``_msg_type``, ``_jid_string``, ``_resolve_sender_name``) plus the
 from __future__ import annotations
 
 import logging
+import re
 
 from models import PROTOCOL_WHATSAPP, ChatEvent
 
 logger = logging.getLogger(__name__)
+
+# Only [0-9A-Fa-f] (Baileys message ids are uppercase hex); used to tell the
+# canonical hex segment apart from the ``@``-bearing JID segments.
+_HEX_RE = re.compile(r"^[0-9A-Fa-f]+$")
 
 # ─── Official WAHA message ack enum ─────────────────────────────────────────
 # ``message.ack`` exposes the delivery/read state both as an integer ``ack``
@@ -63,6 +68,54 @@ def _jid_string(value) -> str | None:
         if isinstance(serialized, str) and serialized:
             return serialized
     return None
+
+
+def canonical_msg_id(raw_id: str | None) -> str:
+    """Return a comparable canonical message id for receipt matching.
+
+    WAHA 2026.8.1 (WEBJS) disagrees on the id shape depending on where it is
+    read from, so the *same* message can appear as:
+
+    - ``true_{jid@lid}_{hex}``                      (DM, ``sendText`` ``_serialized``)
+    - ``true_{jid@g.us}_{hex}_{participant@lid}``   (group, ``sendText`` ``_serialized``)
+    - ``{hex}``                                     (``message.ack`` webhook ``id``)
+
+    ``process_receipt`` compares the DB/serialized id against the ack id, so
+    both sides must be reduced to a single stable token.  This function
+    extracts that token:
+
+    - Baileys ``true_…``/``false_…`` serialized ids → the ``{hex}`` segment
+      (the only ``@``-free, hex-alphabetic segment); the participant suffix is
+      dropped and the JID prefix is ignored.
+    - A plain hex id (no ``@``, no ``_``, hex chars only) → the id uppercased.
+    - Any other flat/opaque id → returned unchanged (so synthetic/test ids and
+      unknown formats degrade gracefully instead of matching by accident).
+
+    Returns ``""`` for empty/``None`` input.
+    """
+    if raw_id is None:
+        return ""
+    raw = str(raw_id).strip()
+    if not raw:
+        return ""
+
+    if raw.startswith(("true_", "false_")):
+        body = raw.split("_", 1)[1]
+        hex_segments = [
+            seg
+            for seg in body.split("_")
+            if seg and "@" not in seg and _HEX_RE.fullmatch(seg)
+        ]
+        # Exactly one hex segment → unambiguous; return it (normalized case).
+        if len(hex_segments) == 1:
+            return hex_segments[0].upper()
+        # Ambiguous/unknown serialized shape → keep the raw id so the caller
+        # logs the mismatch instead of guessing.
+        return raw
+
+    if _HEX_RE.fullmatch(raw):
+        return raw.upper()
+    return raw
 
 
 def _ack_value(raw: dict) -> int | None:
@@ -442,6 +495,10 @@ def _event_from_ack(raw: dict) -> ChatEvent | None:
         return None
     if not content.get("fromMe", False):
         return None
+    # Canonicalize up front so the receipt payload already carries the token
+    # ``process_receipt`` compares against the cache (missing participant /
+    # different serialized prefix can no longer break the match).
+    msg_id = canonical_msg_id(msg_id)
     status = content.get("status") or content.get("ack") or 0
     try:
         status = int(status)
