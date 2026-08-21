@@ -111,7 +111,7 @@ unico quando più alias corrispondono.
 
 ---
 
-### #18 — Ogni nuovo download invalida gli URL precedenti (`backend/download.py`, righe 102-139, 175-181)
+### #18 — Ogni nuovo download invalida gli URL precedenti (`backend/download.py`, righe 102-139, 175-181) ℹ️ WAD (Work As Designed)
 
 `_clean_download_dir()` elimina tutti i file serviti prima di pubblicarne uno nuovo.
 Un URL già consegnato può quindi restituire 404 quando viene richiesto dopo un altro
@@ -121,6 +121,17 @@ download.
 
 **Fix suggerito:** usare nomi univoci e retention temporale/per sessione, rimuovendo
 solo i file scaduti.
+
+**ℹ️ WAD — comportamento deliberato (by design).** Gli URL di download degli
+attachment sono **temporanei e destinati al solo uso interno della TUI**
+(visualizzazione/apertura del singolo media), non alla condivisione o alla
+persistenza oltre la sessione. La pulizia della directory a ogni nuovo download è
+una scelta di **sicurezza/privacy**: evita l'accumulo sul disco di file di
+attachment (potenzialmente sensibili) e impedisce che link temporanei restino
+validi indefinitamente. Un URL 404 dopo un download successivo è quindi il
+comportamento atteso; la condivisione esterna del link esce dall'uso previsto.
+La gestione duratura dei media avviene attraverso il flusso dell'app (cache e DB),
+non tramite l'URL temporaneo del download server.
 
 ---
 
