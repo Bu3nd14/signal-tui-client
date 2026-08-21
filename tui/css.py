@@ -36,6 +36,15 @@ Screen {
     padding: 1 1;
 }
 
+#contact-list ListItem.contact-group {
+    text-style: bold;
+    padding: 0 1;              /* header più compatto */
+}
+
+#contact-list ListItem.contact-member {
+    padding: 0 1 0 3;          /* indentazione sotto l'header */
+}
+
 #contact-list ListItem:hover {
     background: $accent 20%;
 }

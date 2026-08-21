@@ -1020,6 +1020,65 @@ class TestWhatsAppBackend:
             PROTOCOL_WHATSAPP, "wa:39123@s.whatsapp.net"
         )
 
+    def test_load_contacts_sets_phone_for_c_us(self):
+        """I contatti @c.us derivano extras["phone"] dalla parte locale del JID."""
+        backend = _make_backend()
+        with patch.object(
+            backend._rest,
+            "list_contacts",
+            return_value=[{"id": "393331234567@c.us", "name": "Mario"}],
+        ):
+            backend._load_contacts()
+        assert backend.contacts[0].extras["phone"] == "393331234567"
+        assert backend.contacts[0].extras["jid"] == "393331234567@c.us"
+        assert backend.contacts[0].extras["last_message_ts"] == 0
+
+    def test_load_contacts_sets_phone_for_resolved_lid(self):
+        """Un @lid risolto in cache eredita il telefono dalla lid map."""
+        backend = _make_backend()
+        backend._lid_map = {"139153@lid": {"phone": "393331234567"}}
+        with patch.object(
+            backend._rest,
+            "list_contacts",
+            return_value=[{"id": "139153@lid", "name": "Bob"}],
+        ):
+            backend._load_contacts()
+        assert backend.contacts[0].extras["phone"] == "393331234567"
+        assert backend.contacts[0].extras["jid"] == "139153@lid"
+
+    def test_load_contacts_no_phone_for_unresolved_lid(self):
+        """Un @lid non risolto NON ha extras["phone"] (resta single-member)."""
+        backend = _make_backend()
+        backend._lid_map = {}
+        with patch.object(
+            backend._rest,
+            "list_contacts",
+            return_value=[{"id": "139153@lid", "name": "Bob"}],
+        ):
+            backend._load_contacts()
+        assert "phone" not in backend.contacts[0].extras
+        assert backend.contacts[0].extras["jid"] == "139153@lid"
+        assert backend.contacts[0].extras["last_message_ts"] == 0
+
+    def test_load_contacts_preserves_jid_and_last_ts_with_phone(self):
+        """L'aggiunta di extras["phone"] non rimuove jid/last_message_ts."""
+        backend = _make_backend()
+        backend._lid_map = {}
+        with patch.object(
+            backend._rest,
+            "list_contacts",
+            return_value=[
+                {"id": "393331234567@c.us", "name": "Mario", "last_ts": 1700000000000}
+            ],
+        ):
+            backend._load_contacts()
+        extras = backend.contacts[0].extras
+        assert extras == {
+            "jid": "393331234567@c.us",
+            "last_message_ts": 1700000000000,
+            "phone": "393331234567",
+        }
+
     def test_send_message_sync_calls_rest(self):
         backend = _make_backend()
         with patch.object(

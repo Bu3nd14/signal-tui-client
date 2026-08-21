@@ -202,10 +202,10 @@ class TestSignalTUITyping:
         app = self._make_app()
         contact = app.contacts[0]
         # No typing → no icon
-        assert "✍️" not in app._contact_label(contact)
+        assert "✍️" not in app._member_label(contact)
         # Typing → icon present
         app._typing_contacts[contact.cache_key] = 100.0
-        assert "✍️" in app._contact_label(contact)
+        assert "✍️" in app._member_label(contact)
 
     def test_contact_label_icon_after_unread_badge(self):
         """L'icona ✍️ va a destra del badge *N quando presente."""
@@ -213,7 +213,7 @@ class TestSignalTUITyping:
         contact = app.contacts[0]
         app._unread_counts[contact.cache_key] = 3
         app._typing_contacts[contact.cache_key] = 100.0
-        label = app._contact_label(contact)
+        label = app._member_label(contact)
         # Badge first, then typing icon
         assert label.index("*3") < label.index("✍️")
 
@@ -222,7 +222,7 @@ class TestSignalTUITyping:
         app = self._make_app()
         contact = app.contacts[0]
         app._typing_mumbling[contact.cache_key] = 100.0
-        label = app._contact_label(contact)
+        label = app._member_label(contact)
         assert "💭" in label
         assert "✍️" not in label
 
@@ -375,7 +375,7 @@ class TestSignalTUITyping:
         contact = app.contacts[0]
         app.selected_contact = contact
         app._typing_contacts[contact.cache_key] = 100.0
-        assert "✍️" in app._contact_label(contact)
+        assert "✍️" in app._member_label(contact)
 
     def test_selected_mumbling_still_shows_icon(self):
         """Il contatto selezionato in stato mumbling mostra comunque 💭."""
@@ -383,7 +383,7 @@ class TestSignalTUITyping:
         contact = app.contacts[0]
         app.selected_contact = contact
         app._typing_mumbling[contact.cache_key] = 100.0
-        assert "💭" in app._contact_label(contact)
+        assert "💭" in app._member_label(contact)
 
 
 class TestUpdateTypingLabel:

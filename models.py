@@ -33,6 +33,19 @@ def protocol_emoji(protocol: str) -> str:
     return PROTOCOL_EMOJI.get(protocol, "💬")
 
 
+#: Human-friendly protocol names shown on grouped member rows.
+PROTOCOL_NAMES: dict[str, str] = {
+    PROTOCOL_SIGNAL: "Signal",
+    PROTOCOL_WHATSAPP: "WhatsApp",
+    PROTOCOL_TELEGRAM: "Telegram",
+}
+
+
+def protocol_name(protocol: str) -> str:
+    """Return the human-friendly name for *protocol* (fallback: the raw string)."""
+    return PROTOCOL_NAMES.get(protocol, protocol)
+
+
 def contact_cache_key(protocol: str, contact_id: str) -> str:
     """Build a unique cache key for a contact across protocols.
 
