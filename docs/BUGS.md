@@ -240,6 +240,75 @@ causa del mancato passaggio pending→sent prima o insieme al fix B.
 
 ---
 
+### #40 — Indicatore di digitazione (typing) non funzionante per Telegram e WhatsApp, solo per Signal (`backends/telegram.py`; `backends/whatsapp.py`/`backends/whatsapp_events.py`; `backends/signal.py`, righe 759-764)
+
+L'indicatore "✍️ sta scrivendo" (stato gestito in `tui/events.py` `_handle_typing_event`
+e `tui/polling.py`) dipende dagli eventi `ChatEvent(type="typing")` emessi dai
+backend. Verifica per protocollo:
+
+- **Signal** — funziona: `_process_typing(envelope)` estrae il campo `typingMessage`
+  e `envelope_to_event` emette `ChatEvent(type="typing")` (`backends/signal.py`,
+  righe 759-764).
+- **Telegram** — nessuna pipeline: `backends/telegram.py` emette solo eventi
+  `message`/`message_edit`/`receipt` e non registra alcun handler di digitazione
+  (es. `UpdateUserTyping`/`UpdateChatUserTyping`/`UpdateChannelUserTyping` di
+  Telethon). Nessun evento typing viene mai prodotto.
+- **WhatsApp** — la normalizzazione esiste (`_event_from_typing` in
+  `backends/whatsapp_events.py`, righe 433-454, gestisce `typing`/
+  `presence.update`/`presence`) ed è inoltrata da `handle_webhook`, ma gli
+  indicatori non arrivano alla TUI: da verificare il payload reale emesso da WAHA
+  (flag/valori `presence`/`typing`, es. "composing"/"paused") e l'eventuale
+  sottoscrizione al flag typing sul webhook.
+
+**Scenario:** l'utente di una chat Signal/Telegram/WhatsApp digita mentre si
+osserva la lista contatti: l'indicatore ✍️ compare solo per i contatti Signal.
+
+**Verifiche:** nessun evento `type="typing"` nei log per Telegram/WhatsApp; test
+esistenti solo su Signal (`tests/test_backends.py::test_envelope_to_event_typing`)
+e sulla normalizzazione unitaria WhatsApp (`tests/test_whatsapp_backend.py::test_typing_event`),
+nessun test end-to-end del flusso per i due protocolli mancanti.
+
+**Fix suggerito:** per Telegram implementare la ricezione degli update di
+digitazione MTProto (es. `events.Raw` su `UpdateUserTyping`/`UpdateChatUserTyping`/
+`UpdateChannelUserTyping`) normalizzandoli in `ChatEvent(type="typing")`; per
+WhatsApp verificare configurazione WAHA e payload `presence.update` reali e
+allineare `_event_from_typing`; aggiungere test end-to-end per entrambi i backend.
+
+---
+
+### #41 — Stato "consegnato" mai mostrato per WhatsApp e Telegram: si passa direttamente da "sent" a "letto" (`backends/whatsapp_events.py` `_event_from_ack`, righe 377-431; `backends/telegram.py` `_handle_read_receipt`, righe 938-976)
+
+Lo stato intermedio `delivered` (grassetto in UI, `ui_components.py`) non viene
+mai mostrato per i messaggi inviati via WhatsApp e Telegram: la bolla passa
+direttamente da `sent` a `read`. Su Signal il flusso completo
+sent → delivered → read funziona (`receiptMessage` con `is_delivery`/`is_read`,
+`backend/rpc.py` `_process_receipt`).
+
+- **WhatsApp** — `_event_from_ack` assume l'enum Baileys
+  (2=SERVER, 3=DELIVERY→delivered, 4=READ). Se la build WAHA in uso emette i
+  valori della docu ufficiale (1=SERVER, 2=DEVICE→consegnato, 3=READ, 4=PLAYED),
+  l'ack di consegna (2) viene scartato (`status < 3` → `None`, righe 422-423) e
+  il primo receipt utile è il read: la bolla salta `delivered`. **Stessa root
+  cause del bug #39** (mappatura ack divergente da quella ufficiale WAHA).
+- **Telegram** — `_handle_read_receipt` gestisce esclusivamente
+  `UpdateReadHistoryOutbox` ed emette solo eventi `receipt` con
+  `is_read=True`. Nessun evento `delivered` viene mai generato (né da MTProto
+  né sintetico): `process_receipt` supporta il target `"delivered"` (righe
+  992-1000) ma non c'è alcun percorso che lo emetta.
+
+**Scenario:** inviare un messaggio e osservare la bolla: su Signal compare
+"consegnato" prima di "letto"; su WhatsApp e Telegram si passa direttamente da
+"inviato" a "letto" (o si resta "inviato" se il receipt di lettura non arriva).
+
+**Fix suggerito:** per WhatsApp allineare la mappatura ack alla docu ufficiale
+WAHA (2=DEVICE→`delivered`, 3=READ→`read`, come già proposto nel #39),
+verificando i valori reali emessi dalla build in uso; per Telegram valutare se
+esporre un delivered sintetico (il protocollo non offre una conferma di
+consegna nativa per le chat private) oppure documentare la limitazione,
+mantenendo il passaggio sent→read quando arriva `UpdateReadHistoryOutbox`.
+
+---
+
 ### #32 — Le foto Telegram dello storico non sono scaricabili né apribili (`backends/telegram.py`, righe 411-427, 460-466, 482-500) ✅ RISOLTO
 
 Il download della foto avviene solo nel gestore live. Lo storico costruisce il
