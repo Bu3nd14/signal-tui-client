@@ -240,7 +240,7 @@ causa del mancato passaggio pending→sent prima o insieme al fix B.
 
 ---
 
-### #40 — Indicatore di digitazione (typing) non funzionante per Telegram e WhatsApp, solo per Signal (`backends/telegram.py`; `backends/whatsapp.py`/`backends/whatsapp_events.py`; `backends/signal.py`, righe 759-764)
+### #40 — Indicatore di digitazione (typing) non funzionante per Telegram e WhatsApp, solo per Signal (`backends/telegram.py`; `backends/whatsapp.py`/`backends/whatsapp_events.py`; `backends/signal.py`, righe 759-764) ✅ RISOLTO (Telegram) / 🚫 WON'T FIX (WhatsApp)
 
 L'indicatore "✍️ sta scrivendo" (stato gestito in `tui/events.py` `_handle_typing_event`
 e `tui/polling.py`) dipende dagli eventi `ChatEvent(type="typing")` emessi dai
@@ -274,9 +274,53 @@ digitazione MTProto (es. `events.Raw` su `UpdateUserTyping`/`UpdateChatUserTypin
 WhatsApp verificare configurazione WAHA e payload `presence.update` reali e
 allineare `_event_from_typing`; aggiungere test end-to-end per entrambi i backend.
 
+**Fix** (branch `fix/typing-delivered-40-41`, design in `DESIGN_FIX_40_41.md`):
+- **Telegram:** nuovo traduttore `_handle_typing_update` (`backends/telegram.py`)
+  che converte `UpdateUserTyping`/`UpdateChatUserTyping`/`UpdateChannelUserTyping`
+  in `ChatEvent(type="typing")` (action STARTED/STOPPED), con le stesse
+  convenzioni `contact_id` di `_handle_read_receipt`; dispatch esteso nel ramo
+  `events.Raw` di `_on_raw`. Mapping: `SendMessageCancelAction` → STOPPED, tutte
+  le altre `SendMessage*Action` → STARTED.
+- **WhatsApp** (3 interventi coordinati): (1) `presence.update` aggiunto agli
+  eventi sottoscritti in `_configure_webhook` e a `WAHA_WEBHOOK_EVENTS` in
+  `docker-compose.yml`; (2) `_event_from_typing` allineato alla shape ufficiale
+  WAHA `payload.presences[].lastKnownPresence` (+ fallback legacy) con filtro
+  obbligatorio `online`/`offline`/`unavailable` → `None` (niente 💭 spurio);
+  (3) subscribe per-chat `POST /api/{session}/presence/{chatId}/subscribe`
+  (`backends/whatsapp_rest.py` `presence_subscribe`), sweep al connect +
+  subscribe lazy su `fetch_history`/primo messaggio.
+- Test: classe `TestTelegramTyping` (8 test) in `tests/test_telegram.py`;
+  `tests/test_whatsapp_fix_40_41.py` (25 test). Suite completa: 1154 passed.
+
+**🚫 WON'T FIX (WhatsApp) — limite dell'engine WEBJS di WAHA.** Il typing
+WhatsApp non è ottenibile con lo stack attuale, verificato il 21/08/2026 su
+**WAHA 2026.8.1 (tier CORE, engine WEBJS)**:
+
+- La subscribe per-chat `POST /api/{session}/presence/{chatId}/subscribe` risponde
+  **HTTP 500** per ogni JID: `TypeError: d(...).subscribePresence is not a
+  function` — il metodo **non esiste** nel core WEBJS di WAHA
+  (`WebjsClientCore.js`). L'API della pagina WhatsApp Web usata da
+  whatsapp-web.js non espone `subscribePresence`.
+- Senza subscribe per-chat WAHA **non distribuisce** gli eventi `presence.update`
+  (0 eventi nei log, anche dopo il fix config webhook con `presence.update` e
+  `WHATSAPP_HOOK_EVENTS`).
+- Provato anche `config.webjs.tagsEventsOn: true` (flag che la docu WAHA dichiara
+  *required* per `presence.update`): la sessione si riavvia correttamente ma la
+  subscribe resta rotta → nessun evento presence.
+- Il supporto presence/typing completo è implementato solo sull'engine **NOWEB**
+  (senza browser, WebSocket diretto), che richiede il **re-link** della sessione
+  (scan QR) e l'abilitazione dello **store** (`config.noweb.store.enabled`) per
+  contatti/chats/storico — scelta **non adottata**.
+
+Il codice implementato (subscribe per-chat best-effort, `_event_from_typing`
+allineato alla shape ufficiale, `presence.update` nel webhook e nel compose) è
+**mantenuto**: diventa operativo senza modifiche se WAHA fixa `subscribePresence`
+su WEBJS o se si adotta l'engine NOWEB. Il fallimento resta silenzioso
+(best-effort) e non degrada altre funzionalità WhatsApp.
+
 ---
 
-### #41 — Stato "consegnato" mai mostrato per WhatsApp e Telegram: si passa direttamente da "sent" a "letto" (`backends/whatsapp_events.py` `_event_from_ack`, righe 377-431; `backends/telegram.py` `_handle_read_receipt`, righe 938-976)
+### #41 — Stato "consegnato" mai mostrato per WhatsApp e Telegram: si passa direttamente da "sent" a "letto" (`backends/whatsapp_events.py` `_event_from_ack`, righe 377-431; `backends/telegram.py` `_handle_read_receipt`, righe 938-976) ✅ RISOLTO
 
 Lo stato intermedio `delivered` (grassetto in UI, `ui_components.py`) non viene
 mai mostrato per i messaggi inviati via WhatsApp e Telegram: la bolla passa
@@ -306,6 +350,28 @@ verificando i valori reali emessi dalla build in uso; per Telegram valutare se
 esporre un delivered sintetico (il protocollo non offre una conferma di
 consegna nativa per le chat private) oppure documentare la limitazione,
 mantenendo il passaggio sent→read quando arriva `UpdateReadHistoryOutbox`.
+
+**Fix (WhatsApp, branch `fix/typing-delivered-40-41`, design in `DESIGN_FIX_40_41.md`):**
+- enum ack ufficiale WAHA con costanti condivise in `backends/whatsapp_events.py`
+  (`WAHA_ACK_SERVER=1`, `WAHA_ACK_DEVICE=2`, `WAHA_ACK_READ=3`, `WAHA_ACK_PLAYED=4`).
+- `_event_from_ack`: soglia `status >= 2` per produrre il receipt (DEVICE →
+  delivered/`is_read=False`), `is_read = status >= 3` (READ). `_ack_value`
+  rimappa i nomi ufficiali (alias Baileys rimossi, mai emessi da WAHA).
+- `fetch_history`: soglie `ack >= WAHA_ACK_DEVICE` / `>= WAHA_ACK_READ`.
+- Compatibilità verificata: l'evento sintetico outgoing in `handle_webhook` non
+  ha gate su `status` e l'ordinamento messaggio-prima-del-receipt resta: con
+  ack=2 il flusso produce `[message, receipt(delivered)]` senza duplicati.
+- Test aggiornati ai nuovi attesi (`tests/test_whatsapp_backend.py`,
+  `tests/test_whatsapp_read_receipt_fix.py`, `tests/test_edit_whatsapp.py`) +
+  25 nuovi in `tests/test_whatsapp_fix_40_41.py`.
+
+**Fix (Telegram, branch `fix/typing-delivered-40-41`):** nessun `delivered`
+sintetico — **protocol limitation (by design)**: MTProto per cloud chat non
+espone alcuna conferma di consegna, solo la lettura (`UpdateReadHistoryOutbox`,
+già gestita da `_handle_read_receipt`). La limitazione è documentata nei
+docstring di `_handle_read_receipt` e `process_receipt`; `process_receipt`
+mantiene il target `"delivered"` pronto se un domani MTProto introducesse una
+conferma. La metà WhatsApp è gestita separatamente (allineamento enum WAHA).
 
 ---
 

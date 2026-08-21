@@ -455,7 +455,7 @@ class TestWhatsAppEvents:
     # ── message.ack (delivery / read receipts via WAHA push) ──────────
 
     def test_ack_delivery_event(self):
-        """message.ack with status=3 → receipt with is_read=False."""
+        """message.ack with status=2 (DEVICE) → receipt with is_read=False."""
         ev = _event_from_ack(
             {
                 "event": "message.ack",
@@ -464,7 +464,7 @@ class TestWhatsAppEvents:
                     "from": "me@lid",
                     "to": "39123@s.whatsapp.net",
                     "fromMe": True,
-                    "status": 3,
+                    "status": 2,
                 },
             }
         )
@@ -476,7 +476,7 @@ class TestWhatsAppEvents:
         assert ev.payload["is_read"] is False
 
     def test_ack_read_event(self):
-        """message.ack with status=4 → receipt with is_read=True."""
+        """message.ack with status=3 (READ) → receipt with is_read=True."""
         ev = _event_from_ack(
             {
                 "event": "message.ack",
@@ -485,7 +485,7 @@ class TestWhatsAppEvents:
                     "from": "me@lid",
                     "to": "39123@s.whatsapp.net",
                     "fromMe": True,
-                    "status": 4,
+                    "status": 3,
                 },
             }
         )
@@ -495,7 +495,7 @@ class TestWhatsAppEvents:
         assert ev.contact_id == "39123@s.whatsapp.net"
 
     def test_ack_server_ack_ignored(self):
-        """message.ack with status=2 (SERVER_ACK) is ignored."""
+        """message.ack with status=1 (SERVER) is ignored."""
         ev = _event_from_ack(
             {
                 "event": "message.ack",
@@ -504,7 +504,7 @@ class TestWhatsAppEvents:
                     "from": "me@lid",
                     "to": "39123@s.whatsapp.net",
                     "fromMe": True,
-                    "status": 2,
+                    "status": 1,
                 },
             }
         )
@@ -552,7 +552,7 @@ class TestWhatsAppEvents:
                     "from": "me@lid",
                     "to": "39123@s.whatsapp.net",
                     "fromMe": True,
-                    "status": 4,
+                    "status": 3,
                 },
             }
         )
@@ -571,7 +571,7 @@ class TestWhatsAppEvents:
                     "from": "me@lid",
                     "to": "39123@s.whatsapp.net",
                     "fromMe": True,
-                    "status": 3,
+                    "status": 2,
                 },
             }
         )
@@ -1562,11 +1562,11 @@ class TestWhatsAppWebhook:
             patch.object(backend, "_persist_message"),
             patch.object(backend_mod, "_update_message_status_by_id"),
         ):
-            # status 2 (SERVER_ACK) → synthetic message event only (no receipt);
+            # status 2 (DEVICE) → synthetic message event + delivered receipt;
             # handle_webhook must NOT mutate the cache (single mutation point).
             assert backend.handle_webhook({"event": "message.ack", "payload": payload})
             echo = backend.poll_once()
-            assert [event.type for event in echo] == ["message"]
+            assert [event.type for event in echo] == ["message", "receipt"]
             # The consumer performs the ingestion.
             backend.ingest_message(
                 echo[0].contact_id, echo[0].payload, echo[0].payload["timestamp"]
@@ -1636,7 +1636,7 @@ class TestWhatsAppWebhook:
                 "to": "3912345678@c.us",
                 "fromMe": True,
                 "timestamp": now,
-                "status": 2,  # SERVER_ACK (< 3 → _event_from_ack returns None)
+                "status": 2,  # DEVICE (2 → delivered receipt)
                 "body": "",
                 "hasMedia": True,
                 "media": {
@@ -1649,8 +1649,8 @@ class TestWhatsAppWebhook:
         ok = backend.handle_webhook(envelope)
         assert ok is True
         events = backend.poll_once()
-        assert len(events) == 1, (
-            f"Expected 1 synthetic message event for image ack, got {len(events)}"
+        assert len(events) == 2, (
+            f"Expected message + delivered receipt for image ack, got {len(events)}"
         )
         ev = events[0]
         assert ev.type == "message"
@@ -1680,7 +1680,7 @@ class TestWhatsAppWebhook:
                 "to": "3912345678@c.us",
                 "fromMe": True,
                 "timestamp": now,
-                "status": 2,  # SERVER_ACK (< 3 → _event_from_ack returns None)
+                "status": 2,  # DEVICE (2 → delivered receipt)
                 "body": "Nice, or?",
                 "hasMedia": True,
                 "media": {
@@ -1691,7 +1691,7 @@ class TestWhatsAppWebhook:
         }
         assert backend.handle_webhook(envelope) is True
         events = backend.poll_once()
-        assert len(events) == 1
+        assert len(events) == 2
         ev = events[0]
         assert ev.type == "message"
         assert ev.payload["msg_type"] == "image"
@@ -1718,7 +1718,7 @@ class TestWhatsAppWebhook:
         ok = backend.handle_webhook(envelope)
         assert ok is True
         events = backend.poll_once()
-        assert len(events) == 1
+        assert len(events) == 2
         ev = events[0]
         assert ev.payload["msg_type"] == "text"  # default
         assert ev.payload.get("attachment_id") is None
@@ -2863,6 +2863,7 @@ class TestWhatsAppWebhookRegistration:
             "message.any",
             "message.ack",
             "message.ack.group",
+            "presence.update",
         ]
 
     def test_configure_webhook_skips_when_already_registered(self):
@@ -2885,6 +2886,7 @@ class TestWhatsAppWebhookRegistration:
                                     "message.any",
                                     "message.ack",
                                     "message.ack.group",
+                                    "presence.update",
                                 ],
                             }
                         ]
@@ -2916,7 +2918,7 @@ class TestWhatsAppWebhookRegistration:
             patch.object(wa_mod, "get_whatsapp_webhook_url", return_value=webhook),
         ):
             backend._configure_webhook()
-        # Config vecchia (solo message) → PUT con entrambi gli eventi.
+        # Config vecchia (solo message) → PUT con tutti gli eventi.
         mock_put.assert_called_once()
         call_config = mock_put.call_args[0][0]
         assert call_config["config"]["webhooks"][0]["events"] == [
@@ -2924,6 +2926,7 @@ class TestWhatsAppWebhookRegistration:
             "message.any",
             "message.ack",
             "message.ack.group",
+            "presence.update",
         ]
 
     def test_configure_webhook_never_raises_on_error(self):

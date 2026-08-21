@@ -39,7 +39,10 @@ services:
       # The client runs on the HOST, so WAHA reaches it via host.docker.internal
       # (the bridge gateway) on the client's webhook port (default 8088).
       WAHA_WEBHOOK_URL: "http://host.docker.internal:${CLIENT_WEBHOOK_PORT:-8088}/webhook"
-      WAHA_WEBHOOK_EVENTS: "message,message.ack"
+      # Name legacy + attuale: le versioni recenti di WAHA leggono
+      # WHATSAPP_HOOK_EVENTS; WAHA_WEBHOOK_EVENTS è mantenuto per retrocompatibilità.
+      WAHA_WEBHOOK_EVENTS: "message,message.ack,presence.update"
+      WHATSAPP_HOOK_EVENTS: "message,message.ack,presence.update"
     extra_hosts:
       # On Linux, the container cannot resolve host.docker.internal unless it is
       # explicitly mapped to the host gateway.  This is required for WAHA to

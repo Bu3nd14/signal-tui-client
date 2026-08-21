@@ -38,6 +38,8 @@ from .config import (
     resolve_whatsapp_api_url,
 )
 from .whatsapp_events import (
+    WAHA_ACK_DEVICE,
+    WAHA_ACK_READ,
     _event_from_ack,  # noqa: F401  re-export for tests
     _event_from_message,
     _event_from_raw,
@@ -165,6 +167,13 @@ class WhatsAppBackend(ChatBackend):
         self._lid_lock = threading.Lock()
         self._lid_resolver_started = False
 
+        # ── Presence (typing) subscription ─────────────────────────────
+        #: Chats already subscribed to ``presence.update`` via WAHA's per-chat
+        #: endpoint.  The idempotency guard lives here so the background sweep
+        #: and the lazy triggers never double-POST.
+        self._presence_subscribed: set[str] = set()
+        self._presence_subscribe_started = False
+
     def handle_webhook(self, raw: dict) -> bool:
         """Elabora un payload webhook WAHA (modalità Push/event-driven).
 
@@ -186,9 +195,9 @@ class WhatsAppBackend(ChatBackend):
         # ── message.ack: translate into a synthetic message event only ────
         # WAHA sends message.ack INSTEAD of a separate message event for
         # outgoing echoes (including messages synced from another linked
-        # device).  The ack may have status < 3 (SERVER_ACK), which makes
-        # ``_event_from_ack`` return None, so we must build the message event
-        # from the ack content *before* the event-is-None early-return.
+        # device).  The ack may have status < 2 (ERROR/PENDING/SERVER), which
+        # makes ``_event_from_ack`` return None, so we must build the message
+        # event from the ack content *before* the event-is-None early-return.
         #
         # Single-mutation-point rule: we do NOT call ``ingest_message`` here.
         # The consumer (``_handle_message_event``) performs the ingestion and
@@ -211,6 +220,10 @@ class WhatsAppBackend(ChatBackend):
                     or (content.get("key") or {}).get("remoteJid")
                 )
                 if ack_contact:
+                    # Lazy per-chat presence subscribe: the first outgoing
+                    # message event for a contact is a cheap signal that we
+                    # want its typing indicator too.
+                    self._presence_subscribe_lazy(ack_contact)
                     ack_ts = (
                         int(content.get("timestamp") or 0) * 1000
                     )  # WAHA uses seconds, we use ms
@@ -252,7 +265,7 @@ class WhatsAppBackend(ChatBackend):
                                 )
                             )
                         # niente evento sintetico "message"; gli eventuali
-                        # receipt (ack>=3) prodotti da _event_from_raw
+                        # receipt (ack >= 2) prodotti da _event_from_raw
                         # proseguono invariati.
                     else:
                         # ── Extract image/attachment metadata from ack payload ──
@@ -319,7 +332,7 @@ class WhatsAppBackend(ChatBackend):
         events = _event_from_raw(raw, self._contacts_by_jid)
         if not events:
             # Even when the raw event is not recognised as a receipt/typing
-            # (e.g. message.ack with status < 3), enqueue the synthetic message
+            # (e.g. message.ack with status < 2), enqueue the synthetic message
             # event so the TUI mounts and ingests it.
             if ack_msg_event is not None:
                 self._enqueue_event(ack_msg_event)
@@ -327,7 +340,7 @@ class WhatsAppBackend(ChatBackend):
 
             return False
 
-        # When a message.ack also produced a receipt event (status >= 3),
+        # When a message.ack also produced a receipt event (status >= 2),
         # enqueue the synthetic message event first so the TUI mounts the
         # message BEFORE the receipt tries to update its status.
         if ack_msg_event is not None:
@@ -338,6 +351,9 @@ class WhatsAppBackend(ChatBackend):
         # raw event key to avoid repeats.
         for event in events:
             if event.type == "message":
+                # Lazy per-chat presence subscribe on the first message from a
+                # contact we haven't subscribed yet (covers new chats).
+                self._presence_subscribe_lazy(event.contact_id)
                 mid = event.payload.get("id")
                 hit = self._detect_edit(
                     event.contact_id,
@@ -447,6 +463,9 @@ class WhatsAppBackend(ChatBackend):
         # Opportunistico: se già connesso, avvia il resolver @lid in background
         # (idempotente) così la prossima apertura della rubrica beneficia.
         self.start_lid_resolver()
+        # Subscribe presence per-chat in background (idempotente): senza questa
+        # WAHA non distribuisce ``presence.update`` e il typing non arriva.
+        self.start_presence_subscribe()
 
     def _wait_session_ready(self, timeout: float = 40.0) -> bool:
         """Poll get_session_status finché la sessione WAHA è pronta (WORKING).
@@ -514,6 +533,7 @@ class WhatsAppBackend(ChatBackend):
                 "message.any",
                 "message.ack",
                 "message.ack.group",
+                "presence.update",
             ]
             if webhook in urls:
                 # URL già registrato — controlla se anche gli eventi sono
@@ -879,6 +899,75 @@ class WhatsAppBackend(ChatBackend):
         except Exception:
             logger.warning("WhatsApp lid resolver run failed", exc_info=True)
 
+    # ─── Presence (typing) subscription ────────────────────────────────
+    # WAHA only distributes ``presence.update`` for chats we subscribed to via
+    # ``POST /api/{session}/presence/{chatId}/subscribe``.  Subscribing is
+    # best-effort and idempotent: a missing API or an error degrades silently
+    # to "no typing indicator", never to a crash.
+
+    def _presence_subscribe_post(self, chat_id: str) -> None:
+        """Perform the presence-subscribe POST (best-effort, never raises)."""
+        try:
+            self._rest.presence_subscribe(chat_id)
+        except Exception:
+            logger.debug("presence subscribe failed for %s", chat_id, exc_info=True)
+
+    def _presence_subscribe(self, chat_id: str) -> None:
+        """Subscribe a chat to presence updates (idempotent, fire-and-forget).
+
+        The idempotency guard on ``self._presence_subscribed`` prevents
+        duplicate POSTs.  Used directly by the background sweep (already on a
+        worker thread); the lazy call sites use ``_presence_subscribe_lazy``.
+        """
+        if not chat_id or not self._rest:
+            return
+        if chat_id in self._presence_subscribed:
+            return
+        self._presence_subscribed.add(chat_id)
+        self._presence_subscribe_post(chat_id)
+
+    def _presence_subscribe_lazy(self, chat_id: str) -> None:
+        """Non-blocking one-time presence subscribe for lazy call sites.
+
+        Marks the chat subscribed immediately (idempotency, no double-POST
+        races) and performs the actual POST on a daemon thread so it never
+        blocks the UI/webhook/fetch-history caller.
+        """
+        if not chat_id or not self._rest:
+            return
+        if chat_id in self._presence_subscribed:
+            return
+        self._presence_subscribed.add(chat_id)
+        threading.Thread(
+            target=self._presence_subscribe_post,
+            args=(chat_id,),
+            name="wa-presence-subscribe",
+            daemon=True,
+        ).start()
+
+    def start_presence_subscribe(self) -> None:
+        """Start the background per-chat presence subscription sweep (idempotent)."""
+        if self._presence_subscribe_started or not self._rest:
+            return
+        self._presence_subscribe_started = True
+        threading.Thread(
+            target=self._presence_subscribe_run,
+            name="wa-presence-subscribe",
+            daemon=True,
+        ).start()
+
+    def _presence_subscribe_run(self) -> None:
+        """Subscribe presence for the known chats, pausing briefly in between."""
+        try:
+            for contact in list(self.contacts):
+                chat_id = contact.id
+                if not chat_id:
+                    continue
+                self._presence_subscribe(chat_id)
+                time.sleep(0.3)
+        except Exception:
+            logger.warning("WhatsApp presence subscribe sweep failed", exc_info=True)
+
     def fetch_history(self, contact_id: str, limit: int = 20) -> list[dict]:
         """Scarica lo storico remoto di una chat da WAHA e lo salva nel cache.
 
@@ -893,6 +982,9 @@ class WhatsAppBackend(ChatBackend):
         """
         if not self._rest:
             return []
+        # Lazy per-chat presence subscribe: aprire una chat è il segnale che
+        # vogliamo anche il suo indicatore di digitazione.
+        self._presence_subscribe_lazy(contact_id)
         raw = self._rest.list_messages(contact_id, limit=limit)
         if not isinstance(raw, list):
             return []
@@ -901,8 +993,9 @@ class WhatsAppBackend(ChatBackend):
         msgs = [m for m in raw if isinstance(m, dict)]
         msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
         # Riconciliazione read/delivery dallo storico: per i messaggi MIEI già
-        # confermati (ack >= 3) emettiamo eventi receipt (single mutation point:
-        # nessuna scrittura cache/DB qui — sarà process_receipt ad applicarli).
+        # confermati (ack >= 2 = DEVICE) emettiamo eventi receipt (single
+        # mutation point: nessuna scrittura cache/DB qui — sarà process_receipt
+        # ad applicarli).
         read_ids: set[str] = set()
         delivered_ids: set[str] = set()
         for m in msgs:
@@ -948,8 +1041,8 @@ class WhatsAppBackend(ChatBackend):
 
                 ack = payload.get("ack")
                 mid = payload.get("id")
-                if is_mine and isinstance(ack, int) and ack >= 3 and mid:
-                    (read_ids if ack >= 4 else delivered_ids).add(str(mid))
+                if is_mine and isinstance(ack, int) and ack >= WAHA_ACK_DEVICE and mid:
+                    (read_ids if ack >= WAHA_ACK_READ else delivered_ids).add(str(mid))
 
         # Enqueue aggregated receipt events AFTER the ingestion, so the
         # consumer mounts the messages before applying their read/delivered

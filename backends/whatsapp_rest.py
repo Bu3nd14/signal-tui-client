@@ -395,6 +395,23 @@ class WhatsAppRESTClient:
             },
         )
 
+    def presence_subscribe(self, chat_id: str) -> dict | None:
+        """Subscribe to presence updates for a chat (best-effort POST).
+
+        WAHA only distributes a chat's ``presence.update`` events after
+        ``POST /api/{session}/presence/{chatId}/subscribe``.  The JID is
+        percent-encoded (same pattern as ``resolve_contact``) so ``@c.us`` /
+        ``@g.us`` / ``@lid`` don't become URL userinfo.  Returns ``None`` on
+        any error (best-effort contract).
+        """
+        from urllib.parse import quote
+
+        encoded = quote(chat_id, safe="")
+        return self._request(
+            "POST",
+            f"/api/{self.session_name}/presence/{encoded}/subscribe",
+        )
+
     # ── Attachments ───────────────────────────────────────────────────
 
     def get_download_url(self, media_id: str) -> str | None:
