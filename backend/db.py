@@ -437,6 +437,49 @@ def _update_message_status_by_id(
             conn.close()
 
 
+def _update_message_status_by_text(
+    text: str,
+    status: str,
+    protocol: str,
+    contact_number: str,
+    expected_statuses: tuple[str, ...] | None = None,
+) -> bool:
+    """Update the most recent matching outgoing row by ``(protocol, contact, text)``.
+
+    Fallback per la transizione pending→sent (bug bolla "grigia"): l'echo di
+    WhatsApp/Telegram può sostituire il timestamp ottimistico del client con
+    quello del server PRIMA che il worker esegua la transizione, quindi il
+    match per ``timestamp`` di ``_update_message_status`` fallisce.  Qui la
+    riga outgoing più recente con lo stesso testo viene aggiornata, con lo
+    stesso rank guard (mai downgrade) e lo scoping per protocollo/contatto.
+    """
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            where = "protocol = ? AND contact_number = ? AND text = ? AND is_mine = 1"
+            params: list = [protocol, contact_number, text]
+            if expected_statuses:
+                placeholders = ", ".join("?" for _ in expected_statuses)
+                where += f" AND status IN ({placeholders})"
+                params.extend(expected_statuses)
+            cursor = conn.execute(
+                "UPDATE messages SET status = ? WHERE id = ("
+                "SELECT id FROM messages WHERE "
+                + where
+                + " ORDER BY timestamp DESC LIMIT 1) "
+                "AND CASE status WHEN 'pending' THEN 0 WHEN 'failed' THEN 0 "
+                "WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END "
+                "<= CASE ? WHEN 'pending' THEN 0 WHEN 'failed' THEN 0 WHEN 'sent' THEN 1 "
+                "WHEN 'delivered' THEN 2 WHEN 'read' THEN 3 ELSE 0 END",
+                [status, *params, status],
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
 def _update_message_text(
     contact_number: str,
     new_text: str,

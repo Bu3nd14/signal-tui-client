@@ -295,7 +295,7 @@ class SendMixin:
         expected_statuses: tuple[str, ...],
     ) -> bool:
         """Atomically advance one optimistic message across every cache layer."""
-        from backend import _update_message_status
+        from backend import _update_message_status, _update_message_status_by_text
         from models import contact_cache_key
 
         if not _update_message_status(
@@ -306,31 +306,43 @@ class SendMixin:
             text=text,
             expected_statuses=expected_statuses,
         ):
-            logger.warning(
-                "Outgoing status transition failed "
-                "(protocol=%r, contact_id=%r, ts=%r, text=%r, status=%r)",
+            # Fallback: l'echo (spesso più veloce del worker) può aver sostituito
+            # il timestamp ottimistico del client con quello del server, quindi il
+            # match per timestamp fallisce.  Riprova sul testo (riga outgoing più
+            # recente), con lo stesso expected-status e rank guard.
+            updated = _update_message_status_by_text(
+                text,
+                status,
                 protocol,
                 contact_id,
-                timestamp,
-                text[:80],
-                status,
+                expected_statuses=expected_statuses,
             )
-            return False
+            if not updated:
+                logger.warning(
+                    "Outgoing status transition failed "
+                    "(protocol=%r, contact_id=%r, ts=%r, text=%r, status=%r)",
+                    protocol,
+                    contact_id,
+                    timestamp,
+                    text[:80],
+                    status,
+                )
+                return False
         backend = self.manager.get(protocol)
         if backend is None:
             backend = self.signal_backend
         for msg in getattr(backend, "cache", {}).get(contact_id, []):
             if (
                 msg.get("is_mine")
-                and msg.get("timestamp") == timestamp
                 and msg.get("text") == text
+                and msg.get("status") in expected_statuses
             ):
                 msg["status"] = status
         for msg in self._cache.get(contact_cache_key(protocol, contact_id), []):
             if (
                 msg.get("is_mine")
-                and msg.get("timestamp") == timestamp
                 and msg.get("text") == text
+                and msg.get("status") in expected_statuses
             ):
                 msg["status"] = status
         self.call_from_thread(
