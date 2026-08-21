@@ -240,7 +240,7 @@ causa del mancato passaggio pending→sent prima o insieme al fix B.
 
 ---
 
-### #40 — Indicatore di digitazione (typing) non funzionante per Telegram e WhatsApp, solo per Signal (`backends/telegram.py`; `backends/whatsapp.py`/`backends/whatsapp_events.py`; `backends/signal.py`, righe 759-764) ✅ RISOLTO
+### #40 — Indicatore di digitazione (typing) non funzionante per Telegram e WhatsApp, solo per Signal (`backends/telegram.py`; `backends/whatsapp.py`/`backends/whatsapp_events.py`; `backends/signal.py`, righe 759-764) ✅ RISOLTO (Telegram) / 🚫 WON'T FIX (WhatsApp)
 
 L'indicatore "✍️ sta scrivendo" (stato gestito in `tui/events.py` `_handle_typing_event`
 e `tui/polling.py`) dipende dagli eventi `ChatEvent(type="typing")` emessi dai
@@ -291,6 +291,32 @@ allineare `_event_from_typing`; aggiungere test end-to-end per entrambi i backen
   subscribe lazy su `fetch_history`/primo messaggio.
 - Test: classe `TestTelegramTyping` (8 test) in `tests/test_telegram.py`;
   `tests/test_whatsapp_fix_40_41.py` (25 test). Suite completa: 1154 passed.
+
+**🚫 WON'T FIX (WhatsApp) — limite dell'engine WEBJS di WAHA.** Il typing
+WhatsApp non è ottenibile con lo stack attuale, verificato il 21/08/2026 su
+**WAHA 2026.8.1 (tier CORE, engine WEBJS)**:
+
+- La subscribe per-chat `POST /api/{session}/presence/{chatId}/subscribe` risponde
+  **HTTP 500** per ogni JID: `TypeError: d(...).subscribePresence is not a
+  function` — il metodo **non esiste** nel core WEBJS di WAHA
+  (`WebjsClientCore.js`). L'API della pagina WhatsApp Web usata da
+  whatsapp-web.js non espone `subscribePresence`.
+- Senza subscribe per-chat WAHA **non distribuisce** gli eventi `presence.update`
+  (0 eventi nei log, anche dopo il fix config webhook con `presence.update` e
+  `WHATSAPP_HOOK_EVENTS`).
+- Provato anche `config.webjs.tagsEventsOn: true` (flag che la docu WAHA dichiara
+  *required* per `presence.update`): la sessione si riavvia correttamente ma la
+  subscribe resta rotta → nessun evento presence.
+- Il supporto presence/typing completo è implementato solo sull'engine **NOWEB**
+  (senza browser, WebSocket diretto), che richiede il **re-link** della sessione
+  (scan QR) e l'abilitazione dello **store** (`config.noweb.store.enabled`) per
+  contatti/chats/storico — scelta **non adottata**.
+
+Il codice implementato (subscribe per-chat best-effort, `_event_from_typing`
+allineato alla shape ufficiale, `presence.update` nel webhook e nel compose) è
+**mantenuto**: diventa operativo senza modifiche se WAHA fixa `subscribePresence`
+su WEBJS o se si adotta l'engine NOWEB. Il fallimento resta silenzioso
+(best-effort) e non degrada altre funzionalità WhatsApp.
 
 ---
 
