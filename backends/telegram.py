@@ -261,12 +261,22 @@ class TelegramBackend(ChatBackend):
 
         @self._client.on(events.Raw)
         async def _on_raw(update: Any) -> None:
-            from telethon.tl.types import UpdateReadHistoryOutbox
+            from telethon.tl.types import (
+                UpdateChannelUserTyping,
+                UpdateChatUserTyping,
+                UpdateReadHistoryOutbox,
+                UpdateUserTyping,
+            )
 
             if isinstance(update, UpdateReadHistoryOutbox):
                 await self._handle_read_receipt(update)
+            elif isinstance(
+                update,
+                (UpdateUserTyping, UpdateChatUserTyping, UpdateChannelUserTyping),
+            ):
+                await self._handle_typing_update(update)
             else:
-                logger.info("Telegram raw: %s", type(update).__name__)
+                logger.debug("Telegram raw: %s", type(update).__name__)
 
         self._running = True
         self._loop_thread = threading.Thread(
@@ -940,6 +950,11 @@ class TelegramBackend(ChatBackend):
 
         Does not mutate caches or SQLite directly: that is the responsibility
         of ``process_receipt`` on the UI thread.
+
+        Protocol limitation (by design): MTProto cloud chats expose no delivery
+        confirmation, only the read receipt handled here.  No synthetic
+        ``delivered`` event is emitted for Telegram — outgoing messages go
+        straight from ``sent`` to ``read`` when this update arrives.
         """
         from telethon.tl.types import PeerChannel, PeerChat, PeerUser
 
@@ -975,6 +990,52 @@ class TelegramBackend(ChatBackend):
                 )
             )
 
+    async def _handle_typing_update(self, update: Any) -> None:
+        """Translate MTProto typing updates into a generic ``ChatEvent``.
+
+        Pure translator: does not mutate caches or SQLite — it only enqueues a
+        ``ChatEvent(type="typing", ...)`` for the UI, same shape as
+        ``_handle_read_receipt``.  Telegram re-sends the chat-action every ~5 s
+        while the contact is composing, so no backend-side dedup is applied:
+        the UI refreshes the ``✍️`` keep-alive on each STARTED and coalesces the
+        noise (see ``tui/events.py::_handle_typing_event``).
+        """
+        from telethon.tl.types import (
+            SendMessageCancelAction,
+            UpdateChannelUserTyping,
+            UpdateChatUserTyping,
+            UpdateUserTyping,
+        )
+
+        if isinstance(update, UpdateUserTyping):
+            contact_id = str(update.user_id)
+            action = update.action
+        elif isinstance(update, UpdateChatUserTyping):
+            # Legacy groups: the indicator is per-chat (not per-actor), so the
+            # chat id is used, matching the Message.chat_id convention.
+            contact_id = str(-update.chat_id)
+            action = update.action
+        elif isinstance(update, UpdateChannelUserTyping):
+            # Channels/supergroups: match the Message.chat_id convention.
+            contact_id = str(-1000000000000 - update.channel_id)
+            action = update.action
+        else:
+            return
+
+        # Any "SendMessage*Action" other than cancel signals active composing.
+        typing_action = (
+            "STOPPED" if isinstance(action, SendMessageCancelAction) else "STARTED"
+        )
+
+        self._events.put(
+            ChatEvent(
+                type="typing",
+                protocol=PROTOCOL_TELEGRAM,
+                contact_id=contact_id,
+                payload={"action": typing_action},
+            )
+        )
+
     # ─── poll_once (queue drain) ───────────────────────────────────────────
 
     def process_receipt(self, envelope: dict) -> list[dict]:
@@ -985,6 +1046,11 @@ class TelegramBackend(ChatBackend):
         a rank guard (pending/failed < sent < delivered < read), persists the
         change via ``_update_message_status_by_id``, and returns the updated
         entries so the UI can refresh its own cache and widgets.
+
+        Protocol limitation (by design): MTProto cloud chats have no delivery
+        confirmation, so no Telegram producer emits ``is_read=False`` (target
+        ``"delivered"``).  The branch is kept for protocol-agnostic completeness
+        and would light up automatically if such a producer were ever added.
         """
         ids = envelope.get("message_ids") or []
         if not ids:

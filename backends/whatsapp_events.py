@@ -8,7 +8,24 @@ Pure helpers (``_msg_type``, ``_jid_string``, ``_resolve_sender_name``) plus the
 
 from __future__ import annotations
 
+import logging
+
 from models import PROTOCOL_WHATSAPP, ChatEvent
+
+logger = logging.getLogger(__name__)
+
+# ─── Official WAHA message ack enum ─────────────────────────────────────────
+# ``message.ack`` exposes the delivery/read state both as an integer ``ack``
+# (the authoritative field) and as a human-readable ``ackName``.  WAHA uses
+# the enum below (docu ``how-to/events#message.ack``); it differs from the
+# Baileys ``WAMessageAck`` values that some older builds of the underlying
+# engine used to mirror.
+WAHA_ACK_ERROR = -1
+WAHA_ACK_PENDING = 0
+WAHA_ACK_SERVER = 1
+WAHA_ACK_DEVICE = 2
+WAHA_ACK_READ = 3
+WAHA_ACK_PLAYED = 4
 
 
 def _msg_type(raw: dict) -> str:
@@ -49,12 +66,14 @@ def _jid_string(value) -> str | None:
 
 
 def _ack_value(raw: dict) -> int | None:
-    """Return the numeric Baileys ack of a message dict, or ``None``.
+    """Return the numeric WAHA ack of a message dict, or ``None``.
 
-    WAHA exposes the delivery/read state as an integer ``ack`` (the Baileys
-    ``WAMessageAck`` enum: 2=SERVER_ACK, 3=DELIVERY_ACK, 4=READ) and, in some
-    builds, a human-readable ``ackName``.  Accept both so the history fetch can
-    reconcile read receipts without mutating the DB before enqueueing.
+    WAHA exposes the delivery/read state as an integer ``ack`` (the official
+    enum: ``-1=ERROR, 0=PENDING, 1=SERVER, 2=DEVICE, 3=READ, 4=PLAYED``) and,
+    in some builds, a human-readable ``ackName``.  Accept both so the history
+    fetch can reconcile read receipts without mutating the DB before
+    enqueueing.  The integer field is authoritative; ``ackName`` is only the
+    readable fallback.
     """
     ack = raw.get("ack")
     if ack is not None:
@@ -64,13 +83,19 @@ def _ack_value(raw: dict) -> int | None:
             pass
     name = str(raw.get("ackName") or "").strip().upper()
     mapping = {
-        "ERROR": 0,
-        "PENDING": 1,
-        "SERVER_ACK": 2,
-        "DELIVERY_ACK": 3,
-        "READ": 4,
+        "ERROR": WAHA_ACK_ERROR,
+        "PENDING": WAHA_ACK_PENDING,
+        "SERVER": WAHA_ACK_SERVER,
+        "DEVICE": WAHA_ACK_DEVICE,
+        "READ": WAHA_ACK_READ,
+        "PLAYED": WAHA_ACK_PLAYED,
     }
-    return mapping.get(name)
+    value = mapping.get(name)
+    if value is None:
+        # Minimal field instrumentation: helps confirm the enum emitted by the
+        # WAHA build in use without leaking any payload content.
+        logger.debug("Unknown WAHA ackName: %r", raw.get("ackName"))
+    return value
 
 
 def _resolve_sender_name(sender: str, contacts_by_jid: dict | None) -> str:
@@ -379,14 +404,17 @@ def _event_from_ack(raw: dict) -> ChatEvent | None:
     ``ChatEvent`` (type 'receipt').
 
     WAHA emits ``message.ack`` for outgoing messages as they progress through
-    the WhatsApp delivery pipeline.  The ``status`` field follows the Baileys
-    ``WAMessageAck`` enum:
+    the WhatsApp delivery pipeline.  The ``status`` field follows the official
+    WAHA enum (``ack``/``ackName``):
 
-    - 2 = SERVER_ACK  (received by WhatsApp server)   → ignored (not a receipt)
-    - 3 = DELIVERY_ACK (delivered to recipient device) → ``is_read=False``
-    - 4 = READ         (read by recipient)             → ``is_read=True``
+    - -1 = ERROR    → ignored
+    -  0 = PENDING  → ignored
+    -  1 = SERVER   (accepted by server)          → ignored (= already "sent")
+    -  2 = DEVICE   (delivered to recipient device) → ``is_read=False``
+    -  3 = READ     (read by recipient)             → ``is_read=True``
+    -  4 = PLAYED   (played, voice messages only)   → ``is_read=True``
 
-    Only messages sent **by us** (``fromMe: true``) with status ≥ 3 are kept;
+    Only messages sent **by us** (``fromMe: true``) with status ≥ 2 are kept;
     everything else is dropped silently.
     """
     # The payload may be nested under ``raw.payload`` (WAHA Core webhook
@@ -419,9 +447,9 @@ def _event_from_ack(raw: dict) -> ChatEvent | None:
         status = int(status)
     except (ValueError, TypeError):
         return None
-    if status < 3:
-        return None  # PENDING, SERVER_ACK — not a receipt yet
-    is_read = status >= 4
+    if status < WAHA_ACK_DEVICE:
+        return None  # ERROR, PENDING, SERVER — not a receipt yet
+    is_read = status >= WAHA_ACK_READ
     return ChatEvent(
         type="receipt",
         protocol=PROTOCOL_WHATSAPP,
@@ -431,7 +459,32 @@ def _event_from_ack(raw: dict) -> ChatEvent | None:
 
 
 def _event_from_typing(raw: dict) -> ChatEvent | None:
-    """Normalize a typing/presence indicator into a ``ChatEvent`` (type 'typing')."""
+    """Normalize a typing/presence indicator into a ``ChatEvent`` (type 'typing').
+
+    Official WAHA shape (``presence.update``)::
+
+        {"id": "39123@c.us", "presences": [
+            {"participant": "39123@c.us", "lastKnownPresence": "typing", ...}
+        ]}
+
+    where ``payload.id`` is the chat JID (direct ``@c.us``/``@lid`` or group
+    ``@g.us``) and ``lastKnownPresence`` ∈ ``online | offline | typing |
+    recording | paused``.  Some builds use ``composing`` instead of ``typing``.
+
+    Legacy fallback: the scalar ``presence`` / ``typing`` / ``type`` field is
+    treated as a single state (compatibility with older engines/builds).
+
+    Mapping (per-chat indicator, a single affordance in the UI):
+
+    - ``typing`` / ``composing`` / ``recording`` / ``true`` (legacy) → ``STARTED``
+    - ``paused``                                            → ``STOPPED``
+    - ``online`` / ``offline`` / ``unavailable`` / unknown / absent → ``None``
+
+    The ``online``/``offline`` filter is mandatory: presence pings are frequent
+    and unrelated to typing; without it every ping would light the 💭 mumbling
+    state.  With multiple ``presences`` (group) any composing-like state wins
+    over ``paused``, which wins over everything else.
+    """
     chat_jid = _jid_string(
         raw.get("chatId")
         or raw.get("from")
@@ -442,10 +495,35 @@ def _event_from_typing(raw: dict) -> ChatEvent | None:
     )
     if not chat_jid:
         return None
-    pr = raw.get("presence") or raw.get("typing") or raw.get("type") or ""
-    action = (
-        "STARTED" if str(pr).lower() in ("composing", "typing", "true") else "STOPPED"
-    )
+
+    states: list[str] = []
+    presences = raw.get("presences")
+    if isinstance(presences, list):
+        for presence in presences:
+            if not isinstance(presence, dict):
+                continue
+            last_known = presence.get("lastKnownPresence")
+            if last_known is not None:
+                states.append(str(last_known).lower())
+    if not states:
+        # Legacy scalar fallback (presence / typing / type).
+        scalar = raw.get("presence") or raw.get("typing") or raw.get("type")
+        if scalar is not None and str(scalar).strip() != "":
+            states.append(str(scalar).lower())
+
+    action: str | None = None
+    for state in states:
+        if state in ("composing", "typing", "recording", "true"):
+            action = "STARTED"
+            break
+    if action is None:
+        for state in states:
+            if state == "paused":
+                action = "STOPPED"
+                break
+    if action is None:
+        return None  # online/offline/unavailable/unknown → filtered out
+
     return ChatEvent(
         type="typing",
         protocol=PROTOCOL_WHATSAPP,

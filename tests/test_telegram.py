@@ -11,7 +11,20 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from telethon.tl.types import Channel, Chat, User
+from telethon.tl.types import (
+    Channel,
+    Chat,
+    PeerUser,
+    SendMessageCancelAction,
+    SendMessageRecordAudioAction,
+    SendMessageRecordVideoAction,
+    SendMessageTypingAction,
+    SendMessageUploadPhotoAction,
+    UpdateChannelUserTyping,
+    UpdateChatUserTyping,
+    UpdateUserTyping,
+    User,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -457,6 +470,87 @@ class TestTelegramMessages:
             return [item async for item in backend.receive()]
 
         assert asyncio.run(collect()) == []
+
+
+class TestTelegramTyping:
+    def test_user_typing_is_started(self):
+        backend = _backend()
+        asyncio.run(
+            backend._handle_typing_update(
+                UpdateUserTyping(user_id=42, action=SendMessageTypingAction())
+            )
+        )
+        events = backend.poll_once()
+        assert len(events) == 1
+        assert events[0].type == "typing"
+        assert events[0].protocol == PROTOCOL_TELEGRAM
+        assert events[0].contact_id == "42"
+        assert events[0].payload == {"action": "STARTED"}
+
+    def test_user_typing_cancel_is_stopped(self):
+        backend = _backend()
+        asyncio.run(
+            backend._handle_typing_update(
+                UpdateUserTyping(user_id=42, action=SendMessageCancelAction())
+            )
+        )
+        assert backend.poll_once()[0].payload == {"action": "STOPPED"}
+
+    @pytest.mark.parametrize(
+        "action",
+        [
+            SendMessageUploadPhotoAction(progress=0),
+            SendMessageRecordAudioAction(),
+            SendMessageRecordVideoAction(),
+        ],
+    )
+    def test_non_cancel_send_actions_are_started(self, action):
+        backend = _backend()
+        asyncio.run(
+            backend._handle_typing_update(UpdateUserTyping(user_id=42, action=action))
+        )
+        assert backend.poll_once()[0].payload == {"action": "STARTED"}
+
+    def test_chat_and_channel_contact_id_conventions(self):
+        backend = _backend()
+        asyncio.run(
+            backend._handle_typing_update(
+                UpdateChatUserTyping(
+                    chat_id=123,
+                    from_id=PeerUser(user_id=9),
+                    action=SendMessageTypingAction(),
+                )
+            )
+        )
+        assert backend.poll_once()[0].contact_id == "-123"
+
+        channel_id = str(-1000000000000 - 456)
+        asyncio.run(
+            backend._handle_typing_update(
+                UpdateChannelUserTyping(
+                    channel_id=456,
+                    from_id=PeerUser(user_id=9),
+                    action=SendMessageTypingAction(),
+                )
+            )
+        )
+        assert backend.poll_once()[0].contact_id == channel_id
+
+    def test_typing_is_pure_translator_no_cache_mutation(self):
+        backend = _backend()
+        backend.cache = {"42": [{"id": "1", "status": "sent"}]}
+        asyncio.run(
+            backend._handle_typing_update(
+                UpdateUserTyping(user_id=42, action=SendMessageTypingAction())
+            )
+        )
+        assert backend.cache == {"42": [{"id": "1", "status": "sent"}]}
+
+    def test_unknown_update_returns_none_no_event(self):
+        backend = _backend()
+        result = asyncio.run(backend._handle_typing_update(SimpleNamespace(user_id=42)))
+        assert result is None
+        assert backend.poll_once() == []
 
 
 class TestTelegramBackendOperations:

@@ -94,8 +94,9 @@ class TestWebhookSingleMutationPoint:
         # The cache stays empty: ingestion is the consumer's job.
         assert backend.cache == {}
         events = backend.poll_once()
-        assert [e.type for e in events] == ["message"]
+        assert [e.type for e in events] == ["message", "receipt"]
         assert events[0].payload["id"] == "ack-1"
+        assert events[1].payload == {"message_ids": ["ack-1"], "is_read": False}
 
 
 # ─── S1: history reconciliation via ack ──────────────────────────────────────
@@ -113,7 +114,7 @@ class TestHistoryReconciliation:
                 "fromMe": True,
                 "timestamp": 1700000000,
                 "body": "sent earlier",
-                "ack": 4,
+                "ack": 3,
             }
         ]
         backend.fetch_history("1@c.us", limit=20)
@@ -123,7 +124,7 @@ class TestHistoryReconciliation:
         assert len(receipts) == 1
         assert receipts[0].payload == {"message_ids": ["hist-1"], "is_read": True}
 
-    def test_fetch_history_emits_delivery_receipt_for_ack3(self, tmp_db):
+    def test_fetch_history_emits_delivery_receipt_for_ack2(self, tmp_db):
         backend = _make_backend()
         backend._rest.list_messages.return_value = [
             {
@@ -132,7 +133,7 @@ class TestHistoryReconciliation:
                 "fromMe": True,
                 "timestamp": 1700000000,
                 "body": "sent",
-                "ack": 3,
+                "ack": 2,
             }
         ]
         backend.fetch_history("1@c.us", limit=20)
@@ -150,7 +151,7 @@ class TestHistoryReconciliation:
                 "fromMe": True,
                 "timestamp": 1700000000,
                 "body": "sent",
-                "ack": 2,
+                "ack": 1,
             }
         ]
         backend.fetch_history("1@c.us", limit=20)

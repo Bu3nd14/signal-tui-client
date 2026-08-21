@@ -325,7 +325,7 @@ class TestHandleWebhookEdit:
                 "to": _CID,
                 "fromMe": True,
                 "timestamp": _TS_SEC,
-                "status": 2,  # SERVER_ACK (< 3 → nessun receipt da _event_from_raw)
+                "status": 2,  # DEVICE (2 → delivered receipt)
                 "body": "nuovo",
             },
         }
@@ -333,7 +333,7 @@ class TestHandleWebhookEdit:
         backend.handle_webhook(envelope)
         events = backend.poll_once()
 
-        assert [e.type for e in events] == ["message_edit"]
+        assert [e.type for e in events] == ["message_edit", "receipt"]
         ev = events[0]
         assert ev.payload["edit_message_id"] == "m1"
         assert ev.payload["text"] == "nuovo"
