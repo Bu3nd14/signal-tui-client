@@ -306,6 +306,15 @@ class SendMixin:
             text=text,
             expected_statuses=expected_statuses,
         ):
+            logger.warning(
+                "Outgoing status transition failed "
+                "(protocol=%r, contact_id=%r, ts=%r, text=%r, status=%r)",
+                protocol,
+                contact_id,
+                timestamp,
+                text[:80],
+                status,
+            )
             return False
         backend = self.manager.get(protocol)
         if backend is None:

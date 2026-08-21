@@ -46,6 +46,7 @@ from .whatsapp_events import (
     _event_from_receipt,  # noqa: F401  re-export for tests
     _event_from_typing,  # noqa: F401  re-export for tests
     _jid_string,
+    canonical_msg_id,
 )
 from .whatsapp_rest import WhatsAppRESTClient
 
@@ -1626,9 +1627,17 @@ class WhatsAppBackend(ChatBackend):
 
         Updates ``status`` for sent messages matching the reported ids, with a
         rank guard (pending/failed < sent < delivered < read), persists the
-        change by ``msg_id`` (``_update_message_status_by_id``) so it survives
-        restarts, and returns the updated entries (id/timestamp/status/text/
-        is_mine) for the UI to mirror and refresh the widgets.
+        change (by ``msg_id`` when known, otherwise by timestamp/text for the
+        optimistic id-less fallback) so it survives restarts, and returns the
+        updated entries (id/timestamp/status/text/is_mine) for the UI to
+        mirror and refresh the widgets.
+
+        Matching is done on the **canonical** id (see ``canonical_msg_id``):
+        WAHA stores ``true_{jid}_{hex}[_{participant}]`` in the DB/cache while
+        the webhook receipt carries only ``{hex}``, so a raw string comparison
+        would never match.  When no id matches at all, a conservative fallback
+        upgrades the single id-less ``is_mine``/``sent`` optimistic entry of
+        the chat (receipt raced ahead of the send id-upgrade).
         """
         ids = envelope.get("message_ids") or []
         if not ids:
@@ -1643,18 +1652,26 @@ class WhatsAppBackend(ChatBackend):
             "read": 3,
         }
         target_rank = rank.get(target, 0)
-        id_set = {str(i) for i in ids}
+        raw_ids = [str(i) for i in ids]
+        canonical_ids = {c for c in (canonical_msg_id(i) for i in raw_ids) if c}
         scoped_contact = envelope.get("contact_id")
 
         updated: list[dict] = []
+        # (msg_id_or_None, timestamp, text, contact_id) for SQLite persistence.
+        to_persist: list[tuple[str | None, int, str, str]] = []
+        matched_any = False
+
         contacts_to_scan = [scoped_contact] if scoped_contact else list(self.cache)
         for contact_id in contacts_to_scan:
             for msg in self.cache.get(contact_id, []):
                 if not msg.get("is_mine"):
                     continue
                 mid = str(msg.get("id", ""))
-                if mid not in id_set:
+                if not mid:
                     continue
+                if canonical_msg_id(mid) not in canonical_ids:
+                    continue
+                matched_any = True
                 old = msg.get("status", "sent")
                 if target_rank > rank.get(old, 0):
                     msg["status"] = target
@@ -1667,17 +1684,100 @@ class WhatsAppBackend(ChatBackend):
                             "is_mine": True,
                         }
                     )
-        # Persist status changes to SQLite so they survive restarts.
-        if updated:
-            from backend import _update_message_status_by_id
+                    to_persist.append(
+                        (
+                            mid,
+                            int(msg.get("timestamp") or 0),
+                            str(msg.get("text", "")),
+                            contact_id,
+                        )
+                    )
 
-            for msg in updated:
-                _update_message_status_by_id(
-                    msg["id"],
-                    msg["status"],
-                    protocol=PROTOCOL_WHATSAPP,
-                    contact_number=scoped_contact,
+        # ── Fallback: no id matched at all ──────────────────────────────
+        # The receipt can beat the send path's id-upgrade: the optimistic entry
+        # still has an empty id.  Only a UNIQUE id-less ``is_mine`` entry in
+        # ``sent`` state is eligible (prevents false positives when the chat has
+        # several pending bubbles).
+        if not matched_any:
+            candidates: list[tuple[str, dict]] = []
+            for contact_id in contacts_to_scan:
+                for msg in self.cache.get(contact_id, []):
+                    if (
+                        msg.get("is_mine")
+                        and not msg.get("id")
+                        and msg.get("status", "sent") == "sent"
+                    ):
+                        candidates.append((contact_id, msg))
+            if len(candidates) == 1:
+                contact_id, msg = candidates[0]
+                msg["status"] = target
+                updated.append(
+                    {
+                        "id": "",
+                        "timestamp": msg.get("timestamp", 0),
+                        "status": target,
+                        "text": msg.get("text", ""),
+                        "is_mine": True,
+                    }
                 )
+                to_persist.append(
+                    (
+                        None,
+                        int(msg.get("timestamp") or 0),
+                        str(msg.get("text", "")),
+                        contact_id,
+                    )
+                )
+
+        # Diagnostic: nothing matched (neither by canonical id nor by the
+        # id-less uniqueness fallback).  Emit enough context to confirm the
+        # mismatched shapes on production without leaking payload content.
+        # ``matched_any`` guards against noisy warnings on rank-guard no-ops
+        # (duplicated/out-of-order receipts, fetch_history reconciliation of
+        # messages already read), where the receipt WAS found but no state
+        # change was needed.
+        if not matched_any and not updated:
+            with_id = 0
+            empty_id = 0
+            for contact_id in contacts_to_scan:
+                for msg in self.cache.get(contact_id, []):
+                    if not msg.get("is_mine"):
+                        continue
+                    if msg.get("id"):
+                        with_id += 1
+                    else:
+                        empty_id += 1
+            logger.warning(
+                "WhatsApp receipt matched no is_mine entry "
+                "(contact_id=%r, raw_message_ids=%r, canonical_message_ids=%r, "
+                "is_mine_with_id=%d, is_mine_empty_id=%d)",
+                scoped_contact,
+                raw_ids,
+                sorted(canonical_ids),
+                with_id,
+                empty_id,
+            )
+
+        # Persist status changes to SQLite so they survive restarts.
+        if to_persist:
+            from backend import _update_message_status, _update_message_status_by_id
+
+            for msg_id, ts, text, contact_id in to_persist:
+                if msg_id:
+                    _update_message_status_by_id(
+                        msg_id,
+                        target,
+                        protocol=PROTOCOL_WHATSAPP,
+                        contact_number=contact_id,
+                    )
+                else:
+                    _update_message_status(
+                        ts,
+                        target,
+                        PROTOCOL_WHATSAPP,
+                        contact_id,
+                        text=text,
+                    )
         return updated
 
 
