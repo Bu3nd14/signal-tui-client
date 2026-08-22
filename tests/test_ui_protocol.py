@@ -237,30 +237,29 @@ class TestProtocolFilter:
         items[1].children[0].update.assert_not_called()
 
     def test_apply_contact_visibility_preserves_selected_highlight(self):
-        """Il filtro (Ctrl+W) mantiene l'evidenziazione sul contatto selezionato
-        se ancora visibile, e nasconde i contatti degli altri protocolli."""
+        """Il filtro (Ctrl+W) singolo maschera le righe membro e fa ricadere
+        l'evidenziazione sull'header del gruppo del contatto selezionato."""
         app = _make_app(_signal("+1", "Mario"), _whatsapp(), _signal("+2", "Luigi"))
         app._protocol_filter = "signal"
-        app.selected_contact = app.contacts[2]  # Luigi, posizione reale 2
-
-        class _Item:
-            def __init__(self, cid):
-                self._contact_id = cid
-                self.display = True
-
-        items = [_Item(c.cache_key) for c in app.contacts]
-        fake = MagicMock()
-        fake.children = items
-        fake.index = None
+        fake = _FakeListView()
         app.query_one = MagicMock(return_value=fake)
+        app._render_contact_list(list(app.contacts))
 
+        app.selected_contact = app.contacts[2]  # Luigi (signal)
         app._apply_contact_visibility()
 
-        # Luigi (visibile) resta evidenziato alla posizione reale 2.
-        assert fake.index == 2
-        assert items[0].display is True  # Mario (signal)
-        assert items[1].display is False  # Anna (whatsapp, nascosta)
-        assert items[2].display is True  # Luigi (signal)
+        # Tutte le righe membro sono mascherate sotto il filtro singolo.
+        members = [
+            it for it in fake.items if getattr(it, "_row_kind", "member") == "member"
+        ]
+        assert all(it.display is False for it in members)
+        # L'header del gruppo WhatsApp-only è nascosto.
+        wa_group = app._member_to_group[app.contacts[1].cache_key]
+        assert app._group_widgets[wa_group].display is False
+        # L'header del gruppo di Luigi è evidenziato (fallback header).
+        luigi_group = app._member_to_group[app.contacts[2].cache_key]
+        luigi_header = app._group_widgets[luigi_group]
+        assert fake.index == fake.items.index(luigi_header)
 
     def test_apply_contact_visibility_clears_stale_highlight_after_reorder(self):
         """Dopo un riordino in-place (``move_child``) la riga evidenziata può
