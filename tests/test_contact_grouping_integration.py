@@ -163,3 +163,33 @@ async def test_ctrl_w_filter_hides_group_without_protocol():
             mixed_header = app._group_widgets[app._member_to_group["signal:+391"]]
             assert mixed_header.display is True
             assert contact_list.index == contact_list.children.index(mixed_header)
+
+
+@pytest.mark.integration
+async def test_enter_on_header_with_filter_opens_chat_directly():
+    """With a single-protocol filter, Enter on a header opens that protocol's
+    member chat directly (no toggle, no expansion)."""
+    with _grouped_app(
+        _contact(PROTOCOL_SIGNAL, "+391", "Mario", "391"),
+        _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", "391"),
+    ) as app:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            contact_list = app.query_one("#contact-list", ListView)
+            contact_list.focus()
+
+            app._protocol_filter = "signal"
+            app._apply_contact_filter()
+            await pilot.pause()
+
+            # The chevron is gone: the header row is now just "Mario".
+            header = _find_row(contact_list, "Mario")
+            contact_list.index = contact_list.children.index(header)
+            await pilot.pause()
+
+            await pilot.press("enter")
+            await pilot.pause()
+
+            assert app.selected_contact is not None
+            assert app.selected_contact.cache_key == "signal:+391"
+            assert app._expanded_groups == set()  # no expansion

@@ -150,14 +150,19 @@ class ContactListMixin:
         The aggregate unread badge is suppressed when the selected contact is
         one of the group's members (decision 5).
         """
-        chevron = "▸" if entry.key not in self._expanded_groups else "▾"
+        if self._protocol_filter in ("signal", "whatsapp", "telegram"):
+            # Filter mode masks members: the header is the only row shown, so
+            # the collapse chevron is meaningless and is dropped.
+            chevron = ""
+        else:
+            chevron = "▸" if entry.key not in self._expanded_groups else "▾"
         members = entry.members.values()
         unread = sum(self._unread_counts.get(m.cache_key, 0) for m in members)
         if self.selected_contact is not None and self.selected_contact.cache_key in {
             m.cache_key for m in members
         }:
             unread = 0
-        label = f"{chevron} {entry.display_name}"
+        label = f"{chevron} {entry.display_name}" if chevron else entry.display_name
         if unread:
             label += f" *{unread}"
         return label
@@ -171,6 +176,10 @@ class ContactListMixin:
         (legacy/test rows) behaves like the old member-only list.
         """
         if row.kind == "member":
+            if self._protocol_filter in ("signal", "whatsapp", "telegram"):
+                # Filter mode (single protocol) masks every member row: only
+                # group headers are shown, never members nor chevrons.
+                return False
             if row.key not in visible_keys:
                 return False
             return row.group_key is None or row.group_key in self._expanded_groups
@@ -449,6 +458,25 @@ class ContactListMixin:
         # right ``display`` and the highlight lands on the correct row.
         self._apply_contact_visibility()
 
+    def _refresh_header_labels(self) -> None:
+        """Recompute every group-header label in place.
+
+        The header label now depends on the active protocol filter (chevron is
+        dropped when a single protocol is filtered), so a Ctrl+W cycle must
+        refresh the labels without a full rebuild.  The ``PickerEntry`` of each
+        header is stored on the row at construction time (``item._entry``).
+        """
+        for item in self._group_widgets.values():
+            entry = getattr(item, "_entry", None)
+            if entry is None:
+                continue
+            new_text = self._group_label(entry)
+            if getattr(item, "_label_text", None) != new_text:
+                item._label_text = new_text
+                label = item.children[0] if item.children else None
+                if label is not None:
+                    label.update(new_text)
+
     def _apply_contact_filter(self) -> None:
         """Re-apply the active protocol filter to the contact list view.
 
@@ -458,6 +486,8 @@ class ContactListMixin:
         synced here.
         """
         self._apply_contact_visibility()
+        # Header labels depend on the filter (chevron shown only in "all").
+        self._refresh_header_labels()
         try:
             section_lbl = self.query_one("#ContactsTitle", Label)
         except Exception as _e:
@@ -728,13 +758,47 @@ class ContactListMixin:
             contact_list.index = previous
             self._sync_contact_highlight(contact_list, previous)
 
+    def _group_member_for_filter(self, group_key: str | None) -> ChatContact | None:
+        """Resolve the member of *group_key* matching the active protocol filter.
+
+        Only meaningful when the filter is a single protocol ("all" returns
+        ``None``).  ``group_by_person`` keeps at most one member per protocol,
+        so the first (and only) ``self.contacts`` entry whose protocol matches
+        the filter and whose ``cache_key`` belongs to the group is returned.
+        """
+        if group_key is None or self._protocol_filter == "all":
+            return None
+        member_keys = self._group_members.get(group_key)
+        if not member_keys:
+            return None
+        for contact in self.contacts:
+            if (
+                contact.protocol == self._protocol_filter
+                and contact.cache_key in member_keys
+            ):
+                return contact
+        return None
+
     def on_list_view_selected(self, event: ListView.Selected):
         """When a contact is selected, show the chat."""
         # Header rows (group kind) are NOT contacts: they only toggle the
         # collapse state (decision 3).  Members follow the existing flow.
         item = event.item
         if getattr(item, "_row_kind", "member") == "group":
-            self._toggle_group(getattr(item, "_group_key", None))
+            group_key = getattr(item, "_group_key", None)
+            if self._protocol_filter in ("signal", "whatsapp", "telegram"):
+                # Filter mode: the header row opens the chat of the group's
+                # member for that protocol directly (no toggle, no expansion).
+                member = self._group_member_for_filter(group_key)
+                if member is None:
+                    # Defensive no-op: no member resolved (should not happen).
+                    # Never touch _expanded_groups while a single protocol is
+                    # filtered.
+                    return
+                if member != self.selected_contact:
+                    self._select_contact(member)
+                return
+            self._toggle_group(group_key)
             return
         # Resolve the contact directly from the clicked ListItem's _contact_id.
         # Using ListView.index + _filtered_contacts() fails when hidden

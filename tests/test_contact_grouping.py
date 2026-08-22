@@ -23,6 +23,7 @@ from models import (
     ChatContact,
 )
 from signal_tui import SignalTUI
+from tui.contacts import _Row
 
 
 def _contact(
@@ -201,6 +202,17 @@ class TestGroupLabel:
         label = app._group_label(self._entry(app))
         assert " *" not in label
 
+    def test_no_chevron_when_filter_active(self):
+        app = _make_app(
+            _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
+            _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
+        )
+        app._protocol_filter = "signal"
+        app._unread_counts = {"signal:+391": 2}
+        label = app._group_label(self._entry(app))
+        # No chevron in filter mode: only name + aggregate unread badge.
+        assert label == "Mario *2"
+
 
 # ─── Member label ─────────────────────────────────────────────────────────────
 
@@ -342,6 +354,79 @@ class TestClickDispatch:
 
         app._select_contact.assert_not_called()
 
+    def test_header_selected_with_filter_selects_member(self):
+        sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(sig, wa)
+        app._visible_rows()  # populate _group_members
+        app._protocol_filter = "signal"
+        item = MagicMock()
+        item._row_kind = "group"
+        item._group_key = "phone:391"
+        event = MagicMock(item=item)
+        app._select_contact = MagicMock()
+        app._toggle_group = MagicMock()
+
+        app.on_list_view_selected(event)
+
+        app._select_contact.assert_called_once_with(sig)
+        app._toggle_group.assert_not_called()
+        assert app._expanded_groups == set()  # no expansion
+
+    def test_header_selected_with_whatsapp_filter_selects_wa_member(self):
+        sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(sig, wa)
+        app._visible_rows()
+        app._protocol_filter = "whatsapp"
+        item = MagicMock()
+        item._row_kind = "group"
+        item._group_key = "phone:391"
+        event = MagicMock(item=item)
+        app._select_contact = MagicMock()
+
+        app.on_list_view_selected(event)
+
+        app._select_contact.assert_called_once_with(wa)
+        assert app._expanded_groups == set()
+
+    def test_header_selected_with_filter_noop_when_member_missing(self):
+        app = _make_app(_contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"))
+        app._visible_rows()
+        app._protocol_filter = "telegram"  # no telegram member in the group
+        item = MagicMock()
+        item._row_kind = "group"
+        item._group_key = "phone:391"
+        event = MagicMock(item=item)
+        app._select_contact = MagicMock()
+        app._toggle_group = MagicMock()
+
+        app.on_list_view_selected(event)
+
+        # Defensive no-op: never toggle nor expand while a single protocol is
+        # filtered.
+        app._select_contact.assert_not_called()
+        app._toggle_group.assert_not_called()
+
+    def test_header_selected_with_filter_skips_when_already_selected(self):
+        sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(sig, wa)
+        app._visible_rows()
+        app._protocol_filter = "signal"
+        app.selected_contact = sig
+        item = MagicMock()
+        item._row_kind = "group"
+        item._group_key = "phone:391"
+        event = MagicMock(item=item)
+        app._select_contact = MagicMock()
+        app._toggle_group = MagicMock()
+
+        app.on_list_view_selected(event)
+
+        app._select_contact.assert_not_called()
+        app._toggle_group.assert_not_called()
+
 
 # ─── Filter × group × collapse ───────────────────────────────────────────────
 
@@ -356,7 +441,7 @@ class TestFilterWithGroups:
         assert header.display is False
         assert member.display is False
 
-    def test_mixed_group_header_visible_only_matching_member(self):
+    def test_mixed_group_header_visible_members_masked(self):
         app = _make_app(
             _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
             _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
@@ -365,7 +450,7 @@ class TestFilterWithGroups:
         fake = _render(app)
         header = _group_rows(fake)[0]
         assert header.display is True  # signal member exists in group
-        app._toggle_group("phone:391")  # expand
+        app._toggle_group("phone:391")  # expand (state untouched by filter)
         sig_member = next(
             it for it in _member_rows(fake) if it._contact_id == "signal:+391"
         )
@@ -374,8 +459,12 @@ class TestFilterWithGroups:
             for it in _member_rows(fake)
             if it._contact_id == "whatsapp:wa:1@s.whatsapp.net"
         )
-        assert sig_member.display is True
+        # Filter mode (single protocol) masks EVERY member row, even the
+        # matching one and even when the group is expanded.
+        assert sig_member.display is False
         assert wa_member.display is False
+        # The collapse state itself is never mutated by the filter.
+        assert "phone:391" in app._expanded_groups
 
     def test_filter_times_collapse_hides_all_members(self):
         app = _make_app(
@@ -388,6 +477,159 @@ class TestFilterWithGroups:
         assert header.display is True
         # Still collapsed: even the matching member is hidden.
         assert all(it.display is False for it in _member_rows(fake))
+
+
+# ─── Filter masking: _row_visible ────────────────────────────────────────────
+
+
+class TestRowVisibleFilter:
+    def _mixed_app(self):
+        sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(sig, wa)
+        app._group_members = {"phone:391": [sig.cache_key, wa.cache_key]}
+        return app, sig, wa
+
+    def test_filter_masks_member_even_if_expanded(self):
+        app, sig, _ = self._mixed_app()
+        app._protocol_filter = "signal"
+        app._expanded_groups.add("phone:391")
+        row = _Row("member", sig.cache_key, "phone:391", contact=sig)
+        assert app._row_visible(row, {sig.cache_key}) is False
+
+    def test_filter_keeps_header_when_member_matches(self):
+        app, sig, _ = self._mixed_app()
+        app._protocol_filter = "signal"
+        row = _Row("group", "person:phone:391", "phone:391")
+        assert app._row_visible(row, {sig.cache_key}) is True
+
+    def test_filter_hides_header_without_matching_member(self):
+        app, _, _ = self._mixed_app()
+        app._protocol_filter = "telegram"
+        row = _Row("group", "person:phone:391", "phone:391")
+        assert app._row_visible(row, set()) is False
+
+    def test_all_mode_member_visible_when_expanded(self):
+        app, sig, wa = self._mixed_app()
+        app._protocol_filter = "all"
+        app._expanded_groups.add("phone:391")
+        row = _Row("member", sig.cache_key, "phone:391", contact=sig)
+        assert app._row_visible(row, {sig.cache_key, wa.cache_key}) is True
+
+    def test_all_mode_member_hidden_when_collapsed(self):
+        app, sig, wa = self._mixed_app()
+        app._protocol_filter = "all"
+        row = _Row("member", sig.cache_key, "phone:391", contact=sig)
+        assert app._row_visible(row, {sig.cache_key, wa.cache_key}) is False
+
+
+# ─── Filter member resolution ─────────────────────────────────────────────────
+
+
+class TestGroupMemberForFilter:
+    def test_none_when_filter_all(self):
+        sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(sig, wa)
+        app._visible_rows()
+        assert app._group_member_for_filter("phone:391") is None
+
+    def test_resolves_protocol_member(self):
+        sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(sig, wa)
+        app._visible_rows()
+        app._protocol_filter = "whatsapp"
+        assert app._group_member_for_filter("phone:391") is wa
+
+    def test_none_when_group_missing(self):
+        app = _make_app(_contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"))
+        app._visible_rows()
+        app._protocol_filter = "signal"
+        assert app._group_member_for_filter("phone:999") is None
+
+
+# ─── Header label refresh on filter change ────────────────────────────────────
+
+
+class TestRefreshHeaderLabels:
+    def _query_for(self, fake):
+        def _q(selector, *_a, **_k):
+            if selector == "#contact-list":
+                return fake
+            return MagicMock()
+
+        return _q
+
+    def _rendered_app(self):
+        app = _make_app(
+            _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
+            _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
+        )
+        fake = _FakeListView()
+        app.query_one = MagicMock(side_effect=self._query_for(fake))
+        app._render_contact_list(list(app.contacts))
+        return app
+
+    def test_refresh_header_labels_drops_and_restores_chevron(self):
+        app = self._rendered_app()
+        header = app._group_widgets["phone:391"]
+        assert header._label_text.startswith("▸")
+
+        app._protocol_filter = "signal"
+        app._refresh_header_labels()
+        assert header._label_text == "Mario"
+
+        app._protocol_filter = "all"
+        app._refresh_header_labels()
+        assert header._label_text.startswith("▸")
+
+    def test_apply_contact_filter_refreshes_header_labels(self):
+        app = self._rendered_app()
+        header = app._group_widgets["phone:391"]
+        assert header._label_text.startswith("▸")
+
+        # _apply_contact_filter also touches title/border widgets → all mocks.
+        app.query_one = MagicMock(return_value=MagicMock())
+        app._protocol_filter = "signal"
+        app._apply_contact_filter()
+        assert header._label_text == "Mario"
+
+        app._protocol_filter = "all"
+        app._apply_contact_filter()
+        assert header._label_text.startswith("▸")
+
+    def test_refresh_skips_item_without_entry(self):
+        app = _make_app()
+
+        class _BareItem:
+            pass
+
+        app._group_widgets = {"phone:391": _BareItem()}
+        app._refresh_header_labels()  # must not raise
+
+    def test_refresh_noop_when_label_unchanged(self):
+        app = self._rendered_app()
+        header = app._group_widgets["phone:391"]
+        # Label already reflects the current "all" filter → no-op branch.
+        app._refresh_header_labels()
+        assert header._label_text.startswith("▸")
+
+    def test_refresh_updates_child_label(self):
+        app = self._rendered_app()
+        entry = app._visible_rows()[0].entry
+
+        class _HeaderItem:
+            def __init__(self):
+                self._entry = entry
+                self._label_text = "stale"
+                self.children = [MagicMock()]
+
+        item = _HeaderItem()
+        app._group_widgets = {"phone:391": item}
+        app._refresh_header_labels()
+        assert item._label_text.startswith("▸")
+        item.children[0].update.assert_called_once()
 
 
 # ─── Header highlight fallback ───────────────────────────────────────────────
