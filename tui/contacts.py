@@ -683,6 +683,7 @@ class ContactListMixin:
             self.selected_contact.id
         )
         self._unread_counts[cache_key] = 0
+        self._refresh_backend_status_if_idle()
 
         # Highlight the contact in the left list and remove the *N badge.
         # The ListView keeps ALL contacts in the DOM after the Ctrl+W filter
