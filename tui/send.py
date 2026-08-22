@@ -118,6 +118,14 @@ class SendMixin:
         if ingest_backend is None:
             ingest_backend = self.signal_backend
         added = ingest_backend.ingest_message(contact_id, data, ts, persist=False)
+        logger.debug(
+            "optimistic ingest: added=%s protocol=%s contact=%r ts=%s text=%r",
+            added,
+            protocol,
+            contact_id,
+            ts,
+            message[:60],
+        )
 
         # Update in-memory cache for UI
         if cache_key not in self._cache:
@@ -250,6 +258,14 @@ class SendMixin:
             # Instrumentation: la durata di send_message_sync è il tempo in cui
             # la bolla resta "grigia" (pending).  Log a debug; loggato a warning
             # oltre la soglia (1000ms) per individuare backoff/degrado del backend.
+            logger.debug(
+                "worker send start: persist=%s protocol=%s contact=%r ts=%s text=%r",
+                persist is not None,
+                protocol,
+                contact_id,
+                timestamp,
+                message[:60],
+            )
             _t0 = time.perf_counter()
             result = backend.send_message_sync(contact_id, message, **send_kwargs)
             _elapsed_ms = (time.perf_counter() - _t0) * 1000.0
@@ -336,14 +352,42 @@ class SendMixin:
                 expected_statuses=expected_statuses,
             )
             if not updated:
+                # Diagnosi: al momento del fallimento, quante righe corrispondono
+                # per testo / per timestamp (is_mine) — capisce se la riga non è
+                # ancora stata persistita (persist saltato / race con l'echo).
+                rows_text = rows_ts = -1
+                try:
+                    import sqlite3
+
+                    from backend import DB_FILE
+
+                    conn = sqlite3.connect(DB_FILE)
+                    try:
+                        rows_text = conn.execute(
+                            "SELECT COUNT(*) FROM messages WHERE protocol=? "
+                            "AND contact_number=? AND text=? AND is_mine=1",
+                            (protocol, contact_id, text),
+                        ).fetchone()[0]
+                        rows_ts = conn.execute(
+                            "SELECT COUNT(*) FROM messages WHERE protocol=? "
+                            "AND contact_number=? AND timestamp=? AND is_mine=1",
+                            (protocol, contact_id, timestamp),
+                        ).fetchone()[0]
+                    finally:
+                        conn.close()
+                except Exception as _dbg:
+                    logger.debug("diagnostic row count failed", exc_info=_dbg)
                 logger.warning(
                     "Outgoing status transition failed "
-                    "(protocol=%r, contact_id=%r, ts=%r, text=%r, status=%r)",
+                    "(protocol=%r, contact_id=%r, ts=%r, text=%r, status=%r, "
+                    "rows_by_text=%s, rows_by_ts=%s)",
                     protocol,
                     contact_id,
                     timestamp,
                     text[:80],
                     status,
+                    rows_text,
+                    rows_ts,
                 )
                 return False
         backend = self.manager.get(protocol)
