@@ -86,6 +86,7 @@ class PollingMixin:
                     # Ciò lascia il main libero per la finestra di chat (prioritaria)
                     # invece di rifare il giro completo due volte.
                     self.call_from_thread(self._reorder_contact_list)
+                    self.call_from_thread(self._refresh_backend_status_if_idle)
 
                 # Prompt-exit inner sleep.  This runs every cycle (even when no
                 # messages arrived) so the worker exits as soon as the user quits.

@@ -122,6 +122,7 @@ class BackendConnectMixin:
         self._sort_contacts()
         self._render_contact_list(list(self.contacts))
         self._update_unread_badges()
+        self._refresh_backend_status_if_idle()
 
         # Report this backend as done (ready).  The startup auto-selection is
         # triggered by `_mark_backend_done` only once ALL expected backends have

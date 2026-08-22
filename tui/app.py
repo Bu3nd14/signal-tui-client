@@ -24,7 +24,11 @@ from backends import (
 from backends.config import telegram_enabled, whatsapp_enabled
 from contact_picker import BackendChoiceScreen, ContactPickerScreen
 from models import (
+    PROTOCOL_SIGNAL,
+    PROTOCOL_TELEGRAM,
+    PROTOCOL_WHATSAPP,
     ChatContact,
+    protocol_emoji,
 )
 from tui.backend_connect import BackendConnectMixin
 from tui.chat_view import ChatViewMixin
@@ -193,6 +197,8 @@ class SignalTUI(
 
         # Status bar auto-clear timer.
         self._status_timer: Timer | None = None
+        # True while a transient or persistent status message is on display.
+        self._status_active: bool = False
 
     def compose(self):
         yield Header()
@@ -266,6 +272,7 @@ class SignalTUI(
         """
         try:
             self.query_one("#status-bar", Static).update(text)
+            self._status_active = True
             if self._status_timer is not None:
                 self._status_timer.stop()
                 self._status_timer = None
@@ -278,13 +285,39 @@ class SignalTUI(
         except Exception as _e:
             logger.debug("Failed to update status bar", exc_info=True)
 
-    def _status_clear(self) -> None:
-        """Clear the status bar."""
+    def _backend_unread_total(self, protocol: str) -> int:
+        """Sum of unread counts across all contacts of *protocol*."""
+        return sum(
+            self._unread_counts.get(c.cache_key, 0)
+            for c in self.contacts
+            if c.protocol == protocol
+        )
+
+    def _render_backend_unread_status(self) -> None:
+        """Render the default per-backend unread totals into ``#status-bar``."""
+        t_sig = self._backend_unread_total(PROTOCOL_SIGNAL)
+        t_wa = self._backend_unread_total(PROTOCOL_WHATSAPP)
+        t_tg = self._backend_unread_total(PROTOCOL_TELEGRAM)
+        text = (
+            f"{protocol_emoji(PROTOCOL_SIGNAL)} {t_sig or '-'}  "
+            f"{protocol_emoji(PROTOCOL_WHATSAPP)} {t_wa or '-'}  "
+            f"{protocol_emoji(PROTOCOL_TELEGRAM)} {t_tg or '-'}"
+        )
         try:
-            self.query_one("#status-bar", Static).update("")
-            self._status_timer = None
+            self.query_one("#status-bar", Static).update(text)
         except Exception as _e:
-            logger.debug("Failed to clear status bar", exc_info=True)
+            logger.debug("Failed to render backend unread status", exc_info=True)
+
+    def _refresh_backend_status_if_idle(self) -> None:
+        """Refresh the default status bar unless a message is on display."""
+        if not self._status_active:
+            self._render_backend_unread_status()
+
+    def _status_clear(self) -> None:
+        """Clear the status bar, restoring the default unread totals."""
+        self._status_active = False
+        self._status_timer = None
+        self._render_backend_unread_status()
 
     def on_button_pressed(self, event: Button.Pressed):
         """When the user clicks a button."""
