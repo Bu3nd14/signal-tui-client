@@ -104,6 +104,28 @@ class ContactListMixin:
             ]
         return contacts
 
+    def _visible_keys(self) -> set[str]:
+        """Return the cache_keys that should be visible under the active filter.
+
+        The base set is the pure filtered set (``_filtered_contacts``).  When the
+        unread-only filter is active, the selected contact is *pinned*: it stays
+        visible even after being marked read (unread=0) so it doesn't vanish from
+        the list while its chat is open.  The pin only applies while the selected
+        contact is inside the current protocol filter's scope (a selected contact
+        of another protocol never appears when a single protocol is filtered).
+        """
+        visible = {c.cache_key for c in self._filtered_contacts()}
+        if (
+            self._unread_only
+            and self.selected_contact is not None
+            and (
+                self._protocol_filter == "all"
+                or self.selected_contact.protocol == self._protocol_filter
+            )
+        ):
+            visible.add(self.selected_contact.cache_key)
+        return visible
+
     def _protocol_class(self, contact: ChatContact) -> str:
         """Return the CSS accent class for a contact's protocol."""
         return f"protocol-{contact.protocol}"
@@ -237,7 +259,7 @@ class ContactListMixin:
         visible under the filter, falling back to the first visible row.
         """
         contact_list = self.query_one("#contact-list", ListView)
-        visible = {c.cache_key for c in self._filtered_contacts()}
+        visible = self._visible_keys()
 
         first_visible: int | None = None
         selected_index: int | None = None
@@ -360,7 +382,7 @@ class ContactListMixin:
         loop so the UI never freezes.
         """
         contact_list = self.query_one("#contact-list", ListView)
-        visible = {c.cache_key for c in self._filtered_contacts()}
+        visible = self._visible_keys()
         start = self._render_chunk_index
         end = min(start + self._render_chunk_size, len(self._pending_rows))
         chunk = self._pending_rows[start:end]
