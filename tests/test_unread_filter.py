@@ -352,11 +352,48 @@ class TestUnreadGroupHeaders:
         assert sig_item.display is False
 
 
+# ─── A. `_visible_keys` pin (selected contact stays visible) ─────────────────
+
+
+class TestVisibleKeys:
+    def test_pin_adds_selected_contact_in_all_scope(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+1", "Mario", phone="391")
+        luigi = _contact(PROTOCOL_SIGNAL, "+2", "Luigi", phone="392")
+        app = _make_app(mario, luigi)
+        app._unread_only = True
+        app._unread_counts = {"signal:+2": 3}
+        app.selected_contact = mario  # read → would vanish without the pin
+
+        assert app._visible_keys() == {"signal:+1", "signal:+2"}
+
+    def test_pin_skipped_for_different_protocol_scope(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+1", "Mario", phone="391")
+        anna = _contact(PROTOCOL_WHATSAPP, "wa1", "Anna", phone="392")
+        app = _make_app(mario, anna)
+        app._protocol_filter = PROTOCOL_SIGNAL
+        app._unread_only = True
+        app._unread_counts = {"signal:+1": 2}
+        app.selected_contact = anna
+
+        assert app._visible_keys() == {"signal:+1"}
+
+    def test_pin_adds_selected_when_protocol_matches(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+1", "Mario", phone="391")
+        anna = _contact(PROTOCOL_WHATSAPP, "wa1", "Anna", phone="392")
+        app = _make_app(mario, anna)
+        app._protocol_filter = PROTOCOL_WHATSAPP
+        app._unread_only = True
+        app._unread_counts = {"signal:+1": 2}
+        app.selected_contact = anna  # read but inside the whatsapp scope → pinned
+
+        assert app._visible_keys() == {"whatsapp:wa1"}
+
+
 # ─── A. `_select_contact` refresh under unread-only ──────────────────────────
 
 
 class TestSelectContactUnreadOnly:
-    def test_select_contact_removes_row_keeps_chat_and_falls_back(self):
+    def test_select_contact_pins_selected_keeps_chat(self):
         mario = _contact(PROTOCOL_SIGNAL, "+1", "Mario", phone="391")
         luigi = _contact(PROTOCOL_SIGNAL, "+2", "Luigi", phone="392")
         app = _make_app(mario, luigi)
@@ -377,11 +414,97 @@ class TestSelectContactUnreadOnly:
 
         app._select_contact(mario)
 
-        # Chat stays open; the just-read contact vanishes (unread-only).
+        # Chat stays open; the just-read selected contact is PINNED (stays
+        # visible) and the still-unread contact remains visible too.
         assert app.selected_contact is mario
+        assert mario_header.display is True
+        assert luigi_header.display is True
+        # Highlight lands on the selected contact's header (member collapsed).
+        assert fake_list.index == fake_list.children.index(mario_header)
+
+    def test_select_other_contact_unpins_previous(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+1", "Mario", phone="391")
+        luigi = _contact(PROTOCOL_SIGNAL, "+2", "Luigi", phone="392")
+        app = _make_app(mario, luigi)
+        app._unread_only = True
+        app._unread_counts = {"signal:+1": 2, "signal:+2": 3}
+
+        fake = _render(app)
+        mario_header = app._group_widgets[app._member_to_group[mario.cache_key]]
+        luigi_header = app._group_widgets[app._member_to_group[luigi.cache_key]]
+
+        fake_list = MagicMock()
+        fake_list.children = list(fake.items)
+        fake_list.index = None
+        _prepare_select(app, fake_list)
+        app._cache = {}
+
+        app._select_contact(mario)
+        assert mario_header.display is True
+        assert luigi_header.display is True
+
+        app._select_contact(luigi)
+
+        # The previous contact (now unread=0 and no longer selected) vanishes;
+        # the newly selected contact is pinned instead.
+        assert app.selected_contact is luigi
         assert mario_header.display is False
-        # Highlight falls back to the first still-visible row (Luigi's header).
-        assert fake_list.index == fake_list.children.index(luigi_header)
+        assert luigi_header.display is True
+
+    def test_proto_unread_pin_only_when_protocol_matches(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+1", "Mario", phone="391")
+        anna = _contact(PROTOCOL_WHATSAPP, "wa1", "Anna", phone="392")
+        app = _make_app(mario, anna)
+        app._protocol_filter = PROTOCOL_SIGNAL
+        app._unread_only = True
+        app._unread_counts = {"signal:+1": 2}
+
+        fake = _render(app)
+        mario_header = app._group_widgets[app._member_to_group[mario.cache_key]]
+        anna_header = app._group_widgets[app._member_to_group[anna.cache_key]]
+        assert mario_header.display is True
+        assert anna_header.display is False
+
+        fake_list = MagicMock()
+        fake_list.children = list(fake.items)
+        fake_list.index = None
+        _prepare_select(app, fake_list)
+        app._cache = {}
+
+        app._select_contact(anna)
+
+        # Chat stays open, but the selected WhatsApp contact is NOT pinned:
+        # its protocol is outside the Signal filter's scope.
+        assert app.selected_contact is anna
+        assert anna_header.display is False
+        assert mario_header.display is True
+
+    def test_no_pin_when_unread_only_false(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+1", "Mario", phone="391")
+        app = _make_app(mario)
+        app._protocol_filter = PROTOCOL_WHATSAPP  # mario out of scope
+        app._unread_only = False
+        app.selected_contact = mario
+
+        # No pin: the selected contact is NOT force-added when unread-only is off.
+        assert app._visible_keys() == set()
+
+    def test_pin_preserved_through_render_next_chunk(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+1", "Mario", phone="391")
+        luigi = _contact(PROTOCOL_SIGNAL, "+2", "Luigi", phone="392")
+        app = _make_app(mario, luigi)
+        app._unread_only = True
+        app._unread_counts = {"signal:+1": 0, "signal:+2": 3}
+        app.selected_contact = mario  # read but selected → pinned
+
+        fake = _FakeListView()
+        app.query_one = MagicMock(return_value=fake)
+        app._start_progressive_render(app._visible_rows())
+
+        mario_header = app._group_widgets[app._member_to_group[mario.cache_key]]
+        luigi_header = app._group_widgets[app._member_to_group[luigi.cache_key]]
+        assert mario_header.display is True  # pin survives the chunk render
+        assert luigi_header.display is True
 
     def test_ghost_contact_hidden_in_unread_only_but_chat_open(self):
         mario = _contact(PROTOCOL_SIGNAL, "+1", "Mario", phone="391")
