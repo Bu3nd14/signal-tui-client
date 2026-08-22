@@ -40,7 +40,11 @@
 Dalla fonte autorevole: `self.contacts` + `_unread_counts`.
 ```python
 def _backend_unread_total(self, protocol: str) -> int:
-    return sum(self._unread_counts.get(c.cache_key, 0) for c in self.contacts if c.protocol == protocol)
+    return sum(
+        self._unread_counts.get(c.cache_key, 0)
+        for c in self.contacts
+        if c.protocol == protocol
+    )
 ```
 - O(N) con N≈350 contatti, solo al refresh — irrilevante.
 - Riusa `protocol_emoji` e l'ordine `(PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP, PROTOCOL_TELEGRAM)`.
