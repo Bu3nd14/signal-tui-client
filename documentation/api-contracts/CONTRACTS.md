@@ -108,8 +108,8 @@ Migrazioni additive idempotenti gate-ate da `PRAGMA user_version=3`; la colonna 
 
 - default status all'INSERT: `"sent"` se `is_mine` else `"read"`; `read = is_mine`.
 - rank guard su ogni update di status: `pending=0 failed=0 < sent=1 < delivered=2 < read=3` (mai downgrade).
-- dedup by-id tiene la riga col rank più alto.
-- pruning: 200 righe più recenti per `(protocol, contact_number)`.
+- **Invariante attesa sul `msg_id`**: un `msg_id` dovrebbe appartenere a una sola riga per `(protocol, contact_number)`. L'enforcement MANCA oggi: `_update_message_id` può assegnare lo stesso id a piu' righe id-less (UPDATE multi-riga senza finestra né LIMIT) e `_dedup_messages_by_id` — eseguita dentro `_load_cache` a ogni boot — riduce la partizione a una riga sola. Con messaggi ripetuti (es. retry con stesso testo) questo può **cancellare righe legittime** al riavvio: vedere l'avviso su `_update_message_id` in [API_OVERVIEW.md](API_OVERVIEW.md) §4 prima di considerare la dedup "idempotente e sicura".
+- pruning: 200 righe più recenti per `(protocol, contact_number)` — applicata solo dal resync WhatsApp (unico call site di `_prune_cache`).
 
 Test: `tests/test_backend_cache.py`, `tests/test_db_edit.py`, `tests/test_merge_cache_edit.py`.
 
@@ -170,6 +170,13 @@ Fissato da `tests/test_edit_contract.py` e implementato in `backends/base.py` + 
 
 - Vincoli UI: solo messaggi propri, non `pending`/`failed`, solo testo; rollback completo (testo, flag edited, identity sets, widget) se il server rifiuta.
 
+### 6.1 Uso duale di `apply_edit` ed edit su messaggio mai visto
+
+- `apply_edit` è dichiarato come punto unico di mutazione per gli edit **ricevuti** (inbound), ma la UI lo usa anche per l'edit **locale ottimistico** (`tui/edit.py::_apply_local_edit`), eseguendo la scrittura SQLite sul thread UI. Il doppio uso rende il contratto ambiguo per chi implementa un nuovo backend: separare nominalmente i due casi (es. `apply_local_edit`) è la direzione consigliata.
+- Edit riferito a un messaggio MAI visto (target non in cache): comportamento diverso per protocollo:
+  - **Signal / Telegram**: l'evento `message_edit` viene emesso incondizionatamente; `apply_edit` ritorna `None` e l'handler UI scarta silenziosamente l'evento (`if not info: return False`) → nessuna bolla finché un fetch storico non porta il messaggio (già editato);
+  - **WhatsApp**: `handle_webhook` rileva l'edit solo se il target è in cache (`_detect_edit`); se assente, il pacchetto degrada a evento `message` sintetico → la bolla viene creata col testo GIÀ editato (visibile, ma come messaggio nuovo).
+
 Test correlati: `tests/test_edit_flow.py`, `tests/test_edit_signal.py`, `tests/test_edit_whatsapp.py`, `tests/test_telegram_edit.py`, `tests/test_db_edit.py`, `tests/test_merge_cache_edit.py`.
 
 ## 7. Receipt per protocollo
@@ -216,6 +223,7 @@ Test: `tests/test_backend_webhook.py`, `tests/test_whatsapp_backend.py`.
 | `BackendManager.send_message/mark_read` | `KeyError` per protocollo non registrato |
 | `find_signal_cli()` / `_require_user_number()` | eccezioni canoniche (`FileNotFoundError`, `RuntimeError`) solo al punto d'uso; varianti `_find_signal_cli()` / `_get_user_number()` non-raising |
 | `list_address_book_sync` | mai eccezioni verso il chiamante: errori in `manager.address_book_errors[protocol]`, risultato parziale |
+| Dedup by-id al boot (`_load_cache` → `_dedup_messages_by_id`) | riduce le partizioni `(protocol, contact_number, msg_id, text)` alla riga col rank status più alto; NON è safe se lo stesso `msg_id` è stato assegnato a più righe (vedi §3.2, invariante non ancora enforcement) |
 | Config (`config.py`) | fallback a default (`""`/3005/8088/…) senza raise |
 
 Test: `tests/test_backend_rpc.py`, `tests/test_config.py`, `tests/test_backend_download.py`, `tests/test_address_book.py`.

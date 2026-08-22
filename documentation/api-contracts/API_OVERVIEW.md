@@ -49,6 +49,16 @@ Attributo di classe richiesto: `protocol: str` (una delle costanti `PROTOCOL_*` 
 
 Convenzione `*_sync`: le versioni sincrone sono pensate per i worker thread della TUI (stesso pattern di `send_message_sync`, presente nelle implementazioni concrete).
 
+### Contratto duale: async nominale vs flusso reale (leggere prima di estendere)
+
+La superficie async è **definita ma di fatto inusata dalla TUI** (nessun call site di `manager.send_message`/`mark_read`/`connect_all`/`disconnect_all` né di `backend.receive()` in `tui/`): il flusso reale passa dai metodi `*_sync` invocati nei worker thread. Conseguenze da conoscere:
+
+- gli override async eseguono I/O **bloccante nel corpo della coroutine**: `WhatsAppBackend.connect` → `connect_sync()` (fino a ~40 s di `_wait_session_ready`), `WhatsAppBackend.send_message` (REST fino a 30 s), `TelegramBackend.send_message` (`future.result(timeout=30)`); un chiamante che li awaitasse davvero bloccherebbe l'event loop;
+- `get_pairing_qr` ha firme divergenti: `async` nella base (`backends/base.py:188`) ma override **sync** in `TelegramBackend`; la UI lo chiama via `asyncio.to_thread(tb.get_pairing_qr)` per Telegram e per WhatsApp bypassa l'interfaccia chiamando `wa._rest.get_pairing_qr()` direttamente (`device_link_screen.py`);
+- `SignalBackend.receive()` è inusato (la TUI usa `poll_once()`) e muta `self._polling_active`: un consumer lo riaccenderebbe dopo un disconnect.
+
+Direzione raccomandata per nuovi backend: sync-first (metodo `*_sync` come contratto primario + wrapper `asyncio.to_thread`, come già fatto per `edit_message`/`list_address_book`).
+
 Test che fissano il contratto: `tests/test_edit_contract.py` (default `False`/`None`, routing manager), `tests/test_address_book.py`.
 
 ## 2. `BackendManager` facade (`backends/manager.py`)
@@ -59,7 +69,7 @@ Test che fissano il contratto: `tests/test_edit_contract.py` (default `False`/`N
 | `get(protocol) -> ChatBackend \| None` / `all()` / `protocols()` | accesso registry |
 | `connect_all()` / `disconnect_all()` | disconnect best-effort (errori loggati) |
 | `list_contacts() -> list[ChatContact]` | concatena gli attributi `.contacts` già caricati (nessuna rete) |
-| `list_address_book_sync(protocols=None, force=False)` | fan-out parallelo (`ThreadPoolExecutor(max_workers=3)`, timeout 25 s/backend); errori in `address_book_errors[protocol]`, risultato parziale ammesso |
+| `list_address_book_sync(protocols=None, force=False)` | fan-out parallelo (`ThreadPoolExecutor(max_workers=3)`, timeout 25 s/backend); errori in `address_book_errors[protocol]`, risultato parziale ammesso. Attenzione: i `future.result(timeout=25)` sono valutati **in serie**, quindi con più backend lenti l'attesa si somma (fino a ~75 s con 3 backend appesi) |
 | `send_message(protocol, contact_id, text, quote_*, reply_to_message_id=None)` | routing; `KeyError` se protocollo sconosciuto |
 | `mark_read(protocol, contact_id)` | routing; `KeyError` se sconosciuto |
 | `get_attachment_path(protocol, attachment_id)` | routing; `None` se backend assente |
@@ -75,6 +85,7 @@ Test che fissano il contratto: `tests/test_edit_contract.py` (default `False`/`N
   - `receive` — polling legacy.
 - Errori: ogni fallimento HTTP/socket è restituito come `{"error": "<messaggio>"}` (mai eccezioni da `_call`); `send_message_sync` converte `"error"` in `RuntimeError`.
 - SSE: `listen_events(user_number)` yielda dict `{"envelope": {...}}`; keep-alive ogni 15 s; timeout socket 30 s → il generatore termina e il chiamante riconnette dopo una breve pausa (~1 s, commento "keep it short (1s)" in `SignalBackend._sse_listener`).
+- Limiti SSE noti (stato attuale): nessun backoff/jitter/tetto — il retry resta ~1 Hz indefinitamente durante un outage del daemon, senza alcun segnale di stato verso la UI; il log può essere fuorviante (`if envelope:` a valle del `for` valuta una variabile mai assegnata o stale quando il generatore ritorna senza yield → NameError catturato o "SSE: envelope received" spurio, la causa reale non appare); `restart_sse()` è dead code (nessun chiamante) con una race latente: un restart ri-armerebbe la guardia del vecchio thread (bloccato in `urlopen` fino a 30 s), che al risveglio riconnetterebbe → doppio listener ed eventi duplicati. Nota: il commento nel codice a `backends/signal.py:140` ("reconnects every 5s") è stale, la pausa reale è ~1 s.
 - Fallback subprocess: `[signal-cli, "-u", numero, ...args]`, timeout 60 s, stdout testuale; `send` subprocess ritorna il timestamp stampato su stdout.
 
 Test: `tests/test_backend_rpc.py`, `tests/test_backend_send.py`, `tests/test_signal_real_timestamp.py`.
@@ -88,7 +99,7 @@ Schema v3 (`PRAGMA user_version = 3`) — tabella `messages` descritta in [CONTR
 | `_init_db()` | crea schema + migrazioni additive idempotenti |
 | `_load_cache(protocol=None) -> {contact: [msg_dict]}` | carica ordinato per ts; dedup by-id cross-session; filtro per protocollo |
 | `_add_message_to_cache(...)` | INSERT incrementale; status default `"sent"` se `is_mine` else `"read"` |
-| `_update_message_id(contact, text, is_mine, timestamp, msg_id, protocol)` | aggancia l'id alla riga ottimistica `(msg_id IS NULL OR '')` |
+| `_update_message_id(contact, text, is_mine, timestamp, msg_id, protocol)` | aggancia l'id server alle righe id-less `(msg_id IS NULL OR '')` matchate per `(protocol, contact_number, text, is_mine)` — **UPDATE MULTI-RIGA**: nessuna finestra temporale né `LIMIT`, quindi TUTTE le righe id-less con lo stesso testo nella chat ricevono lo stesso `msg_id` (e il timestamp sovrascritto). Combinato con `_dedup_messages_by_id()` — eseguito dentro `_load_cache()` a ogni boot — righe distinte col medesimo testo possono essere cancellate come "duplicati" (rischio perdita dati; caso reale: retry di un messaggio fallito riparte senza id). Mitigazione proposta: finestra echo nel WHERE + `LIMIT 1` via subquery, e dedup difensiva che non cancella partizioni con timestamp fuori finestra |
 | `_prune_cache()` | tiene le 200 righe più recenti per `(protocol, contact_number)` |
 | `_mark_as_read(contact, protocol="signal")` | `read = 1` per il contatto |
 | `_dedup_messages()` / `_dedup_messages_by_id()` | rimozione duplicati (per tupla identità / per msg-id col rank status più alto); ritornano il numero righe rimosse |
@@ -108,6 +119,11 @@ Tutte le funzioni aprono connessioni brevi sotto `_DB_LOCK` (RLock condiviso tra
   - path diverso → `404 {"ok": false}`;
   - body non JSON → `400`;
   - **risposta sempre `200 {"ok": true}`** dopo l'inoltro, anche se il target solleva (evita retry WAHA).
+- Threat model (stato attuale, pre-mitigazione — trattarlo come superficie NON fidata):
+  - bind su `0.0.0.0:8088` e nessuna autenticazione/token: chiunque raggiunga la porta (LAN, container della stessa macchina) può iniettare eventi arbitrari — inclusi messaggi sintetici con `fromMe: true` che vengono persistiti in SQLite e mostrati come autentici;
+  - server **single-threaded** (`TCPServer`, non threading) senza `settimeout` sul socket e senza tetto su `Content-Length`: una connessione aperta senza body blocca l'unico thread di gestione → ricezione WhatsApp ferma (DoS, anche accidentale);
+  - pipeline **at-most-once**: l'ack `200` viene inviato PRIMA della persistenza (l'evento è solo enqueuato in memoria); un crash tra ack e drain perde gli eventi accodati e WAHA non li rispedisce;
+  - mitigazioni candidate: bind ristretto/route via gateway docker, token nel path (registrabile via `_configure_webhook`), `ThreadingTCPServer` + `settimeout` + tetto payload.
 
 Test: `tests/test_backend_webhook.py`.
 

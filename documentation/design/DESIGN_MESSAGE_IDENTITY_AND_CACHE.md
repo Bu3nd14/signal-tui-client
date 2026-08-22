@@ -38,9 +38,9 @@ servizi esterni
 ```
 
 - **Livello [1]** è gestito dal backend: dedup specifica di protocollo, ordinamento deterministico `(timestamp, id|testo)`, upgrade dell'id ottimistico con quello server.
-- **Livello [2]** alimenta lista contatti (unread, last_message_ts), finestra di chat e reload; è add-only verso il backend (`_merge_backend_cache` non può mai farla "restringere").
+- **Livello [2]** alimenta lista contatti (unread, last_message_ts), finestra di chat e reload; è add-only verso il backend (`_merge_backend_cache` non può mai farla "restringere"). Attenzione: il merge **non copia i dict** — le entry appese nella cache UI sono GLI STESSI oggetti del backend cache, quindi le mutazioni dell'uno si riflettono nell'altro.
 - **Livello [3]** è volatile: svuotato a ogni cambio contatto (`_clear_chat` resetta anche i set).
-- **Livello [4]** è la verità across-session: al boot ogni backend ricarica solo le proprie righe (`_load_cache(protocol=...)`) e la dedup per `msg_id` previene ri-ingest.
+- **Livello [4]** è la verità across-session: al boot WhatsApp e Telegram ricaricano solo le proprie righe (`_load_cache(protocol=...)`); **Signal invece chiama `_load_cache()` SENZA filtro protocollo** (`backends/signal.py:330`), quindi la sua cache in-memory parte con righe di tutti i protocolli (chiavi raw miste). La dedup per `msg_id` previene in generale il ri-ingest, ma ha limiti documentati nella sezione "Limiti noti" qui sotto.
 
 ## 3. Regole di dedup per ingest (per protocollo)
 
@@ -58,7 +58,9 @@ servizi esterni
 - set `_seen_msg_ids` + finestra incoming `2000 ms`; cache limitata a 50 messaggi per contatto.
 
 ### Cross-session (DB)
-- `_dedup_messages_by_id()`: per `(protocol, contact_number, msg_id, text)` tiene la riga col rank status più alto (un receipt `read` non viene perso a favore di un doppione `sent`).
+- `_dedup_messages_by_id()`: per `(protocol, contact_number, msg_id, text)` tiene la riga col rank status più alto (un receipt `read` non viene perso a favore di un doppione `sent`). Attenzione: è una euristica con limiti noti — vedere la sezione "Limiti noti" e l'avviso su `_update_message_id` in [../api-contracts/API_OVERVIEW.md](../api-contracts/API_OVERVIEW.md) §4.
+
+Le finestre qui sopra sono **euristiche, non garanzie**: i casi di collasso documentati sono raccolti nella sezione 7.
 
 ## 4. Merge cache backend → UI (`chat_view.py::_merge_backend_cache`)
 
@@ -88,6 +90,16 @@ La versione storica del cache usava un flush JSON debounced; oggi le scritture S
 - Il banner "load more" appare quando la cache ha più di 20 messaggi; il click carica tutta la cache (`_load_all_messages`).
 - `_refresh_chat` aggiunge solo messaggi più nuovi dell'ultimo mostrato (o distinti nello stesso secondo): evita che chiusura di picker/modali ri-appenda la storia.
 - I worker verificano `_is_stale()` (token + contatto corrente) prima di ogni mount: nessuna bolla atterra nella chat sbagliata.
+
+## 7. Limiti noti (le finestre sono euristiche, non garanzie)
+
+Casi di collasso e fragilità documentati, da tenere presenti leggendo le regole di dedup:
+
+1. **Stesso testo entro la finestra**: due messaggi distinti con identico testo che cadono nella finestra di dedup del protocollo collidono in un'unica entry (incoming ±2 s Signal/Telegram, ±5 s WhatsApp; outgoing echo fino a 10 minuti su WhatsApp). È il costo accettato per assorbire ridelivery ed eco.
+2. **Echo window WhatsApp senza veto sull'id**: nel ramo `elif msg_id:` di `_message_already_cached`, se l'id cached è diverso dal matchato NON c'è alcun veto — si matcha comunque per testo entro `_ECHO_MATCH_WINDOW_MS` (10 min). Due "ok" inviati a pochi minuti di distanza possono quindi collassare in uno.
+3. **Doppia regola sul timestamp WAHA**: il path ack di `handle_webhook` converte con `int(ts) * 1000` INCONDIZIONATO, mentre `_event_from_message` usa l'euristica `ts < 10**12` (secondi vs ms). Una build WAHA che emettesse millisecondi nell'ack produrrebbe timestamp nell'anno ~51000: ordinamento e dedup rotti per quel messaggio. La conversione andrebbe centralizzata in un helper unico.
+4. **Tuple d'identità type-mixed**: `_seen_message_ids` e `_shown_in_log` contengono nello stesso set sia `(protocol, key, int_ts, text)` sia `(protocol, key, str_message_id, text)` — due tipi nello stesso slot; funziona perché int e str non collidono, ma è fragile e poco leggibile dai test.
+5. **Gate `ts=0`** (`tui/events.py::_handle_message_event`): un evento con `timestamp=0` (payload malformato) viene ingerito in cache backend/UI/DB ma MAI mostrato live (la guardia `if ts and ...` scarta il mount): divergenza cache/vista finché non si riapre la chat.
 
 ## Test che documentano questo design
 

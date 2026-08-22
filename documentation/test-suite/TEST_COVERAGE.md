@@ -60,6 +60,9 @@ Legenda: **Robusta** = suite dedicata ampia; **Coperta** = test presenti ma su p
 4. **Telegram media lazy** (`tgref:`): risoluzione path coperta parzialmente dentro `tests/test_telegram`; mancano test del download reale mockato.
 5. **Render progressivo** sotto liste grandi (>50 righe) e interazione con filtri.
 6. **`get_local_ip()`** fallback UDP.
+7. **Integrità id/dedup al boot**: scenario `_update_message_id` multi-riga (UPDATE senza finestra/LIMIT) + `_dedup_messages_by_id` eseguita da `_load_cache` a ogni avvio — es. retry di un messaggio fallito con stesso testo → righe legittime cancellate come "duplicati" al riavvio. I test attuali coprono il caso a riga singola. (review P1-3)
+8. **Lifecycle SSE**: doppio listener via `restart_sse` (oggi dead code, race latente) e comportamento del loop quando il generatore `listen_events` ritorna senza yield (log NameError/stale, nessun segnale UI durante un outage prolungato). (review P1-4)
+9. **Race check-then-act sugli ingest**: due ingest concorrenti dello stesso messaggio (echo webhook vs `fetch_history` nel pool resync `ThreadPoolExecutor(4)`) che superano entrambi il dedup → riga doppia in DB; nessun lock applicativo sulle cache in-memory è testato. (review P1-2)
 
 Queste lacune NON indicano codice rotto: sono aree dove l'esecuzione reale è difficile da simulare o dove la copertura arriva tramite percorsi indiretti.
 

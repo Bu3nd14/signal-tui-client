@@ -18,7 +18,7 @@ Tre servizi esterni, tutti opzionali tranne Signal:
 | WhatsApp | WAHA (container Docker Baileys), default `127.0.0.1:3005` | REST (`whatsapp_rest.py`) + webhook PUSH verso il client | server HTTP webhook locale su porta `CLIENT_WEBHOOK_PORT` (default 8088) |
 | Telegram | nessun demone esterno (MTProto via Telethon) | event loop asyncio in thread daemon | handler eventi Telethon → coda |
 
-Persistenza: SQLite locale in `~/.local/share/signal-tui-client/messages.db` (WAL), scritture incrementali serializzate da un lock (`_DB_LOCK`), retention 200 messaggi per contatto.
+Persistenza: SQLite locale in `~/.local/share/signal-tui-client/messages.db` (WAL), scritture incrementali serializzate da un lock (`_DB_LOCK`). Retention: 200 messaggi per contatto, MA applicata solo dal resync WhatsApp (l'unico call site di `_prune_cache` è `backends/whatsapp.py:1153`): installazioni Signal-only o Telegram-only non eseguono alcuna pruning (il DB cresce senza limite).
 
 ## 2. Struttura modulare (diagramma)
 
@@ -110,7 +110,7 @@ Telethon handler    ──►    TelegramBackend._handle_new_message() ecc.
                                                       unread incrementale per contatti toccati)
 ```
 
-Il thread UI non fa mai I/O di rete: il poll worker è un thread "plain" che chiama `call_from_thread` per ogni mutazione della UI.
+Disciplina threading dichiarata: il thread UI non esegue le operazioni di rete lunghe (ricezione via worker, invio in worker thread dedicato), e il poll worker è un thread "plain" che chiama `call_from_thread` per ogni mutazione visiva. Due eccezioni reali da conoscere (I/O sul thread UI): alla selezione di un contatto `mark_read_sync` può eseguire una POST REST sincrona verso WAHA (`tui/contacts.py:708`), e al submit dell'edit ottimistico `backend.apply_edit` scrive SQLite dal thread UI (`tui/edit.py`). Non esistono lock applicativi sulle cache in-memory (`backend.cache`, `self._cache`, `self.contacts`): l'unico lock del sistema (`_DB_LOCK`) copre solo SQLite — la correttezza poggia sul GIL e sulla cadenza del poll worker.
 
 ### 3.2 Flusso di un messaggio in uscita (invio ottimistico)
 
@@ -146,7 +146,7 @@ Vedi `tui/send.py::on_message_text_area_submitted` e `_send_message_worker`:
 ## 5. Decisioni architetetturali chiave (riscontrabili nel codice)
 
 1. **Daemon-first con fallback**: Signal prova prima il daemon JSON-RPC (`_is_daemon_running()`); se assente avvia `signal-cli daemon --http` come subprocess e, se anche questo non risponde entro ~15 s, degrada a chiamate subprocess one-shot (`rpc.py::_run_subprocess`).
-2. **WhatsApp push-only**: la ricezione live arriva SOLO via webhook (`handle_webhook`); `GET /api/messages` non è mai usato in polling ma solo on-demand dal backend: all'apertura di una chat (`fetch_history`) e all'avvio da `resync_history()` per ri-sincronizzare l'unione di unread e chat presenti nel DB. Il retry breve (fino a 3 tentativi, pausa 0,8 s) sta nel chiamante `tui/chat_view.py::_load_messages_worker`, perché WAHA può rispondere vuoto subito dopo l'avvio.
+2. **WhatsApp push-only**: la ricezione live arriva SOLO via webhook (`handle_webhook`); `GET /api/messages` non è mai usato in polling ma solo on-demand dal backend: all'apertura di una chat (`fetch_history`) e all'avvio da `resync_history()` per ri-sincronizzare l'unione di unread e chat presenti nel DB. Il retry breve (fino a 3 tentativi, pausa 0,8 s) sta nel chiamante `tui/chat_view.py::_load_messages_worker`, perché WAHA può rispondere vuoto subito dopo l'avvio. Nota di rischio (stato attuale): il listener webhook è in ascolto su `0.0.0.0` senza autenticazione ed è single-thread senza timeout — threat model dettagliato in [../api-contracts/API_OVERVIEW.md](../api-contracts/API_OVERVIEW.md) §5.
 3. **Telegram in-process**: nessun demone esterno; Telethon gira in un event loop asyncio dedicato dentro un thread daemon; login QR (`tg://login?token=...`) con supporto 2FA.
 4. **Identità messaggio multi-protocollo**: le chiavi cache sono namespaced per protocollo (`contact_cache_key = f"{protocol}:{id}"`); l'identità di un messaggio a livello render è `(protocol, cache_key, timestamp, text)` perché il timestamp al secondo non è unico.
 5. **Dedup difensiva a più livelli**: guardie webhook per `(contatto, id, testo normalizzato)` in `WhatsAppBackend`, dedup per identità/fuzzy-window in `ingest_message` (±2 s incoming, ±5 s outgoing echo, ±10 min per echo con id), dedup cross-sessione in SQLite per `msg_id`.
