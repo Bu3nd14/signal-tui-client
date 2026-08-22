@@ -464,7 +464,10 @@ class TestProtocolFilter:
         app._protocol_filter = "whatsapp"
         app._apply_contact_filter()
         chat_log.remove_class.assert_called_with(
-            "chat-filter-signal", "chat-filter-whatsapp", "chat-filter-telegram"
+            "chat-filter-signal",
+            "chat-filter-whatsapp",
+            "chat-filter-telegram",
+            "chat-filter-unread",
         )
         chat_log.add_class.assert_called_with("chat-filter-whatsapp")
         contact_list.add_class.assert_called_with("chat-filter-whatsapp")

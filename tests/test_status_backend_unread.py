@@ -29,13 +29,28 @@ DEFAULT_ALL_ZERO = "📱 -  💬 -  📨 -"
 
 
 class _FakeStatusBar:
-    """Minimal ``Static`` double capturing the last ``update`` payload."""
+    """Minimal ``StatusBar`` double exposing the widget's public API.
+
+    ``show_message``/``show_default``/``set_counts`` mirror the real
+    ``StatusBar`` methods so the app code under test runs unchanged.  The
+    formatted default text is produced by the SAME pure helper used in
+    production (``SignalTUI._backend_unread_text``), so the format assertions
+    stay coupled to the real code.
+    """
 
     def __init__(self) -> None:
         self.content = ""
+        self.counts: dict[str, int] = {}
 
-    def update(self, text: str) -> None:
+    def show_message(self, text: str) -> None:
         self.content = text
+
+    def set_counts(self, counts: dict[str, int]) -> None:
+        self.counts = dict(counts)
+
+    def show_default(self, totals: dict[str, int]) -> None:
+        self.counts = dict(totals)
+        self.content = SignalTUI._backend_unread_text(totals)
 
 
 def _contact(protocol: str, cid: str, name: str = "X") -> ChatContact:
@@ -219,15 +234,17 @@ async def test_status_transient_restores_default_after_timer(app_for_test):
     app = app_for_test
     async with app.run_test() as pilot:
         await pilot.pause()
-        status_bar = app.query_one("#status-bar", Static)
+        status_text = app.query_one("#status-text", Static)
 
         app._unread_counts["signal:+391234567890"] = 2
         app._status("Ciao", 0.05)
-        assert status_bar.content == "Ciao"
+        assert status_text.content == "Ciao"
 
         await pilot.pause(0.2)
 
-        assert status_bar.content == "📱 2  💬 -  📨 -"
+        assert app.query_one("#status-signal", Static).content == "📱 2"
+        assert app.query_one("#status-whatsapp", Static).content == "💬 -"
+        assert app.query_one("#status-telegram", Static).content == "📨 -"
         assert app._status_active is False
 
 
@@ -237,7 +254,6 @@ async def test_select_contact_zeroes_unread_in_default(app_for_test):
     app = app_for_test
     async with app.run_test() as pilot:
         await pilot.pause()
-        status_bar = app.query_one("#status-bar", Static)
 
         mario_key = "signal:+391234567890"
         luigi_key = "signal:+391111111111"
@@ -248,4 +264,6 @@ async def test_select_contact_zeroes_unread_in_default(app_for_test):
 
         assert app._unread_counts[mario_key] == 0
         # Only Luigi's 3 remain; Mario's unread was zeroed.
-        assert status_bar.content == "📱 3  💬 -  📨 -"
+        assert app.query_one("#status-signal", Static).content == "📱 3"
+        assert app.query_one("#status-whatsapp", Static).content == "💬 -"
+        assert app.query_one("#status-telegram", Static).content == "📨 -"

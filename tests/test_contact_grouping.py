@@ -210,8 +210,7 @@ class TestGroupLabel:
         app._protocol_filter = "signal"
         app._unread_counts = {"signal:+391": 2}
         label = app._group_label(self._entry(app))
-        # No chevron in filter mode: name + per-protocol unread breakdown.
-        # The filter's own backend is implicit → bare marker without emoji.
+        # No chevron in filter mode: name + bare unread badge (no emoji).
         assert label == "Mario *2"
 
     def test_filter_badge_single_backend_with_unread(self):
@@ -224,7 +223,8 @@ class TestGroupLabel:
         label = app._group_label(self._entry(app))
         assert label == "Mario *2"
 
-    def test_filter_badge_two_backends(self):
+    def test_filter_badge_only_filtered_protocol_unread(self):
+        # Filter signal with unread on BOTH members: only signal's is shown.
         app = _make_app(
             _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
             _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
@@ -232,27 +232,20 @@ class TestGroupLabel:
         app._protocol_filter = "signal"
         app._unread_counts = {"signal:+391": 2, "whatsapp:wa:1@s.whatsapp.net": 3}
         label = app._group_label(self._entry(app))
-        assert label == "Mario *2 *3💬"
+        assert label == "Mario *2"
 
-    def test_filter_badge_three_backends(self):
+    def test_filter_badge_whatsapp_filter_shows_only_whatsapp(self):
         app = _make_app(
             _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
             _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
-            _contact(PROTOCOL_TELEGRAM, "42", "Tg", phone="391"),
         )
-        app._protocol_filter = "signal"
-        app._unread_counts = {
-            "signal:+391": 2,
-            "whatsapp:wa:1@s.whatsapp.net": 3,
-            "telegram:42": 2,
-        }
+        app._protocol_filter = "whatsapp"
+        app._unread_counts = {"whatsapp:wa:1@s.whatsapp.net": 1}
         label = app._group_label(self._entry(app))
-        assert label == "Mario *2 *3💬 *2📨"
+        assert label == "Mario *1"
 
-    def test_filter_badge_fixed_protocol_order_regardless_of_insertion_and_counts(self):
-        # Members inserted in reverse protocol order; unread counts are also
-        # "misleading" (Telegram highest).  The breakdown must stay fixed
-        # Signal → WhatsApp → Telegram.
+    def test_filter_badge_ignores_other_backends(self):
+        # Higher unread on other backends is not shown under a single filter.
         app = _make_app(
             _contact(PROTOCOL_TELEGRAM, "42", "Tg", phone="391"),
             _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
@@ -265,7 +258,7 @@ class TestGroupLabel:
             "signal:+391": 1,
         }
         label = app._group_label(self._entry(app))
-        assert label == "Mario *1 *7💬 *9📨"
+        assert label == "Mario *1"
 
     def test_filter_badge_zero_unread_omitted(self):
         app = _make_app(
@@ -277,18 +270,7 @@ class TestGroupLabel:
         app._unread_counts = {"signal:+391": 2}
         label = app._group_label(self._entry(app))
         assert label == "Mario *2"
-        assert "💬" not in label and "📨" not in label
-
-    def test_filter_badge_format_no_space_between_number_and_emoji(self):
-        app = _make_app(
-            _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
-            _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
-        )
-        app._protocol_filter = "whatsapp"
-        app._unread_counts = {"signal:+391": 2}
-        label = app._group_label(self._entry(app))
-        assert " *2📱" in label
-        assert "2 📱" not in label
+        assert "💬" not in label and "📨" not in label and "📱" not in label
 
     def test_filter_badge_own_backend_bare_no_emoji(self):
         app = _make_app(
@@ -301,31 +283,6 @@ class TestGroupLabel:
         label = app._group_label(self._entry(app))
         assert label == "Mario *3"
 
-    def test_filter_badge_external_backend_with_emoji(self):
-        app = _make_app(
-            _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
-            _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
-        )
-        app._protocol_filter = "whatsapp"
-        app._unread_counts = {"signal:+391": 2}
-        label = app._group_label(self._entry(app))
-        assert label == "Mario *2📱"
-
-    def test_filter_badge_mixed_own_bare_external_emoji(self):
-        app = _make_app(
-            _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
-            _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
-            _contact(PROTOCOL_TELEGRAM, "42", "Tg", phone="391"),
-        )
-        app._protocol_filter = "whatsapp"
-        app._unread_counts = {
-            "signal:+391": 2,
-            "whatsapp:wa:1@s.whatsapp.net": 1,
-            "telegram:42": 5,
-        }
-        label = app._group_label(self._entry(app))
-        assert label == "Mario *2📱 *1 *5📨"
-
     def test_filter_badge_none_when_all_zero(self):
         app = _make_app(
             _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
@@ -336,35 +293,9 @@ class TestGroupLabel:
         label = app._group_label(self._entry(app))
         assert label == "Mario"
 
-    def test_filter_badge_excludes_only_selected_member(self):
-        app = _make_app(
-            _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
-            _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
-        )
-        app._protocol_filter = "signal"
-        app._unread_counts = {"signal:+391": 2, "whatsapp:wa:1@s.whatsapp.net": 3}
-        app.selected_contact = app.contacts[1]  # Anna (whatsapp member)
-        label = app._group_label(self._entry(app))
-        # The selected member's marker is excluded, but the other backends'
-        # markers stay visible (Anna's WhatsApp unread must not hide Mario's
-        # Signal unread).
-        assert label == "Mario *2"
-        assert "💬" not in label
-
-    def test_filter_badge_selected_own_backend_excludes_only_that_marker(self):
-        # Filter WhatsApp + selected WhatsApp member: the other backends keep
-        # their emoji markers, only the selected (WhatsApp) marker disappears.
-        app = _make_app(
-            _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
-            _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
-        )
-        app._protocol_filter = "whatsapp"
-        app._unread_counts = {"signal:+391": 2, "whatsapp:wa:1@s.whatsapp.net": 3}
-        app.selected_contact = app.contacts[1]  # Anna (whatsapp member)
-        label = app._group_label(self._entry(app))
-        assert label == "Mario *2📱"
-
-    def test_filter_badge_reappears_after_selection_changes(self):
+    def test_filter_badge_selection_does_not_affect_filter(self):
+        # No selected-member exclusion in filter mode: the badge is the filtered
+        # member's unread regardless of which contact is selected.
         sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
         wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
         other = _contact(PROTOCOL_SIGNAL, "+392", "Bruno", phone="392")
@@ -377,10 +308,10 @@ class TestGroupLabel:
         )
 
         app.selected_contact = sig  # Mario belongs to phone:391
-        assert app._group_label(entry) == "Mario *3💬"
+        assert app._group_label(entry) == "Mario *2"
 
         app.selected_contact = other  # Bruno belongs to a different group
-        assert app._group_label(entry) == "Mario *2 *3💬"
+        assert app._group_label(entry) == "Mario *2"
 
 
 # ─── Member label ─────────────────────────────────────────────────────────────
@@ -886,7 +817,7 @@ class TestHeaderBadge:
 
         assert " *2" in header._label_text
 
-    def test_header_badge_breakdown_after_flush_in_filter_mode(self):
+    def test_header_badge_filtered_protocol_only_after_flush(self):
         app = _make_app(
             _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
             _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
@@ -908,7 +839,8 @@ class TestHeaderBadge:
         app._recompute_unread()
         app._render_contact_list(list(app.contacts))
 
-        assert header._label_text == "Mario *1 *1💬"
+        # Filter mode shows only the filtered protocol's unread (no breakdown).
+        assert header._label_text == "Mario *1"
 
     def test_header_badge_suppressed_after_select_contact(self):
         app = _make_app(
