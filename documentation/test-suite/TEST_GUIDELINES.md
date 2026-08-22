@@ -19,7 +19,7 @@ Convenzioni desunte dai test esistenti (`tests/conftest.py`, `Telegram/conftest.
 
 from __future__ import annotations
 
-from unittest.mock import patch          # MagicMock quando serve
+from unittest.mock import patch  # MagicMock quando serve
 
 from models import ChatContact
 # ...import dei moduli sotto test
@@ -28,8 +28,7 @@ from models import ChatContact
 class TestArea:
     """🧱 <cosa copre la classe>."""
 
-    def test_comportamento_atteso(self):
-        ...
+    def test_comportamento_atteso(self): ...
 ```
 
 Nota sugli import: `pyproject.toml` definisce `pythonpath = ["."]`, quindi i moduli del progetto sono importabili direttamente senza manipolare `sys.path`. Alcuni file storici contengono ancora un ridondante `sys.path.insert(0, PROJECT_ROOT)` (senza commenti `noqa`): non replicarlo nei nuovi test.
