@@ -144,11 +144,16 @@ class ContactListMixin:
         return rows
 
     def _group_label(self, entry: PickerEntry) -> str:
-        """Build the neutral group-header label (no emoji, no typing icons).
+        """Build the neutral group-header label (no typing icons).
 
-        The chevron ▸/▾ conveys the collapse state (▸ collapsed, ▾ expanded).
-        The aggregate unread badge is suppressed when the selected contact is
-        one of the group's members (decision 5).
+        The chevron ▸/▾ conveys the collapse state (▸ collapsed, ▾ expanded)
+        and is dropped in single-protocol filter mode (the header is the only
+        row shown).  The unread badge is suppressed when the selected contact
+        is one of the group's members (decision 5).  In filter mode the badge
+        is broken down per protocol (fixed Signal → WhatsApp → Telegram order)
+        so unread counts of backends masked by the filter stay visible; the
+        filter's own backend marker is bare `` *N`` (no emoji), while the
+        other backends keep their protocol emoji.
         """
         if self._protocol_filter in ("signal", "whatsapp", "telegram"):
             # Filter mode masks members: the header is the only row shown, so
@@ -156,13 +161,38 @@ class ContactListMixin:
             chevron = ""
         else:
             chevron = "▸" if entry.key not in self._expanded_groups else "▾"
-        members = entry.members.values()
-        unread = sum(self._unread_counts.get(m.cache_key, 0) for m in members)
-        if self.selected_contact is not None and self.selected_contact.cache_key in {
-            m.cache_key for m in members
-        }:
-            unread = 0
         label = f"{chevron} {entry.display_name}" if chevron else entry.display_name
+
+        # Decision 5: when the selected contact belongs to this group, no
+        # unread badge at all (suppressed before both badge branches).
+        if self.selected_contact is not None and self.selected_contact.cache_key in {
+            m.cache_key for m in entry.members.values()
+        }:
+            return label
+
+        if self._protocol_filter in ("signal", "whatsapp", "telegram"):
+            # Filter mode: per-protocol breakdown.  ``entry.members`` is a dict
+            # in insertion order, so re-sort by protocol priority (same sort as
+            # ``_visible_rows``) to guarantee a fixed Signal → WhatsApp →
+            # Telegram order.  Zero unread members are omitted; max 3 markers.
+            # The current filter's own backend is implicit, so its marker is
+            # bare `` *N``; other backends keep the protocol emoji.
+            members = sorted(
+                entry.members.values(),
+                key=lambda c: _protocol_priority(c.protocol),
+            )
+            parts = [
+                f" *{self._unread_counts.get(m.cache_key, 0)}"
+                f"{'' if m.protocol == self._protocol_filter else protocol_emoji(m.protocol)}"
+                for m in members
+                if self._unread_counts.get(m.cache_key, 0) > 0
+            ]
+            return label + "".join(parts)
+
+        # "all": aggregate sum, no emoji (unchanged).
+        unread = sum(
+            self._unread_counts.get(m.cache_key, 0) for m in entry.members.values()
+        )
         if unread:
             label += f" *{unread}"
         return label
