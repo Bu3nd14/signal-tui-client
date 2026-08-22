@@ -117,7 +117,7 @@ async def test_status_bar_shows(app_for_test):
     async with app.run_test() as pilot:
         await pilot.pause()
 
-        status_bar = app.query_one("#status-bar", Static)
+        status_bar = app.query_one("#status-text", Static)
         app._status("Ciao", 0)  # persistent: no auto-clear timer
         assert status_bar.content == "Ciao"
 

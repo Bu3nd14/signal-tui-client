@@ -93,10 +93,16 @@ class ContactListMixin:
             c.last_message_ts = max(c.last_message_ts, ts)
 
     def _filtered_contacts(self) -> list[ChatContact]:
-        """Return contacts matching the active protocol filter."""
+        """Return contacts matching the active protocol + unread filters."""
         if self._protocol_filter in ("signal", "whatsapp", "telegram"):
-            return [c for c in self.contacts if c.protocol == self._protocol_filter]
-        return list(self.contacts)
+            contacts = [c for c in self.contacts if c.protocol == self._protocol_filter]
+        else:
+            contacts = list(self.contacts)
+        if self._unread_only:
+            contacts = [
+                c for c in contacts if self._unread_counts.get(c.cache_key, 0) > 0
+            ]
+        return contacts
 
     def _protocol_class(self, contact: ChatContact) -> str:
         """Return the CSS accent class for a contact's protocol."""
@@ -105,14 +111,18 @@ class ContactListMixin:
     def _filter_title_suffix(self) -> str:
         """Human-readable suffix describing the active filter state."""
         if self._protocol_filter == "signal":
-            return " - Signal"
-        if self._protocol_filter == "whatsapp":
-            return " - WhatsApp"
-        if self._protocol_filter == "telegram":
-            return " - Telegram"
-        if self._protocol_filter == "all":
-            return " - All"
-        return ""
+            suffix = " - Signal"
+        elif self._protocol_filter == "whatsapp":
+            suffix = " - WhatsApp"
+        elif self._protocol_filter == "telegram":
+            suffix = " - Telegram"
+        elif self._protocol_filter == "all":
+            suffix = " - All"
+        else:
+            suffix = ""
+        if self._unread_only:
+            suffix += " · Unread"
+        return suffix
 
     def _visible_rows(self) -> list[_Row]:
         """Project ``self.contacts`` into flat, sorted rows (header + members).
@@ -150,13 +160,11 @@ class ContactListMixin:
         and is dropped in single-protocol filter mode (the header is the only
         row shown).  In "all" mode the aggregate unread badge is suppressed
         entirely when the selected contact is one of the group's members
-        (decision 5).  In filter mode the badge is broken down per protocol
-        (fixed Signal → WhatsApp → Telegram order) so unread counts of backends
-        masked by the filter stay visible; the filter's own backend marker is
-        bare `` *N`` (no emoji), while the other backends keep their protocol
-        emoji.  In filter mode only the selected member's marker is excluded —
-        the other backends' markers remain visible even while the selected
-        member is being read (their ``read`` flags are still 0 in the cache).
+        (decision 5).  In filter mode the badge is the unread of the filtered
+        protocol's member ONLY (bare `` *N``, no emoji): the per-backend
+        breakdown is gone — the per-backend status bar is now the informative
+        mechanism.  After reading that member its unread is 0, so the badge
+        disappears naturally (no selected-member exclusion).
         """
         if self._protocol_filter in ("signal", "whatsapp", "telegram"):
             # Filter mode masks members: the header is the only row shown, so
@@ -167,29 +175,15 @@ class ContactListMixin:
         label = f"{chevron} {entry.display_name}" if chevron else entry.display_name
 
         if self._protocol_filter in ("signal", "whatsapp", "telegram"):
-            # Filter mode: per-protocol breakdown.  ``entry.members`` is a dict
-            # in insertion order, so re-sort by protocol priority (same sort as
-            # ``_visible_rows``) to guarantee a fixed Signal → WhatsApp →
-            # Telegram order.  Zero unread members are omitted; max 3 markers.
-            # The current filter's own backend is implicit, so its marker is
-            # bare `` *N``; other backends keep the protocol emoji.  The
-            # selected member's marker is excluded (its chat is being read) but
-            # the other backends' markers stay visible.
-            selected_key = (
-                self.selected_contact.cache_key if self.selected_contact else None
+            # Filter mode: only the unread of the filtered protocol's member.
+            unread = sum(
+                self._unread_counts.get(m.cache_key, 0)
+                for m in entry.members.values()
+                if m.protocol == self._protocol_filter
             )
-            members = sorted(
-                entry.members.values(),
-                key=lambda c: _protocol_priority(c.protocol),
-            )
-            parts = [
-                f" *{self._unread_counts.get(m.cache_key, 0)}"
-                f"{'' if m.protocol == self._protocol_filter else protocol_emoji(m.protocol)}"
-                for m in members
-                if self._unread_counts.get(m.cache_key, 0) > 0
-                and m.cache_key != selected_key
-            ]
-            return label + "".join(parts)
+            if unread:
+                label += f" *{unread}"
+            return label
 
         # Decision 5 (only in "all" mode): when the selected contact belongs to
         # this group, no aggregate unread badge at all.
@@ -533,13 +527,20 @@ class ContactListMixin:
             logger.debug("Contacts title not found", exc_info=True)
             section_lbl = None
         if section_lbl is not None:
-            section_lbl.update(f"📇 Contacts{self._filter_title_suffix()}")
+            if self._unread_only:
+                # No "Contacts" word and no " - " prefix: the long "· Unread"
+                # suffix would wrap and the " - " prefix would double the space.
+                suffix = self._filter_title_suffix().removeprefix(" - ")
+                section_lbl.update(f"📇 {suffix}")
+            else:
+                section_lbl.update(f"📇 Contacts{self._filter_title_suffix()}")
 
         # Sync the filter accent across the chat border, the contact list border
         # and the two section banners (📇 Contacts / 💬 Chat).
         cls_signal = "chat-filter-signal"
         cls_whats = "chat-filter-whatsapp"
         cls_telegram = "chat-filter-telegram"
+        cls_unread = "chat-filter-unread"
         widgets = [self.chat_log]
         for selector in ("#contact-list", "#ContactsTitle", "#ChatTitle"):
             try:
@@ -547,14 +548,16 @@ class ContactListMixin:
             except Exception as _e:
                 logger.debug("Filter widget not found: %s", selector, exc_info=True)
         for node in widgets:
-            node.remove_class(cls_signal, cls_whats, cls_telegram)
+            node.remove_class(cls_signal, cls_whats, cls_telegram, cls_unread)
             if self._protocol_filter == "signal":
                 node.add_class(cls_signal)
             elif self._protocol_filter == "whatsapp":
                 node.add_class(cls_whats)
             elif self._protocol_filter == "telegram":
                 node.add_class(cls_telegram)
-                # filtro "all": nessuna classe -> default (giallo).
+                # filtro "all": nessuna classe protocollo -> default (giallo).
+            if self._unread_only and self._protocol_filter == "all":
+                node.add_class(cls_unread)
 
     def action_cycle_protocol_filter(self):
         """Ctrl+W: cycle the contact list filter ALL -> SIGNAL -> WHATSAPP -> TELEGRAM."""
@@ -564,6 +567,7 @@ class ContactListMixin:
         )
         self._protocol_filter = order[(idx + 1) % len(order)]
         self._apply_contact_filter()
+        self._sync_status_segments()
         # NB: volutamente NON scriviamo niente nella chat qui: il ctrl+W aggiorna
         # solo il titolo della barra contatti e la lista visibile, senza inquinare
         # la cronologia della conversazione in corso.
@@ -683,6 +687,16 @@ class ContactListMixin:
             self.selected_contact.id
         )
         self._unread_counts[cache_key] = 0
+        # With the unread-only filter active the just-read contact now has zero
+        # unread and must vanish from the list immediately (not at the next
+        # flush).  Re-apply visibility before the highlight pass so the
+        # row → header → first-visible fallback happens now.  The chat stays
+        # open: ``selected_contact`` is preserved across the pass (the pass may
+        # deselect when no row remains visible under the filter).
+        if self._unread_only:
+            selected = self.selected_contact
+            self._apply_contact_visibility()
+            self.selected_contact = selected
         self._refresh_backend_status_if_idle()
 
         # Highlight the contact in the left list and remove the *N badge.

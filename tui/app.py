@@ -6,13 +6,13 @@ from typing import ClassVar
 from textual.app import App
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import (
     Button,
     Footer,
     Header,
     ListItem,
-    Static,
 )
 
 from backends import (
@@ -44,6 +44,7 @@ from tui.unread_reply import UnreadReplyMixin
 from ui_components import (
     ChatAreaWidget,
     ContactListWidget,
+    StatusBar,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,8 @@ class SignalTUI(
         Binding("ctrl+s", "open_contact_picker", "Search", priority=True),
         Binding("ctrl+d", "download_mode", "Download", priority=True),
         Binding("ctrl+w", "cycle_protocol_filter", "Filter", show=True, priority=True),
+        Binding("ctrl+u", "toggle_unread_filter", "Unread", priority=True),
+        Binding("ctrl+a", "go_to_all", show=False, priority=True),
         Binding("ctrl+l", "open_device_link", "Link", priority=True),
         Binding("ctrl+n", "next_suggestion", "Next", show=False),
         Binding("ctrl+p", "prev_suggestion", "Prev", show=False),
@@ -106,6 +109,10 @@ class SignalTUI(
         # Active protocol filter for the unified contact list:
         # "all" -> "signal" -> "whatsapp" (cycled with Ctrl+W).
         self._protocol_filter: str = "all"
+
+        # Unread-only filter (toggled with Ctrl+U): orthogonal to the protocol
+        # filter; only contacts with at least one unread message are shown.
+        self._unread_only: bool = False
 
         self._polling_active = False
         # Message identity: (protocol, contact_id, timestamp_ms).  Timestamps
@@ -208,7 +215,7 @@ class SignalTUI(
         )
         with Horizontal(id="bottom-bar"):
             yield Footer()
-            yield Static("", id="status-bar")
+            yield StatusBar(id="status-bar")
 
     def on_mount(self):
         """On startup, start poll worker and backend connections in parallel."""
@@ -239,6 +246,19 @@ class SignalTUI(
         self._polling_active = False
         self.exit()
 
+    def action_toggle_unread_filter(self):
+        """Ctrl+U: toggle the unread-only filter on the contact list."""
+        self._unread_only = not self._unread_only
+        self._apply_contact_filter()
+        self._sync_status_segments()
+
+    def action_go_to_all(self):
+        """Ctrl+A (undocumented): reset to the "all" view (no filter, no unread)."""
+        self._protocol_filter = "all"
+        self._unread_only = False
+        self._apply_contact_filter()
+        self._sync_status_segments()
+
     def on_exit(self):
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
@@ -250,17 +270,19 @@ class SignalTUI(
         # No flush needed — SQLite writes are incremental
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        """Gate the global Ctrl+W filter while the contact picker modal is open.
+        """Gate the global Ctrl+W / Ctrl+U / Ctrl+A filters while a picker is open.
 
         Textual resolves *priority* bindings from the App down, so the app-level
         ``ctrl+w → cycle_protocol_filter`` binding would otherwise win over the
         picker's own ``ctrl+w → cycle_filter`` binding.  Returning ``False`` here
-        (for that action, while a picker screen is active) lets the modal binding
-        win and keeps the main contact-list filter untouched.
+        (for those actions, while a picker screen is active) lets the modal
+        binding win and keeps the main contact-list filter untouched.
         """
-        if action == "cycle_protocol_filter" and isinstance(
-            self.screen, (ContactPickerScreen, BackendChoiceScreen)
-        ):
+        if action in (
+            "cycle_protocol_filter",
+            "toggle_unread_filter",
+            "go_to_all",
+        ) and isinstance(self.screen, (ContactPickerScreen, BackendChoiceScreen)):
             return False
         return super().check_action(action, parameters)
 
@@ -271,7 +293,7 @@ class SignalTUI(
         New messages cancel the previous auto-clear timer.
         """
         try:
-            self.query_one("#status-bar", Static).update(text)
+            self.query_one("#status-bar").show_message(text)
             self._status_active = True
             if self._status_timer is not None:
                 self._status_timer.stop()
@@ -293,18 +315,29 @@ class SignalTUI(
             if c.protocol == protocol
         )
 
+    def _backend_totals(self) -> dict[str, int]:
+        """Per-protocol unread totals in fixed Signal → WhatsApp → Telegram order."""
+        return {
+            PROTOCOL_SIGNAL: self._backend_unread_total(PROTOCOL_SIGNAL),
+            PROTOCOL_WHATSAPP: self._backend_unread_total(PROTOCOL_WHATSAPP),
+            PROTOCOL_TELEGRAM: self._backend_unread_total(PROTOCOL_TELEGRAM),
+        }
+
+    @staticmethod
+    def _backend_unread_text(totals: dict[str, int]) -> str:
+        """Format *totals* into the legacy status-bar text (pure, for tests)."""
+        return (
+            f"{protocol_emoji(PROTOCOL_SIGNAL)} {totals.get(PROTOCOL_SIGNAL, 0) or '-'}  "
+            f"{protocol_emoji(PROTOCOL_WHATSAPP)} {totals.get(PROTOCOL_WHATSAPP, 0) or '-'}  "
+            f"{protocol_emoji(PROTOCOL_TELEGRAM)} {totals.get(PROTOCOL_TELEGRAM, 0) or '-'}"
+        )
+
     def _render_backend_unread_status(self) -> None:
         """Render the default per-backend unread totals into ``#status-bar``."""
-        t_sig = self._backend_unread_total(PROTOCOL_SIGNAL)
-        t_wa = self._backend_unread_total(PROTOCOL_WHATSAPP)
-        t_tg = self._backend_unread_total(PROTOCOL_TELEGRAM)
-        text = (
-            f"{protocol_emoji(PROTOCOL_SIGNAL)} {t_sig or '-'}  "
-            f"{protocol_emoji(PROTOCOL_WHATSAPP)} {t_wa or '-'}  "
-            f"{protocol_emoji(PROTOCOL_TELEGRAM)} {t_tg or '-'}"
-        )
+        totals = self._backend_totals()
         try:
-            self.query_one("#status-bar", Static).update(text)
+            self.query_one("#status-bar").set_counts(totals)
+            self.query_one("#status-bar").show_default(totals)
         except Exception as _e:
             logger.debug("Failed to render backend unread status", exc_info=True)
 
@@ -318,6 +351,37 @@ class SignalTUI(
         self._status_active = False
         self._status_timer = None
         self._render_backend_unread_status()
+
+    def _sync_status_segments(self) -> None:
+        """Sync the ``-active`` class on the status-bar segments with state."""
+        try:
+            self.query_one("#status-bar").sync_active(
+                self._protocol_filter, self._unread_only
+            )
+        except Exception as _e:
+            logger.debug("Failed to sync status segments", exc_info=True)
+
+    def on_status_segment_pressed(self, event) -> None:
+        """Handle a click on a per-protocol status-bar segment."""
+        if isinstance(self.screen, ModalScreen):
+            return
+        self._activate_backend_unread(event.protocol)
+
+    def _activate_backend_unread(self, protocol: str) -> None:
+        """Set the protocol filter from a segment click (conditional unread).
+
+        Re-clicking the active unread segment turns the unread view off (the
+        protocol filter is kept).  Otherwise the protocol filter is set and the
+        unread-only view is enabled only when that backend actually has unread
+        (a backend with zero unread behaves like a plain Ctrl+W filter).
+        """
+        if self._protocol_filter == protocol and self._unread_only:
+            self._unread_only = False
+        else:
+            self._protocol_filter = protocol
+            self._unread_only = self._backend_unread_total(protocol) > 0
+        self._apply_contact_filter()
+        self._sync_status_segments()
 
     def on_button_pressed(self, event: Button.Pressed):
         """When the user clicks a button."""

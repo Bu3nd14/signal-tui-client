@@ -106,7 +106,7 @@ async def test_edit_gate_not_mine_rejected(app_for_test):
         await pilot.pause()
 
         assert app._editing_message is None
-        status_bar = app.query_one("#status-bar", Static)
+        status_bar = app.query_one("#status-text", Static)
         assert status_bar.content == "❌ You can only edit your own messages"
 
 
@@ -121,7 +121,7 @@ async def test_edit_gate_pending_rejected(app_for_test):
         await pilot.pause()
 
         assert app._editing_message is None
-        status_bar = app.query_one("#status-bar", Static)
+        status_bar = app.query_one("#status-text", Static)
         assert status_bar.content == "❌ Message not sent yet — cannot edit"
 
 
@@ -139,7 +139,7 @@ async def test_edit_gate_media_rejected(app_for_test):
         await pilot.pause()
 
         assert app._editing_message is None
-        status_bar = app.query_one("#status-bar", Static)
+        status_bar = app.query_one("#status-text", Static)
         assert status_bar.content == "❌ Only text messages can be edited"
 
 
@@ -282,7 +282,7 @@ async def test_submit_edit_failure_rolls_back(app_for_test_with_mocks, failure):
         assert (PROTOCOL_SIGNAL, ck, 1000, "vecchio") in app._seen_message_ids
         assert (PROTOCOL_SIGNAL, ck, 1000, "nuovo") not in app._seen_message_ids
 
-        status_bar = app.query_one("#status-bar", Static)
+        status_bar = app.query_one("#status-text", Static)
         assert status_bar.content == f"❌ Edit failed: {expected_error}"
 
 

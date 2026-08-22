@@ -26,6 +26,12 @@ from textual.widgets import (
 )
 
 from emoji_picker import EmojiCompletionWidget
+from models import (
+    PROTOCOL_SIGNAL,
+    PROTOCOL_TELEGRAM,
+    PROTOCOL_WHATSAPP,
+    protocol_emoji,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +47,25 @@ class MessageTextArea(TextArea):
             self.text_area = text_area
             self.value = text_area.text
 
+    # NB: ``ctrl+u`` is deliberately removed from the inherited TextArea
+    # bindings.  The App now binds ``ctrl+u`` (priority) to the unread-only
+    # filter toggle, which would otherwise shadow the editing shortcut anyway.
+    # ``super+backspace`` keeps the "delete to line start" behaviour; the
+    # ctrl+u editing shortcut is therefore LOST in the message input
+    # (documented UX trade-off).  The input keeps focus and its text intact.
     BINDINGS: ClassVar[list] = [
-        *TextArea.BINDINGS,
+        *[
+            Binding(
+                "super+backspace",
+                b.action,
+                b.description,
+                show=b.show,
+                priority=b.priority,
+            )
+            if b.action == "delete_to_start_of_line"
+            else b
+            for b in TextArea.BINDINGS
+        ],
         ("shift+enter,ctrl+j,ctrl+enter", "insert_newline", "New line"),
     ]
 
@@ -169,6 +192,91 @@ class ContactListWidget(Vertical):
 
     def on_mount(self):
         self.styles.width = 30
+
+
+class StatusSegment(Static):
+    """A clickable per-protocol unread segment in the status bar.
+
+    Subclasses ``Static`` (NOT ``Button``): a Static is not focusable, so
+    clicking it never steals focus from the message input.  The click is
+    translated into a ``Pressed`` message carrying the protocol.
+    """
+
+    class Pressed(Message):
+        """Posted when the user clicks this segment."""
+
+        def __init__(self, protocol: str) -> None:
+            super().__init__()
+            self.protocol = protocol
+
+    def __init__(self, protocol: str, *, id: str) -> None:
+        super().__init__("", id=id)
+        self.protocol = protocol
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.post_message(self.Pressed(self.protocol))
+
+
+class StatusBar(Horizontal):
+    """Bottom status bar: 3 per-protocol unread segments + a message label.
+
+    Default (idle) state shows the three clickable segments; transient /
+    persistent status messages swap to the single ``#status-text`` label.
+    Precedence is handled purely via ``display`` toggles (no mount/unmount),
+    so both groups of children stay in the DOM at all times.
+    """
+
+    _SEGMENTS: ClassVar[tuple[tuple[str, str], ...]] = (
+        (PROTOCOL_SIGNAL, "status-signal"),
+        (PROTOCOL_WHATSAPP, "status-whatsapp"),
+        (PROTOCOL_TELEGRAM, "status-telegram"),
+    )
+
+    def compose(self):
+        for protocol, sid in self._SEGMENTS:
+            yield StatusSegment(protocol, id=sid)
+        yield Static("", id="status-text")
+
+    def on_mount(self) -> None:
+        self._toggle(segments=True)
+
+    def _segment(self, sid: str) -> StatusSegment:
+        return self.query_one(f"#{sid}", StatusSegment)
+
+    def _text(self) -> Static:
+        return self.query_one("#status-text", Static)
+
+    def set_counts(self, counts: dict[str, int]) -> None:
+        """Update each segment label from a {protocol: unread} mapping."""
+        for protocol, sid in self._SEGMENTS:
+            count = counts.get(protocol, 0) or 0
+            self._segment(sid).update(f"{protocol_emoji(protocol)} {count or '-'}")
+
+    def show_default(self, totals: dict[str, int]) -> None:
+        """Show the three segments (default view) with *totals* as labels."""
+        self.set_counts(totals)
+        self._toggle(segments=True)
+
+    def show_message(self, text: str) -> None:
+        """Show *text* in the single message label, hiding the segments."""
+        self._toggle(segments=False)
+        self._text().update(text)
+
+    def sync_active(self, protocol_filter: str, unread_only: bool) -> None:
+        """Toggle the ``status-segment-active`` class on the current segment.
+
+        A segment is "active" when the unread-only filter is on AND the
+        protocol filter matches it (e.g. after clicking a segment).
+        """
+        active = protocol_filter if unread_only else None
+        for protocol, sid in self._SEGMENTS:
+            self._segment(sid).set_class(protocol == active, "status-segment-active")
+
+    def _toggle(self, segments: bool) -> None:
+        for _, sid in self._SEGMENTS:
+            self._segment(sid).display = segments
+        self._text().display = not segments
 
 
 class ChatAreaWidget(Vertical):

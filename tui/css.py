@@ -32,6 +32,10 @@ Screen {
     border: solid #0088cc;
 }
 
+#contact-list.chat-filter-unread {
+    border: solid #f59e0b;
+}
+
 #contact-list ListItem {
     padding: 1 1;
 }
@@ -139,6 +143,10 @@ Screen {
     border: solid #0088cc;
 }
 
+#chat-log.chat-filter-unread {
+    border: solid #f59e0b;
+}
+
 /* Banner (titoli di sezione) sincroni col bordo della chat per filtro. */
 #ContactsTitle.chat-filter-signal,
 #ChatTitle.chat-filter-signal {
@@ -153,6 +161,11 @@ Screen {
 #ContactsTitle.chat-filter-telegram,
 #ChatTitle.chat-filter-telegram {
     background: #0088cc;
+}
+
+#ContactsTitle.chat-filter-unread,
+#ChatTitle.chat-filter-unread {
+    background: #f59e0b;
 }
 .msg-quote {
     text-align: left;
@@ -262,7 +275,27 @@ Footer {
 
 #status-bar {
     width: 45;
-    text-align: right;
+    align-horizontal: right;
     color: $footer-foreground;
+}
+
+#status-bar StatusSegment {
+    width: auto;
+    padding: 0 1;
+}
+
+#status-bar StatusSegment:hover {
+    background: $boost;
+}
+
+#status-bar StatusSegment.status-segment-active {
+    background: $accent 40%;
+    color: $text;
+    text-style: bold;
+}
+
+#status-bar #status-text {
+    width: auto;
+    text-align: right;
 }
 """
