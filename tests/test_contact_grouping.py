@@ -336,7 +336,7 @@ class TestGroupLabel:
         label = app._group_label(self._entry(app))
         assert label == "Mario"
 
-    def test_filter_badge_suppressed_when_selected_in_group(self):
+    def test_filter_badge_excludes_only_selected_member(self):
         app = _make_app(
             _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
             _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
@@ -345,7 +345,24 @@ class TestGroupLabel:
         app._unread_counts = {"signal:+391": 2, "whatsapp:wa:1@s.whatsapp.net": 3}
         app.selected_contact = app.contacts[1]  # Anna (whatsapp member)
         label = app._group_label(self._entry(app))
-        assert " *" not in label
+        # The selected member's marker is excluded, but the other backends'
+        # markers stay visible (Anna's WhatsApp unread must not hide Mario's
+        # Signal unread).
+        assert label == "Mario *2"
+        assert "💬" not in label
+
+    def test_filter_badge_selected_own_backend_excludes_only_that_marker(self):
+        # Filter WhatsApp + selected WhatsApp member: the other backends keep
+        # their emoji markers, only the selected (WhatsApp) marker disappears.
+        app = _make_app(
+            _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
+            _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
+        )
+        app._protocol_filter = "whatsapp"
+        app._unread_counts = {"signal:+391": 2, "whatsapp:wa:1@s.whatsapp.net": 3}
+        app.selected_contact = app.contacts[1]  # Anna (whatsapp member)
+        label = app._group_label(self._entry(app))
+        assert label == "Mario *2📱"
 
     def test_filter_badge_reappears_after_selection_changes(self):
         sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
@@ -360,7 +377,7 @@ class TestGroupLabel:
         )
 
         app.selected_contact = sig  # Mario belongs to phone:391
-        assert " *" not in app._group_label(entry)
+        assert app._group_label(entry) == "Mario *3💬"
 
         app.selected_contact = other  # Bruno belongs to a different group
         assert app._group_label(entry) == "Mario *2 *3💬"
