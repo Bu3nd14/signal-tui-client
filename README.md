@@ -37,6 +37,10 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 - Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
 - Device linking (`Ctrl+L`) — link a new Signal, WhatsApp, or Telegram device directly from the TUI with QR code scanning
 - Unified multi-protocol contact list with `Ctrl+W` cycle filter: all → Signal → WhatsApp → Telegram
+- **Contacts grouped per person** — the same person on Signal + WhatsApp + Telegram appears once, as an expandable group; groups are **collapsed by default** (click/`Enter`/`space` on the header expands/collapses them)
+- **Per-backend unread counters in the status bar** — `📱 N  💬 N  📨 N` (total unread per protocol, `-` when zero), always visible even when a filter hides those contacts; **click an icon** to jump straight to that backend (its unread view if it has unread, otherwise its plain filter)
+- **Unread-only filter (`Ctrl+U`)** — show only contacts with unread messages; combines with the `Ctrl+W` protocol filter (`Ctrl+A` returns to the full **All** view)
+- **Flat filtered views** — when a single backend filter is active the list becomes flat (one row per person, no expand): clicking a row opens the chat directly
 - Protocol-aware theming — 📱 Signal, 💬 WhatsApp, 📨 Telegram with distinct emoji labels
 - Message delivery and read receipts — sent messages show status: *sent* (italic), **delivered** (bold), read (normal).  Works for all three protocols.
 - Typing indicators — see when a contact is typing (✍️ icon next to their name); a 💭 icon shows briefly after they stop typing or send a message.  Works for Signal and WhatsApp.
@@ -337,7 +341,13 @@ python3 signal_tui.py
 | `Ctrl+E` | Open emoji picker |
 | `Ctrl+S` | Open contact search picker |
 | `Ctrl+D` | Toggle download mode |
-| `Ctrl+W` | Cycle contact filter: all → Signal → WhatsApp → Telegram |
+| `Ctrl+W` | Cycle contact filter: all → Signal → WhatsApp → Telegram (single-backend views are flat) |
+| `Ctrl+U` | Toggle the "unread only" filter (combines with the `Ctrl+W` backend filter) |
+| `Ctrl+A` | Return to the full **All** view (backend filter + unread filter off) |
+| `Click` / `Enter` (on group header) | Expand / collapse a contact group (in the All view) |
+| `space` (on group header) | Expand / collapse a contact group |
+| `Click` / `Enter` (on a row in a filtered view) | Open the chat directly |
+| `Click` (on a status-bar icon) | Jump to that backend — unread view if it has unread, else its plain filter |
 | `Ctrl+L` | Link a new device (Signal / WhatsApp / Telegram) via QR code |
 | `Ctrl+N` / `Ctrl+P` | Navigate emoji suggestions / emoji picker categories |
 | `Ctrl+Q` | Quit |
@@ -384,15 +394,42 @@ A persistent HTTP server starts on port **10042** (first download only) and stay
 
 > **macOS users:** The download URL is shown in a selectable `Input` widget, but **Terminal.app** does not allow copying text from Textual widgets with `Cmd+C`. For the best experience, use **[iTerm2](https://iterm2.com/)** (free) which supports clipboard access from terminal applications.
 
+### Contact Grouping & Unread Filters
+
+The contact list groups the same person across backends: one **header** row shows the
+person's best name plus an aggregate unread badge (in the "All" view), and one
+**member** row per protocol (`📱 Signal`, `💬 WhatsApp`, `📨 Telegram`) sits below it.
+
+- Groups are **collapsed by default**: you see one row per person. `Click`/`Enter`/`space`
+  on the header expands or collapses the group; `Click`/`Enter` on a **member** row opens
+  that backend's chat.
+- In **"All"** view the header badge is the aggregate unread count of the person's members.
+- With a **single-backend filter** (`Ctrl+W`) the list becomes **flat**: one row per person
+  (no chevron), clicking a row opens the chat directly, and the badge shows only the unread
+  of that filtered view. The backend border color is kept even when the unread filter is on.
+- **`Ctrl+U`** toggles the **unread-only** filter: only contacts/groups with at least one
+  unread message are shown. It composes with `Ctrl+W` (e.g. `Ctrl+W` → WhatsApp, `Ctrl+U` →
+  only your unread WhatsApp messages).
+- **`Ctrl+A`** returns to the full All view (both filters off).
+- The **status bar** always shows the per-backend unread totals (`📱 N  💬 N  📨 N`, `-` when
+  zero). Clicking an icon jumps to that backend: to its **unread view** if it has unread
+  messages, otherwise to its **plain filter**. When the bar shows a transient message or an
+  error the icons are hidden and reappear (updated) once the message clears.
+
+> Note: `Ctrl+U` and `Ctrl+A` take over two text-editing shortcuts in the message input
+> ("delete to line start", "cursor to line start"); use `super+backspace` / `home` instead.
+> While the contact search picker (`Ctrl+S`) is open the new shortcuts are disabled.
+
 ### Tips
 
 - The app starts the `signal-cli` daemon automatically on first launch (for Signal) and a webhook HTTP server for WhatsApp push events
 - Messages are persisted locally in a SQLite database (`~/.local/share/signal-tui-client/messages.db`) with up to 200 messages retained per contact
 - The last 20 messages are shown when opening a chat; click "Load more" to see older cached messages
-- Unread messages are shown with a `*N` badge next to the contact name
+- Unread messages are shown with a `*N` badge: aggregate on the group header in the "All" view, filtered to the current backend in filtered views
+- The contact list is **grouped per person and sorted by recency** — typing, mumbling and unread states are shown as icons/badges; use `Ctrl+U` to focus on unread, `Ctrl+A` to go back to All
 - Sent messages show their delivery status: *sent* (italic), **delivered** (bold), read (normal)
 - A `✍️` icon next to a contact name means they are typing; a `💭` icon shows briefly after they send the message or stop typing
-- The contact list is always kept in alphabetical order — typing, mumbling and unread states are shown as icons/badges but never reorder the list
+- The contact list is **grouped per person and sorted by recency** — typing, mumbling and unread states are shown as icons/badges; use `Ctrl+U` to focus on unread, `Ctrl+A` to go back to All
 
 
 
