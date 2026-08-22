@@ -60,23 +60,23 @@ Forma usata da backend cache, cache UI e mirror eventi (`tui/events.py::_handle_
 
 ```python
 {
-    "id": str | None,            # id server/stabile (None nelle righe ottimistiche)
+    "id": str | None,  # id server/stabile (None nelle righe ottimistiche)
     "text": str,
     "is_mine": bool,
-    "sender": str,               # "You" per gli outgoing
-    "timestamp": int,            # ms
+    "sender": str,  # "You" per gli outgoing
+    "timestamp": int,  # ms
     "quote_text": str | None,
-    "msg_type": "text"|"image"|"sticker"|"attachment",
+    "msg_type": "text" | "image" | "sticker" | "attachment",
     "attachment_info": str | None,
-    "attachment_id": str | None, # per Telegram anche "tgref:<chat_id>:<msg_id>"
-    "read": bool,                # incoming letti (outgoing sempre True)
-    "status": "pending"|"failed"|"sent"|"delivered"|"read",
+    "attachment_id": str | None,  # per Telegram anche "tgref:<chat_id>:<msg_id>"
+    "read": bool,  # incoming letti (outgoing sempre True)
+    "status": "pending" | "failed" | "sent" | "delivered" | "read",
     # opzionali:
     "quote_timestamp": int | None,
     "quote_author": str | None,  # contact id, non display name
     "reply_to_message_id": str | None,
-    "edited": bool,              # flag "(modificato)"
-    "protocol": str,             # presente nelle righe caricate dal DB
+    "edited": bool,  # flag "(modificato)"
+    "protocol": str,  # presente nelle righe caricate dal DB
 }
 ```
 
@@ -164,8 +164,13 @@ Fissato da `tests/test_edit_contract.py` e implementato in `backends/base.py` + 
   - ritorna in caso di modifica:
 
     ```python
-    {"message_id": str, "timestamp": int,   # ts della entry, MAI modificato
-     "old_text": str, "text": str, "is_mine": bool}
+    {
+        "message_id": str,
+        "timestamp": int,  # ts della entry, MAI modificato
+        "old_text": str,
+        "text": str,
+        "is_mine": bool,
+    }
     ```
 
 - Vincoli UI: solo messaggi propri, non `pending`/`failed`, solo testo; rollback completo (testo, flag edited, identity sets, widget) se il server rifiuta.
