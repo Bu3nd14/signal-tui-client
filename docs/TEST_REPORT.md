@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
-**Data:** 2026-08-15
-**Git commit:** `30a2e8d` (master)
+**Data:** 2026-08-22
+**Git commit:** `8d95742` (master)
 **Python:** 3.12.3
-**Stato:** ✅ 507/507 test superati (433 main + 74 Telegram)
+**Stato:** ✅ **1268/1268 test superati** (1194 in `tests/` + 74 in `Telegram/`) · coverage globale ~90% (gate 68%) · lint/format puliti
 
 ---
 
@@ -11,37 +11,95 @@
 
 | Modulo | File | Test | Esito |
 |--------|------|------|-------|
-| WhatsApp Backend | `test_whatsapp_backend.py` | 102 | ✅ |
+| WhatsApp Backend | `test_whatsapp_backend.py` | 121 | ✅ |
+| Address Book | `test_address_book.py` | 82 | ✅ |
+| Grouping Contatti | `test_contact_grouping.py` | 56 | ✅ |
 | UI Protocol | `test_ui_protocol.py` | 55 | ✅ |
-| Telegram Regression | `Telegram/test_regression.py` | 39 | ✅ |
-| Backends (Manager) | `test_backends.py` | 36 | ✅ |
-| Telegram Backend | `Telegram/test_telegram_backend.py` | 35 | ✅ |
+| Contact Picker | `test_contact_picker.py` | 49 | ✅ |
+| Backends (Manager) | `test_backends.py` | 48 | ✅ |
+| Unread Filter | `test_unread_filter.py` | 41 | ✅ |
+| Telegram Backend | `test_telegram.py` | 40 | ✅ |
+| Telegram Edit | `test_telegram_edit.py` | 34 | ✅ |
+| Edit WhatsApp | `test_edit_whatsapp.py` | 33 | ✅ |
+| Device Link Screen | `test_device_link_screen.py` | 32 | ✅ |
+| UI Components | `test_ui_components.py` | 29 | ✅ |
 | Typing Indicator | `test_typing_indicator.py` | 29 | ✅ |
-| Device Link Screen | `test_device_link_screen.py` | 23 | ✅ |
-| Cache (SQLite) | `test_backend_cache.py` | 20 | ✅ |
-| Script installazione | `test_install_script.py` | 16 | ✅ |
-| Refresh Chat | `test_refresh_chat.py` | 16 | ✅ |
-| Emoji Picker | `test_emoji_picker.py` | 16 | ✅ |
+| Image Caption | `test_image_caption.py` | 28 | ✅ |
+| Edit Signal | `test_edit_signal.py` | 28 | ✅ |
+| WhatsApp Fix 40/41 | `test_whatsapp_fix_40_41.py` | 26 | ✅ |
+| Refresh Chat | `test_refresh_chat.py` | 23 | ✅ |
+| Emoji Picker | `test_emoji_picker.py` | 23 | ✅ |
+| Cache (SQLite) | `test_backend_cache.py` | 21 | ✅ |
+| WA Receipt ID Match | `test_whatsapp_receipt_id_match.py` | 20 | ✅ |
+| TG Read Receipt Fix | `test_telegram_read_receipt_fix.py` | 20 | ✅ |
+| TUI Integration | `test_tui_integration.py` | 18 | ✅ |
+| Config | `test_config.py` | 18 | ✅ |
+| DB Edit | `test_db_edit.py` | 17 | ✅ |
+| Install Script | `test_install_script.py` | 16 | ✅ |
+| Failed Send Status | `test_failed_send_status.py` | 16 | ✅ |
 | WA Startup/Resync | `test_wa_startup_resync.py` | 15 | ✅ |
-| UI Components | `test_ui_components.py` | 14 | ✅ |
+| Backend Download | `test_backend_download.py` | 15 | ✅ |
+| WA Read Receipt Fix | `test_whatsapp_read_receipt_fix.py` | 14 | ✅ |
+| Status Backend Unread | `test_status_backend_unread.py` | 14 | ✅ |
+| Signal Real Timestamp | `test_signal_real_timestamp.py` | 14 | ✅ |
+| Send Persist Offthread | `test_send_persist_offthread.py` | 14 | ✅ |
+| Edit Flow | `test_edit_flow.py` | 13 | ✅ |
 | Backend Connect | `test_backend_connect.py` | 13 | ✅ |
+| Migrazione Protocollo | `test_migrate_protocol.py` | 12 | ✅ |
 | RPC / Daemon | `test_backend_rpc.py` | 12 | ✅ |
-| Migrazione Protocollo | `test_migrate_protocol.py` | 11 | ✅ |
+| Open/Create | `test_open_or_create.py` | 11 | ✅ |
+| Backend Webhook | `test_backend_webhook.py` | 11 | ✅ |
+| Edit Contract | `test_edit_contract.py` | 10 | ✅ |
+| Download Mode | `test_download_mode.py` | 10 | ✅ |
 | Cache Debounce | `test_cache_debounce.py` | 10 | ✅ |
-| Contact Picker | `test_contact_picker.py` | 9 | ✅ |
-| Invio messaggi | `test_backend_send.py` | 6 | ✅ |
+| Merge Cache Edit | `test_merge_cache_edit.py` | 9 | ✅ |
+| Image Async Download | `test_image_async_download.py` | 9 | ✅ |
+| Outgoing Status Fallback | `test_outgoing_status_fallback.py` | 7 | ✅ |
 | Lock File | `test_signal_tui_lock.py` | 6 | ✅ |
+| Migrazione Status | `test_migrate_status.py` | 6 | ✅ |
+| DB Schema Versioning | `test_db_schema_versioning.py` | 6 | ✅ |
+| Invio messaggi | `test_backend_send.py` | 6 | ✅ |
+| Migrazione SQLite | `test_migrate_sqlite.py` | 5 | ✅ |
+| Grouping Integration | `test_contact_grouping_integration.py` | 5 | ✅ |
 | Lazy Config (CI) | `test_backend_lazy_config.py` | 5 | ✅ |
 | Attachment | `test_backend_attachments.py` | 5 | ✅ |
 | QR ASCII | `test_qr_ascii.py` | 4 | ✅ |
-| Migrazione SQLite | `test_migrate_sqlite.py` | 4 | ✅ |
 | Contatti | `test_backend_contacts.py` | 4 | ✅ |
+| Send Timing | `test_send_timing.py` | 3 | ✅ |
 | Docker Compose | `test_docker_compose_extra_hosts.py` | 2 | ✅ |
-| **Totale** | | **507** | **✅ 507/507** |
+| TG Send Reorder | `test_telegram_send_reorder.py` | 1 | ✅ |
+| Telegram Regression | `Telegram/test_regression.py` | 39 | ✅ |
+| Telegram Backend | `Telegram/test_telegram_backend.py` | 35 | ✅ |
+| **Totale** | | **1268** | **✅ 1268/1268** |
 
 ---
 
 ## Novità — Ultimi aggiornamenti
+
+### Raggruppamento contatti per persona (PR #25)
+- La lista principale raggruppa la stessa persona sui diversi backend in **un solo header** (+ una riga membro per protocollo: `📱 Signal`, `💬 WhatsApp`, `📨 Telegram`).
+- Gruppi **collassati di default**; toggle con click/`Enter`/`space` sull'header (solo display, nessun rebuild).
+- Ordine gruppi per recency del membro default; membri in ordine **fisso** Signal→WhatsApp→Telegram.
+- `backends/whatsapp.py`: `extras["phone"]` da `@c.us`/`@lid` → i contatti WhatsApp si fondono con Signal/Telegram.
+- Design: `docs/DESIGN_CONTACT_GROUPING.md`.
+
+### Vista piatta nei filtri + badge per-backend (PR #32, #34)
+- Con filtro singolo (`Ctrl+W`) la lista diventa **flat** (solo header, senza chevron); click/Enter apre la chat del protocollo filtrato.
+- Badge unread per-backend con icone in vista filtro, ordine fisso; poi **rifinito**: in ogni filtro il badge mostra **solo l'unread della vista filtrata** (l'informativa cross-backend è la status bar).
+
+### Filtro "solo non letti" + status bar clickabile (PR #37)
+- **`Ctrl+U`**: toggle "solo non letti" (ortogonale al filtro backend); **`Ctrl+A`**: torna alla vista All.
+- **Status bar** con contatore per-backend (`📱 N  💬 N  📨 N`, `-` se 0), segmenti **clickabili** (con non letti → filtro+unread; senza → solo filtro protocollo) e allineati a destra.
+- Precedenza default < transiente < errore permanente; `_select_contact` riapplica la visibilità sotto unread.
+- Design: `docs/DESIGN_UNREAD_FILTER.md`.
+
+### Altre feature recenti
+- **Foto Telegram dallo storico scaricabili** (download lazy via `tgref:`, PR #22).
+- **Edit messaggi** Signal/WhatsApp/Telegram (Alt+click o `Alt+E`, PR #23).
+- **Caption foto come bolla dedicata** + allineamento foto inviate da cache (PR #21).
+- **Contatore unread per-backend in status bar** (PR #36).
+
+> Nota: le tabelle dettagliate per modulo nelle sezioni successive sono snapshot storici; la tabella riepilogativa sopra è la fonte aggiornata.
 
 ### Telegram Backend (branch `feature/telegram-backend`, merged)
 
@@ -288,7 +346,9 @@ Test dello script `migrate_cache_sqlite.py` che converte la cache JSON esistente
 
 ### ✍️ Indicatori di typing (`test_typing_indicator.py`) — 25 test
 
-Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano da signal-cli come envelope con `typingMessage` (action `STARTED`/`STOPPED`). Sono effimeri: non finiscono mai in cache né nel log chat, ma attivano l'icona `✍️` accanto al contatto nella lista. Quando un contatto smette di scrivere senza inviare **oppure invia un messaggio**, passa allo stato **mumbling** (`💭`) per ~1 minuto. La lista dei contatti è **sempre in ordine alfabetico**: le icone `✍️`/`💭` e i badge `*N` sono mostrati nella label ma **non riordinano mai la lista**, così non "salta".
+Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano da signal-cli come envelope con `typingMessage` (action `STARTED`/`STOPPED`). Sono effimeri: non finiscono mai in cache né nel log chat, ma attivano l'icona `✍️` accanto al contatto nella lista. Quando un contatto smette di scrivere senza inviare **oppure invia un messaggio**, passa allo stato **mumbling** (`💭`) per ~1 minuto.
+
+> **Nota (aggiornamento 2026-08-22):** con il raggruppamento contatti la lista è ora **raggruppata per persona e ordinata per recency** (non più alfabetica); le icone `✍️`/`💭` e i badge `*N` sono mostrati nelle label ma non riordinano i gruppi di per sé (si veda `Ctrl+U` per il filtro non-letti).
 
 
 | Test | Descrizione |
