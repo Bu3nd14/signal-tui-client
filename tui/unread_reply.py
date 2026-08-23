@@ -252,6 +252,9 @@ class UnreadReplyMixin:
             # Propagate the placeholder flag so the send path can omit the fake
             # media text from the Signal quote on the wire (see _send_message_worker).
             "quote_is_placeholder": event.is_placeholder,
+            # Wire-faithful quote text: the real caption or None (captionless
+            # media).  ``text`` above stays the display value for the reply bar.
+            "quote_wire_text": event.caption,
         }
         if event.message_id is not None:
             self._reply_to["message_id"] = event.message_id

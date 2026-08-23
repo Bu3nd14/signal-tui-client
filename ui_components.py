@@ -599,6 +599,7 @@ class ImageWidget(Static):
             attachment_info: str | None = None,
             attachment_id: str = "",
             is_placeholder: bool = False,
+            caption: str | None = None,
         ) -> None:
             super().__init__()
             self.text = text
@@ -612,6 +613,10 @@ class ImageWidget(Static):
             # ("🖼️ Immagine") rather than a real user caption.  Used by the send
             # path to omit the fake text from the Signal quote on the wire.
             self.is_placeholder = is_placeholder
+            # Real user caption (or None for captionless media).  Distinct from
+            # ``text``, which is the display value (caption or placeholder).
+            # Carried verbatim so the wire quote stays faithful to the original.
+            self.caption = caption
 
     BINDINGS: ClassVar[list] = [
         Binding("alt+r", "request_reply", "Reply", show=False),
@@ -688,6 +693,8 @@ class ImageWidget(Static):
             attachment_id=self.attachment_id,
             # No real caption → ``text`` is the typed placeholder, not user text.
             is_placeholder=self._caption is None,
+            # ``caption`` carries only the real user caption (None if absent).
+            caption=self._caption,
         )
 
     def on_click(self, event: events.Click | None = None) -> None:

@@ -431,7 +431,7 @@ class TestMediaReplySend:
     """🖼️ Bug #37 — propagazione in uscita della reply media + guardie protocollo."""
 
     def test_send_media_reply_propagates_quote_params(self, tmp_db):
-        """Media reply senza caption → ``quote_message`` omesso sul filo Signal."""
+        """Media reply senza caption → ``quote_message`` vuoto sul filo Signal."""
         app = _signal_app()
         contact = ChatContact(
             id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
@@ -443,6 +443,7 @@ class TestMediaReplySend:
             "timestamp": 1234,
             "message_id": "sig-1234",
             "quote_is_placeholder": True,
+            "quote_wire_text": None,
         }
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
@@ -452,10 +453,11 @@ class TestMediaReplySend:
         kwargs = app.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_timestamp"] == 1234
         assert kwargs["quote_author"] == contact.id
-        # Il segnaposto NON viaggia come quoteMessage: il destinatario Signal
-        # risolve la quote da timestamp/author, e il testo fittizio causerebbe
+        # Il segnaposto NON viaggia come quoteMessage: il body reale del media
+        # senza caption è vuoto, quindi ``quote_message`` è "" (fedele
+        # all'originale) e non il testo fittizio che causava
         # "Original message not found".
-        assert kwargs["quote_message"] is None
+        assert kwargs["quote_message"] == ""
         assert kwargs["reply_to_message_id"] == "sig-1234"
 
     def test_signal_media_reply_with_caption_sends_caption_as_quote_message(
@@ -473,6 +475,7 @@ class TestMediaReplySend:
             "timestamp": 1234,
             "message_id": "sig-1234",
             "quote_is_placeholder": False,
+            "quote_wire_text": "Che bella!",
         }
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 

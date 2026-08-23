@@ -245,20 +245,17 @@ class SendMixin:
         quote_message = reply_data.get("text") if reply_data else None
         reply_to_message_id = reply_data.get("message_id") if reply_data else None
 
-        # For Signal, a media quote without a real caption carries the typed
-        # placeholder ("🖼️ Immagine") as ``quote_message``.  signal-cli resolves
-        # the quoted message from quote_timestamp/quote_author, so the fake text
-        # would only be used to locate a non-existent message and surfaces as
-        # "Original message not found" on the recipient side.  Omit it for
-        # placeholder quotes (the real caption is still sent when present).  The
-        # placeholder stays in the local bubble/ingest (quote_message) for UX.
+        # Wire-faithful quote text: media replies carry ``quote_wire_text`` (the
+        # real caption, or None for captionless media).  signal-cli resolves the
+        # quoted message from quote_timestamp/quote_author, so a fabricated body
+        # ("🖼️ Immagine") that does not exist in the original surfaces as
+        # "Original message not found".  A captionless media has an empty body,
+        # so None maps to "" (never the placeholder).  Text replies never set the
+        # key, so the original text is used unchanged.  The placeholder stays in
+        # the local bubble/ingest (quote_message) for UX.
         send_quote_message = quote_message
-        if (
-            protocol == PROTOCOL_SIGNAL
-            and reply_data
-            and reply_data.get("quote_is_placeholder")
-        ):
-            send_quote_message = None
+        if reply_data is not None and "quote_wire_text" in reply_data:
+            send_quote_message = reply_data.get("quote_wire_text") or ""
 
         # Send synchronously through the submission contact's backend. This is
         # a sync call running in a worker thread; it is NOT an async coroutine
