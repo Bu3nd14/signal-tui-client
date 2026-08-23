@@ -431,7 +431,7 @@ class TestMediaReplySend:
     """🖼️ Bug #37 — propagazione in uscita della reply media + guardie protocollo."""
 
     def test_send_media_reply_propagates_quote_params(self, tmp_db):
-        """Il segnaposto media viaggia come ``quote_message`` (preview Signal)."""
+        """Media reply senza caption → ``quote_message`` omesso sul filo Signal."""
         app = _signal_app()
         contact = ChatContact(
             id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
@@ -442,6 +442,7 @@ class TestMediaReplySend:
             "text": "🖼️ Immagine",
             "timestamp": 1234,
             "message_id": "sig-1234",
+            "quote_is_placeholder": True,
         }
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
@@ -451,8 +452,52 @@ class TestMediaReplySend:
         kwargs = app.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_timestamp"] == 1234
         assert kwargs["quote_author"] == contact.id
-        assert kwargs["quote_message"] == "🖼️ Immagine"
+        # Il segnaposto NON viaggia come quoteMessage: il destinatario Signal
+        # risolve la quote da timestamp/author, e il testo fittizio causerebbe
+        # "Original message not found".
+        assert kwargs["quote_message"] is None
         assert kwargs["reply_to_message_id"] == "sig-1234"
+
+    def test_signal_media_reply_with_caption_sends_caption_as_quote_message(
+        self, tmp_db
+    ):
+        """Media reply con caption reale → la caption viaggia come ``quote_message``."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "Che bella!",
+            "timestamp": 1234,
+            "message_id": "sig-1234",
+            "quote_is_placeholder": False,
+        }
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_message"] == "Che bella!"
+
+    def test_signal_text_reply_still_sends_quote_message(self, tmp_db):
+        """Reply a testo normale → ``quote_message`` resta il testo quotato."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {"text": "domanda", "timestamp": 1234}
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_message"] == "domanda"
 
     def test_whatsapp_media_reply_without_id_is_blocked(self, tmp_db):
         """Guardia WhatsApp: reply media senza Baileys id → bloccata prima del send."""
