@@ -529,6 +529,313 @@ class TestSelectContactUnreadOnly:
         assert ghost_item.display is False
 
 
+# ─── A. Auto-selection of the first visible contact on filter change ──────────
+
+
+class TestAutoSelectFirstVisible:
+    @staticmethod
+    def _query_for(fake):
+        def fake_q(selector, *args, **_k):
+            # The contact-list widget loop in ``_apply_contact_filter`` queries
+            # ``#contact-list`` WITHOUT a type, so only return the real list for
+            # the typed lookups (``_apply_contact_visibility`` /
+            # ``_contact_for_first_visible`` / ``_select_contact``).
+            if selector == "#contact-list" and args:
+                return fake
+            return MagicMock()
+
+        return fake_q
+
+    def _render_and_arm(self, app):
+        """Render the app into a fake ListView and re-arm ``query_one``."""
+        fake = _render(app)
+        app.query_one = MagicMock(side_effect=self._query_for(fake))
+        app._select_contact = MagicMock()
+        app._sync_status_segments = MagicMock()
+        return fake
+
+    # ── `_contact_for_first_visible` resolution ────────────────────────────────
+
+    def test_contact_for_first_visible_resolves_member(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        app = _make_app(mario)
+        item = MagicMock()
+        item._row_kind = "member"
+        item._contact_id = mario.cache_key
+        item.display = True
+        fake = _FakeListView()
+        fake.items.append(item)
+        app.query_one = MagicMock(return_value=fake)
+
+        assert app._contact_for_first_visible() is mario
+
+    def test_contact_for_first_visible_resolves_header_in_filter(self):
+        sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(sig, wa)
+        app._visible_rows()  # populate _group_members
+        app._protocol_filter = "signal"
+        item = MagicMock()
+        item._row_kind = "group"
+        item._group_key = "phone:391"
+        item.display = True
+        fake = _FakeListView()
+        fake.items.append(item)
+        app.query_one = MagicMock(return_value=fake)
+
+        assert app._contact_for_first_visible() is sig
+
+    def test_contact_for_first_visible_header_all_uses_default(self):
+        sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391", ts=100)
+        wa = _contact(
+            PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391", ts=200
+        )
+        app = _make_app(sig, wa)
+        entry = app._visible_rows()[0].entry
+        app._protocol_filter = "all"
+        item = MagicMock()
+        item._row_kind = "group"
+        item._group_key = "phone:391"
+        item._entry = entry
+        item.display = True
+        fake = _FakeListView()
+        fake.items.append(item)
+        app.query_one = MagicMock(return_value=fake)
+
+        # Default is the most-recent member (wa, ts=200).
+        assert app._contact_for_first_visible() is wa
+
+    def test_contact_for_first_visible_none_when_no_match(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        app = _make_app(mario)
+        item = MagicMock()
+        item._row_kind = "member"
+        item._contact_id = "signal:missing"
+        item.display = True
+        fake = _FakeListView()
+        fake.items.append(item)
+        app.query_one = MagicMock(return_value=fake)
+
+        assert app._contact_for_first_visible() is None
+
+    def test_contact_for_first_visible_skips_member_without_id(self):
+        app = _make_app(_contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"))
+        item = MagicMock()
+        item._row_kind = "member"
+        item._contact_id = None
+        item.display = True
+        fake = _FakeListView()
+        fake.items.append(item)
+        app.query_one = MagicMock(return_value=fake)
+
+        assert app._contact_for_first_visible() is None
+
+    def test_contact_for_first_visible_skips_unresolved_filter_header(self):
+        sig = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        app = _make_app(sig)
+        app._visible_rows()  # populate _group_members
+        app._protocol_filter = "telegram"  # no telegram member in the group
+        header = MagicMock()
+        header._row_kind = "group"
+        header._group_key = "phone:391"
+        header.display = True
+        fake = _FakeListView()
+        fake.items.append(header)
+        app.query_one = MagicMock(return_value=fake)
+
+        assert app._contact_for_first_visible() is None
+
+    def test_contact_for_first_visible_skips_header_without_entry(self):
+        app = _make_app()
+        app._protocol_filter = "all"
+        header = MagicMock()
+        header._row_kind = "group"
+        header._group_key = "phone:391"
+        header._entry = None
+        header.display = True
+        fake = _FakeListView()
+        fake.items.append(header)
+        app.query_one = MagicMock(return_value=fake)
+
+        assert app._contact_for_first_visible() is None
+
+    # ── `_select_first_visible_contact` ───────────────────────────────────────
+
+    def test_select_first_visible_calls_select_contact(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        app = _make_app(mario)
+        item = MagicMock()
+        item._row_kind = "member"
+        item._contact_id = mario.cache_key
+        item.display = True
+        fake = _FakeListView()
+        fake.items.append(item)
+        app.query_one = MagicMock(return_value=fake)
+        app._select_contact = MagicMock()
+
+        app._select_first_visible_contact()
+
+        app._select_contact.assert_called_once_with(mario)
+
+    def test_select_first_visible_noop_when_already_selected(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        app = _make_app(mario)
+        app.selected_contact = mario
+        item = MagicMock()
+        item._row_kind = "member"
+        item._contact_id = mario.cache_key
+        item.display = True
+        fake = _FakeListView()
+        fake.items.append(item)
+        app.query_one = MagicMock(return_value=fake)
+        app._select_contact = MagicMock()
+
+        app._select_first_visible_contact()
+
+        app._select_contact.assert_not_called()
+
+    def test_select_first_visible_noop_on_empty_list(self):
+        app = _make_app()
+        fake = _FakeListView()
+        app.query_one = MagicMock(return_value=fake)
+        app._select_contact = MagicMock()
+
+        app._select_first_visible_contact()
+
+        app._select_contact.assert_not_called()
+
+    # ── The 4 call sites select the first visible contact ─────────────────────
+
+    def test_cycle_protocol_filter_selects_first_visible(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(mario, wa)
+        self._render_and_arm(app)
+
+        app.action_cycle_protocol_filter()  # "all" -> "signal"
+
+        app._select_contact.assert_called_once_with(mario)
+
+    def test_toggle_unread_filter_selects_first_visible(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        luigi = _contact(PROTOCOL_SIGNAL, "+392", "Luigi", phone="392")
+        app = _make_app(mario, luigi)
+        app._unread_counts = {"signal:+392": 3}
+        self._render_and_arm(app)
+
+        app.action_toggle_unread_filter()  # unread-only -> True
+
+        # Only Luigi has unread: its header is the first visible row.
+        app._select_contact.assert_called_once_with(luigi)
+
+    def test_go_to_all_selects_first_visible(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(mario, wa)
+        app._protocol_filter = "signal"
+        app._unread_only = True
+        app._unread_counts = {"signal:+391": 2}
+        self._render_and_arm(app)
+
+        app.action_go_to_all()  # "all" + unread off
+
+        # Single group phone:391 → default contact (tiebreak: signal first).
+        app._select_contact.assert_called_once_with(mario)
+
+    def test_activate_backend_unread_selects_first_visible(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        wa = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(mario, wa)
+        app._unread_counts = {"whatsapp:wa:1@s.whatsapp.net": 3}
+        self._render_and_arm(app)
+
+        app._activate_backend_unread(PROTOCOL_WHATSAPP)
+
+        app._select_contact.assert_called_once_with(wa)
+
+    # ── Empty list deselects without selecting ────────────────────────────────
+
+    def test_apply_contact_filter_empty_list_deselects_and_no_select(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        app = _make_app(mario)
+        fake = _render(app)
+        app.selected_contact = mario
+        app.query_one = MagicMock(side_effect=self._query_for(fake))
+        app._select_contact = MagicMock()
+        app._sync_status_segments = MagicMock()
+
+        app._protocol_filter = "whatsapp"  # mario (signal) out of scope
+        app._apply_contact_filter()
+
+        assert app.selected_contact is None
+        app._select_contact.assert_not_called()
+
+    # ── No recursion: `_select_contact` → `_apply_contact_visibility` ─────────
+
+    def test_select_first_visible_not_reentrant(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391", ts=100)
+        luigi = _contact(PROTOCOL_SIGNAL, "+392", "Luigi", phone="392")
+        app = _make_app(mario, luigi)
+        app._protocol_filter = "signal"
+        app._unread_only = True
+        app._unread_counts = {"signal:+391": 2, "signal:+392": 3}
+        fake = _render(app)
+
+        fake_list = MagicMock()
+        fake_list.children = list(fake.items)
+        fake_list.index = None
+        app.query_one = MagicMock(side_effect=self._query_for(fake_list))
+        app._sync_status_segments = MagicMock()
+        _prepare_select(app, fake_list)
+        app._cache = {}
+
+        calls = []
+        real = app._select_contact
+
+        def spy(contact):
+            calls.append(contact)
+            return real(contact)
+
+        app._select_contact = spy
+
+        app._apply_contact_filter()
+
+        # The mark-read inside `_select_contact` re-applies visibility, but that
+        # must NOT re-trigger the auto-selection hook: exactly one call.
+        assert len(calls) == 1
+        assert calls[0] is mario
+
+    # ── Unread pin survives the auto-selection mark-read ──────────────────────
+
+    def test_select_first_visible_keeps_pin_and_new_selection_visible(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391", ts=100)
+        luigi = _contact(PROTOCOL_SIGNAL, "+392", "Luigi", phone="392", ts=200)
+        app = _make_app(mario, luigi)
+        app._unread_only = True
+        app._unread_counts = {"signal:+391": 2, "signal:+392": 3}
+        app.selected_contact = mario  # old selection (has unread)
+        fake = _render(app)
+        mario_header = app._group_widgets[app._member_to_group[mario.cache_key]]
+        luigi_header = app._group_widgets[app._member_to_group[luigi.cache_key]]
+
+        fake_list = MagicMock()
+        fake_list.children = list(fake.items)
+        fake_list.index = None
+        app.query_one = MagicMock(side_effect=self._query_for(fake_list))
+        _prepare_select(app, fake_list)
+        app._cache = {}
+
+        app._select_first_visible_contact()
+
+        # New first visible (Luigi, most recent) is selected and, after
+        # mark-read, stays pinned/visible; the old selection still has unread
+        # and stays visible too.
+        assert app.selected_contact is luigi
+        assert app._unread_counts["signal:+392"] == 0
+        assert luigi_header.display is True
+        assert mario_header.display is True
+
+
 # ─── A. ctrl+u binding + check_action gate ───────────────────────────────────
 
 

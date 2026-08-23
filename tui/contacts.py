@@ -179,19 +179,20 @@ class ContactListMixin:
         """Build the neutral group-header label (no typing icons).
 
         The chevron ▸/▾ conveys the collapse state (▸ collapsed, ▾ expanded)
-        and is dropped in single-protocol filter mode (the header is the only
-        row shown).  In "all" mode the aggregate unread badge is suppressed
-        entirely when the selected contact is one of the group's members
-        (decision 5).  In filter mode the badge is the unread of the filtered
-        protocol's member ONLY (bare `` *N``, no emoji): the per-backend
-        breakdown is gone — the per-backend status bar is now the informative
-        mechanism.  After reading that member its unread is 0, so the badge
-        disappears naturally (no selected-member exclusion).
+        in "all" mode; in single-protocol filter mode the header is the only
+        row shown (collapse is meaningless), so a bullet ``•`` is used instead.
+        In "all" mode the aggregate unread badge is suppressed entirely when
+        the selected contact is one of the group's members (decision 5).  In
+        filter mode the badge is the unread of the filtered protocol's member
+        ONLY (bare `` *N``, no emoji): the per-backend breakdown is gone — the
+        per-backend status bar is now the informative mechanism.  After reading
+        that member its unread is 0, so the badge disappears naturally (no
+        selected-member exclusion).
         """
         if self._protocol_filter in ("signal", "whatsapp", "telegram"):
             # Filter mode masks members: the header is the only row shown, so
-            # the collapse chevron is meaningless and is dropped.
-            chevron = ""
+            # the collapse chevron is meaningless and a bullet is used instead.
+            chevron = "•"
         else:
             chevron = "▸" if entry.key not in self._expanded_groups else "▾"
         label = f"{chevron} {entry.display_name}" if chevron else entry.display_name
@@ -516,10 +517,11 @@ class ContactListMixin:
     def _refresh_header_labels(self) -> None:
         """Recompute every group-header label in place.
 
-        The header label now depends on the active protocol filter (chevron is
-        dropped when a single protocol is filtered), so a Ctrl+W cycle must
-        refresh the labels without a full rebuild.  The ``PickerEntry`` of each
-        header is stored on the row at construction time (``item._entry``).
+        The header label now depends on the active protocol filter (the chevron
+        is replaced by a bullet ``•`` when a single protocol is filtered), so a
+        Ctrl+W cycle must refresh the labels without a full rebuild.  The
+        ``PickerEntry`` of each header is stored on the row at construction time
+        (``item._entry``).
         """
         for item in self._group_widgets.values():
             entry = getattr(item, "_entry", None)
@@ -581,6 +583,63 @@ class ContactListMixin:
             if self._unread_only and self._protocol_filter == "all":
                 node.add_class(cls_unread)
 
+        # After the filter changed, open the first visible contact of the new
+        # view (the previous selection would otherwise be a "ghost chat" no
+        # longer relevant to the filter).  Done HERE (not in
+        # ``_apply_contact_visibility``): ``_select_contact`` with the
+        # unread-only filter re-enters ``_apply_contact_visibility``, which
+        # would recurse if the hook lived there.
+        self._select_first_visible_contact()
+
+    def _contact_for_first_visible(self) -> ChatContact | None:
+        """Resolve the contact of the first visible row in the contact list.
+
+        Iterates the ListView children in DOM order and returns the contact of
+        the first row with ``display=True``.  Member rows resolve by their
+        ``_contact_id`` (a ``cache_key``); group-header rows resolve via the
+        filtered member (single-protocol filter) or the entry's default
+        contact ("all").  Returns ``None`` when no visible row resolves.
+        """
+        contact_list = self.query_one("#contact-list", ListView)
+        for child in contact_list.children:
+            if not getattr(child, "display", True):
+                continue
+            if getattr(child, "_row_kind", "member") == "member":
+                cache_key = getattr(child, "_contact_id", None)
+                if cache_key is not None:
+                    for contact in self.contacts:
+                        if contact.cache_key == cache_key:
+                            return contact
+                continue
+            group_key = getattr(child, "_group_key", None)
+            if self._protocol_filter != "all":
+                member = self._group_member_for_filter(group_key)
+                if member is not None:
+                    return member
+            else:
+                entry = getattr(child, "_entry", None)
+                if entry is not None:
+                    return entry_default_contact(entry)
+        return None
+
+    def _select_first_visible_contact(self) -> None:
+        """Select the first visible contact after a filter change.
+
+        No-op when the list is empty (``_apply_contact_visibility`` has already
+        set ``selected_contact=None``) or when the first visible contact is
+        already the selected one (compared by ``cache_key`` ONLY — not the
+        dataclass ``__eq__``, which also compares ``extras``).
+        """
+        contact = self._contact_for_first_visible()
+        if contact is None:
+            return
+        selected_key = (
+            self.selected_contact.cache_key if self.selected_contact else None
+        )
+        if contact.cache_key == selected_key:
+            return
+        self._select_contact(contact)
+
     def action_cycle_protocol_filter(self):
         """Ctrl+W: cycle the contact list filter ALL -> SIGNAL -> WHATSAPP -> TELEGRAM."""
         order = ["all", "signal", "whatsapp", "telegram"]
@@ -590,9 +649,11 @@ class ContactListMixin:
         self._protocol_filter = order[(idx + 1) % len(order)]
         self._apply_contact_filter()
         self._sync_status_segments()
-        # NB: volutamente NON scriviamo niente nella chat qui: il ctrl+W aggiorna
-        # solo il titolo della barra contatti e la lista visibile, senza inquinare
-        # la cronologia della conversazione in corso.
+        # NB: dopo il cambio filtro viene deliberatamente selezionata la prima
+        # chat della nuova vista (``_select_first_visible_contact`` in coda a
+        # ``_apply_contact_filter``).  Side-effect voluto: la chat appena aperta
+        # viene marcata come letta (mark-read).  Nessun'altra scrittura nella
+        # cronologia della conversazione in corso.
 
     # ─── Contact selection ─────────────────────────────────────────────────
 
@@ -822,12 +883,23 @@ class ContactListMixin:
 
         # SOLO display: nessun render, nessun clear, nessun cambio di focus.
         # Preserva la posizione evidenziata: togglare un header non deve far
-        # "saltare" l'highlight in cima alla lista (l'header resta visibile).
+        # "saltare" l'highlight in cima alla lista.  Ma NON sovrascrivere
+        # l'highlight se ``_apply_contact_visibility`` ha appena evidenziato la
+        # riga MEMBRO del contatto selezionato (gruppo appena espanso): il
+        # ripristino dell'header vale solo quando il membro resta nascosto
+        # (gruppo collassato) o quando il toggle riguarda un gruppo diverso.
         contact_list = self.query_one("#contact-list", ListView)
         previous = contact_list.index
         self._apply_contact_visibility()
+        sel_item = (
+            self._contact_widgets.get(self.selected_contact.cache_key)
+            if self.selected_contact is not None
+            else None
+        )
+        member_visible = sel_item is not None and getattr(sel_item, "display", True)
         if (
-            previous is not None
+            not member_visible
+            and previous is not None
             and 0 <= previous < len(contact_list.children)
             and getattr(contact_list.children[previous], "display", True)
         ):
