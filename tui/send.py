@@ -94,17 +94,6 @@ class SendMixin:
                 )
                 return
 
-        # WhatsApp quotes are applied server-side via the Baileys ``reply_to``
-        # id only (WAHA ignores the ``quote_*`` params).  Without that id the
-        # reply would be dropped or attached to the wrong target, so refuse
-        # before creating an optimistic bubble.
-        if reply_data and protocol == PROTOCOL_WHATSAPP and not reply_to_message_id:
-            self._status(
-                "❌ Cannot reply: the original WhatsApp message ID is unavailable",
-                0,
-            )
-            return
-
         # Save to SQLite (incremental INSERT), protocol-aware.
         data = {
             "text": message,
@@ -245,21 +234,6 @@ class SendMixin:
         quote_message = reply_data.get("text") if reply_data else None
         reply_to_message_id = reply_data.get("message_id") if reply_data else None
 
-        # For Signal, a media quote without a real caption carries the typed
-        # placeholder ("🖼️ Immagine") as ``quote_message``.  signal-cli resolves
-        # the quoted message from quote_timestamp/quote_author, so the fake text
-        # would only be used to locate a non-existent message and surfaces as
-        # "Original message not found" on the recipient side.  Omit it for
-        # placeholder quotes (the real caption is still sent when present).  The
-        # placeholder stays in the local bubble/ingest (quote_message) for UX.
-        send_quote_message = quote_message
-        if (
-            protocol == PROTOCOL_SIGNAL
-            and reply_data
-            and reply_data.get("quote_is_placeholder")
-        ):
-            send_quote_message = None
-
         # Send synchronously through the submission contact's backend. This is
         # a sync call running in a worker thread; it is NOT an async coroutine
         # that needs awaiting, which would otherwise be silently dropped.
@@ -277,7 +251,7 @@ class SendMixin:
             send_kwargs = {
                 "quote_timestamp": quote_timestamp,
                 "quote_author": quote_author,
-                "quote_message": send_quote_message,
+                "quote_message": quote_message,
             }
             if reply_to_message_id is not None:
                 send_kwargs["reply_to_message_id"] = reply_to_message_id

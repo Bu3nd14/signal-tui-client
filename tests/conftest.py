@@ -118,58 +118,6 @@ def sample_envelope_image() -> dict:
 
 
 @pytest.fixture
-def sample_envelope_quoting_image() -> dict:
-    """Return a Signal envelope whose ``dataMessage`` quotes an image (no text).
-
-    Sister fixture of ``sample_envelope_image``, used by bug #37 tests to
-    exercise the media-quote fallback on the ``dataMessage`` path.
-    """
-    return {
-        "source": "+391234567890",
-        "sourceNumber": "+391234567890",
-        "sourceName": "Mario",
-        "timestamp": 5000000,
-        "dataMessage": {
-            "message": "Guarda!",
-            "timestamp": 5000000,
-            "quote": {
-                "id": 4999000,
-                "author": "+391234567890",
-                "attachments": [{"contentType": "image/jpeg"}],
-            },
-        },
-    }
-
-
-@pytest.fixture
-def wa_event_quoting_sticker() -> dict:
-    """Return a raw WAHA message that quotes a sticker (nested ``quotedMessage``)."""
-    return {
-        "chatId": "391234567890@c.us",
-        "from": "391234567890@c.us",
-        "text": "guarda!",
-        "timestamp": 1700000000,
-        "quotedMessage": {"stickerMessage": {"id": "sticker-id-1"}},
-    }
-
-
-@pytest.fixture
-def cached_media_target() -> dict:
-    """Return a Telegram cache entry for a photo without a caption."""
-    return {
-        "id": "12",
-        "text": "",
-        "is_mine": False,
-        "sender": "Ada",
-        "timestamp": 1735787045000,
-        "quote_text": None,
-        "msg_type": "image",
-        "attachment_info": "Photo",
-        "attachment_id": "tgref:42:12",
-    }
-
-
-@pytest.fixture
 def sample_envelope_receipt() -> dict:
     """Return a sample receiptMessage envelope."""
     return {

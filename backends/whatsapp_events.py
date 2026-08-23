@@ -11,11 +11,7 @@ from __future__ import annotations
 import logging
 import re
 
-from models import (
-    PROTOCOL_WHATSAPP,
-    ChatEvent,
-    media_quote_placeholder,
-)
+from models import PROTOCOL_WHATSAPP, ChatEvent
 
 logger = logging.getLogger(__name__)
 
@@ -48,79 +44,6 @@ def _msg_type(raw: dict) -> str:
     if lower in ("video", "audio", "document", "file"):
         return "attachment"
     return "text"
-
-
-# ─── Quoted media detection ──────────────────────────────────────────────────
-# WAHA exposes a quote in multiple shapes, mirroring the media shapes handled
-# for the message itself in ``_event_from_message``: nested ``*Message`` keys
-# (directly or under ``message``), a flat ``type`` field, or ``mimetype``.
-
-_WA_QUOTE_MEDIA_TYPES = (
-    ("imageMessage", "image"),
-    ("videoMessage", "video"),
-    ("audioMessage", "audio"),
-    ("documentMessage", "attachment"),
-    ("stickerMessage", "sticker"),
-)
-
-
-def _wa_quote_media_type(quote: dict) -> str | None:
-    """Return the neutral ``msg_type`` of a quoted WhatsApp media, or ``None``.
-
-    Detection order matches the media extraction in ``_event_from_message``:
-    nested ``*Message`` keys first (on the quote itself or under ``message``),
-    then the flat ``type`` field, then ``mimetype``.
-    """
-    for container in (quote, quote.get("message")):
-        if not isinstance(container, dict):
-            continue
-        for media_key, msg_type in _WA_QUOTE_MEDIA_TYPES:
-            if container.get(media_key) is not None:
-                return msg_type
-    flat = str(quote.get("type") or "").lower()
-    if flat in ("image", "photo"):
-        return "image"
-    if flat == "sticker":
-        return "sticker"
-    if flat == "video":
-        return "video"
-    if flat in ("audio", "voice", "ptt"):
-        return "audio"
-    if flat in ("document", "file"):
-        return "attachment"
-    mime = str(quote.get("mimetype") or "").lower()
-    if mime.startswith("image/"):
-        return "image"
-    if mime.startswith("video/"):
-        return "video"
-    if mime.startswith("audio/"):
-        return "audio"
-    if mime:
-        return "attachment"
-    return None
-
-
-def _wa_quote_text(quote) -> str | None:
-    """Resolve the ``quote_text`` for a WhatsApp quoted message.
-
-    Real text (``text``/``body``/``conversation``/``caption``) wins; otherwise
-    a media quote resolves to a typed placeholder via ``_wa_quote_media_type``.
-    Returns ``None`` for a non-dict/unknown quote (no bubble, as before).
-    """
-    if not isinstance(quote, dict):
-        return None
-    text = (
-        quote.get("text")
-        or quote.get("body")
-        or quote.get("conversation")
-        or quote.get("caption")
-    )
-    if text:
-        return str(text)
-    msg_type = _wa_quote_media_type(quote)
-    if msg_type is None:
-        return None
-    return media_quote_placeholder(msg_type)
 
 
 def _jid_string(value) -> str | None:
@@ -440,7 +363,11 @@ def _event_from_message(
     sender = _resolve_sender_name(sender, contacts_by_jid)
 
     quote = raw.get("quote") or raw.get("quotedMessage")
-    quote_text = _wa_quote_text(quote)
+    quote_text = None
+    if isinstance(quote, dict):
+        quote_text = (
+            quote.get("text") or quote.get("body") or quote.get("conversation") or None
+        )
 
     # ── Build events ───────────────────────────────────────────────────
     ack_val = _ack_value(raw)
