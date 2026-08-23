@@ -455,7 +455,6 @@ class TestImageWidgetReply:
         ev = events[0]
         assert isinstance(ev, ImageWidget.ReplyRequested)
         assert ev.text == "🖼️ Immagine"  # caption None → placeholder
-        assert ev.is_placeholder is True  # no real caption → placeholder text
         assert ev.timestamp == 1000
         assert ev.sender == "Mario"
         assert ev.is_mine is False
@@ -472,7 +471,6 @@ class TestImageWidgetReply:
         w.on_click(self._click(meta=True))
 
         assert events[0].text == "Che bella!"
-        assert events[0].is_placeholder is False  # real caption → user text
 
     def test_image_widget_alt_r_action(self):
         """``alt+r`` (``action_request_reply``) → posta ``ReplyRequested``."""
@@ -485,7 +483,6 @@ class TestImageWidgetReply:
         assert len(events) == 1
         assert isinstance(events[0], ImageWidget.ReplyRequested)
         assert events[0].text == "🖼️ Immagine"
-        assert events[0].is_placeholder is True
         assert events[0].message_id == "msg-1"
 
     def test_image_widget_click_still_emits_image_clicked(self):

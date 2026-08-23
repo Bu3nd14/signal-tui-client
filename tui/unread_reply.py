@@ -249,9 +249,6 @@ class UnreadReplyMixin:
             "timestamp": event.timestamp,
             "sender": event.sender,
             "is_mine": event.is_mine,
-            # Propagate the placeholder flag so the send path can omit the fake
-            # media text from the Signal quote on the wire (see _send_message_worker).
-            "quote_is_placeholder": event.is_placeholder,
         }
         if event.message_id is not None:
             self._reply_to["message_id"] = event.message_id
