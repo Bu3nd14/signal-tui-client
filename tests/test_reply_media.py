@@ -27,6 +27,7 @@ def _reply_requested(**overrides) -> ImageWidget.ReplyRequested:
         "message_id": "sig-img-1",
         "attachment_info": "photo.jpg",
         "attachment_id": "att-1",
+        "is_placeholder": True,
     }
     kw.update(overrides)
     return ImageWidget.ReplyRequested(**kw)
@@ -77,7 +78,26 @@ async def test_handler_populates_reply_to_from_image(app_for_test):
         assert app._reply_to["is_mine"] is False
         assert app._reply_to["message_id"] == "sig-img-1"
         assert app._reply_to["attachment_info"] == "photo.jpg"
+        assert app._reply_to["quote_is_placeholder"] is True
         assert app._reply_to["_widget"] is _mounted_image(app)
+
+
+@pytest.mark.integration
+async def test_handler_propagates_placeholder_flag_false_for_caption(app_for_test):
+    """Con caption reale ``_reply_to["quote_is_placeholder"]`` è False."""
+    app = app_for_test
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _mount_image(app)
+        await pilot.pause()
+
+        app.on_image_widget_reply_requested(
+            _reply_requested(text="Che bella!", is_placeholder=False)
+        )
+        await pilot.pause()
+
+        assert app._reply_to["text"] == "Che bella!"
+        assert app._reply_to["quote_is_placeholder"] is False
 
 
 @pytest.mark.integration
