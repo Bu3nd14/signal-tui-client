@@ -94,17 +94,6 @@ class SendMixin:
                 )
                 return
 
-        # WhatsApp quotes are applied server-side via the Baileys ``reply_to``
-        # id only (WAHA ignores the ``quote_*`` params).  Without that id the
-        # reply would be dropped or attached to the wrong target, so refuse
-        # before creating an optimistic bubble.
-        if reply_data and protocol == PROTOCOL_WHATSAPP and not reply_to_message_id:
-            self._status(
-                "❌ Cannot reply: the original WhatsApp message ID is unavailable",
-                0,
-            )
-            return
-
         # Save to SQLite (incremental INSERT), protocol-aware.
         data = {
             "text": message,

@@ -55,34 +55,6 @@ def contact_cache_key(protocol: str, contact_id: str) -> str:
     return f"{protocol}:{contact_id}"
 
 
-# ─── Media quote placeholders ────────────────────────────────────────────────
-
-#: Canonical typed placeholders for a quoted media message (bug #37).  When a
-#: message quoting a media carries no real caption, the backends synthesize a
-#: ``quote_text`` from this mapping so the quote bubble is still rendered.
-MEDIA_QUOTE_PLACEHOLDERS: dict[str, str] = {
-    "image": "🖼️ Immagine",
-    "sticker": "🎨 Sticker",
-    "attachment": "📎 File",
-    "audio": "🎵 Audio",
-    "video": "🎬 Video",
-}
-
-
-def media_quote_placeholder(msg_type: str, detail: str | None = None) -> str:
-    """Return a human-readable label for a quoted media message.
-
-    ``detail`` is the real user caption/filename when available; it takes
-    priority over the typed placeholder derived from ``msg_type``.  Unknown
-    message types degrade to the generic "📎 File" placeholder.
-    """
-    if detail:
-        return detail
-    return MEDIA_QUOTE_PLACEHOLDERS.get(
-        msg_type, MEDIA_QUOTE_PLACEHOLDERS["attachment"]
-    )
-
-
 # ─── Data models ─────────────────────────────────────────────────────────────
 
 

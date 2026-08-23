@@ -204,10 +204,6 @@ class ChatViewMixin:
                 is_mine=is_mine,
                 chat_log=chat_log,
                 protocol=protocol,
-                timestamp=timestamp,
-                sender=sender,
-                message_id=message_id,
-                caption=caption,
             )
             if caption:
                 is_group = bool(
@@ -313,10 +309,6 @@ class ChatViewMixin:
         is_mine: bool,
         chat_log: Vertical,
         protocol: str | None = None,
-        timestamp: int = 0,
-        sender: str = "",
-        message_id: str | None = None,
-        caption: str | None = None,
     ):
         """Mount a clickable ``ImageWidget`` placeholder immediately and
         resolve the attachment path in a worker thread.
@@ -328,10 +320,6 @@ class ChatViewMixin:
 
         The actual image rendering happens on-demand when the user presses
         Enter or clicks the widget, which opens a fullscreen modal.
-
-        ``timestamp``/``sender``/``message_id``/``caption`` are forwarded to
-        the ``ImageWidget`` so Alt+click / Alt+r can raise a ``ReplyRequested``
-        carrying the message metadata (bug #37).
         """
         resolved_protocol = protocol or PROTOCOL_SIGNAL
 
@@ -340,13 +328,6 @@ class ChatViewMixin:
                 attachment_path=None,
                 attachment_id="",
                 fallback_text=f"[🖼️ Image: {attachment_info}]",
-                timestamp=timestamp,
-                sender=sender,
-                is_mine=is_mine,
-                message_id=message_id,
-                caption=caption,
-                attachment_info=attachment_info,
-                protocol=resolved_protocol,
             )
             widget.classes = "msg-right" if is_mine else "msg-left"
             chat_log.mount(widget)
@@ -357,13 +338,6 @@ class ChatViewMixin:
             attachment_path=None,
             attachment_id=attachment_id,
             fallback_text=f"[🖼️ Image: {attachment_info} — loading…]",
-            timestamp=timestamp,
-            sender=sender,
-            is_mine=is_mine,
-            message_id=message_id,
-            caption=caption,
-            attachment_info=attachment_info,
-            protocol=resolved_protocol,
         )
         widget.classes = "msg-right" if is_mine else "msg-left"
         chat_log.mount(widget)
@@ -715,14 +689,6 @@ class ChatViewMixin:
                 attachment_path=None,
                 attachment_id=attachment_id or "",
                 fallback_text=f"[{display}]",
-                timestamp=ts,
-                sender=sender,
-                is_mine=is_mine,
-                message_id=message_id,
-                msg_type=msg_type,
-                caption=caption,
-                attachment_info=attachment_info,
-                protocol=protocol,
             )
             image_widget.classes = "msg-right" if is_mine else "msg-left"
             widgets.append(image_widget)
