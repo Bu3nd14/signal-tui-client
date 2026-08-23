@@ -29,6 +29,10 @@ services:
       # WAHA itself listens on 3000 inside the container.
       - "127.0.0.1:${WHATSAPP_API_PORT:-3005}:3000/tcp"
     environment:
+      # Node heap cap: l'immagine WAHA defaulta a --max-old-space-size=16384
+      # (16GB di commit virtuale per un processo che usa ~116MB). Limitiamo a
+      # 1GB per non gonfiare il commit di sistema senza impatti funzionali.
+      NODE_OPTIONS: "--max-old-space-size=1024"
       # WAHA stores sessions and media under this data dir inside the container.
       WAHA_DATA_DIR: "/app/.sessions"
       # The default session name used by the Python backend/link tool.
