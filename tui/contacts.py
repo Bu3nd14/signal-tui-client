@@ -150,18 +150,35 @@ class ContactListMixin:
         """Project ``self.contacts`` into flat, sorted rows (header + members).
 
         Reuses the picker's grouping machine in read-only mode: contacts are
-        grouped per person via ``group_by_person``, groups are ordered by the
-        recency of their default contact (``entry_default_contact`` +
-        ``contact_sort_key``), and members are emitted in a FIXED protocol order
-        (Signal → WhatsApp → Telegram), never by recency.
+        grouped per person via ``group_by_person`` and members are emitted in a
+        FIXED protocol order (Signal → WhatsApp → Telegram), never by recency.
+
+        Group ordering is filter-aware: under a single-protocol filter each group
+        is ordered by the recency of THAT protocol's member (``contact_sort_key``),
+        so a contact that is recent on Telegram but stale on Signal no longer
+        surfaces at the top of the Signal view.  In "all" mode (and "all+unread")
+        the group is ordered by the recency of its default contact
+        (``entry_default_contact`` + ``contact_sort_key``) — the global recency.
+        Every visible group under a single-protocol filter has exactly one member
+        of that protocol, so the fallback to ``entry_default_contact`` is only a
+        safety net.
 
         Every contact — including single-member entries ("Mamma Vod") — gets a
-        header.  The projection does NOT depend on collapse state nor on the
-        protocol filter: ``want_ids`` stays stable while collapse/filter only
-        toggle ``display``.  Side-effect: refreshes ``_group_members``.
+        header.  The projection does NOT depend on collapse state; the set of
+        ``want_ids`` stays stable while collapse/filter only toggle ``display``
+        (the filter may, however, reorder groups).  Side-effect: refreshes
+        ``_group_members``.
         """
         entries = group_by_person(self.contacts)
-        entries.sort(key=lambda e: contact_sort_key(entry_default_contact(e)))
+
+        def _sort_key(entry):
+            if self._protocol_filter in ("signal", "whatsapp", "telegram"):
+                for m in entry.members.values():
+                    if m.protocol == self._protocol_filter:
+                        return contact_sort_key(m)
+            return contact_sort_key(entry_default_contact(entry))
+
+        entries.sort(key=_sort_key)
         self._group_members = {}
         rows: list[_Row] = []
         for entry in entries:
@@ -537,12 +554,16 @@ class ContactListMixin:
     def _apply_contact_filter(self) -> None:
         """Re-apply the active protocol filter to the contact list view.
 
-        Uses ``_apply_contact_visibility`` (display toggle) instead of a
-        full ListItem rebuild — the DOM keeps all contacts, hidden ones
-        are ``display=False``.  Only the CSS border / banner classes are
-        synced here.
+        Re-renders via ``_render_contact_list``: the group order now depends
+        on the active filter (per-protocol recency under a single-protocol
+        filter), so a filter change must reorder the DOM, not just toggle
+        ``display``.  Because the contact SET is unchanged, the render hits
+        the in-place reorder fast path (``move_child``, no clear/rebuild) and
+        ends with ``_apply_contact_visibility`` — no double visibility pass.
+        The DOM keeps all contacts, hidden ones are ``display=False``.  Only
+        the CSS border / banner classes are synced here on top of that.
         """
-        self._apply_contact_visibility()
+        self._render_contact_list(list(self.contacts))
         # Header labels depend on the filter (chevron shown only in "all").
         self._refresh_header_labels()
         try:

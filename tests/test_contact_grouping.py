@@ -669,6 +669,7 @@ class TestRefreshHeaderLabels:
         fake = _FakeListView()
         app.query_one = MagicMock(side_effect=self._query_for(fake))
         app._render_contact_list(list(app.contacts))
+        app._fake_list = fake
         return app
 
     def test_refresh_header_labels_drops_and_restores_chevron(self):
@@ -686,11 +687,22 @@ class TestRefreshHeaderLabels:
 
     def test_apply_contact_filter_refreshes_header_labels(self):
         app = self._rendered_app()
+        fake = app._fake_list
         header = app._group_widgets["phone:391"]
         assert header._label_text.startswith("▸")
 
-        # _apply_contact_filter also touches title/border widgets → all mocks.
-        app.query_one = MagicMock(return_value=MagicMock())
+        # _apply_contact_filter now re-renders in-place (the contact SET is
+        # unchanged, so the reorder/fast path preserves the same ListItem
+        # objects).  Only the typed ``#contact-list`` lookups return the real
+        # list; the title/border sync and the auto-select are mocked.
+        app._select_first_visible_contact = MagicMock()
+
+        def _typed_query(selector, *args, **_k):
+            if selector == "#contact-list" and args:
+                return fake
+            return MagicMock()
+
+        app.query_one = MagicMock(side_effect=_typed_query)
         app._protocol_filter = "signal"
         app._apply_contact_filter()
         assert header._label_text == "• Mario"
@@ -1002,3 +1014,124 @@ class TestReorderBlock:
             "signal:+392",
         ]
         assert set(fake.items) == set(objs_before)  # same objects, reordered
+
+
+# ─── Per-backend recency ordering under a single-protocol filter ─────────────
+
+
+class TestPerBackendRecency:
+    """Ordine dei gruppi per recency del membro del protocollo filtrato.
+
+    In "all"/"all+unread" l'ordine segue la recency globale del default member;
+    sotto un filtro singolo segue la recency del membro di QUEL protocollo, così
+    un contatto recente su Telegram ma vecchio su Signal non appare in cima nel
+    filtro Signal.
+    """
+
+    @staticmethod
+    def _multi_backend_app() -> SignalTUI:
+        # Bruno è recentissimo su Telegram (ts=9000) ma vecchio su Signal (ts=100);
+        # Alice è recente su Signal (ts=5000).  I due Bruno condividono il telefono
+        # 391 → stesso gruppo; Alice è un gruppo a sé (telefono 392).
+        b_sig = _contact(PROTOCOL_SIGNAL, "+391", "Bruno", phone="391", ts=100)
+        b_tg = _contact(PROTOCOL_TELEGRAM, "42", "Bruno", phone="391", ts=9000)
+        a_sig = _contact(PROTOCOL_SIGNAL, "+392", "Alice", phone="392", ts=5000)
+        return _make_app(b_sig, b_tg, a_sig)
+
+    @staticmethod
+    def _query_for(fake):
+        def _q(selector, *args, **_k):
+            # Solo i lookup tipizzati di #contact-list ricevono la lista reale;
+            # titolo/bordo restano mock (come in _apply_contact_filter reale).
+            if selector == "#contact-list" and args:
+                return fake
+            return MagicMock()
+
+        return _q
+
+    @staticmethod
+    def _group_order(app: SignalTUI) -> list[str]:
+        return [r.key for r in app._visible_rows() if r.kind == "group"]
+
+    def test_all_mode_orders_by_global_default_recency(self):
+        app = self._multi_backend_app()
+        app._protocol_filter = "all"
+        # Bruno (default member = Telegram, ts=9000) è in cima in "all".
+        assert self._group_order(app) == ["person:phone:391", "person:phone:392"]
+
+    def test_signal_filter_orders_by_signal_recency(self):
+        app = self._multi_backend_app()
+        app._protocol_filter = "signal"
+        # Su Signal Bruno è vecchio (ts=100), Alice recente (ts=5000): Alice
+        # prima, Bruno NON in cima.
+        assert self._group_order(app) == ["person:phone:392", "person:phone:391"]
+
+    def test_signal_unread_filter_orders_by_signal_recency(self):
+        app = self._multi_backend_app()
+        app._protocol_filter = "signal"
+        app._unread_only = True
+        app._unread_counts = {"signal:+391": 1, "signal:+392": 1}
+        # unread+protocollo: stessa recency del membro filtrato (coerente).
+        assert self._group_order(app) == ["person:phone:392", "person:phone:391"]
+
+    def test_filter_falls_back_to_default_when_member_missing(self):
+        app = self._multi_backend_app()
+        app._protocol_filter = "whatsapp"
+        # Nessun gruppo ha un membro whatsapp → fallback al default member per
+        # tutti (nessuna eccezione, ordine deterministico per la proiezione).
+        assert self._group_order(app) == ["person:phone:391", "person:phone:392"]
+
+    def test_filter_change_reorders_in_place(self):
+        app = self._multi_backend_app()
+        app._protocol_filter = "all"
+        fake = _FakeListView()
+        app.query_one = MagicMock(side_effect=self._query_for(fake))
+        app._render_contact_list(list(app.contacts))
+
+        assert [it._contact_id for it in fake.items] == [
+            "person:phone:391",
+            "signal:+391",
+            "telegram:42",
+            "person:phone:392",
+            "signal:+392",
+        ]
+        objs_before = list(fake.items)
+        contact_widgets_before = dict(app._contact_widgets)
+        group_widgets_before = dict(app._group_widgets)
+
+        clears: list[bool] = []
+        fake.clear = lambda: (clears.append(True), fake.items.clear())
+        app._select_first_visible_contact = MagicMock()
+
+        app._protocol_filter = "signal"
+        app._apply_contact_filter()
+
+        assert clears == []  # nessun clear/rebuild: riordino in-place
+        assert [it._contact_id for it in fake.items] == [
+            "person:phone:392",
+            "signal:+392",
+            "person:phone:391",
+            "signal:+391",
+            "telegram:42",
+        ]
+        assert set(fake.items) == set(objs_before)  # stessi oggetti, riordinati
+        assert app._contact_widgets == contact_widgets_before  # mappe preservate
+        assert app._group_widgets == group_widgets_before
+
+    def test_auto_select_after_signal_filter_opens_most_recent_signal(self):
+        app = self._multi_backend_app()
+        app._protocol_filter = "all"
+        fake = _FakeListView()
+        app.query_one = MagicMock(side_effect=self._query_for(fake))
+        app._render_contact_list(list(app.contacts))
+
+        app._protocol_filter = "signal"
+        app._sync_status_segments = MagicMock()
+        selected: list[ChatContact] = []
+        app._select_contact = lambda c: selected.append(c)
+
+        app._apply_contact_filter()
+
+        # Il primo visibile dopo il riordino è Alice (più recente su Signal),
+        # non Bruno (recente solo su Telegram).
+        assert selected == [app.contacts[2]]
