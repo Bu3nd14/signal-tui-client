@@ -6,6 +6,7 @@ from textual.containers import Horizontal
 from textual.widgets import Static
 
 from ui_components import (
+    ImageWidget,
     MessageTextArea,
     MessageWidget,
 )
@@ -186,6 +187,80 @@ class UnreadReplyMixin:
             if (
                 isinstance(child, MessageWidget)
                 and child._msg_timestamp == event.timestamp
+            ):
+                child.set_selected(True)
+                self._reply_to["_widget"] = child
+                break
+
+        self._update_reply_bar()
+
+        # Return focus to the message input so the user can start typing
+        # the reply immediately.
+        try:
+            self.query_one("#message-input", MessageTextArea).focus()
+        except Exception as _e:
+            logger.debug("Failed to focus message input", exc_info=True)
+
+    def on_image_widget_reply_requested(
+        self, event: ImageWidget.ReplyRequested
+    ) -> None:
+        """Handle ``ReplyRequested`` from an ``ImageWidget`` (Alt+click / Alt+r).
+
+        Mirrors ``on_message_widget_message_clicked``: in download mode the
+        attachment is served; otherwise the image becomes the reply target.
+        The reply-bar shows the caption or the typed media placeholder
+        ("↩️ Replying to: 🖼️ Immagine").
+        """
+        if self._download_mode:
+            self._start_download(
+                text=event.text,
+                attachment_id=event.attachment_id,
+                timestamp=event.timestamp,
+            )
+            return
+
+        # Clicking the same message again cancels the reply.
+        if (
+            self._reply_to is not None
+            and self._reply_to.get("timestamp") == event.timestamp
+        ):
+            self._cancel_reply()
+            return
+
+        # Deselect the previously selected widget.
+        if self._reply_to is not None:
+            prev_widget = self._reply_to.get("_widget")
+            if prev_widget is not None:
+                try:
+                    prev_widget.set_selected(False)
+                except Exception as _e:
+                    logger.debug(
+                        "Failed to deselect previous reply widget", exc_info=True
+                    )
+
+        # Mutua esclusione reply↔edit: un nuovo reply cancella un edit attivo.
+        cancel_edit = getattr(self, "_cancel_edit", None)
+        if cancel_edit is not None:
+            cancel_edit()
+
+        # Store the new reply target.
+        self._reply_to = {
+            "text": event.text,
+            "timestamp": event.timestamp,
+            "sender": event.sender,
+            "is_mine": event.is_mine,
+        }
+        if event.message_id is not None:
+            self._reply_to["message_id"] = event.message_id
+        if event.attachment_info is not None:
+            self._reply_to["attachment_info"] = event.attachment_info
+
+        # Highlight the clicked widget (find it by timestamp in the chat log).
+        chat_log = self.chat_log
+        for child in chat_log.children:
+            if (
+                isinstance(child, ImageWidget)
+                and getattr(child, "_timestamp", None) == event.timestamp
             ):
                 child.set_selected(True)
                 self._reply_to["_widget"] = child

@@ -27,6 +27,7 @@ from models import (
     PROTOCOL_TELEGRAM,
     ChatContact,
     ChatEvent,
+    media_quote_placeholder,
 )
 
 from .base import ChatBackend
@@ -54,6 +55,45 @@ _INCOMING_DEDUP_WINDOW_MS = 2000
 
 # Prefix for lazy-download media references (``tgref:<chat_id>:<msg_id>``).
 _TGREF_PREFIX = "tgref:"
+
+
+#: Maps Telegram's fine-grained attachment labels (set by
+#: ``_message_to_chat_event``) to the canonical placeholder types used by
+#: ``media_quote_placeholder``.  Telegram's coarse ``msg_type`` is ``"image"``
+#: for photos and ``"attachment"`` for video/audio/voice/document, so the
+#: label is what distinguishes "🎬 Video" / "🎵 Audio" from a generic "📎 File".
+_TG_QUOTE_INFO_TYPE = {
+    "Photo": "image",
+    "🎨 Sticker": "sticker",
+    "🎬 Video": "video",
+    "🎤 Voice": "audio",
+    "🎵 Audio": "audio",
+    "📎 Document": "attachment",
+}
+
+
+def _tg_quote_text_from_cached(target: dict) -> str | None:
+    """Compose the ``quote_text`` for a cached Telegram reply target.
+
+    Text targets keep their text.  Media targets use their caption (``text``)
+    when present, otherwise a typed placeholder derived from ``msg_type`` and
+    ``attachment_info``.  Returns ``None`` for a text-less target of unknown
+    type (no bubble mounted).
+    """
+    msg_type = target.get("msg_type", "text")
+    if msg_type == "text":
+        return target.get("text") or None
+    caption = (target.get("text") or "").strip()
+    if caption:
+        return caption
+    info = (target.get("attachment_info") or "").strip()
+    fine_type = _TG_QUOTE_INFO_TYPE.get(info)
+    if fine_type is not None:
+        return media_quote_placeholder(fine_type)
+    if info:
+        # A real filename (e.g. "📎 report.pdf") enriches the placeholder.
+        return media_quote_placeholder(msg_type, info)
+    return media_quote_placeholder(msg_type)
 
 
 def _media_dir() -> Path:
@@ -920,7 +960,7 @@ class TelegramBackend(ChatBackend):
             cached = self.cache.get(chat_id, [])
             for m in cached:
                 if str(m.get("id")) == str(msg.reply_to.reply_to_msg_id):
-                    quote_text = m.get("text", "")
+                    quote_text = _tg_quote_text_from_cached(m)
                     break
 
         payload: dict[str, Any] = {
