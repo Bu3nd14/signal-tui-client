@@ -182,8 +182,8 @@ async def test_enter_on_header_with_filter_opens_chat_directly():
             app._apply_contact_filter()
             await pilot.pause()
 
-            # The chevron is gone: the header row is now just "Mario".
-            header = _find_row(contact_list, "Mario")
+            # The chevron is gone in filter mode: the header row is now "• Mario".
+            header = _find_row(contact_list, "• Mario")
             contact_list.index = contact_list.children.index(header)
             await pilot.pause()
 

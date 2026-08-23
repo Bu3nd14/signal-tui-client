@@ -202,7 +202,7 @@ class TestGroupLabel:
         label = app._group_label(self._entry(app))
         assert " *" not in label
 
-    def test_no_chevron_when_filter_active(self):
+    def test_bullet_when_filter_active(self):
         app = _make_app(
             _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391"),
             _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391"),
@@ -210,8 +210,8 @@ class TestGroupLabel:
         app._protocol_filter = "signal"
         app._unread_counts = {"signal:+391": 2}
         label = app._group_label(self._entry(app))
-        # No chevron in filter mode: name + bare unread badge (no emoji).
-        assert label == "Mario *2"
+        # Bullet (not chevron) in filter mode: name + bare unread badge (no emoji).
+        assert label == "• Mario *2"
 
     def test_filter_badge_single_backend_with_unread(self):
         app = _make_app(
@@ -221,7 +221,7 @@ class TestGroupLabel:
         app._protocol_filter = "signal"
         app._unread_counts = {"signal:+391": 2}
         label = app._group_label(self._entry(app))
-        assert label == "Mario *2"
+        assert label == "• Mario *2"
 
     def test_filter_badge_only_filtered_protocol_unread(self):
         # Filter signal with unread on BOTH members: only signal's is shown.
@@ -232,7 +232,7 @@ class TestGroupLabel:
         app._protocol_filter = "signal"
         app._unread_counts = {"signal:+391": 2, "whatsapp:wa:1@s.whatsapp.net": 3}
         label = app._group_label(self._entry(app))
-        assert label == "Mario *2"
+        assert label == "• Mario *2"
 
     def test_filter_badge_whatsapp_filter_shows_only_whatsapp(self):
         app = _make_app(
@@ -242,7 +242,7 @@ class TestGroupLabel:
         app._protocol_filter = "whatsapp"
         app._unread_counts = {"whatsapp:wa:1@s.whatsapp.net": 1}
         label = app._group_label(self._entry(app))
-        assert label == "Mario *1"
+        assert label == "• Mario *1"
 
     def test_filter_badge_ignores_other_backends(self):
         # Higher unread on other backends is not shown under a single filter.
@@ -258,7 +258,7 @@ class TestGroupLabel:
             "signal:+391": 1,
         }
         label = app._group_label(self._entry(app))
-        assert label == "Mario *1"
+        assert label == "• Mario *1"
 
     def test_filter_badge_zero_unread_omitted(self):
         app = _make_app(
@@ -269,7 +269,7 @@ class TestGroupLabel:
         app._protocol_filter = "signal"
         app._unread_counts = {"signal:+391": 2}
         label = app._group_label(self._entry(app))
-        assert label == "Mario *2"
+        assert label == "• Mario *2"
         assert "💬" not in label and "📨" not in label and "📱" not in label
 
     def test_filter_badge_own_backend_bare_no_emoji(self):
@@ -281,7 +281,7 @@ class TestGroupLabel:
         app._protocol_filter = "whatsapp"
         app._unread_counts = {"whatsapp:wa:1@s.whatsapp.net": 3}
         label = app._group_label(self._entry(app))
-        assert label == "Mario *3"
+        assert label == "• Mario *3"
 
     def test_filter_badge_none_when_all_zero(self):
         app = _make_app(
@@ -291,7 +291,7 @@ class TestGroupLabel:
         app._protocol_filter = "signal"
         app._unread_counts = {}
         label = app._group_label(self._entry(app))
-        assert label == "Mario"
+        assert label == "• Mario"
 
     def test_filter_badge_selection_does_not_affect_filter(self):
         # No selected-member exclusion in filter mode: the badge is the filtered
@@ -308,10 +308,10 @@ class TestGroupLabel:
         )
 
         app.selected_contact = sig  # Mario belongs to phone:391
-        assert app._group_label(entry) == "Mario *2"
+        assert app._group_label(entry) == "• Mario *2"
 
         app.selected_contact = other  # Bruno belongs to a different group
-        assert app._group_label(entry) == "Mario *2"
+        assert app._group_label(entry) == "• Mario *2"
 
 
 # ─── Member label ─────────────────────────────────────────────────────────────
@@ -678,7 +678,7 @@ class TestRefreshHeaderLabels:
 
         app._protocol_filter = "signal"
         app._refresh_header_labels()
-        assert header._label_text == "Mario"
+        assert header._label_text == "• Mario"
 
         app._protocol_filter = "all"
         app._refresh_header_labels()
@@ -693,7 +693,7 @@ class TestRefreshHeaderLabels:
         app.query_one = MagicMock(return_value=MagicMock())
         app._protocol_filter = "signal"
         app._apply_contact_filter()
-        assert header._label_text == "Mario"
+        assert header._label_text == "• Mario"
 
         app._protocol_filter = "all"
         app._apply_contact_filter()
@@ -790,6 +790,105 @@ class TestHeaderHighlight:
         assert fake_list.index == fake_list.children.index(member)
 
 
+# ─── Toggle highlight: expand/collapse moves highlight off/onto the member ────
+
+
+class TestToggleGroupHighlight:
+    @staticmethod
+    def _query_for(fake):
+        def fake_q(selector, *args, **_k):
+            # Only the typed ``#contact-list`` lookups get the real list; the
+            # border/title sync in ``_apply_contact_filter`` queries it untyped.
+            if selector == "#contact-list" and args:
+                return fake
+            return MagicMock()
+
+        return fake_q
+
+    def _prepared_single_group_app(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        anna = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(mario, anna)
+        fake = _render(app)
+        fake_list = MagicMock()
+        fake_list.children = list(fake.items)
+        fake_list.index = None
+        _prepare_select(app, fake_list)
+        app._cache = {}
+        return app, fake_list
+
+    def test_expand_moves_highlight_to_selected_member(self):
+        app, fake_list = self._prepared_single_group_app()
+        app._select_contact(app.contacts[0])  # Mario, collapsed → header
+
+        header = app._group_widgets["phone:391"]
+        assert fake_list.index == fake_list.children.index(header)
+
+        app._toggle_group("phone:391")  # expand
+
+        member = app._contact_widgets["signal:+391"]
+        assert fake_list.index == fake_list.children.index(member)
+
+    def test_collapse_returns_highlight_to_header(self):
+        app, fake_list = self._prepared_single_group_app()
+        app._select_contact(app.contacts[0])
+        app._toggle_group("phone:391")  # expand → member highlighted
+        member = app._contact_widgets["signal:+391"]
+        assert fake_list.index == fake_list.children.index(member)
+
+        app._toggle_group("phone:391")  # collapse
+
+        header = app._group_widgets["phone:391"]
+        assert fake_list.index == fake_list.children.index(header)
+
+    def test_toggle_other_group_keeps_selected_member_highlight(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        anna = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        bruno = _contact(PROTOCOL_SIGNAL, "+392", "Bruno", phone="392")
+        app = _make_app(mario, anna, bruno)
+        fake = _render(app)
+        fake_list = MagicMock()
+        fake_list.children = list(fake.items)
+        fake_list.index = None
+        _prepare_select(app, fake_list)
+        app._cache = {}
+
+        app._select_contact(mario)
+        app._toggle_group("phone:391")  # expand selected group → member highlighted
+        member = app._contact_widgets["signal:+391"]
+        assert fake_list.index == fake_list.children.index(member)
+
+        app._toggle_group("phone:392")  # toggle a different group
+
+        assert fake_list.index == fake_list.children.index(member)
+
+    def test_go_to_all_then_expand_highlights_open_member(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+391", "Mario", phone="391")
+        anna = _contact(PROTOCOL_WHATSAPP, "wa:1@s.whatsapp.net", "Anna", phone="391")
+        app = _make_app(mario, anna)
+        app._protocol_filter = "signal"
+        app._unread_only = True
+        app._unread_counts = {"signal:+391": 2}
+        fake = _render(app)
+        fake_list = MagicMock()
+        fake_list.children = list(fake.items)
+        fake_list.index = None
+        _prepare_select(app, fake_list)
+        app._cache = {}
+
+        app.query_one = MagicMock(side_effect=self._query_for(fake_list))
+        app._sync_status_segments = MagicMock()
+        app.action_go_to_all()  # switch to All → auto-select opens the chat
+
+        header = app._group_widgets["phone:391"]
+        assert fake_list.index == fake_list.children.index(header)
+
+        app._toggle_group("phone:391")  # expand the open chat's group
+
+        member = app._contact_widgets["signal:+391"]
+        assert fake_list.index == fake_list.children.index(member)
+
+
 # ─── Aggregate unread badge ──────────────────────────────────────────────────
 
 
@@ -840,7 +939,7 @@ class TestHeaderBadge:
         app._render_contact_list(list(app.contacts))
 
         # Filter mode shows only the filtered protocol's unread (no breakdown).
-        assert header._label_text == "Mario *1"
+        assert header._label_text == "• Mario *1"
 
     def test_header_badge_suppressed_after_select_contact(self):
         app = _make_app(
