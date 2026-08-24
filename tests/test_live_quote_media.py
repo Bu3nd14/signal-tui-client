@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -35,6 +36,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend import get_attachment_path
 from backends.signal import SignalBackend
 from backends.telegram import TelegramBackend
 from backends.whatsapp import WhatsAppBackend
@@ -109,19 +111,36 @@ def _latest_text(msgs, incoming_only: bool = False) -> dict | None:
     return max(candidates, key=lambda m: int(m.get("timestamp") or 0))
 
 
-def _signal_image_by_caption(msgs):
-    """Split incoming Signal images into (captionless, captioned, caption).
+def _fresh_incoming_images(msgs) -> list[dict]:
+    """Incoming Signal images with a persisted ``content_type`` (piano B), newest first.
 
-    Reuses ``_image_caption`` — the exact UI source of the wire-faithful caption
-    — so E1/E2 assert against the same value the TUI would send on the wire.
+    Only these can produce a ``quoteAttachments`` thumbnail: legacy rows
+    (``content_type IS NULL``) are excluded by design (no backfill, §9/Bug #2).
+    """
+    return sorted(
+        (
+            m
+            for m in msgs
+            if not m.get("is_mine")
+            and m.get("msg_type") == "image"
+            and (m.get("content_type") or "").strip()
+        ),
+        key=lambda m: int(m.get("timestamp") or 0),
+        reverse=True,
+    )
+
+
+def _fresh_image_by_caption(msgs):
+    """Split FRESH incoming images into (captionless, captioned, caption_text).
+
+    Same semantics as the old ``_signal_image_by_caption`` but restricted to
+    images that carry a persisted ``content_type`` — the only ones that can
+    build a ``quoteAttachments`` thumbnail (E1/E2/E7).
     """
     from tui.chat_view import _image_caption
 
     captionless = captioned = caption_text = None
-    ordered = sorted(msgs, key=lambda m: int(m.get("timestamp") or 0), reverse=True)
-    for m in ordered:
-        if m.get("is_mine") or m.get("msg_type") != "image":
-            continue
+    for m in _fresh_incoming_images(msgs):
         cap = _image_caption(
             m.get("text", ""),
             m.get("attachment_info"),
@@ -186,6 +205,72 @@ def _tg_fetch_contact(
     future.result(timeout=120)
 
 
+def _media_quote_content_type(media: dict) -> str | None:
+    """Resolve the quoted-attachment content type for *media* (persisted value only).
+
+    Mirrors ``tui.send._quote_content_type``: when the mime is missing (legacy
+    rows) there is no reliable fallback, so ``None`` is returned and no
+    ``quoteAttachments`` is sent (V2 behaviour, no thumbnail).
+    """
+    return (media.get("content_type") or "").strip() or None
+
+
+def _quote_attachments_for(media: dict) -> list[str] | None:
+    """Build the ``quoteAttachments`` descriptor for *media* (mirror of §4).
+
+    Uses ``contentType:filename:previewFile``: signal-cli's
+    ``([^:]+)(:([^:]+)(:(.+))?)?`` regex requires the filename when the second
+    block is present, so ``contentType::previewFile`` is invalid.
+    """
+    content_type = _media_quote_content_type(media)
+    if not content_type:
+        return None
+    preview = get_attachment_path(media.get("attachment_id"))
+    if preview is not None:
+        return [f"{content_type}:{Path(preview).name}:{preview}"]
+    return [content_type]
+
+
+def _await_fresh_image(
+    backend: SignalBackend,
+    contact_id: str,
+    *,
+    caption: bool,
+    timeout_s: int = 90,
+) -> dict | None:
+    """Return a fresh incoming Signal image with ``content_type``, waiting if needed.
+
+    ``caption=False`` selects a captionless image (E1/E7), ``caption=True`` a
+    captioned one (E2).  When none is already in cache, an SSE bootstrap (see
+    ``signal_fresh_media``) ingests incoming envelopes into ``backend.cache``
+    and this helper polls until ``timeout_s`` elapses, then returns ``None``.
+    """
+
+    def _pick():
+        captionless, captioned, _ = _fresh_image_by_caption(
+            backend.cache.get(contact_id, [])
+        )
+        return captioned if caption else captionless
+
+    media = _pick()
+    if media is not None:
+        return media
+
+    kind = "con caption" if caption else "senza caption"
+    print(
+        f"⏳ INVIA ORA una NUOVA immagine {kind} a questo account dal client di "
+        f"Roberto BMW (entro {timeout_s}s) per validare il piano B",
+        flush=True,
+    )
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        time.sleep(1)
+        media = _pick()
+        if media is not None:
+            return media
+    return None
+
+
 # ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 
@@ -228,6 +313,7 @@ def signal_live():
                 "quote_timestamp": kwargs.get("quote_timestamp"),
                 "quote_author": kwargs.get("quote_author"),
                 "quote_message": kwargs.get("quote_message"),
+                "quote_attachments": kwargs.get("quote_attachments"),
             }
         )
         return original(*args, **kwargs)
@@ -237,6 +323,81 @@ def signal_live():
         yield backend, contact, captures
     finally:
         backend._rpc.send_message = original
+
+
+@pytest.fixture(scope="module")
+def signal_fresh_media():
+    """Module-scoped Signal SSE bootstrap for E1/E2/E7 (bug #37 piano B).
+
+    Starts ONE daemon thread that consumes ``SignalRPCClient.listen_events`` —
+    the only delivery path in ``--receive-mode on-connection`` (``receive()``
+    RPC is empty, bug #56) — and ingests incoming messages via
+    ``envelope_to_event`` + ``ingest_message``, so freshly sent media land in
+    cache/DB with a persisted ``content_type``.  Shared by E1/E2/E7 so the user
+    does not have to send three separate images.
+    """
+    from backend import _is_daemon_running, _require_user_number
+
+    try:
+        user_number = _require_user_number()
+    except RuntimeError as exc:
+        pytest.skip(f"Signal non configurato: {exc}")
+    if not _is_daemon_running():
+        pytest.skip("signal-cli daemon non in esecuzione (avvialo e rilancia)")
+
+    backend = SignalBackend(user_number=user_number)
+    backend._use_daemon = True
+    backend.cache = backend._load_protocol_cache()
+    backend._load_contacts_rpc()
+    contact = _resolve_contact(
+        PROTOCOL_SIGNAL,
+        "LIVE_TARGET_SIGNAL",
+        backend.list_address_book_sync(force=True),
+    )
+    if contact is None:
+        pytest.skip(
+            'contatto "Roberto BMW" non trovato su Signal '
+            "(override: LIVE_TARGET_SIGNAL=<numero>)"
+        )
+
+    stop = threading.Event()
+
+    def _consume() -> None:
+        while not stop.is_set():
+            try:
+                for envelope in backend._rpc.listen_events(user_number):
+                    if stop.is_set():
+                        return
+                    for ev in backend.envelope_to_event(envelope.get("envelope", {})):
+                        if ev is None or ev.type != "message":
+                            continue
+                        if ev.contact_id != contact.id:
+                            continue
+                        try:
+                            backend.ingest_message(
+                                ev.contact_id,
+                                ev.payload,
+                                ev.payload.get("timestamp", 0),
+                            )
+                        except Exception as exc:  # noqa: BLE001 — non bloccare il bootstrap
+                            print(f"[bootstrap] ingest fallita: {exc}", flush=True)
+            except Exception as exc:  # noqa: BLE001 — riconnetti
+                print(f"[bootstrap] SSE interrotto, riconnessione: {exc}", flush=True)
+            for _ in range(10):
+                if stop.is_set():
+                    return
+                time.sleep(0.1)
+
+    thread = threading.Thread(
+        target=_consume, name="signal-live-sse-bootstrap", daemon=True
+    )
+    thread.start()
+
+    try:
+        yield backend, contact
+    finally:
+        stop.set()
+        thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -323,21 +484,23 @@ def telegram_live():
 # ─── E1–E3, E7 (Signal) ──────────────────────────────────────────────────────
 
 
-def test_e1_signal_quote_media_no_caption_wire_empty(signal_live):
+def test_e1_signal_quote_media_no_caption_wire_empty(signal_live, signal_fresh_media):
     """E1 — quote di un'immagine Signal SENZA caption → ``quoteMessage == ""``.
 
     Criterio §10.2 E1: mai il segnaposto (F2), mai omesso (F3); params loggati
     con ``quoteMessage == ""`` e ``quoteTimestamp/quoteAuthor`` coerenti.
     """
     backend, contact, captures = signal_live
-    captionless, _, _ = _signal_image_by_caption(backend.cache.get(contact.id, []))
+    fresh_backend, fresh_contact = signal_fresh_media
+    captionless = _await_fresh_image(fresh_backend, fresh_contact.id, caption=False)
     if captionless is None:
         pytest.skip(
-            "nessuna immagine senza caption da Roberto BMW su Signal: "
-            "manda un'immagine e rilancia"
+            "nessuna immagine fresca senza caption con content_type ricevuta: "
+            "invia un'immagine da Roberto BMW e rilancia"
         )
     media_ts = int(captionless.get("timestamp") or 0)
     text = _unique_marker("E1 media senza caption")
+    quote_attachments = _quote_attachments_for(captionless)
 
     result = backend.send_message_sync(
         contact.id,
@@ -345,6 +508,7 @@ def test_e1_signal_quote_media_no_caption_wire_empty(signal_live):
         quote_timestamp=media_ts,
         quote_author=contact.id,
         quote_message="",
+        quote_attachments=quote_attachments,
     )
 
     assert result is not None  # nessuna eccezione dal daemon
@@ -354,22 +518,42 @@ def test_e1_signal_quote_media_no_caption_wire_empty(signal_live):
     assert call["quote_timestamp"] == media_ts
     assert call["quote_author"] == contact.id
     assert call["message"] == text
+    # Piano B: la thumbnail viaggia in ``quoteAttachments`` (contentType + preview).
+    assert call["quote_attachments"], "quote_attachments assente sul filo"
+    descriptor = call["quote_attachments"][0]
+    content_type = _media_quote_content_type(captionless)
+    assert descriptor.startswith(f"{content_type}:"), (
+        f"contentType atteso {content_type!r}, got {descriptor!r}"
+    )
+    filename, preview_file = descriptor.split(":", 2)[1:]
+    assert filename, "filename vuoto nel descriptor quoteAttachments"
+    assert filename == Path(preview_file).name, (
+        f"filename {filename!r} non è il basename di {preview_file!r}"
+    )
+    assert Path(preview_file).exists(), f"previewFile inesistente: {preview_file}"
 
 
-def test_e2_signal_quote_media_with_caption_wire_is_caption(signal_live):
+def test_e2_signal_quote_media_with_caption_wire_is_caption(
+    signal_live, signal_fresh_media
+):
     """E2 — quote di un'immagine Signal CON caption → ``quoteMessage == caption``.
 
     Criterio §10.2 E2: quote ricevuta con immagine; ``quoteMessage == caption``.
     """
     backend, contact, captures = signal_live
-    _, captioned, caption = _signal_image_by_caption(backend.cache.get(contact.id, []))
+    fresh_backend, fresh_contact = signal_fresh_media
+    captioned = _await_fresh_image(fresh_backend, fresh_contact.id, caption=True)
     if captioned is None:
         pytest.skip(
-            "nessuna immagine con caption da Roberto BMW su Signal: "
-            "manda un'immagine con caption e rilancia"
+            "nessuna immagine fresca con caption con content_type ricevuta: "
+            "invia un'immagine con caption da Roberto BMW e rilancia"
         )
+    _, _, caption = _fresh_image_by_caption(
+        fresh_backend.cache.get(fresh_contact.id, [])
+    )
     media_ts = int(captioned.get("timestamp") or 0)
     text = _unique_marker("E2 media con caption")
+    quote_attachments = _quote_attachments_for(captioned)
 
     backend.send_message_sync(
         contact.id,
@@ -377,10 +561,19 @@ def test_e2_signal_quote_media_with_caption_wire_is_caption(signal_live):
         quote_timestamp=media_ts,
         quote_author=contact.id,
         quote_message=caption,
+        quote_attachments=quote_attachments,
     )
 
     assert captures, "nessuna chiamata intercettata sul filo"
     assert captures[-1]["quote_message"] == caption
+    call = captures[-1]
+    assert call["quote_attachments"], "quote_attachments assente sul filo"
+    descriptor = call["quote_attachments"][0]
+    content_type = _media_quote_content_type(captioned)
+    assert descriptor.startswith(f"{content_type}:")
+    filename, preview_file = descriptor.split(":", 2)[1:]
+    assert filename == Path(preview_file).name
+    assert Path(preview_file).exists(), f"previewFile inesistente: {preview_file}"
 
 
 def test_e3_signal_text_reply_unchanged(signal_live):
@@ -411,7 +604,7 @@ def test_e3_signal_text_reply_unchanged(signal_live):
     assert captures[-1]["quote_message"] == quote
 
 
-def test_e7_signal_retry_after_failure_wire_empty(signal_live):
+def test_e7_signal_retry_after_failure_wire_empty(signal_live, signal_fresh_media):
     """E7 — retry post-riavvio di reply media → ``quoteMessage == ""`` (buco #3).
 
     Riproduce la normalizzazione di ``_retry_failed_message`` (§6.2 R2-bis): una
@@ -420,11 +613,12 @@ def test_e7_signal_retry_after_failure_wire_empty(signal_live):
     la mappa a ``quote_message == ""`` (mai il segnaposto sul filo).
     """
     backend, contact, captures = signal_live
-    captionless, _, _ = _signal_image_by_caption(backend.cache.get(contact.id, []))
+    fresh_backend, fresh_contact = signal_fresh_media
+    captionless = _await_fresh_image(fresh_backend, fresh_contact.id, caption=False)
     if captionless is None:
         pytest.skip(
-            "nessuna immagine senza caption da Roberto BMW su Signal: "
-            "manda un'immagine e rilancia"
+            "nessuna immagine fresca senza caption con content_type ricevuta: "
+            "invia un'immagine da Roberto BMW e rilancia"
         )
     media_ts = int(captionless.get("timestamp") or 0)
 
@@ -437,6 +631,7 @@ def test_e7_signal_retry_after_failure_wire_empty(signal_live):
     # Regola R1/R2 del worker: chiave presente → body fedele (o "").
     quote_message = reply_data["quote_wire_body"] or ""
     assert quote_message == ""
+    quote_attachments = _quote_attachments_for(captionless)
 
     text = _unique_marker("E7 retry")
     backend.send_message_sync(
@@ -445,10 +640,19 @@ def test_e7_signal_retry_after_failure_wire_empty(signal_live):
         quote_timestamp=media_ts,
         quote_author=contact.id,
         quote_message=quote_message,
+        quote_attachments=quote_attachments,
     )
 
     assert captures, "nessuna chiamata intercettata sul filo"
     assert captures[-1]["quote_message"] == ""
+    call = captures[-1]
+    assert call["quote_attachments"], "quote_attachments assente sul filo"
+    descriptor = call["quote_attachments"][0]
+    content_type = _media_quote_content_type(captionless)
+    assert descriptor.startswith(f"{content_type}:")
+    filename, preview_file = descriptor.split(":", 2)[1:]
+    assert filename == Path(preview_file).name
+    assert Path(preview_file).exists(), f"previewFile inesistente: {preview_file}"
 
 
 # ─── E5 (WhatsApp), E6 (Telegram) ────────────────────────────────────────────
