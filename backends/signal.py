@@ -23,6 +23,7 @@ from models import (
     PROTOCOL_SIGNAL,
     ChatContact,
     ChatEvent,
+    media_quote_placeholder,
 )
 
 from .base import ChatBackend
@@ -72,6 +73,44 @@ _RE_CONTACT_LINE = re.compile(
     r"(?:\s+Profile name:.*)?"
     r"$"
 )
+
+
+def _signal_quote_text(quote: dict | None) -> str | None:
+    """Resolve the ``quote_text`` for a Signal quote, with a media fallback.
+
+    A real caption (``quote.text``) wins, preserving the previous behaviour.
+    Otherwise a quote that carries attachments is a media quote: the first
+    attachment's ``contentType`` selects the typed placeholder and its
+    ``filename`` (when present) is prepended for context.  Returns ``None``
+    when the quote is absent/empty (no bubble mounted, as before).
+
+    Note: signal-cli reports a quoted sticker as an ``image/webp`` attachment
+    (or no attachment at all), so in the absence of stronger signals it
+    degrades to the "🖼️ Immagine" placeholder.
+    """
+    if not quote:
+        return None
+    text = (quote.get("text") or "").strip()
+    if text:
+        return text
+    attachments = quote.get("attachments") or []
+    if not attachments:
+        return None
+    first = attachments[0] or {}
+    content_type = first.get("contentType", "") or ""
+    filename = (first.get("filename") or "").strip()
+    if content_type.startswith("image/"):
+        msg_type = "image"
+    elif content_type.startswith("video/"):
+        msg_type = "video"
+    elif content_type.startswith("audio/"):
+        msg_type = "audio"
+    else:
+        msg_type = "attachment"
+    placeholder = media_quote_placeholder(msg_type)
+    if filename:
+        return f"{filename} — {placeholder}"
+    return placeholder
 
 
 class SignalBackend(ChatBackend):
@@ -585,8 +624,7 @@ class SignalBackend(ChatBackend):
         if data_msg:
             text = data_msg.get("message", "") or ""
             sender = source_name or source_number
-            quote = data_msg.get("quote", {})
-            quote_text = quote.get("text", "") if quote else None
+            quote_text = _signal_quote_text(data_msg.get("quote"))
 
             sticker_data = _extract_sticker(data_msg.get("sticker"))
             if sticker_data:
@@ -617,8 +655,7 @@ class SignalBackend(ChatBackend):
         if sent:
             text = sent.get("message", "") or ""
             sender = "You"
-            quote = sent.get("quote", {})
-            quote_text = quote.get("text", "") if quote else None
+            quote_text = _signal_quote_text(sent.get("quote"))
 
             sticker_data = _extract_sticker(sent.get("sticker"))
             if sticker_data:

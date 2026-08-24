@@ -12,6 +12,7 @@ from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
     PROTOCOL_WHATSAPP,
+    is_media_quote_placeholder,
 )
 from ui_components import MessageTextArea
 
@@ -93,6 +94,17 @@ class SendMixin:
                     0,
                 )
                 return
+
+        # WhatsApp quotes are applied server-side via the Baileys ``reply_to``
+        # id only (WAHA ignores the ``quote_*`` params).  Without that id the
+        # reply would be dropped or attached to the wrong target, so refuse
+        # before creating an optimistic bubble.
+        if reply_data and protocol == PROTOCOL_WHATSAPP and not reply_to_message_id:
+            self._status(
+                "❌ Cannot reply: the original WhatsApp message ID is unavailable",
+                0,
+            )
+            return
 
         # Save to SQLite (incremental INSERT), protocol-aware.
         data = {
@@ -233,6 +245,14 @@ class SendMixin:
         quote_author = contact_id if reply_data else None
         quote_message = reply_data.get("text") if reply_data else None
         reply_to_message_id = reply_data.get("message_id") if reply_data else None
+
+        # Wire-faithful quote body (R1/R2): a media reply carries the explicit
+        # ``quote_wire_body`` key (real caption or None), so the Signal quote on
+        # the wire uses that body (caption or "") — never the display placeholder
+        # and never omitted.  Text replies never set the key, so their text is
+        # used unchanged.  WA/TG ignore ``quote_message`` anyway.
+        if reply_data is not None and "quote_wire_body" in reply_data:
+            quote_message = reply_data["quote_wire_body"] or ""
 
         # Send synchronously through the submission contact's backend. This is
         # a sync call running in a worker thread; it is NOT an async coroutine
@@ -504,6 +524,11 @@ class SendMixin:
             }
             if message.get("reply_to_message_id") is not None:
                 reply_data["message_id"] = message["reply_to_message_id"]
+            # R2-bis: a media reply retried after reload has lost its wire body
+            # (only the display placeholder is persisted).  Reconstruct a
+            # faithful empty body so the Signal quote is never the placeholder.
+            if is_media_quote_placeholder(message["quote_text"]):
+                reply_data["quote_wire_body"] = ""
         self.run_worker(
             lambda: self._send_message_worker(
                 text,

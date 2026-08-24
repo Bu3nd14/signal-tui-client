@@ -425,3 +425,186 @@ class TestSendPersistOffthread:
         assert len(_db_rows(tmp_db)) == 1
         assert len(app._cache[contact.cache_key]) == 1
         assert app._cache[contact.cache_key][0]["status"] == "sent"
+
+
+class TestMediaReplySend:
+    """🖼️ Bug #37 — contratto display vs filo in uscita + guardie protocollo + retry."""
+
+    def test_send_media_reply_without_caption_sends_empty_quote_message(self, tmp_db):
+        """Media senza caption → ``quote_message == ""`` (mai il segnaposto)."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "message_id": "sig-1234",
+            "quote_wire_body": None,
+        }
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_timestamp"] == 1234
+        assert kwargs["quote_author"] == contact.id
+        assert kwargs["quote_message"] == ""
+        assert kwargs["reply_to_message_id"] == "sig-1234"
+
+        # Il display (segnaposto) resta nel DB, non sul filo.
+        assert _db_rows(tmp_db)[0]["quote_text"] == "🖼️ Immagine"
+
+    def test_send_media_reply_with_caption_sends_caption(self, tmp_db):
+        """Media con caption → ``quote_message == caption``."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "Che bella!",
+            "timestamp": 1234,
+            "message_id": "sig-1234",
+            "quote_wire_body": "Che bella!",
+        }
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_message"] == "Che bella!"
+
+    def test_send_text_reply_is_unchanged(self, tmp_db):
+        """Reply a testo (chiave assente) → ``quote_message == text`` invariato."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {"text": "domanda", "timestamp": 1234}
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_message"] == "domanda"
+
+    def test_retry_media_reply_reconstructs_empty_wire_body(self, tmp_db):
+        """Retry post-reload di reply media → ``quote_wire_body == ""`` (buco #3)."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "message_id": "sig-1234",
+            "quote_wire_body": None,
+        }
+        app.signal_backend.send_message_sync = MagicMock(
+            side_effect=RuntimeError("offline")
+        )
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        assert app._cache[contact.cache_key][0]["status"] == "failed"
+        assert _db_rows(tmp_db)[0]["quote_text"] == "🖼️ Immagine"
+
+        app.signal_backend.send_message_sync = MagicMock(return_value="ok")
+        ts = app._cache[contact.cache_key][0]["timestamp"]
+        app.run_worker.reset_mock()
+        app._retry_failed_message(ts, "risposta")
+        _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_message"] == ""
+        assert kwargs["quote_timestamp"] == 1234
+        assert kwargs["reply_to_message_id"] == "sig-1234"
+
+    def test_retry_text_reply_is_unchanged(self, tmp_db):
+        """Retry post-reload di reply a testo → invariato (nessuna chiave wire)."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+        app._reply_to = {"text": "domanda", "timestamp": 1234}
+        app.signal_backend.send_message_sync = MagicMock(
+            side_effect=RuntimeError("offline")
+        )
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        app.signal_backend.send_message_sync = MagicMock(return_value="ok")
+        ts = app._cache[contact.cache_key][0]["timestamp"]
+        app.run_worker.reset_mock()
+        app._retry_failed_message(ts, "risposta")
+        _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_message"] == "domanda"
+
+    def test_whatsapp_media_reply_without_id_is_blocked(self, tmp_db):
+        """Guardia WhatsApp: reply media senza Baileys id → bloccata prima del send."""
+        app = _signal_app()
+        whatsapp = WhatsAppBackend()
+        whatsapp.send_message_sync = MagicMock(return_value="wa-ts")
+        app.manager.register(whatsapp)
+        contact = ChatContact(
+            id="391234567890@c.us", display_name="Pix", protocol=PROTOCOL_WHATSAPP
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "quote_wire_body": None,
+        }  # no message_id
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        app._status.assert_called_with(
+            "❌ Cannot reply: the original WhatsApp message ID is unavailable", 0
+        )
+        whatsapp.send_message_sync.assert_not_called()
+
+    def test_telegram_media_reply_guard_unchanged(self, tmp_db):
+        """Guardia Telegram: reply media senza id server valido → bloccata."""
+        from backends import TelegramBackend
+
+        app = _signal_app()
+        telegram = TelegramBackend()
+        telegram.send_message_sync = MagicMock(return_value="tg-ts")
+        app.manager.register(telegram)
+        contact = ChatContact(id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM)
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "quote_wire_body": None,
+        }  # no message_id
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        app._status.assert_called_with(
+            "❌ Cannot reply: the original Telegram message ID is unavailable", 0
+        )
+        telegram.send_message_sync.assert_not_called()

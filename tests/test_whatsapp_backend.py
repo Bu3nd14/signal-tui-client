@@ -2965,3 +2965,74 @@ class TestWhatsAppWebhookRegistration:
         ):
             backend.connect_sync()
         mock_cfg.assert_called_once()
+
+
+class TestWhatsAppQuoteMedia:
+    """🖼️ Bug #37 — quote di un media WhatsApp → segnaposto tipizzato (Decisione A)."""
+
+    def _raw(self, quote: dict) -> dict:
+        return {
+            "chatId": "391234567890@c.us",
+            "from": "391234567890@c.us",
+            "text": "rispondo",
+            "timestamp": 1700000000,
+            "quotedMessage": quote,
+        }
+
+    @pytest.mark.parametrize(
+        ("media_key", "expected"),
+        [
+            ("imageMessage", "🖼️ Immagine"),
+            ("videoMessage", "🎬 Video"),
+            ("audioMessage", "🎵 Audio"),
+            ("documentMessage", "📎 File"),
+            ("stickerMessage", "🎨 Sticker"),
+        ],
+    )
+    def test_wa_quote_nested_media_placeholders(self, media_key, expected):
+        """Chiavi annidate ``*Message`` nella quote → segnaposto tipizzato."""
+        ev = _msg(self._raw({media_key: {"id": "media-id"}}))
+        assert ev.payload["quote_text"] == expected
+
+    def test_wa_quote_sticker_fixture(self, wa_event_quoting_sticker):
+        """La fixture ``quotedMessage.stickerMessage`` → "🎨 Sticker"."""
+        ev = _msg(wa_event_quoting_sticker)
+        assert ev.payload["quote_text"] == "🎨 Sticker"
+
+    @pytest.mark.parametrize(
+        ("quote", "expected"),
+        [
+            ({"type": "image"}, "🖼️ Immagine"),
+            ({"type": "video"}, "🎬 Video"),
+            ({"type": "audio"}, "🎵 Audio"),
+            ({"type": "sticker"}, "🎨 Sticker"),
+            ({"type": "document"}, "📎 File"),
+            ({"mimetype": "image/png"}, "🖼️ Immagine"),
+            ({"mimetype": "video/mp4"}, "🎬 Video"),
+            ({"mimetype": "audio/ogg"}, "🎵 Audio"),
+            ({"mimetype": "application/pdf"}, "📎 File"),
+        ],
+    )
+    def test_wa_quote_flat_type_and_mimetype(self, quote, expected):
+        """Detection piatta (``type`` o ``mimetype``) → segnaposto tipizzato."""
+        ev = _msg(self._raw(quote))
+        assert ev.payload["quote_text"] == expected
+
+    @pytest.mark.parametrize(
+        "quote",
+        [
+            {"body": "testo reale", "imageMessage": {"id": "x"}},
+            {"text": "testo reale", "type": "image"},
+            {"conversation": "testo reale", "mimetype": "image/png"},
+            {"caption": "testo reale", "documentMessage": {"id": "x"}},
+        ],
+    )
+    def test_wa_quote_body_wins_over_placeholder(self, quote):
+        """Testo/body/caption reale → priorità sul segnaposto (invariato)."""
+        ev = _msg(self._raw(quote))
+        assert ev.payload["quote_text"] == "testo reale"
+
+    def test_wa_quote_unknown_is_none(self):
+        """Quote senza segnali media e senza testo → nessuna bolla."""
+        ev = _msg(self._raw({"id": "quoted-id"}))
+        assert ev.payload["quote_text"] is None

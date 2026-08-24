@@ -827,3 +827,84 @@ class TestRenderDedupSameSecond:
         # Il path non è risolto quando si carica da cache
         assert image_widgets[0].attachment_path is None
         assert image_widgets[0].attachment_id == "img-001.jpg"
+
+
+class TestCacheImageReplyMetadata:
+    """🖼️ Bug #37 — ``_build_message_widgets`` propaga i metadati reply all'ImageWidget."""
+
+    def test_cache_built_image_widget_carries_reply_metadata(self):
+        app = SignalTUI()
+        message = {
+            "id": "img-42",
+            "text": "",
+            "is_mine": False,
+            "sender": "Mario",
+            "timestamp": 1000,
+            "quote_text": None,
+            "msg_type": "image",
+            "attachment_info": "photo.jpg",
+            "attachment_id": "att-1",
+            "read": False,
+            "status": "read",
+        }
+
+        widgets = app._build_message_widgets("signal", False, message)
+        image_widget = widgets[0]
+
+        assert isinstance(image_widget, ImageWidget)
+        assert image_widget._timestamp == 1000
+        assert image_widget._sender == "Mario"
+        assert image_widget._is_mine is False
+        assert image_widget._message_id == "img-42"
+        assert image_widget._attachment_info == "photo.jpg"
+        assert image_widget._caption is None
+        assert image_widget.attachment_id == "att-1"
+
+    def test_cache_built_image_widget_carries_caption(self):
+        """La caption reale calcolata da ``_image_caption`` arriva al widget."""
+        app = SignalTUI()
+        message = {
+            "id": "img-42",
+            "text": "Che bella!",
+            "is_mine": False,
+            "sender": "Mario",
+            "timestamp": 1000,
+            "quote_text": None,
+            "msg_type": "image",
+            "attachment_info": "photo.jpg",
+            "attachment_id": "att-1",
+            "read": False,
+            "status": "read",
+        }
+
+        widgets = app._build_message_widgets("signal", False, message)
+        image_widget = widgets[0]
+
+        assert isinstance(image_widget, ImageWidget)
+        assert image_widget._caption == "Che bella!"
+
+    def test_cache_media_quote_renders_bubble(self):
+        """Una quote media (segnaposto) monta la bolla anche dal percorso cache."""
+        from textual.widgets import Static
+
+        app = SignalTUI()
+        message = {
+            "id": "msg-42",
+            "text": "testo",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": 2000,
+            "quote_text": "🖼️ Immagine",
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+            "read": True,
+            "status": "sent",
+        }
+
+        widgets = app._build_message_widgets("signal", False, message)
+
+        assert isinstance(widgets[0], Static)
+        assert widgets[0]._Static__content == "▎ 🖼️ Immagine"
+        assert isinstance(widgets[1], MessageWidget)
+        assert widgets[1]._msg_text == "testo"
