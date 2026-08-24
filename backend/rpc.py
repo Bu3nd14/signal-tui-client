@@ -141,6 +141,7 @@ def _send_subprocess(
     quote_author: str | None = None,
     quote_message: str | None = None,
     edit_timestamp: int | None = None,
+    quote_attachments: list[str] | None = None,
 ) -> str:
     """Send a message via subprocess, optionally with a quote/reply or edit."""
     args = ["send", "-m", message, recipient]
@@ -152,6 +153,8 @@ def _send_subprocess(
         args.extend(["--quote-message", quote_message])
     if edit_timestamp is not None:
         args.extend(["--edit-timestamp", str(edit_timestamp)])
+    for qa in quote_attachments or []:
+        args.extend(["--quote-attachment", qa])
     return _backend._run_subprocess(args)
 
 
@@ -342,6 +345,7 @@ class SignalRPCClient:
         quote_author: str | None = None,
         quote_message: str | None = None,
         edit_timestamp: int | None = None,
+        quote_attachments: list[str] | None = None,
     ) -> dict:
         """Send a message to a recipient, optionally with a quote/reply.
 
@@ -367,6 +371,10 @@ class SignalRPCClient:
         edit_timestamp:
             Timestamp (ms) of the original message to edit.  When provided,
             signal-cli edits that message instead of sending a new one.
+        quote_attachments:
+            List of quoted-attachment descriptors in the signal-cli
+            ``contentType[:filename[:previewFile]]`` format, rendered on the
+            wire as the ``quoteAttachments`` JSON-RPC parameter.
         """
         params: dict = {
             "message": message,
@@ -382,6 +390,8 @@ class SignalRPCClient:
             params["quoteMessage"] = quote_message
         if edit_timestamp is not None:
             params["editTimestamp"] = edit_timestamp
+        if quote_attachments is not None:
+            params["quoteAttachments"] = quote_attachments
         return self._call("send", params)
 
     def receive(self) -> list[dict]:

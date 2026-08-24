@@ -427,6 +427,59 @@ class TestSignalBackend:
         assert events[1].payload["attachment_id"] == "vid"
         assert events[2].payload["attachment_id"] == "aud"
 
+    def test_signal_media_persists_content_type(self):
+        """(A) envelope media con ``contentType`` → payload ``content_type`` valorizzato."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 2000,
+            "dataMessage": {
+                "message": "guarda!",
+                "timestamp": 2000,
+                "attachments": [
+                    {
+                        "contentType": "image/png",
+                        "filename": "photo.png",
+                        "id": "att-001",
+                    }
+                ],
+            },
+        }
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        assert events[0].payload["content_type"] == "image/png"
+
+    def test_signal_media_content_type_null_when_absent(self):
+        """(A) envelope media senza ``contentType`` → ``content_type`` è None."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 2000,
+            "dataMessage": {
+                "timestamp": 2000,
+                "attachments": [{"id": "att-no-mime"}],
+            },
+        }
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        assert events[0].payload["content_type"] is None
+
     def test_text_with_multiple_attachments_only_first_has_text(self):
         """Testo + 2 foto → primo evento ha il testo, secondo no."""
         backend = SignalBackend()
@@ -923,3 +976,151 @@ class TestIngestDedup:
             backend.ingest_message("+391234567890", out(1_000_000), 1_000_000) is True
         )
         assert len(backend.cache["+391234567890"]) == 2
+
+
+class TestSignalQuoteMedia:
+    """🖼️ Bug #37 — quote di un media Signal → segnaposto tipizzato (Decisione A)."""
+
+    @staticmethod
+    def _backend() -> SignalBackend:
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        return backend
+
+    def _envelope(self, quote: dict, sent: bool = False) -> dict:
+        if sent:
+            return {
+                "source": "+391234567890",
+                "sourceNumber": "+391234567890",
+                "timestamp": 2000,
+                "syncMessage": {
+                    "sentMessage": {
+                        "destination": "+391234567890",
+                        "destinationNumber": "+391234567890",
+                        "message": "Guarda!",
+                        "timestamp": 2000,
+                        "quote": quote,
+                    }
+                },
+            }
+        return {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 2000,
+            "dataMessage": {
+                "message": "Guarda!",
+                "timestamp": 2000,
+                "quote": quote,
+            },
+        }
+
+    @pytest.mark.parametrize(
+        ("content_type", "expected"),
+        [
+            ("image/jpeg", "🖼️ Immagine"),
+            ("video/mp4", "🎬 Video"),
+            ("audio/ogg", "🎵 Audio"),
+            ("application/pdf", "📎 File"),
+            # Uno sticker quotato arriva come image/webp: degrada a "Immagine".
+            ("image/webp", "🖼️ Immagine"),
+        ],
+    )
+    def test_signal_quote_image_placeholder(self, content_type, expected):
+        """dataMessage con quote media senza testo → segnaposto tipizzato."""
+        backend = self._backend()
+        envelope = self._envelope(
+            {
+                "id": 1000,
+                "author": "+391234567890",
+                "attachments": [{"contentType": content_type}],
+            }
+        )
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        assert events[0].payload["quote_text"] == expected
+
+    def test_signal_quote_image_placeholder_via_fixture(
+        self, sample_envelope_quoting_image
+    ):
+        """La fixture condivisa produce il segnaposto via ``dataMessage``."""
+        backend = self._backend()
+        events = backend.envelope_to_event(sample_envelope_quoting_image)
+        assert len(events) == 1
+        assert events[0].payload["quote_text"] == "🖼️ Immagine"
+
+    def test_signal_quote_image_with_filename_prepended(self):
+        """Il filename dell'allegato quotato viene anteposto al segnaposto."""
+        backend = self._backend()
+        envelope = self._envelope(
+            {
+                "id": 1000,
+                "author": "+391234567890",
+                "attachments": [{"contentType": "image/jpeg", "filename": "photo.jpg"}],
+            }
+        )
+        events = backend.envelope_to_event(envelope)
+        assert events[0].payload["quote_text"] == "photo.jpg — 🖼️ Immagine"
+
+    def test_signal_sent_message_quote_media(self):
+        """sync sentMessage con quote media → stesso fallback, is_mine=True."""
+        backend = self._backend()
+        envelope = self._envelope(
+            {
+                "id": 1000,
+                "author": "+391234567890",
+                "attachments": [{"contentType": "video/mp4"}],
+            },
+            sent=True,
+        )
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        assert events[0].payload["quote_text"] == "🎬 Video"
+        assert events[0].payload["is_mine"] is True
+
+    def test_signal_quote_caption_preferred(self):
+        """Il testo reale della quote vince sul segnaposto (invariato)."""
+        backend = self._backend()
+        envelope = self._envelope(
+            {
+                "id": 1000,
+                "author": "+391234567890",
+                "text": "Che bella foto!",
+                "attachments": [{"contentType": "image/jpeg"}],
+            }
+        )
+        events = backend.envelope_to_event(envelope)
+        assert events[0].payload["quote_text"] == "Che bella foto!"
+
+    def test_signal_quote_empty_remains_none(self):
+        """Quote vuota / senza allegati → nessun segnaposto (nessuna bolla)."""
+        backend = self._backend()
+        envelope = self._envelope({"id": 1000, "author": "+391234567890"})
+        events = backend.envelope_to_event(envelope)
+        assert events[0].payload["quote_text"] is None
+
+    def test_media_message_with_quote_placeholder_not_duplicated(self):
+        """Regressione dedup: quote segnaposto su media non causa duplicati."""
+        backend = SignalBackend()
+        data = {
+            "text": "Media: att-1",
+            "is_mine": False,
+            "sender": "Mario",
+            "timestamp": 1000,
+            "quote_text": "🖼️ Immagine",
+            "msg_type": "image",
+            "attachment_info": "photo.jpg",
+            "attachment_id": "att-1",
+        }
+        assert (
+            backend.ingest_message("+391234567890", data, 1000, persist=False) is True
+        )
+        assert (
+            backend.ingest_message("+391234567890", data, 1000, persist=False) is False
+        )
+        assert len(backend.cache["+391234567890"]) == 1

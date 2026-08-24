@@ -3,19 +3,36 @@
 import logging
 import sys
 import time
+from pathlib import Path
 
 from textual.widgets import Input
 
+from backend import get_attachment_path
 from emoji_picker import EmojiCompletionWidget
 from emoji_picker import replace_emoji_aliases as _replace_emoji_aliases
 from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
     PROTOCOL_WHATSAPP,
+    is_media_quote_placeholder,
 )
 from ui_components import MessageTextArea
 
 logger = logging.getLogger(__name__)
+
+
+def _quote_content_type(reply_data: dict) -> str | None:
+    """Return the persisted quoted-attachment mime type, or ``None``.
+
+    ``None`` is returned for legacy rows (pre-migration, ``content_type IS
+    NULL``): the reply degrades to the V2 behaviour — no ``quoteAttachments``,
+    so the quote stays correct and typed but without a thumbnail.  Deriving the
+    mime from ``msg_type`` was considered and rejected (design §9): the mapping
+    is unreliable (Signal video/audio are ``msg_type="attachment"`` → would
+    yield ``application/octet-stream``) and guessing from the file extension is
+    fragile, so the persisted value is the only trusted source.
+    """
+    return (reply_data.get("content_type") or "").strip() or None
 
 
 def _resolve_emoji_replacer():
@@ -94,6 +111,17 @@ class SendMixin:
                 )
                 return
 
+        # WhatsApp quotes are applied server-side via the Baileys ``reply_to``
+        # id only (WAHA ignores the ``quote_*`` params).  Without that id the
+        # reply would be dropped or attached to the wrong target, so refuse
+        # before creating an optimistic bubble.
+        if reply_data and protocol == PROTOCOL_WHATSAPP and not reply_to_message_id:
+            self._status(
+                "❌ Cannot reply: the original WhatsApp message ID is unavailable",
+                0,
+            )
+            return
+
         # Save to SQLite (incremental INSERT), protocol-aware.
         data = {
             "text": message,
@@ -103,7 +131,8 @@ class SendMixin:
             "quote_text": quote_text,
             "msg_type": "text",
             "attachment_info": None,
-            "attachment_id": None,
+            "attachment_id": reply_data.get("attachment_id") if reply_data else None,
+            "content_type": reply_data.get("content_type") if reply_data else None,
             "status": "pending",
             "protocol": protocol,
             "quote_timestamp": reply_data.get("timestamp") if reply_data else None,
@@ -139,7 +168,8 @@ class SendMixin:
                 "quote_text": quote_text,
                 "msg_type": "text",
                 "attachment_info": None,
-                "attachment_id": None,
+                "attachment_id": data["attachment_id"],
+                "content_type": data["content_type"],
                 "read": True,
                 "status": "pending",
                 "quote_timestamp": data["quote_timestamp"],
@@ -234,6 +264,45 @@ class SendMixin:
         quote_message = reply_data.get("text") if reply_data else None
         reply_to_message_id = reply_data.get("message_id") if reply_data else None
 
+        # Wire-faithful quote body (R1/R2): a media reply carries the explicit
+        # ``quote_wire_body`` key (real caption or None), so the Signal quote on
+        # the wire uses that body (caption or "") — never the display placeholder
+        # and never omitted.  Text replies never set the key, so their text is
+        # used unchanged.  WA/TG ignore ``quote_message`` anyway.
+        if reply_data is not None and "quote_wire_body" in reply_data:
+            quote_message = reply_data["quote_wire_body"] or ""
+
+        # Signal media reply → build the ``quoteAttachments`` descriptor so the
+        # recipient renders the quoted thumbnail (bug #37, piano B).  Only for
+        # Signal (WA/TG quote natively via ``reply_to``) and only for media
+        # replies (the ``quote_wire_body`` key is present only there).
+        quote_attachments: list[str] | None = None
+        if (
+            reply_data is not None
+            and "quote_wire_body" in reply_data
+            and protocol == PROTOCOL_SIGNAL
+        ):
+            content_type = _quote_content_type(reply_data)
+            if content_type:
+                attachment_id = reply_data.get("attachment_id")
+                preview_path = (
+                    get_attachment_path(attachment_id) if attachment_id else None
+                )
+                if preview_path is not None:
+                    # signal-cli parses ``quoteAttachments`` with the regex
+                    # ``([^:]+)(:([^:]+)(:(.+))?)?`` (G1=contentType,
+                    # G3=filename, G5=previewFile): the filename is REQUIRED
+                    # when the second block is present, so ``contentType::file``
+                    # is invalid.  Use ``contentType:filename:previewFile`` with
+                    # the basename of the local attachment as the (cosmetic)
+                    # filename.
+                    filename = Path(preview_path).name
+                    quote_attachments = [f"{content_type}:{filename}:{preview_path}"]
+                else:
+                    # No local file → quoted attachment without thumbnail:
+                    # ``contentType`` alone is a valid descriptor.
+                    quote_attachments = [content_type]
+
         # Send synchronously through the submission contact's backend. This is
         # a sync call running in a worker thread; it is NOT an async coroutine
         # that needs awaiting, which would otherwise be silently dropped.
@@ -255,6 +324,8 @@ class SendMixin:
             }
             if reply_to_message_id is not None:
                 send_kwargs["reply_to_message_id"] = reply_to_message_id
+            if quote_attachments is not None:
+                send_kwargs["quote_attachments"] = quote_attachments
             # Instrumentation: la durata di send_message_sync è il tempo in cui
             # la bolla resta "grigia" (pending).  Log a debug; loggato a warning
             # oltre la soglia (1000ms) per individuare backoff/degrado del backend.
@@ -504,6 +575,32 @@ class SendMixin:
             }
             if message.get("reply_to_message_id") is not None:
                 reply_data["message_id"] = message["reply_to_message_id"]
+            # A media reply carries the quoted attachment metadata on its own
+            # row (persisted at submit time).  Reconstruct it so the retry
+            # rebuilds ``quoteAttachments`` exactly like the live send.  The
+            # media marker is the presence of that metadata — NOT the display
+            # placeholder — so a captioned media reply (whose persisted
+            # ``quote_text`` is the real caption) is reconstructed too.
+            is_media_reply = (
+                message.get("content_type") is not None
+                or message.get("attachment_id") is not None
+            )
+            if is_media_reply:
+                reply_data["content_type"] = message.get("content_type")
+                reply_data["attachment_id"] = message.get("attachment_id")
+                # R2-bis: a media reply without caption has only the display
+                # placeholder persisted; reconstruct a faithful empty body so
+                # the Signal quote is never the placeholder.  For captioned
+                # media the wire body is the caption itself (``quote_text``).
+                if is_media_quote_placeholder(message["quote_text"]):
+                    reply_data["quote_wire_body"] = ""
+                else:
+                    reply_data["quote_wire_body"] = message["quote_text"]
+            elif is_media_quote_placeholder(message["quote_text"]):
+                # Legacy captionless media row (pre-piano-B, no metadata):
+                # keep the wire body empty (R2-bis) but there is nothing to
+                # rebuild the thumbnail from → V2 behaviour.
+                reply_data["quote_wire_body"] = ""
         self.run_worker(
             lambda: self._send_message_worker(
                 text,

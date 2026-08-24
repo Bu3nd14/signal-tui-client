@@ -11,7 +11,11 @@ testpaths = ["tests", "Telegram"]
 pythonpath = ["."]
 addopts = "-ra --tb=short --strict-markers"
 asyncio_mode = "auto"
-markers = ["integration: test che lancia la TUI (lento, headless)"]
+markers = [
+    "integration: test che lancia la TUI (lento, headless)",
+    "live: test su filo reale contro i backend (richiede LIVE_TESTS=1)",
+    "live-manual: test live che richiede intervento manuale sul device (richiede LIVE_MANUAL=1)",
+]
 
 [tool.coverage.run]
 source = ["."]

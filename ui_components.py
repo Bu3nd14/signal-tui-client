@@ -30,6 +30,7 @@ from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
     PROTOCOL_WHATSAPP,
+    media_quote_placeholder,
     protocol_emoji,
 )
 
@@ -569,6 +570,10 @@ class ImageWidget(Static):
     When the user presses Enter or clicks on this widget, it emits an
     ``ImageClicked`` message carrying the attachment path so the parent
     can open a fullscreen modal.
+
+    Alt+click (or Alt+R from focus) instead emits a ``ReplyRequested`` message
+    carrying the message metadata so the parent can set it as the reply target
+    — mirroring the Alt+click → ``EditRequested`` pattern on ``MessageWidget``.
     """
 
     class ImageClicked(Message):
@@ -581,11 +586,54 @@ class ImageWidget(Static):
             self.attachment_path = attachment_path
             self.attachment_id = attachment_id
 
+    class ReplyRequested(Message):
+        """Posted on Alt+click / Alt+r: request to reply to this image.
+
+        ``text`` is the display value (real caption or typed placeholder);
+        ``caption`` is the real user caption or ``None`` and is the only
+        source of the wire-faithful ``quoteMessage`` body (bug #37, §7).
+        """
+
+        def __init__(
+            self,
+            text: str,
+            caption: str | None,
+            timestamp: int = 0,
+            sender: str = "",
+            is_mine: bool = False,
+            message_id: str | None = None,
+            attachment_id: str = "",
+            content_type: str | None = None,
+        ) -> None:
+            super().__init__()
+            self.text = text
+            self.caption = caption
+            self.timestamp = timestamp
+            self.sender = sender
+            self.is_mine = is_mine
+            self.message_id = message_id
+            self.attachment_id = attachment_id
+            self.content_type = content_type
+
+    BINDINGS: ClassVar[list] = [
+        Binding("alt+r", "request_reply", "Reply", show=False),
+    ]
+
     def __init__(
         self,
         attachment_path: Path | None,
         attachment_id: str = "",
         fallback_text: str = "[🖼️ Image: Click Enter to View]",
+        *,
+        timestamp: int = 0,
+        sender: str = "",
+        is_mine: bool = False,
+        message_id: str | None = None,
+        msg_type: str = "image",
+        caption: str | None = None,
+        attachment_info: str | None = None,
+        protocol: str = "",
+        content_type: str | None = None,
     ) -> None:
         """Initialise the image widget.
 
@@ -595,22 +643,81 @@ class ImageWidget(Static):
             Resolved path to the attachment file on disk, or None if the
             file could not be located.
         attachment_id:
-            The raw signal-cli attachment UUID (for reference / logging).
+            The raw backend attachment id (for reference / logging).
         fallback_text:
             Plain-text placeholder shown in the chat.
+        timestamp / sender / is_mine / message_id:
+            Metadata of the message this widget represents, used to build the
+            ``ReplyRequested`` event (Alt+click / Alt+r).
+        msg_type:
+            Neutral media type (default "image"), used for the typed quote
+            placeholder.
+        caption:
+            Real user caption, when available; preferred over the placeholder
+            in the reply text and carried as the wire-faithful quote body.
+        attachment_info:
+            Raw attachment detail (filename/label), kept for the placeholder.
+        protocol:
+            Source protocol (kept for parity with ``MessageWidget``).
+        content_type:
+            Mime type of the attachment (e.g. "image/png"), carried by the
+            ``ReplyRequested`` event so a Signal quote can rebuild its
+            ``quoteAttachments`` thumbnail (bug #37, piano B).
         """
         self.attachment_path = attachment_path
         self.attachment_id = attachment_id
+        self._timestamp = timestamp
+        self._sender = sender
+        self._is_mine = is_mine
+        self._message_id = message_id
+        self._msg_type = msg_type
+        self._caption = caption
+        self._attachment_info = attachment_info
+        self._protocol = protocol
+        self._content_type = content_type
+        self._selected = False
 
         super().__init__(fallback_text, markup=False)
         self.can_focus = True
 
-    def on_click(self) -> None:
-        """Mouse click → emit ``ImageClicked``."""
+    def _reply_text(self) -> str:
+        """Compose the reply text: real caption or a typed media placeholder."""
+        return self._caption or media_quote_placeholder(self._msg_type)
+
+    def _make_reply_requested(self) -> "ImageWidget.ReplyRequested":
+        """Build the ``ReplyRequested`` event from this widget's metadata."""
+        return self.ReplyRequested(
+            text=self._reply_text(),
+            caption=self._caption,
+            timestamp=self._timestamp,
+            sender=self._sender,
+            is_mine=self._is_mine,
+            message_id=self._message_id,
+            attachment_id=self.attachment_id,
+            content_type=self._content_type,
+        )
+
+    def on_click(self, event: events.Click | None = None) -> None:
+        """Mouse click → Alt+click requests reply, otherwise ``ImageClicked``."""
+        if event is not None and event.meta:
+            self.post_message(self._make_reply_requested())
+            return
         if self.attachment_path or self.attachment_id:
             self.post_message(
                 self.ImageClicked(self.attachment_path, self.attachment_id)
             )
+
+    def action_request_reply(self) -> None:
+        """Alt+r → emit ``ReplyRequested``."""
+        self.post_message(self._make_reply_requested())
+
+    def set_selected(self, selected: bool) -> None:
+        """Toggle the visual "selected" state (reply highlight)."""
+        self._selected = selected
+        if selected:
+            self.styles.border = ("solid", "#4ebf71")
+        else:
+            self.styles.border = None
 
     def update_attachment(
         self, attachment_path: Path | None, fallback_text: str
@@ -621,11 +728,13 @@ class ImageWidget(Static):
 
     def on_focus(self) -> None:
         """Visual feedback when focused."""
-        self.styles.border = ("solid", "#4ebf71")
+        if not self._selected:
+            self.styles.border = ("solid", "#4ebf71")
 
     def on_blur(self) -> None:
-        """Remove focus border."""
-        self.styles.border = None
+        """Remove focus border if not in selected state."""
+        if not self._selected:
+            self.styles.border = None
 
     def key_enter(self) -> None:
         """Enter key → emit ``ImageClicked``."""

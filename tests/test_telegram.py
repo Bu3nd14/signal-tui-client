@@ -739,3 +739,92 @@ class TestTelegramBackendOperations:
         )
         assert backend.complete_2fa("password") is False
         assert backend._needs_2fa is False
+
+
+class TestTelegramQuoteMedia:
+    """🖼️ Bug #37 — quote di un media Telegram risolta dalla cache locale."""
+
+    def test_tg_quote_media_from_cache_placeholder(self, cached_media_target):
+        """Target foto senza caption in cache → "🖼️ Immagine"."""
+        from backends.telegram import _tg_quote_text_from_cached
+
+        assert _tg_quote_text_from_cached(cached_media_target) == "🖼️ Immagine"
+
+    @pytest.mark.parametrize(
+        ("msg_type", "info", "expected"),
+        [
+            ("image", "Photo", "🖼️ Immagine"),
+            ("sticker", "🎨 Sticker", "🎨 Sticker"),
+            ("attachment", "🎬 Video", "🎬 Video"),
+            ("attachment", "🎤 Voice", "🎵 Audio"),
+            ("attachment", "🎵 Audio", "🎵 Audio"),
+            ("attachment", "📎 Document", "📎 File"),
+        ],
+    )
+    def test_tg_quote_media_placeholder_variants(self, msg_type, info, expected):
+        """Etichette Telegram fini mappano al segnaposto canonico."""
+        from backends.telegram import _tg_quote_text_from_cached
+
+        target = {"id": "12", "text": "", "msg_type": msg_type, "attachment_info": info}
+        assert _tg_quote_text_from_cached(target) == expected
+
+    @pytest.mark.parametrize(
+        ("msg_type", "info", "expected"),
+        [
+            # Documento con filename reale (shape reale di _message_to_chat_event).
+            ("attachment", "📎 report.pdf", "📎 report.pdf — 📎 File"),
+            # Filename nudo non mappato: composto col segnaposto, come Signal.
+            ("attachment", "report.pdf", "report.pdf — 📎 File"),
+        ],
+    )
+    def test_tg_quote_unmapped_filename_enriches_placeholder(
+        self, msg_type, info, expected
+    ):
+        """Un ``attachment_info`` non mappato compone ``filename — segnaposto``."""
+        from backends.telegram import _tg_quote_text_from_cached
+
+        target = {"id": "12", "text": "", "msg_type": msg_type, "attachment_info": info}
+        assert _tg_quote_text_from_cached(target) == expected
+
+    def test_tg_quote_caption_from_cache(self):
+        """La caption (``text``) di un media quotato ha priorità."""
+        from backends.telegram import _tg_quote_text_from_cached
+
+        target = {
+            "id": "12",
+            "text": "che bello",
+            "msg_type": "image",
+            "attachment_info": "Photo",
+        }
+        assert _tg_quote_text_from_cached(target) == "che bello"
+
+    def test_tg_quote_no_cache_hit_is_none(self):
+        """Target non in cache → quote_text None (limitazione documentata)."""
+        backend = _backend()
+        backend.cache = {"42": []}
+        message = _message(reply_to=SimpleNamespace(reply_to_msg_id=999))
+
+        event = backend._message_to_chat_event(message)
+
+        assert event.payload["quote_text"] is None
+        assert event.payload["reply_to_message_id"] == "999"
+
+    def test_tg_quote_media_through_message_to_event(self):
+        """Percorso completo: reply_to risolto contro la cache → segnaposto."""
+        backend = _backend()
+        backend.cache = {
+            "42": [
+                {
+                    "id": "12",
+                    "text": "",
+                    "msg_type": "image",
+                    "attachment_info": "Photo",
+                }
+            ]
+        }
+        message = _message(reply_to=SimpleNamespace(reply_to_msg_id=12))
+
+        event = backend._message_to_chat_event(message)
+
+        assert event.payload["quote_text"] == "🖼️ Immagine"
+        assert event.payload["reply_to_message_id"] == "12"

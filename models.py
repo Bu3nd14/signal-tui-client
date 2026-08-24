@@ -55,6 +55,47 @@ def contact_cache_key(protocol: str, contact_id: str) -> str:
     return f"{protocol}:{contact_id}"
 
 
+# ─── Media quote placeholders ────────────────────────────────────────────────
+
+#: Canonical typed placeholders for a quoted media message (bug #37).  When a
+#: message quoting a media carries no real caption, the backends synthesize a
+#: ``quote_text`` from this mapping so the quote bubble is still rendered.
+#: These are display-only values: they must never travel on the wire as a
+#: Signal ``quoteMessage`` (see ``is_media_quote_placeholder``).
+MEDIA_QUOTE_PLACEHOLDERS: dict[str, str] = {
+    "image": "🖼️ Immagine",
+    "sticker": "🎨 Sticker",
+    "attachment": "📎 File",
+    "audio": "🎵 Audio",
+    "video": "🎬 Video",
+}
+
+
+def media_quote_placeholder(msg_type: str, detail: str | None = None) -> str:
+    """Return a human-readable label for a quoted media message.
+
+    ``detail`` is the real user caption/filename when available; it takes
+    priority over the typed placeholder derived from ``msg_type``.  Unknown
+    message types degrade to the generic "📎 File" placeholder.
+    """
+    if detail:
+        return detail
+    return MEDIA_QUOTE_PLACEHOLDERS.get(
+        msg_type, MEDIA_QUOTE_PLACEHOLDERS["attachment"]
+    )
+
+
+def is_media_quote_placeholder(text: str | None) -> bool:
+    """Return True if *text* is exactly one of the canonical media placeholders.
+
+    The predicate recognises only the 5 canonical strings (never the composed
+    ``"filename — placeholder"`` form, which exists only on the display path).
+    Used by the retry path to reconstruct the wire-faithful ``quote_wire_body``
+    when a media reply is retried after reload.
+    """
+    return text is not None and text in MEDIA_QUOTE_PLACEHOLDERS.values()
+
+
 # ─── Data models ─────────────────────────────────────────────────────────────
 
 
@@ -155,6 +196,7 @@ class ChatMessage:
     msg_type: str = "text"
     attachment_info: str | None = None
     attachment_id: str | None = None
+    content_type: str | None = None
     status: str = "sent"
     reply_to_message_id: str | None = None
 
