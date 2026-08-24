@@ -1,6 +1,7 @@
 """SignalTUI main App — composes the functional mixins and owns app lifecycle."""
 
 import logging
+import threading
 from typing import ClassVar
 
 from textual.app import App
@@ -37,6 +38,9 @@ from tui.css import APP_CSS
 from tui.download import DownloadModeMixin
 from tui.edit import EditMessageMixin
 from tui.events import EventHandlingMixin
+from tui.images.cellsize import get_cell_size_ioctl
+from tui.images.detect import ImageSupport
+from tui.images.kitty_renderer import KittyRenderer, compute_source_rect
 from tui.pickers import PickerMixin
 from tui.polling import PollingMixin
 from tui.send import SendMixin
@@ -44,6 +48,7 @@ from tui.unread_reply import UnreadReplyMixin
 from ui_components import (
     ChatAreaWidget,
     ContactListWidget,
+    ImageWidget,
     StatusBar,
 )
 
@@ -82,8 +87,36 @@ class SignalTUI(
     # with the emoji picker's Ctrl+P for previous category.
     ENABLE_COMMAND_PALETTE = False
 
-    def __init__(self):
+    def __init__(
+        self,
+        image_support: ImageSupport = ImageSupport.CATIMG,
+        *,
+        initial_cell_size: tuple[int, int] | None = None,
+    ):
         super().__init__()
+        # Terminal image backend detected in ``signal_tui`` before ``run()``.
+        # Defaults to CATIMG so existing tests instantiating ``SignalTUI()``
+        # with no arguments keep the current (placeholder + catimg) behaviour.
+        self.image_support = image_support
+        # Cell size measured BEFORE ``run()`` (P2): the CSI fallback can only run
+        # safely outside the app (no Textual key-thread racing for stdin).
+        self._initial_cell_size = initial_cell_size
+
+        # Native kitty image rendering state (phase 2).  The renderer is created
+        # in ``on_mount`` when the terminal supports it; placements are reconciled
+        # against the frame in ``post_display_hook``.
+        self._native_renderer: KittyRenderer | None = None
+        # image_id → last placed (row, col, x_src, y_src, w_px, h_px) key, used
+        # to skip no-op re-emissions during scroll.
+        self._native_last_key: dict[int, tuple] = {}
+        # Chat image ids (P3): the screen-stack gate deletes only these, never
+        # the modal's own placement.
+        self._chat_native_ids: set[int] = set()
+        self._screen_stack_cleared = False
+        self._native_image_counter = 0
+        # Concurrency gate for attachment path resolution + thumbnail prepare.
+        self._image_resolve_semaphore = threading.Semaphore(4)
+
         # Multi-protocol backend manager + the always-registered Signal backend.
         self.manager = BackendManager()
         self.signal_backend = SignalBackend()
@@ -240,6 +273,189 @@ class SignalTUI(
             and not self.telegram_backend.needs_pairing
         ):
             self.run_worker(self._connect_telegram, exclusive=False, thread=True)
+
+        self._init_native_renderer()
+
+    def _init_native_renderer(self) -> None:
+        """Set up the kitty renderer when the terminal supports it (R3).
+
+        Prefers the cell size measured pre-run in ``signal_tui`` (P2); falls
+        back to an ioctl-only detection on the driver's tty.  The CSI ``16 t``
+        fallback never runs inside the app (it would race the key-thread for
+        stdin).
+        """
+        if self.image_support is not ImageSupport.KITTY:
+            return
+        driver = self._driver
+        if driver is None:
+            return
+        cell_size = self._initial_cell_size
+        if cell_size is None:
+            fd = getattr(driver, "fileno", None)
+            if fd is None:
+                return
+            try:
+                cell_size = get_cell_size_ioctl(fd)
+            except Exception as _e:
+                logger.debug("Cell-size detection failed", exc_info=True)
+                return
+        if cell_size is None:
+            return
+        cell_w, cell_h = cell_size
+        self._native_renderer = KittyRenderer(
+            write=driver.write, cell_w=cell_w, cell_h=cell_h
+        )
+        # Safety net: ``post_display_hook`` is the primary trigger; this low
+        # frequency interval catches frames that slipped through (resize settle).
+        if self.is_running:
+            self.set_interval(0.25, self._native_sync_tick)
+
+    def _next_native_image_id(self) -> int:
+        """Return a new monotonic kitty image id (UI thread only)."""
+        self._native_image_counter += 1
+        return self._native_image_counter
+
+    def post_display_hook(self) -> None:
+        """Reconcile native image placements right after each frame flush."""
+        self._native_sync_tick()
+
+    def _native_sync_tick(self) -> None:
+        """Gate + reconcile placements (shared by the hook and the timer)."""
+        renderer = self._native_renderer
+        if self.image_support is not ImageSupport.KITTY or renderer is None:
+            return
+        # C5 screen-stack gate: while a modal/picker sits on top, the chat
+        # placements would bleed over it.  Drop ONLY the chat placements (P3:
+        # per-id ``d=i``, keeping data) — never the modal's own placement.
+        if self.screen is not self.default_screen:
+            if not self._screen_stack_cleared:
+                for image_id in list(self._chat_native_ids):
+                    renderer.delete(image_id, keep_data=True)
+                self._screen_stack_cleared = True
+                self._native_last_key.clear()
+            return
+        # Back on the default screen: invalidate positions and re-emit.
+        if self._screen_stack_cleared:
+            self._screen_stack_cleared = False
+            self._native_last_key.clear()
+        self._sync_native_images()
+
+    def _sync_native_images(self) -> None:
+        """Place/delete kitty placements for every native image widget."""
+        renderer = self._native_renderer
+        if renderer is None:
+            return
+        chat_log = self._chat_log
+        if chat_log is None:
+            return
+        try:
+            container = chat_log.content_region
+        except Exception as _e:
+            logger.debug("Failed to read chat-log content region", exc_info=True)
+            return
+        cell_w = renderer.cell_w
+        cell_h = renderer.cell_h
+        chat_ids: set[int] = set()
+        for widget in self.query(ImageWidget):
+            image_id = widget.native_image_id
+            if image_id is None or not widget.visible:
+                continue
+            if widget.native_width_px is None:
+                continue
+            region = widget.content_region
+            rect = compute_source_rect(
+                region, container, cell_w, cell_h, widget.native_width_px
+            )
+            placement_id = image_id
+            chat_ids.add(image_id)
+            if rect is None:
+                # Out of viewport: drop the placement but keep the data (d=i).
+                if image_id in self._native_last_key:
+                    renderer.delete(image_id, keep_data=True)
+                    del self._native_last_key[image_id]
+                continue
+            row, col, x_src, y_src, w_px, h_px = rect
+            if widget.has_class("msg-right"):
+                # P4: right-align — the thumb must end at the content region's
+                # right edge, matching the placeholder ``text-align: right``.
+                image_cols = (w_px + cell_w - 1) // cell_w
+                col = region.right - image_cols + 1
+            key = (image_id, placement_id, row, col, x_src, y_src, w_px, h_px)
+            if self._native_last_key.get(image_id) != key:
+                renderer.place(
+                    image_id,
+                    placement_id,
+                    row=row,
+                    col=col,
+                    x_src=x_src,
+                    y_src=y_src,
+                    w_px=w_px,
+                    h_px=h_px,
+                )
+                self._native_last_key[image_id] = key
+        self._chat_native_ids = chat_ids
+
+    def on_resize(self, event) -> None:
+        """Re-detect cell size and force delayed re-emissions (kitty remap)."""
+        if self.image_support is not ImageSupport.KITTY:
+            return
+        renderer = self._native_renderer
+        if renderer is None:
+            return
+        driver = self._driver
+        fd = getattr(driver, "fileno", None) if driver is not None else None
+        if fd is not None:
+            try:
+                # P2: ioctl only — never the CSI fallback inside the app.  If the
+                # terminal stops reporting pixels we keep the previous value.
+                new_cell = get_cell_size_ioctl(fd)
+            except Exception as _e:
+                logger.debug("Cell-size re-detection failed", exc_info=True)
+                new_cell = None
+            if new_cell is not None and new_cell != (renderer.cell_w, renderer.cell_h):
+                renderer.cell_w, renderer.cell_h = new_cell
+                # P1: font-zoom changed the cell height — reflow the native
+                # widget heights so they match the newly-detected cell size.
+                self._reflow_native_widget_heights()
+        self._native_last_key.clear()
+        self.call_after_refresh(self._force_native_reemit)
+        self.set_timer(0.1, self._force_native_reemit)
+        self.set_timer(0.3, self._force_native_reemit)
+
+    def _reflow_native_widget_heights(self) -> None:
+        """Recompute native widget heights after a cell-size change (P1)."""
+        renderer = self._native_renderer
+        if renderer is None:
+            return
+        for widget in self.query(ImageWidget):
+            if widget.native_height_px is not None:
+                rows = max(
+                    1,
+                    (widget.native_height_px + renderer.cell_h - 1) // renderer.cell_h,
+                )
+                widget.styles.height = rows
+                widget.refresh(layout=True)
+
+    def _force_native_reemit(self) -> None:
+        """Invalidate the placement cache and re-emit immediately."""
+        if self.image_support is not ImageSupport.KITTY:
+            return
+        if self._native_renderer is None:
+            return
+        self._native_last_key.clear()
+        # Go through the gate: a resize while a modal is open must NOT re-place
+        # the chat images over it (the gate clears + suspends instead).
+        self._native_sync_tick()
+
+    def on_unmount(self) -> None:
+        """On exit, free every kitty image and placement (d=A)."""
+        renderer = self._native_renderer
+        if renderer is None:
+            return
+        try:
+            renderer.clear_all()
+        except Exception as _e:
+            logger.debug("Failed to clear kitty images on exit", exc_info=True)
 
     def action_quit(self):
         """Ctrl+Q: stop polling and exit cleanly."""

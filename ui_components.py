@@ -33,6 +33,7 @@ from models import (
     media_quote_placeholder,
     protocol_emoji,
 )
+from tui.images.kitty_renderer import KittyRenderer, png_size, prepare_hi_res
 
 logger = logging.getLogger(__name__)
 
@@ -677,6 +678,16 @@ class ImageWidget(Static):
         self._content_type = content_type
         self._selected = False
 
+        # Native kitty-rendering state (phase 2).  ``native_renderer`` /
+        # ``native_image_id`` stay ``None`` until ``show_native_thumbnail`` is
+        # called by the app after the worker resolves the path and transmits the
+        # PNG.  Placement is performed ONLY by the app's ``post_display_hook``
+        # (never in this widget's render path, to avoid a stdout race).
+        self.native_renderer: KittyRenderer | None = None
+        self.native_image_id: int | None = None
+        self.native_width_px: int | None = None
+        self.native_height_px: int | None = None
+
         super().__init__(fallback_text, markup=False)
         self.can_focus = True
 
@@ -726,6 +737,41 @@ class ImageWidget(Static):
         self.attachment_path = attachment_path
         self.update(fallback_text)
 
+    def show_native_thumbnail(
+        self, renderer: KittyRenderer, image_id: int, png_bytes: bytes
+    ) -> None:
+        """Register the native kitty thumbnail state for this widget.
+
+        Clears the textual content: in native mode the widget shows ONLY the
+        kitty image, with no placeholder text behind it (explicit product
+        decision overriding the original C3 "placeholder behind the image").
+        The real ``a=p`` emission happens in the app's ``post_display_hook``.
+        Note: if kitty later evicts the image data, the area is simply empty
+        (no textual fallback) — degraded/fallback paths keep their own text.
+        """
+        self.native_renderer = renderer
+        self.native_image_id = image_id
+        width_px, height_px = png_size(png_bytes)
+        self.native_width_px = width_px
+        self.native_height_px = height_px
+        # Drop the placeholder text: the kitty image covers the widget area.
+        self.update("")
+        # Expand the widget to the thumbnail's natural height so the image has
+        # room to render.
+        rows = max(1, (height_px + renderer.cell_h - 1) // renderer.cell_h)
+        self.styles.width = "100%"
+        self.styles.height = rows
+        self.refresh(layout=True)
+
+    def native_cleanup(self) -> None:
+        """Free the kitty image data (``d=I``) and clear the native state."""
+        if self.native_renderer is not None and self.native_image_id is not None:
+            self.native_renderer.delete(self.native_image_id, keep_data=False)
+        self.native_renderer = None
+        self.native_image_id = None
+        self.native_width_px = None
+        self.native_height_px = None
+
     def on_focus(self) -> None:
         """Visual feedback when focused."""
         if not self._selected:
@@ -744,28 +790,56 @@ class ImageWidget(Static):
             )
 
 
-class ImageModalScreen(ModalScreen):
-    """Fullscreen modal that renders an image via ``catimg`` and displays it
-    inside a scrollable ``RichLog`` widget.
+#: Cap on the hi-res modal image's long side, in pixels (DESIGN §6).
+_NATIVE_MAX_PX = 1600
+#: Rows reserved at the top (Header) / bottom (Footer + status bar) so the
+#: native image does not cover them when they are visible.
+_NATIVE_TOP_MARGIN = 1
+_NATIVE_BOTTOM_MARGIN = 1
 
-    The image is rendered asynchronously so the UI stays responsive.
+
+class ImageModalScreen(ModalScreen):
+    """Fullscreen image modal: native kitty hi-res or ``catimg`` fallback.
+
+    When a ``KittyRenderer`` is injected (and an ``image_id`` is provided) the
+    image is decoded/resized with Pillow (capped at ~1600px on the long side),
+    transmitted once and placed centered via the kitty graphics protocol.  The
+    placement is local to this modal (``on_resize`` re-places; ``dismiss``
+    frees the data with ``d=I``).
+
+    Without a renderer the existing ``catimg`` path is used, unchanged.
     Dismiss with ``Escape`` or ``q``.
     """
 
-    def __init__(self, attachment_path: Path) -> None:
+    def __init__(
+        self,
+        attachment_path: Path,
+        renderer: KittyRenderer | None = None,
+        *,
+        image_id: int | None = None,
+    ) -> None:
         super().__init__()
         self._attachment_path = attachment_path
+        self._renderer = renderer
+        self._image_id = image_id
+        # Native branch state: bytes of the prepared hi-res PNG.
+        self._native_png: bytes | None = None
 
     def compose(self):
+        # Native branch: no Textual widgets — kitty draws the image itself.
+        if self._renderer is not None:
+            return
         yield RichLog(id="modal-image", highlight=True, markup=False, wrap=False)
         yield Static("Press Escape or q to close", id="modal-hint")
 
     def on_mount(self) -> None:
-        """Set up widget styles on mount.
+        """Set up the screen: native placement or catimg rendering."""
+        if self._renderer is not None and self._image_id is not None:
+            self.run_worker(self._prepare_native, thread=True)
+            return
 
-        Rendering is deferred via ``call_after_refresh`` so that the
-        RichLog has final layout dimensions before we read its height.
-        """
+        # catimg branch: defer rendering so the RichLog has final layout
+        # dimensions before we read its height.
         img = self.query_one("#modal-image", RichLog)
         img.styles.width = "100%"
         img.styles.height = "1fr"
@@ -775,10 +849,94 @@ class ImageModalScreen(ModalScreen):
         hint.styles.color = "#888888"
         hint.styles.margin = (0, 2)
 
-        # Defer rendering until after the next layout pass, when
-        # widget regions are guaranteed to have non-zero dimensions.
         self.call_after_refresh(self._start_image_render)
 
+    # ── Native branch ──────────────────────────────────────────────────────
+    def _native_target_box(self) -> tuple[int, int]:
+        """Return the ``(max_w_px, max_h_px)`` box the hi-res image must fit."""
+        size = self.size
+        cell_w = self._renderer.cell_w
+        cell_h = self._renderer.cell_h
+        avail_w = max(1, size.width * cell_w)
+        avail_h = max(
+            1, (size.height - _NATIVE_TOP_MARGIN - _NATIVE_BOTTOM_MARGIN) * cell_h
+        )
+        return (min(_NATIVE_MAX_PX, avail_w), min(_NATIVE_MAX_PX, avail_h))
+
+    def _native_placement(self, w_px: int, h_px: int) -> tuple[int, int]:
+        """Return the centered 1-based ``(row, col)`` for an image of w×h px."""
+        size = self.size
+        cell_w = self._renderer.cell_w
+        cell_h = self._renderer.cell_h
+        avail_w = size.width
+        avail_h = size.height - _NATIVE_TOP_MARGIN - _NATIVE_BOTTOM_MARGIN
+        image_cols = max(1, (w_px + cell_w - 1) // cell_w)
+        image_rows = max(1, (h_px + cell_h - 1) // cell_h)
+        row = _NATIVE_TOP_MARGIN + 1 + max(0, (avail_h - image_rows) // 2)
+        col = 1 + max(0, (avail_w - image_cols) // 2)
+        return row, col
+
+    def _prepare_native(self) -> None:
+        """Worker thread: decode/resize/encode the hi-res PNG (cap 1600px)."""
+        try:
+            box_w, box_h = self._native_target_box()
+            png = prepare_hi_res(self._attachment_path, box_w, box_h)
+        except Exception as _e:
+            logger.debug("Native hi-res prepare failed", exc_info=True)
+            self.app.call_from_thread(self._native_error, str(_e))
+            return
+        self.app.call_from_thread(self._finish_native, png)
+
+    def _finish_native(self, png: bytes) -> None:
+        """UI thread: transmit once and place the image centered."""
+        if self._renderer is None or self._image_id is None:
+            return
+        self._native_png = png
+        self._renderer.transmit(self._image_id, png)
+        self._place_native()
+
+    def _place_native(self) -> None:
+        """Place (or replace, same placement id → no flicker) the image."""
+        if self._native_png is None or self._renderer is None or self._image_id is None:
+            return
+        w_px, h_px = png_size(self._native_png)
+        row, col = self._native_placement(w_px, h_px)
+        self._renderer.place(
+            self._image_id,
+            self._image_id,
+            row=row,
+            col=col,
+            y_src=0,
+            w_px=w_px,
+            h_px=h_px,
+        )
+
+    def _native_error(self, message: str) -> None:
+        """UI thread: surface a prepare failure as a toast."""
+        try:
+            self.notify(f"⚠️ Could not render image: {message}", severity="error")
+        except Exception:
+            logger.debug("Failed to notify native image error", exc_info=True)
+
+    def _native_cleanup(self) -> None:
+        """Free the modal image data (``d=I``), idempotently."""
+        if self._renderer is not None and self._image_id is not None:
+            self._renderer.delete(self._image_id, keep_data=False)
+        self._image_id = None
+        self._native_png = None
+
+    def on_resize(self, event) -> None:
+        if self._renderer is not None and self._native_png is not None:
+            self._place_native()
+
+    def dismiss(self, result=None):
+        self._native_cleanup()
+        return super().dismiss(result)
+
+    def on_unmount(self) -> None:
+        self._native_cleanup()
+
+    # ── catimg branch (unchanged) ──────────────────────────────────────────
     def _start_image_render(self) -> None:
         """Called after layout is complete — widget regions are now valid."""
         img = self.query_one("#modal-image", RichLog)

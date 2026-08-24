@@ -11,10 +11,12 @@ from textual.widgets import Button, Static
 from backends import (
     WhatsAppBackend,
 )
+from backends.config import thumbnail_max_cols, thumbnail_max_lines
 from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
 )
+from tui.images.detect import ImageSupport
 from ui_components import (
     ImageWidget,
     MessageWidget,
@@ -308,6 +310,22 @@ class ChatViewMixin:
             edited=edited,
         )
 
+    def _native_placeholder(self, text: str, *, attachment_id: str | None) -> str:
+        """Return empty text when a native thumbnail will cover the widget.
+
+        In native KITTY mode (renderer available AND an attachment id to
+        resolve) the widget shows ONLY the kitty image — no textual placeholder.
+        In every fallback/degradation case (CATIMG/OFF, renderer gone, no id)
+        the given *text* is returned unchanged.
+        """
+        if (
+            self.image_support is ImageSupport.KITTY
+            and self._native_renderer is not None
+            and attachment_id
+        ):
+            return ""
+        return text
+
     def _render_image_in_chat(
         self,
         attachment_id: str | None,
@@ -360,7 +378,10 @@ class ChatViewMixin:
         widget = ImageWidget(
             attachment_path=None,
             attachment_id=attachment_id,
-            fallback_text=f"[🖼️ Image: {attachment_info} — loading…]",
+            fallback_text=self._native_placeholder(
+                f"[🖼️ Image: {attachment_info} — loading…]",
+                attachment_id=attachment_id,
+            ),
             timestamp=timestamp,
             sender=sender,
             is_mine=is_mine,
@@ -374,9 +395,21 @@ class ChatViewMixin:
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
 
+        max_lines = thumbnail_max_lines()
+        max_cols = thumbnail_max_cols()
+        chat_region = getattr(chat_log, "content_region", None)
+        chat_width = chat_region.width if chat_region is not None else 0
+        if chat_width > 0:
+            max_cols = min(max_cols, max(1, chat_width))
+
         self.run_worker(
             lambda: self._resolve_attachment_worker(
-                resolved_protocol, attachment_id, widget, attachment_info
+                resolved_protocol,
+                attachment_id,
+                widget,
+                attachment_info,
+                max_lines=max_lines,
+                max_cols=max_cols,
             ),
             thread=True,
             exclusive=False,
@@ -388,12 +421,39 @@ class ChatViewMixin:
         attachment_id: str,
         widget: ImageWidget,
         attachment_info: str,
+        *,
+        max_lines: int = 0,
+        max_cols: int = 0,
     ):
-        """Worker thread: resolve the attachment path without blocking the UI."""
-        path = self.manager.get_attachment_path(protocol, attachment_id)
-        self.call_from_thread(
-            self._finish_attachment_resolve, widget, path, attachment_info
-        )
+        """Worker thread: resolve the path (and prepare a native thumbnail).
+
+        Runs under a concurrency-limited semaphore (4) so a burst of attachments
+        never floods the CPU with parallel Pillow decodes.  For KITTY the PNG
+        thumbnail is generated here (Pillow); the transmit and widget-state
+        update happen on the UI thread via ``call_from_thread``.
+        """
+        with self._image_resolve_semaphore:
+            path = self.manager.get_attachment_path(protocol, attachment_id)
+            if path is None:
+                self.call_from_thread(
+                    self._finish_attachment_resolve, widget, None, attachment_info
+                )
+                return
+            renderer = self._native_renderer
+            if self.image_support is ImageSupport.KITTY and renderer is not None:
+                try:
+                    png = renderer.prepare_thumbnail(path, max_lines, max_cols)
+                except Exception as _e:
+                    logger.debug("Thumbnail prepare failed", exc_info=True)
+                    self.call_from_thread(
+                        self._finish_attachment_resolve, widget, path, attachment_info
+                    )
+                    return
+                self.call_from_thread(self._finish_native_thumbnail, widget, path, png)
+            else:
+                self.call_from_thread(
+                    self._finish_attachment_resolve, widget, path, attachment_info
+                )
 
     def _finish_attachment_resolve(
         self, widget: ImageWidget, path: Path | None, attachment_info: str
@@ -408,12 +468,71 @@ class ChatViewMixin:
                 path, f"[🖼️ Image: {path.name} — Click Enter to View]"
             )
 
+    def _finish_native_thumbnail(self, widget: ImageWidget, path: Path, png: bytes):
+        """UI thread: transmit the thumbnail once and register the widget.
+
+        Placement happens later in the app's ``post_display_hook`` — never here.
+        """
+        if not widget.is_mounted:
+            return
+        renderer = self._native_renderer
+        if renderer is None:
+            # Renderer vanished (e.g. a resize disabled it): CATIMG fallback.
+            widget.update_attachment(
+                path, f"[🖼️ Image: {path.name} — Click Enter to View]"
+            )
+            return
+        image_id = self._next_native_image_id()
+        renderer.transmit(image_id, png)
+        # Native mode: no textual placeholder — the kitty image covers the area.
+        widget.update_attachment(path, "")
+        widget.show_native_thumbnail(renderer, image_id, png)
+
+    def _resolve_mounted_image_paths(self, widgets: list) -> None:
+        """Start path resolution for cached image widgets (C4).
+
+        Only relevant for KITTY (native thumbnails); CATIMG keeps its lazy
+        on-click resolution (``download.py``).  Reuses the same worker path and
+        the concurrency semaphore as the live path.
+        """
+        if self.image_support is not ImageSupport.KITTY:
+            return
+        if self._native_renderer is None:
+            return
+        max_lines = thumbnail_max_lines()
+        max_cols = thumbnail_max_cols()
+        chat_region = getattr(self.chat_log, "content_region", None)
+        chat_width = chat_region.width if chat_region is not None else 0
+        if chat_width > 0:
+            max_cols = min(max_cols, max(1, chat_width))
+
+        for widget in widgets:
+            if not isinstance(widget, ImageWidget):
+                continue
+            if widget.attachment_path is not None or not widget.attachment_id:
+                continue
+            protocol = widget._protocol or PROTOCOL_SIGNAL
+            info = widget._attachment_info or "Photo"
+            self.run_worker(
+                lambda w=widget, p=protocol, i=info: self._resolve_attachment_worker(
+                    p, w.attachment_id, w, i, max_lines=max_lines, max_cols=max_cols
+                ),
+                thread=True,
+                exclusive=False,
+            )
+
     def _clear_chat(self):
         """Clear the chat and reset the render-level de-dup set."""
         chat_log = self.chat_log
+        for widget in list(getattr(chat_log, "children", [])):
+            if isinstance(widget, ImageWidget):
+                widget.native_cleanup()
         chat_log.remove_children()
         self._shown_in_log.clear()
         self._seen_message_ids.clear()
+        # All placements were freed above (d=I); drop their cache keys too.
+        self._native_last_key.clear()
+        self._chat_native_ids.clear()
 
     def _load_messages_worker(self):
         """Load messages: last 20 from cache, then reconcile remote history.
@@ -594,6 +713,9 @@ class ChatViewMixin:
                 chat_log = self.chat_log
                 chat_log.mount(*widgets)
                 chat_log.scroll_end(animate=False)
+                # C4: cached image widgets mount with path=None; kick off the
+                # (KITTY-only) resolution so native thumbnails can appear.
+                self._resolve_mounted_image_paths(widgets)
 
             # "load more" banner remounted AFTER the _clear_chat.
             if total > 20 and not is_stale():
@@ -720,7 +842,9 @@ class ChatViewMixin:
             image_widget = ImageWidget(
                 attachment_path=None,
                 attachment_id=attachment_id or "",
-                fallback_text=f"[{display}]",
+                fallback_text=self._native_placeholder(
+                    f"[{display}]", attachment_id=attachment_id
+                ),
                 timestamp=ts,
                 sender=sender,
                 is_mine=is_mine,

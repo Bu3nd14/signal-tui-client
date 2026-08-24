@@ -25,6 +25,7 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 - Full contact list with unread badges — unified across Signal, WhatsApp, and Telegram
 - Real-time message receiving and sending on all three protocols
 - **Multiple attachments** — a message with several photos shows each one separately (both Signal and WhatsApp).  Clickable image placeholders with fullscreen viewer (via catimg).
+- **Native inline images on kitty** — high-resolution inline thumbnails and a fullscreen hi-res viewer via the kitty graphics protocol (kitty ≥ 0.20, direct terminal or ssh); automatic `catimg` fallback everywhere else.  See [Immagini native inline](#immagini-native-inline-kitty-graphics-protocol).
 - Message history with local SQLite cache (last 200 messages per contact retained)
 - Device linking via QR code — Signal, WhatsApp, and Telegram
 - Daemon mode for fast JSON-RPC communication (Signal)
@@ -55,7 +56,7 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 - **signal-cli** — download and place in `./bin/` directory (see Installation).  Required for the **Signal** backend only.
 - **Docker + Docker Compose** — required for the **WhatsApp** backend (runs the WAHA container).
   Skip this if you only use Signal.
-- **catimg** — for rendering images in the terminal (optional; falls back to text placeholder if missing)
+- **catimg** — for rendering images in the terminal (optional; falls back to text placeholder if missing).  On **kitty ≥ 0.20** images render natively, no `catimg` needed — see [Immagini native inline](#immagini-native-inline-kitty-graphics-protocol).
 - A linked account — Signal (via `link_account.py` or TUI `Ctrl+L`) and/or WhatsApp (via `link_whatsapp.py` or TUI `Ctrl+L`)
 
 > **Note:** A Python virtual environment (venv) is **recommended** but not strictly required. See [Virtual environment](#virtual-environment-optional-but-recommended).
@@ -433,6 +434,51 @@ person's best name plus an aggregate unread badge (in the "All" view), and one
 
 
 
+## Immagini native inline (kitty graphics protocol)
+
+Nei messaggi con immagini il client mostra **miniature inline ad alta risoluzione** direttamente nella chat e apre il visualizzatore in un **modal hi-res**, quando il terminale supporta il *kitty graphics protocol*.  Negli altri ambienti resta il comportamento classico: placeholder cliccabile + `catimg` nel modal.
+
+### Requisiti (modalità nativa)
+
+- Terminale **[kitty](https://sw.kovidgoyal.net/kitty/) ≥ 0.20** (sviluppo e test su kitty 0.48)
+- Client lanciato in un terminale **diretto** o via **ssh** (dentro tmux/screen non funziona)
+- `pillow>=10.3` — già inclusa in `requirements.txt`
+
+> La detection gira una sola volta all'avvio (`TERM=xterm-kitty` + query al protocollo grafico); qualsiasi errore degrada al fallback `catimg` senza bloccare l'app.
+
+### Comportamento per ambiente
+
+| Ambiente | Modalità | Cosa succede |
+|---|---|---|
+| kitty, diretto o via ssh (`TERM=xterm-kitty`) | **kitty** | miniature inline ad alta risoluzione + modal hi-res (cap 1600 px sul lato lungo); scroll fluido senza ritrasmissioni; immagini mai sopra picker/modal |
+| Altri terminali (Ghostty, iTerm2, Windows Terminal, xterm…) | `catimg` | esperienza **invariata** rispetto a prima della feature: placeholder + modal `catimg` |
+| tmux / GNU screen (anche se il terminale è kitty) | `catimg` | il passthrough delle immagini non è affidabile → sempre fallback |
+| Pipe / CI / shell headless (non-tty) | `catimg` | nessuna query al terminale → suite e CI restano sicure |
+| Terminale non supportato e `catimg` assente | `off` | solo placeholder; il click mostra lo stato «rendering disabilitato», nessun modal |
+
+### Configurazione
+
+La modalità è automatica (`auto`). Per forzarla usa la variabile d'ambiente `IMAGE_PROTOCOL` oppure la chiave `image_protocol` in `config.json`:
+
+```bash
+export IMAGE_PROTOCOL=auto    # auto | kitty | catimg | off
+```
+
+```json
+{
+    "image_protocol": "auto"
+}
+```
+
+I limiti delle miniature sono configurabili allo stesso modo (env o `config.json`):
+
+| Chiave `config.json` | Variabile d'ambiente | Default | Significato |
+|---|---|---|---|
+| `thumbnail_max_lines` | `THUMBNAIL_MAX_LINES` | `12` | altezza massima della miniatura, in righe |
+| `thumbnail_max_cols` | `THUMBNAIL_MAX_COLS` | `60` | larghezza massima, in colonne (comunque clampata alla larghezza della chat) |
+
+> **Nota sviluppo:** in questo ambiente il client si lancia di solito con l'alias **`signal-dev`** (worktree `~/signal-tui-dev`, log DEBUG su `/tmp/signal-tui.log`).  Per la validazione manuale su kitty reale segui [docs/CHECKLIST_MANUAL_KITTY.md](docs/CHECKLIST_MANUAL_KITTY.md).  I dettagli tecnici (protocollo, clipping, gestione screen-stack) sono nel design `documentation/design/DESIGN_NATIVE_IMAGES.md` del repo principale (`signal-tui-client`).
+
 ## Performance Profiling
 
 Per profilare l'applicazione in termini di **CPU**, **RAM** e **I/O**, usa gli strumenti nella cartella `profiling/`:
@@ -526,6 +572,7 @@ signal-tui-client/
 │   ├── telegram.py          #   Telegram backend (Telethon MTProto, QR login, read receipts)
 │   └── config.py            #   WhatsApp + Telegram configuration helpers
 ├── tui/                     # TUI screens, mixins and widgets (Textual App composition)
+│   └── images/              # Native kitty rendering: detect.py (terminal detection), cellsize.py, kitty_renderer.py
 ├── models.py                # Shared data models (ChatContact, ChatMessage, ChatEvent)
 ├── ui_components.py         # Custom Textual widgets (MessageWidget, ImageWidget, ImageModalScreen, …)
 ├── emoji_picker.py          # Emoji picker modal screen and auto-completion widget (Ctrl+E)
@@ -554,6 +601,7 @@ signal-tui-client/
 ├── scripts/                 # Helper scripts (start_whatsapp.sh)
 ├── docs/                    # Documentation & design notes
 │   ├── BUGS.md              #   Known bugs and limitations
+│   ├── CHECKLIST_MANUAL_KITTY.md  #   Manual validation checklist (native images on real kitty)
 │   ├── TEST_REPORT.md       #   Test report (last run: 1080/1080 ✅)
 │   ├── PERF_ANALYSIS.md     #   Performance analysis (UI reactivity hotspots)
 │   ├── DESIGN_*.md          #   Design documents (edit messages, ctrls rubrica, UI freeze, fixes)
