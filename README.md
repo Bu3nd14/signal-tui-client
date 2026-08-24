@@ -454,6 +454,63 @@ python profiling/profile_memory.py --duration 120
 
 Vedi [profiling/README.md](profiling/README.md) per istruzioni dettagliate, interpretazione dei risultati e i punti critici noti.
 
+## Testing
+
+### Suite standard (unit + integration, CI-safe)
+
+Esegue tutti i test di `tests/` e `Telegram/` (niente rete, niente account reali):
+
+```bash
+make test PYTHON=.venv-test/bin/python      # o: source .venv-test/bin/activate && make test
+make lint                                   # ruff check
+make coverage                               # test + coverage (gate 68%)
+```
+
+Questa suite gira anche in CI (`.github/workflows/ci.yml`, Python 3.12/3.13).
+
+### Test di integrazione "live" (run opzionale, su filo reale)
+
+I test in `tests/test_live_quote_media.py` (E1–E7) verificano il comportamento
+end-to-end **contro un account di test reale** ("Roberto BMW", presente sui 3
+protocolli) e **inviano messaggi reali**. Non girano in CI: sono sempre skippati
+senza `LIVE_TESTS=1`.
+
+**Prerequisiti:**
+- Daemon signal-cli attivo (`config.json` con `user_number`) — richiesto per Signal;
+- WAHA raggiungibile con sessione WORKING (per WhatsApp);
+- `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` + sessione Telethon autorizzata (per Telegram);
+- contatto di test "Roberto BMW" presente sui 3 protocolli, oppure override esplicito
+  degli id con `LIVE_TARGET_SIGNAL` / `LIVE_TARGET_WHATSAPP` / `LIVE_TARGET_TELEGRAM`.
+
+**Esecuzione:**
+
+```bash
+make live-test PYTHON=.venv-test/bin/python
+# equivale a: LIVE_TESTS=1 .venv-test/bin/python -m pytest tests/test_live_quote_media.py -v
+```
+
+Cosa copre (criteri §10.2 di `docs/DESIGN_QUOTE_MEDIA_37_V2.md`):
+- **E1/E2/E3/E7** — Signal: quote media senza/con caption (params `quoteMessage`/`quoteAttachments`
+  verificati sul filo), reply a testo invariata, retry dopo fallimento;
+- **E5** — WhatsApp: quote foto (`reply_to` = id Baileys);
+- **E6** — Telegram: quote foto (`reply_to` = id numerico).
+
+Se nella chat non ci sono media freschi con `content_type` persistito (i media
+legacy pre-piano-B non sono backfillati automaticamente), i test Signal stampano
+"⏳ INVIA ORA una NUOVA immagine…" e attendono fino a 90 s: basta mandare una foto
+dal client ufficiale del contatto di test e il test procede da solo.
+
+**E4 (ingresso, manuale):** richiede di quotare un'immagine dal client ufficiale
+del contatto di test mentre il test è in attesa:
+
+```bash
+make live-test-manual PYTHON=.venv-test/bin/python
+```
+
+**Note:** ogni test invia messaggi marcati `[live-test #37]` (riconoscibili sul
+device). I test saltano con messaggi chiari quando un backend non è configurato,
+il contatto non è risolto o non c'è un media adatto — non falliscono la suite.
+
 ## Project Structure
 
 ```

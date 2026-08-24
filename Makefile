@@ -13,7 +13,7 @@
 
 PYTHON ?= python
 
-.PHONY: test lint coverage format-check check
+.PHONY: test lint coverage format-check check live-test live-test-manual
 
 # Esegue l'intera suite (tests/ + Telegram/) — radici definite da testpaths.
 test:
@@ -35,3 +35,17 @@ format-check:
 # Gate locale rapido: lint + test. La coverage resta un target separato
 # (diventerà parte del gate CI in Fase 5).
 check: lint test
+
+# Test di integrazione "live" (su filo reale) — RUN OPZIONALE, NON in CI.
+# Verificano il comportamento end-to-end contro un account di test reale
+# (es. "Roberto BMW" sui 3 protocolli) e inviano messaggi REALI, quindi
+# richiedono i servizi locali attivi (daemon signal-cli, WAHA docker, sessione
+# Telethon autorizzata) e le credenziali configurate. Senza LIVE_TESTS=1 i test
+# restano sempre skippati (vedi tests/test_live_quote_media.py). Runbook nel README.
+live-test:
+	LIVE_TESTS=1 $(PYTHON) -m pytest tests/test_live_quote_media.py -v
+
+# E4 — verifica d'ingresso manuale (serve quotare dal client ufficiale del
+# contatto di test mentre il test è in attesa). Richiede LIVE_MANUAL=1.
+live-test-manual:
+	LIVE_TESTS=1 LIVE_MANUAL=1 $(PYTHON) -m pytest tests/test_live_quote_media.py::test_e4_ingest_manual -v
