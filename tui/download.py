@@ -11,6 +11,7 @@ from backend import (
 from models import (
     PROTOCOL_SIGNAL,
 )
+from tui.images.detect import ImageSupport
 from ui_components import (
     DownloadLinkWidget,
     ImageModalScreen,
@@ -127,7 +128,22 @@ class DownloadModeMixin:
                 protocol=protocol,
             )
             return
+
+        # OFF semantics (R8): images are disabled → placeholder stays and the
+        # click only reports a status (no modal, no catimg).
+        image_support = getattr(self, "image_support", ImageSupport.CATIMG)
+        if image_support is ImageSupport.OFF:
+            self._status("🖼️ Image rendering is disabled")
+            return
+
         if att_path:
-            self.push_screen(ImageModalScreen(att_path))
+            renderer = getattr(self, "_native_renderer", None)
+            if image_support is ImageSupport.KITTY and renderer is not None:
+                image_id = self._next_native_image_id()
+                self.push_screen(
+                    ImageModalScreen(att_path, renderer, image_id=image_id)
+                )
+            else:
+                self.push_screen(ImageModalScreen(att_path))
         else:
             self._status("❌ Image file not found on server")

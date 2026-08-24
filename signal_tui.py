@@ -77,10 +77,13 @@ def _global_exception_handler(exc_type, exc_value, exc_traceback):
 
 sys.excepthook = _global_exception_handler
 
+from backends.config import image_protocol
 from emoji_picker import (
     replace_emoji_aliases,  # noqa: F401 (re-exported for test patching)
 )
 from tui.app import SignalTUI
+from tui.images.cellsize import get_cell_size
+from tui.images.detect import ImageSupport, detect_image_support
 
 logger = logging.getLogger("signal_tui")
 # Ensure LINK-* logs are written to a file (Textual may suppress stderr)
@@ -116,7 +119,31 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    app = SignalTUI()
+    # Detect the terminal image backend BEFORE ``app.run()``.  Any failure
+    # degrades to CATIMG (current behaviour), never blocking startup.
+    try:
+        image_support = detect_image_support(
+            isatty=sys.stdin.isatty() and sys.stdout.isatty(),
+            env=os.environ,
+            override=image_protocol(),
+        )
+    except Exception:
+        logger.debug(
+            "Image support detection failed, falling back to CATIMG", exc_info=True
+        )
+        image_support = ImageSupport.CATIMG
+
+    # P2: measure the cell size BEFORE ``app.run()``, in the same pre-run window
+    # where the TGP query is already safe (no Textual key-thread yet).  The CSI
+    # ``16 t`` fallback reads stdin, so it must never run inside the app.
+    initial_cell_size = None
+    if image_support is ImageSupport.KITTY:
+        try:
+            initial_cell_size = get_cell_size(sys.stdin.fileno())
+        except Exception:
+            logger.debug("Cell-size pre-run detection failed", exc_info=True)
+
+    app = SignalTUI(image_support=image_support, initial_cell_size=initial_cell_size)
 
     def _handle_sigint(sig, frame):
         """Handle Ctrl+C: stop polling and exit cleanly."""

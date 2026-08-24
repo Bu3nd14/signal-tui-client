@@ -279,3 +279,27 @@ def get_picker_max_results() -> int:
 def get_picker_preferred_backend() -> str:
     """Return the preferred picker backend, or ``""`` (most recent) if unset."""
     return _get("picker_preferred_backend", "PICKER_PREFERRED_BACKEND").strip()
+
+
+# ─── Image rendering configuration ──────────────────────────────────────────
+
+
+def image_protocol() -> str:
+    """Return the desired image protocol (default ``"auto"``).
+
+    One of ``auto``, ``kitty``, ``catimg`` or ``off``, read from the
+    ``IMAGE_PROTOCOL`` environment variable then the ``image_protocol`` key in
+    ``config.json`` (same resolution order as the other getters in this file).
+    """
+    value = _get("image_protocol", "IMAGE_PROTOCOL", "auto").strip().lower()
+    return value or "auto"
+
+
+def thumbnail_max_lines() -> int:
+    """Return the max thumbnail height in lines (default ``12``)."""
+    return _get_int("thumbnail_max_lines", "THUMBNAIL_MAX_LINES", 12)
+
+
+def thumbnail_max_cols() -> int:
+    """Return the max thumbnail width in columns (default ``60``)."""
+    return _get_int("thumbnail_max_cols", "THUMBNAIL_MAX_COLS", 60)

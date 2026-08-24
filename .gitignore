@@ -1,6 +1,10 @@
 .venv/
+.venv
 .venv-test/
+.venv-test
 bin/signal-cli-*/
+bin
+bin/
 __pycache__/
 *.pyc
 # Coverage artifacts
