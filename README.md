@@ -477,7 +477,7 @@ I limiti delle miniature sono configurabili allo stesso modo (env o `config.json
 | `thumbnail_max_lines` | `THUMBNAIL_MAX_LINES` | `12` | altezza massima della miniatura, in righe |
 | `thumbnail_max_cols` | `THUMBNAIL_MAX_COLS` | `60` | larghezza massima, in colonne (comunque clampata alla larghezza della chat) |
 
-> **Nota sviluppo:** in questo ambiente il client si lancia di solito con l'alias **`signal-dev`** (worktree `~/signal-tui-dev`, log DEBUG su `/tmp/signal-tui.log`).  Per la validazione manuale su kitty reale segui [docs/CHECKLIST_MANUAL_KITTY.md](docs/CHECKLIST_MANUAL_KITTY.md).  I dettagli tecnici (protocollo, clipping, gestione screen-stack) sono nel design `documentation/design/DESIGN_NATIVE_IMAGES.md` del repo principale (`signal-tui-client`).
+> **Nota sviluppo:** il client si lancia con l'alias **`signal`** (log DEBUG su `/tmp/signal-tui.log`).  La validazione manuale su kitty reale segue la checklist **locale** `docs/CHECKLIST_MANUAL_KITTY.md` (gitignored, non distribuita con il repo).  I dettagli tecnici (protocollo, clipping, gestione screen-stack) sono nel design `documentation/design/DESIGN_NATIVE_IMAGES.md` del repo principale (`signal-tui-client`).
 
 ## Performance Profiling
 
@@ -601,7 +601,6 @@ signal-tui-client/
 ├── scripts/                 # Helper scripts (start_whatsapp.sh)
 ├── docs/                    # Documentation & design notes
 │   ├── BUGS.md              #   Known bugs and limitations
-│   ├── CHECKLIST_MANUAL_KITTY.md  #   Manual validation checklist (native images on real kitty)
 │   ├── TEST_REPORT.md       #   Test report (last run: 1080/1080 ✅)
 │   ├── PERF_ANALYSIS.md     #   Performance analysis (UI reactivity hotspots)
 │   ├── DESIGN_*.md          #   Design documents (edit messages, ctrls rubrica, UI freeze, fixes)

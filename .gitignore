@@ -24,4 +24,8 @@ whatsapp-data/
 .docker/
 # Script di ottimizzazione di sistema (da lanciare come root, specifico per host)
 system_tuning_root.sh
+# POC immagini native (Python 3.13) — non versionata
+poc-image/
+# Checklist validazione manuale kitty — locale, non distribuita
+docs/CHECKLIST_MANUAL_KITTY.md
 
