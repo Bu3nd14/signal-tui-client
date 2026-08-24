@@ -1,9 +1,9 @@
 # Test Report — Signal TUI Client
 
-**Data:** 2026-08-22
-**Git commit:** `8d95742` (master)
+**Data:** 2026-08-24
+**Git commit:** `7d483cc` (master)
 **Python:** 3.12.3
-**Stato:** ✅ **1268/1268 test superati** (1194 in `tests/` + 74 in `Telegram/`) · coverage globale ~90% (gate 68%) · lint/format puliti
+**Stato:** ✅ **1389/1389 test superati** + 7 test live opzionali (gated da `LIVE_TESTS=1`) · coverage 80% (gate 68%) · lint/format puliti
 
 ---
 
@@ -11,23 +11,24 @@
 
 | Modulo | File | Test | Esito |
 |--------|------|------|-------|
-| WhatsApp Backend | `test_whatsapp_backend.py` | 121 | ✅ |
+| WhatsApp Backend | `test_whatsapp_backend.py` | 141 | ✅ |
 | Address Book | `test_address_book.py` | 82 | ✅ |
-| Grouping Contatti | `test_contact_grouping.py` | 56 | ✅ |
+| Grouping Contatti | `test_contact_grouping.py` | 66 | ✅ |
+| Unread Filter | `test_unread_filter.py` | 65 | ✅ |
+| Backends (Manager) | `test_backends.py` | 61 | ✅ |
 | UI Protocol | `test_ui_protocol.py` | 55 | ✅ |
+| Telegram Backend | `test_telegram.py` | 52 | ✅ |
 | Contact Picker | `test_contact_picker.py` | 49 | ✅ |
-| Backends (Manager) | `test_backends.py` | 48 | ✅ |
-| Unread Filter | `test_unread_filter.py` | 41 | ✅ |
-| Telegram Backend | `test_telegram.py` | 40 | ✅ |
+| UI Components | `test_ui_components.py` | 37 | ✅ |
 | Telegram Edit | `test_telegram_edit.py` | 34 | ✅ |
 | Edit WhatsApp | `test_edit_whatsapp.py` | 33 | ✅ |
 | Device Link Screen | `test_device_link_screen.py` | 32 | ✅ |
-| UI Components | `test_ui_components.py` | 29 | ✅ |
 | Typing Indicator | `test_typing_indicator.py` | 29 | ✅ |
+| Send Persist Offthread | `test_send_persist_offthread.py` | 28 | ✅ |
 | Image Caption | `test_image_caption.py` | 28 | ✅ |
 | Edit Signal | `test_edit_signal.py` | 28 | ✅ |
+| Refresh Chat | `test_refresh_chat.py` | 27 | ✅ |
 | WhatsApp Fix 40/41 | `test_whatsapp_fix_40_41.py` | 26 | ✅ |
-| Refresh Chat | `test_refresh_chat.py` | 23 | ✅ |
 | Emoji Picker | `test_emoji_picker.py` | 23 | ✅ |
 | Cache (SQLite) | `test_backend_cache.py` | 21 | ✅ |
 | WA Receipt ID Match | `test_whatsapp_receipt_id_match.py` | 20 | ✅ |
@@ -42,11 +43,10 @@
 | WA Read Receipt Fix | `test_whatsapp_read_receipt_fix.py` | 14 | ✅ |
 | Status Backend Unread | `test_status_backend_unread.py` | 14 | ✅ |
 | Signal Real Timestamp | `test_signal_real_timestamp.py` | 14 | ✅ |
-| Send Persist Offthread | `test_send_persist_offthread.py` | 14 | ✅ |
+| RPC / Daemon | `test_backend_rpc.py` | 14 | ✅ |
 | Edit Flow | `test_edit_flow.py` | 13 | ✅ |
 | Backend Connect | `test_backend_connect.py` | 13 | ✅ |
 | Migrazione Protocollo | `test_migrate_protocol.py` | 12 | ✅ |
-| RPC / Daemon | `test_backend_rpc.py` | 12 | ✅ |
 | Open/Create | `test_open_or_create.py` | 11 | ✅ |
 | Backend Webhook | `test_backend_webhook.py` | 11 | ✅ |
 | Edit Contract | `test_edit_contract.py` | 10 | ✅ |
@@ -54,7 +54,10 @@
 | Cache Debounce | `test_cache_debounce.py` | 10 | ✅ |
 | Merge Cache Edit | `test_merge_cache_edit.py` | 9 | ✅ |
 | Image Async Download | `test_image_async_download.py` | 9 | ✅ |
+| Reply Media (#37) | `test_reply_media.py` | 7 | ✅ |
 | Outgoing Status Fallback | `test_outgoing_status_fallback.py` | 7 | ✅ |
+| Models (#37) | `test_models.py` | 7 | ✅ |
+| Live integration (#37) | `test_live_quote_media.py` | 7 | ⏭️ gated (`LIVE_TESTS=1`) |
 | Lock File | `test_signal_tui_lock.py` | 6 | ✅ |
 | Migrazione Status | `test_migrate_status.py` | 6 | ✅ |
 | DB Schema Versioning | `test_db_schema_versioning.py` | 6 | ✅ |
@@ -70,11 +73,29 @@
 | TG Send Reorder | `test_telegram_send_reorder.py` | 1 | ✅ |
 | Telegram Regression | `Telegram/test_regression.py` | 39 | ✅ |
 | Telegram Backend | `Telegram/test_telegram_backend.py` | 35 | ✅ |
-| **Totale** | | **1268** | **✅ 1268/1268** |
+| **Totale** | | **1396** | **✅ 1389 + 7 gated** |
 
 ---
 
 ## Novità — Ultimi aggiornamenti
+
+### Bug #37 — Quote media (PR #53: V2 + piano B, 24/08/2026) ✅ RISOLTO
+- **V2** (design `DESIGN_QUOTE_MEDIA_37_V2.md`): ingresso con segnaposto tipizzato
+  `quote_text` nei 3 backend (`media_quote_placeholder` in `models.py`, priorità caption);
+  uscita con `ImageWidget.ReplyRequested` (Alt+click/Alt+R, click/Enter → modal);
+  contratto display-vs-filo (`quote_message` = caption o `""`, mai segnaposto/omesso).
+- **Piano B** (design `DESIGN_QUOTE_MEDIA_37_PLANB.md`): su Signal serve anche
+  `quoteAttachments` (`contentType:filename:previewFile`) per mostrare la thumbnail;
+  persistenza di `content_type` (colonna + migrazione) e backfill per i media legacy
+  (`migrate_content_type.py`).
+- **Nuovi test**: `test_models.py` (7), `test_reply_media.py` (7), `test_live_quote_media.py`
+  (7, live/gated); +13 su `test_backends.py`/`test_send_persist_offthread.py`/
+  `test_ui_components.py`/`test_refresh_chat.py`/`test_backend_rpc.py`/`test_whatsapp_backend.py`/
+  `test_telegram.py`.
+- **Test live sul filo reale** (account "Roberto BMW", `make live-test`): E1/E2/E3/E7 Signal +
+  E5 WhatsApp + E6 Telegram **verdi**; confermato sul device che la quote Signal mostra
+  l'immagine quotata. E4 (ingresso) manuale (`make live-test-manual`).
+- `docs/BUGS.md`: #37 → RISOLTO (PR #54); follow-up **#57** (quote media non-immagine Signal) tracciato.
 
 ### Raggruppamento contatti per persona (PR #25)
 - La lista principale raggruppa la stessa persona sui diversi backend in **un solo header** (+ una riga membro per protocollo: `📱 Signal`, `💬 WhatsApp`, `📨 Telegram`).
@@ -393,12 +414,18 @@ Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano
 # Test completi (tests/ + Telegram/) — richiede il venv attivo o PYTHON=...
 make test
 
-# Test con coverage + gate (soglia 52%) + report XML per Codecov
+# Test con coverage + gate (soglia 68%) + report XML per Codecov
 make coverage
 
 # Lint (ruff check) e format check
 make lint
 make format-check
+
+# Test di integrazione "live" (run opzionale, su filo reale — NON in CI)
+# Richiede i servizi locali attivi + account di test reale; invia messaggi veri.
+# Vedere la sezione "Testing" del README per prerequisiti e dettagli.
+make live-test PYTHON=.venv-test/bin/python
+make live-test-manual PYTHON=.venv-test/bin/python   # E4 (ingresso, manuale)
 ```
 
 I comandi del `Makefile` usano la config condivisa in `pyproject.toml` (`testpaths = ["tests", "Telegram"]`), quindi raccolgono **entrambe** le radici di test. Lo script legacy `tests/run_regression_tests.sh` è stato sostituito dal Makefile (non copriva la suite `Telegram/`).
