@@ -603,6 +603,7 @@ class ImageWidget(Static):
             is_mine: bool = False,
             message_id: str | None = None,
             attachment_id: str = "",
+            content_type: str | None = None,
         ) -> None:
             super().__init__()
             self.text = text
@@ -612,6 +613,7 @@ class ImageWidget(Static):
             self.is_mine = is_mine
             self.message_id = message_id
             self.attachment_id = attachment_id
+            self.content_type = content_type
 
     BINDINGS: ClassVar[list] = [
         Binding("alt+r", "request_reply", "Reply", show=False),
@@ -631,6 +633,7 @@ class ImageWidget(Static):
         caption: str | None = None,
         attachment_info: str | None = None,
         protocol: str = "",
+        content_type: str | None = None,
     ) -> None:
         """Initialise the image widget.
 
@@ -656,6 +659,10 @@ class ImageWidget(Static):
             Raw attachment detail (filename/label), kept for the placeholder.
         protocol:
             Source protocol (kept for parity with ``MessageWidget``).
+        content_type:
+            Mime type of the attachment (e.g. "image/png"), carried by the
+            ``ReplyRequested`` event so a Signal quote can rebuild its
+            ``quoteAttachments`` thumbnail (bug #37, piano B).
         """
         self.attachment_path = attachment_path
         self.attachment_id = attachment_id
@@ -667,6 +674,7 @@ class ImageWidget(Static):
         self._caption = caption
         self._attachment_info = attachment_info
         self._protocol = protocol
+        self._content_type = content_type
         self._selected = False
 
         super().__init__(fallback_text, markup=False)
@@ -686,6 +694,7 @@ class ImageWidget(Static):
             is_mine=self._is_mine,
             message_id=self._message_id,
             attachment_id=self.attachment_id,
+            content_type=self._content_type,
         )
 
     def on_click(self, event: events.Click | None = None) -> None:

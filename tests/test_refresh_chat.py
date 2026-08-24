@@ -883,6 +883,30 @@ class TestCacheImageReplyMetadata:
         assert isinstance(image_widget, ImageWidget)
         assert image_widget._caption == "Che bella!"
 
+    def test_cache_built_image_widget_carries_content_type(self):
+        """(A/C) ``_build_message_widgets`` propaga ``content_type`` all'ImageWidget."""
+        app = SignalTUI()
+        message = {
+            "id": "img-42",
+            "text": "",
+            "is_mine": False,
+            "sender": "Mario",
+            "timestamp": 1000,
+            "quote_text": None,
+            "msg_type": "image",
+            "attachment_info": "photo.png",
+            "attachment_id": "att-1",
+            "content_type": "image/png",
+            "read": False,
+            "status": "read",
+        }
+
+        widgets = app._build_message_widgets("signal", False, message)
+        image_widget = widgets[0]
+
+        assert isinstance(image_widget, ImageWidget)
+        assert image_widget._content_type == "image/png"
+
     def test_cache_media_quote_renders_bubble(self):
         """Una quote media (segnaposto) monta la bolla anche dal percorso cache."""
         from textual.widgets import Static

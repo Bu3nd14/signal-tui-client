@@ -257,6 +257,8 @@ class UnreadReplyMixin:
             "sender": event.sender,
             "is_mine": event.is_mine,
             "quote_wire_body": event.caption,
+            "attachment_id": event.attachment_id,
+            "content_type": event.content_type,
         }
         if event.message_id is not None:
             self._reply_to["message_id"] = event.message_id

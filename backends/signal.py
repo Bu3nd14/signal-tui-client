@@ -402,6 +402,7 @@ class SignalBackend(ChatBackend):
         quote_author: str | None,
         quote_message: str | None,
         reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
     ) -> str:
         """Send *text* and return the real server timestamp (ms) when available.
 
@@ -420,6 +421,7 @@ class SignalBackend(ChatBackend):
                 quote_timestamp=quote_timestamp,
                 quote_author=quote_author,
                 quote_message=quote_message,
+                quote_attachments=quote_attachments,
             )
             if "error" in result:
                 raise RuntimeError(result["error"])
@@ -433,6 +435,7 @@ class SignalBackend(ChatBackend):
             quote_timestamp=quote_timestamp,
             quote_author=quote_author,
             quote_message=quote_message,
+            quote_attachments=quote_attachments,
         )
         try:
             return int(stdout.strip())
@@ -447,6 +450,7 @@ class SignalBackend(ChatBackend):
         quote_author: str | None = None,
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
     ) -> str:
         """Synchronous send, for use from the TUI's sync worker threads.
 
@@ -458,6 +462,7 @@ class SignalBackend(ChatBackend):
             quote_timestamp=quote_timestamp,
             quote_author=quote_author,
             quote_message=quote_message,
+            quote_attachments=quote_attachments,
         )
 
     def edit_message_sync(
@@ -538,27 +543,28 @@ class SignalBackend(ChatBackend):
 
         def _classify_attachments(
             attachments: list,
-        ) -> list[tuple[str, str, str | None]]:
+        ) -> list[tuple[str, str, str | None, str | None]]:
             """Classify every attachment in *attachments*, returning one
-            ``(msg_type, info, att_id)`` tuple for each element."""
-            result: list[tuple[str, str, str | None]] = []
+            ``(msg_type, info, att_id, content_type)`` tuple for each element."""
+            result: list[tuple[str, str, str | None, str | None]] = []
             for att in attachments:
                 content_type = att.get("contentType", "") or ""
+                ct = content_type or None
                 fname = att.get("filename", "") or ""
                 caption = att.get("caption", "") or ""
                 att_id = att.get("id") or att.get("attachmentId") or None
                 if content_type.startswith("image/"):
                     info = caption or (f"Image: {fname}" if fname else "🖼️ Image")
-                    result.append(("image", info, att_id))
+                    result.append(("image", info, att_id, ct))
                 elif content_type.startswith("video/"):
                     info = caption or (f"Video: {fname}" if fname else "🎬 Video")
-                    result.append(("attachment", info, att_id))
+                    result.append(("attachment", info, att_id, ct))
                 elif content_type.startswith("audio/"):
                     info = caption or (f"Audio: {fname}" if fname else "🎵 Audio")
-                    result.append(("attachment", info, att_id))
+                    result.append(("attachment", info, att_id, ct))
                 else:
                     info = caption or fname or content_type or "📎 File"
-                    result.append(("attachment", info, att_id))
+                    result.append(("attachment", info, att_id, ct))
             return result
 
         def _extract_sticker(sticker: dict | None) -> tuple[str, str] | None:
@@ -581,7 +587,9 @@ class SignalBackend(ChatBackend):
             classified = _classify_attachments(attachments)
             if classified:
                 msgs: list[dict] = []
-                for i, (msg_type, att_info, att_id) in enumerate(classified):
+                for i, (msg_type, att_info, att_id, content_type) in enumerate(
+                    classified
+                ):
                     if i == 0 and text:
                         msg_text = text
                     else:
@@ -604,6 +612,7 @@ class SignalBackend(ChatBackend):
                             "msg_type": msg_type,
                             "attachment_info": att_info,
                             "attachment_id": att_id,
+                            "content_type": content_type,
                         }
                     )
                 return msgs
@@ -617,6 +626,7 @@ class SignalBackend(ChatBackend):
                     "msg_type": "text",
                     "attachment_info": None,
                     "attachment_id": None,
+                    "content_type": None,
                 }
             ]
 
@@ -639,6 +649,7 @@ class SignalBackend(ChatBackend):
                         "quote_text": quote_text,
                         "msg_type": msg_type,
                         "attachment_info": att_info,
+                        "content_type": None,
                     }
                 ]
 
@@ -670,6 +681,7 @@ class SignalBackend(ChatBackend):
                         "quote_text": quote_text,
                         "msg_type": msg_type,
                         "attachment_info": att_info,
+                        "content_type": None,
                     }
                 ]
 
@@ -889,6 +901,7 @@ class SignalBackend(ChatBackend):
             msg_type=data["msg_type"],
             attachment_info=data["attachment_info"],
             attachment_id=data.get("attachment_id"),
+            content_type=data.get("content_type"),
             status=data.get("status"),
             protocol=data.get("protocol", PROTOCOL_SIGNAL),
             msg_id=data.get("id"),
@@ -961,6 +974,7 @@ class SignalBackend(ChatBackend):
                 "msg_type": data["msg_type"],
                 "attachment_info": data["attachment_info"],
                 "attachment_id": data.get("attachment_id"),
+                "content_type": data.get("content_type"),
                 "read": is_mine,
                 "status": data.get("status", "sent" if is_mine else "read"),
                 "quote_timestamp": data.get("quote_timestamp"),

@@ -80,6 +80,33 @@ class TestSignalRPCClient:
             messages = client.receive()
         assert messages == []
 
+    def test_send_message_serializes_quote_attachments(self):
+        """send_message(..., quote_attachments=[...]) → params["quoteAttachments"]."""
+        client = SignalRPCClient("http://localhost:9999")
+        with patch.object(client, "_call") as mock_call:
+            mock_call.return_value = {"result": {}}
+            client.send_message(
+                "ciao",
+                "+391234567890",
+                quote_timestamp=1234,
+                quote_author="+391234567890",
+                quote_message="",
+                quote_attachments=["image/png:photo.png:/tmp/photo.png"],
+            )
+        params = mock_call.call_args.args[1]
+        assert params["quoteAttachments"] == ["image/png:photo.png:/tmp/photo.png"]
+        assert params["quoteMessage"] == ""
+        assert params["quoteTimestamp"] == 1234
+
+    def test_send_message_omits_quote_attachments_when_none(self):
+        """Senza quote_attachments, il parametro ``quoteAttachments`` non è serializzato."""
+        client = SignalRPCClient("http://localhost:9999")
+        with patch.object(client, "_call") as mock_call:
+            mock_call.return_value = {"result": {}}
+            client.send_message("ciao", "+391234567890")
+        params = mock_call.call_args.args[1]
+        assert "quoteAttachments" not in params
+
 
 class TestSignalSSE:
     """📡 Server-Sent Events listener (real-time Signal delivery)."""

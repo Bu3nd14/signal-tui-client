@@ -196,6 +196,7 @@ class ChatMessage:
     msg_type: str = "text"
     attachment_info: str | None = None
     attachment_id: str | None = None
+    content_type: str | None = None
     status: str = "sent"
     reply_to_message_id: str | None = None
 

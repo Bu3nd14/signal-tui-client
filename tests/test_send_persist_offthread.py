@@ -497,6 +497,225 @@ class TestMediaReplySend:
         kwargs = app.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_message"] == "domanda"
 
+    def test_media_reply_signal_builds_quote_attachments_with_preview(self, tmp_db):
+        """(B) media Signal senza caption → ``quote_attachments == [f"{ct}:{name}:{path}"]``."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "message_id": "sig-1234",
+            "quote_wire_body": None,
+            "content_type": "image/png",
+            "attachment_id": "att-1",
+        }
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        preview = Path("/tmp/att-1.png")
+
+        with patch("tui.send.get_attachment_path", return_value=preview):
+            _send_text(app, "risposta")
+            _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_attachments"] == ["image/png:att-1.png:/tmp/att-1.png"]
+        assert kwargs["quote_message"] == ""
+
+    def test_media_reply_signal_with_caption_builds_quote_attachments(self, tmp_db):
+        """(B) media Signal con caption → ``quote_attachments`` presente + caption."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "Che bella!",
+            "timestamp": 1234,
+            "message_id": "sig-1234",
+            "quote_wire_body": "Che bella!",
+            "content_type": "image/jpeg",
+            "attachment_id": "att-1",
+        }
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/a.jpg")):
+            _send_text(app, "risposta")
+            _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_message"] == "Che bella!"
+        assert kwargs["quote_attachments"] == ["image/jpeg:a.jpg:/tmp/a.jpg"]
+
+    def test_text_reply_omits_quote_attachments(self, tmp_db):
+        """(B) reply a testo → ``quote_attachments`` ASSENTE (chiave non passata)."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {"text": "domanda", "timestamp": 1234}
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert "quote_attachments" not in kwargs
+
+    def test_media_reply_signal_missing_preview_falls_back_to_content_type(
+        self, tmp_db
+    ):
+        """(B) previewFile mancante → ``quote_attachments == [content_type]``."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "message_id": "sig-1234",
+            "quote_wire_body": None,
+            "content_type": "image/png",
+            "attachment_id": "att-missing",
+        }
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        with patch("tui.send.get_attachment_path", return_value=None):
+            _send_text(app, "risposta")
+            _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_attachments"] == ["image/png"]
+
+    def test_retry_media_reply_reconstructs_quote_attachments(self, tmp_db):
+        """(D) retry media post-reload → ricostruisce ``quote_attachments`` via DB."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "message_id": "sig-1234",
+            "quote_wire_body": None,
+            "content_type": "image/png",
+            "attachment_id": "att-1",
+        }
+        app.signal_backend.send_message_sync = MagicMock(
+            side_effect=RuntimeError("offline")
+        )
+
+        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.png")):
+            _send_text(app, "risposta")
+            _run_workers(app)
+
+        assert app._cache[contact.cache_key][0]["status"] == "failed"
+        row = _db_rows(tmp_db)[0]
+        assert row["content_type"] == "image/png"
+        assert row["attachment_id"] == "att-1"
+
+        app.signal_backend.send_message_sync = MagicMock(return_value="ok")
+        ts = app._cache[contact.cache_key][0]["timestamp"]
+        app.run_worker.reset_mock()
+        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.png")):
+            app._retry_failed_message(ts, "risposta")
+            _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_message"] == ""
+        assert kwargs["quote_attachments"] == ["image/png:att-1.png:/tmp/att-1.png"]
+
+    def test_retry_media_reply_with_caption_reconstructs_quote_attachments(
+        self, tmp_db
+    ):
+        """(Bug #1) retry media CON caption → ricostruisce ``quote_attachments``.
+
+        Il ``quote_text`` persistito è la caption reale (non il segnaposto),
+        quindi la ricostruzione deve essere gated sulla presenza dei metadati
+        media (``content_type``/``attachment_id``), non sul predicato
+        ``is_media_quote_placeholder``.
+        """
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+        app._reply_to = {
+            "text": "Che bella!",
+            "timestamp": 1234,
+            "message_id": "sig-1234",
+            "quote_wire_body": "Che bella!",
+            "content_type": "image/jpeg",
+            "attachment_id": "att-1",
+        }
+        app.signal_backend.send_message_sync = MagicMock(
+            side_effect=RuntimeError("offline")
+        )
+
+        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.jpg")):
+            _send_text(app, "risposta")
+            _run_workers(app)
+
+        assert app._cache[contact.cache_key][0]["status"] == "failed"
+        row = _db_rows(tmp_db)[0]
+        assert row["quote_text"] == "Che bella!"
+        assert row["content_type"] == "image/jpeg"
+        assert row["attachment_id"] == "att-1"
+
+        app.signal_backend.send_message_sync = MagicMock(return_value="ok")
+        ts = app._cache[contact.cache_key][0]["timestamp"]
+        app.run_worker.reset_mock()
+        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.jpg")):
+            app._retry_failed_message(ts, "risposta")
+            _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert kwargs["quote_message"] == "Che bella!"
+        assert kwargs["quote_attachments"] == ["image/jpeg:att-1.jpg:/tmp/att-1.jpg"]
+
+    def test_media_reply_without_content_type_omits_quote_attachments(self, tmp_db):
+        """(Bug #2) riga legacy senza ``content_type`` → nessun ``quoteAttachments``.
+
+        La derivazione del mime da ``msg_type`` è stata rimossa (inaffidabile:
+        video/audio Signal sono ``msg_type="attachment"``).  Il degrado è il
+        comportamento V2: quote corretta ma senza thumbnail, nessun crash.
+        """
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "message_id": "sig-1234",
+            "quote_wire_body": None,
+            "content_type": None,
+            "attachment_id": "att-legacy",
+        }
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/x")):
+            _send_text(app, "risposta")
+            _run_workers(app)
+
+        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        assert "quote_attachments" not in kwargs
+        assert kwargs["quote_message"] == ""
+
     def test_retry_media_reply_reconstructs_empty_wire_body(self, tmp_db):
         """Retry post-reload di reply media → ``quote_wire_body == ""`` (buco #3)."""
         app = _signal_app()

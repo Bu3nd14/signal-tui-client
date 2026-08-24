@@ -427,6 +427,59 @@ class TestSignalBackend:
         assert events[1].payload["attachment_id"] == "vid"
         assert events[2].payload["attachment_id"] == "aud"
 
+    def test_signal_media_persists_content_type(self):
+        """(A) envelope media con ``contentType`` → payload ``content_type`` valorizzato."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 2000,
+            "dataMessage": {
+                "message": "guarda!",
+                "timestamp": 2000,
+                "attachments": [
+                    {
+                        "contentType": "image/png",
+                        "filename": "photo.png",
+                        "id": "att-001",
+                    }
+                ],
+            },
+        }
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        assert events[0].payload["content_type"] == "image/png"
+
+    def test_signal_media_content_type_null_when_absent(self):
+        """(A) envelope media senza ``contentType`` → ``content_type`` è None."""
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 2000,
+            "dataMessage": {
+                "timestamp": 2000,
+                "attachments": [{"id": "att-no-mime"}],
+            },
+        }
+        events = backend.envelope_to_event(envelope)
+        assert len(events) == 1
+        assert events[0].payload["content_type"] is None
+
     def test_text_with_multiple_attachments_only_first_has_text(self):
         """Testo + 2 foto → primo evento ha il testo, secondo no."""
         backend = SignalBackend()

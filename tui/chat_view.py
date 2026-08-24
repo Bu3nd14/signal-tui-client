@@ -134,6 +134,7 @@ class ChatViewMixin:
         msg_type: str = "text",
         attachment_info: str | None = None,
         attachment_id: str | None = None,
+        content_type: str | None = None,
         timestamp: int = 0,
         sender: str = "",
         status: str = "sent",
@@ -208,6 +209,7 @@ class ChatViewMixin:
                 sender=sender,
                 message_id=message_id,
                 caption=caption,
+                content_type=content_type,
             )
             if caption:
                 is_group = bool(
@@ -317,6 +319,7 @@ class ChatViewMixin:
         sender: str = "",
         message_id: str | None = None,
         caption: str | None = None,
+        content_type: str | None = None,
     ):
         """Mount a clickable ``ImageWidget`` placeholder immediately and
         resolve the attachment path in a worker thread.
@@ -347,6 +350,7 @@ class ChatViewMixin:
                 caption=caption,
                 attachment_info=attachment_info,
                 protocol=resolved_protocol,
+                content_type=content_type,
             )
             widget.classes = "msg-right" if is_mine else "msg-left"
             chat_log.mount(widget)
@@ -364,6 +368,7 @@ class ChatViewMixin:
             caption=caption,
             attachment_info=attachment_info,
             protocol=resolved_protocol,
+            content_type=content_type,
         )
         widget.classes = "msg-right" if is_mine else "msg-left"
         chat_log.mount(widget)
@@ -694,6 +699,7 @@ class ChatViewMixin:
         msg_type = msg.get("msg_type", "text")
         attachment_info = msg.get("attachment_info")
         attachment_id = msg.get("attachment_id")
+        content_type = msg.get("content_type")
         sender = msg.get("sender", "")
         status = msg.get("status", "sent" if is_mine else "read")
         ts = msg.get("timestamp", 0)
@@ -723,6 +729,7 @@ class ChatViewMixin:
                 caption=caption,
                 attachment_info=attachment_info,
                 protocol=protocol,
+                content_type=content_type,
             )
             image_widget.classes = "msg-right" if is_mine else "msg-left"
             widgets.append(image_widget)
@@ -808,6 +815,7 @@ class ChatViewMixin:
                 msg_type=msg_type,
                 attachment_info=attachment_info,
                 attachment_id=attachment_id,
+                content_type=msg.get("content_type"),
                 timestamp=ts,
                 sender=sender,
                 status=status,
@@ -889,6 +897,7 @@ class ChatViewMixin:
                     msg_type=msg_type,
                     attachment_info=attachment_info,
                     attachment_id=attachment_id,
+                    content_type=msg.get("content_type"),
                     timestamp=ts,
                     sender=sender,
                     status=status,

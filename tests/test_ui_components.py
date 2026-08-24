@@ -462,6 +462,19 @@ class TestImageWidgetReply:
         assert ev.message_id == "msg-1"
         assert ev.attachment_id == "att-1"
 
+    def test_image_widget_reply_requested_carries_content_type(self):
+        """(C) ``content_type`` è esposto su ``ImageWidget`` e sul ``ReplyRequested``."""
+        w = self._widget(content_type="image/png")
+        events = []
+        w.post_message = events.append
+
+        w.on_click(self._click(meta=True))
+
+        assert len(events) == 1
+        ev = events[0]
+        assert isinstance(ev, ImageWidget.ReplyRequested)
+        assert ev.content_type == "image/png"
+
     def test_image_widget_alt_click_caption_preferred_and_kept_distinct(self):
         """La caption reale ha priorità nel display ed è esposta separata da ``text``."""
         w = self._widget(caption="Che bella!")

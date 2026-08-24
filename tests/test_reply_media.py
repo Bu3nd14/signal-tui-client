@@ -29,6 +29,7 @@ def _reply_requested(**overrides) -> ImageWidget.ReplyRequested:
         "is_mine": False,
         "message_id": "sig-img-1",
         "attachment_id": "att-1",
+        "content_type": "image/png",
     }
     kw.update(overrides)
     return ImageWidget.ReplyRequested(**kw)
@@ -79,6 +80,8 @@ async def test_handler_populates_reply_to_from_image(app_for_test):
         assert app._reply_to["sender"] == "Mario"
         assert app._reply_to["is_mine"] is False
         assert app._reply_to["message_id"] == "sig-img-1"
+        assert app._reply_to["attachment_id"] == "att-1"
+        assert app._reply_to["content_type"] == "image/png"
         assert "attachment_info" not in app._reply_to
         assert app._reply_to["_widget"] is _mounted_image(app)
 
