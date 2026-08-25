@@ -87,6 +87,34 @@ async def test_handler_populates_reply_to_from_image(app_for_test):
 
 
 @pytest.mark.integration
+async def test_handler_stores_quote_attachment_metadata(app_for_test, tmp_path):
+    """La reply da immagine risolta salva i metadati della quote (thumbnail).
+
+    I campi ``quote_attachment_*`` sono additivi (chunk 4): i campi del wire
+    ``quote_wire_body``/``attachment_id``/``content_type`` restano invariati (#37).
+    """
+    path = tmp_path / "photo.jpg"
+    path.write_text("x")
+
+    app = app_for_test
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _mount_image(app)
+        await pilot.pause()
+
+        app.on_image_widget_reply_requested(_reply_requested(attachment_path=path))
+        await pilot.pause()
+
+        assert app._reply_to["quote_attachment_path"] == path
+        assert app._reply_to["quote_attachment_id"] == "att-1"
+        assert app._reply_to["quote_content_type"] == "image/png"
+        # Wire keys unchanged (#37).
+        assert app._reply_to["quote_wire_body"] is None
+        assert app._reply_to["attachment_id"] == "att-1"
+        assert app._reply_to["content_type"] == "image/png"
+
+
+@pytest.mark.integration
 async def test_handler_populates_quote_wire_body_from_caption(app_for_test):
     """La caption reale finisce in ``quote_wire_body`` (body di filo)."""
     app = app_for_test

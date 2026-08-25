@@ -30,7 +30,7 @@ from models import (
     contact_cache_key,
 )
 from signal_tui import SignalTUI
-from ui_components import ImageWidget, MessageWidget
+from ui_components import ImageWidget, MessageWidget, QuoteWidget
 
 
 def _make_message(text: str, ts: int, is_mine: bool = False) -> dict:
@@ -909,8 +909,6 @@ class TestCacheImageReplyMetadata:
 
     def test_cache_media_quote_renders_bubble(self):
         """Una quote media (segnaposto) monta la bolla anche dal percorso cache."""
-        from textual.widgets import Static
-
         app = SignalTUI()
         message = {
             "id": "msg-42",
@@ -928,7 +926,10 @@ class TestCacheImageReplyMetadata:
 
         widgets = app._build_message_widgets("signal", False, message)
 
-        assert isinstance(widgets[0], Static)
-        assert widgets[0]._Static__content == "▎ 🖼️ Immagine"
+        # Chunk 2: the quote bubble is now a QuoteWidget container; the text
+        # lives (byte-identical) in its internal Static.
+        assert isinstance(widgets[0], QuoteWidget)
+        text_static = next(widgets[0].compose())
+        assert text_static._Static__content == "▎ 🖼️ Immagine"
         assert isinstance(widgets[1], MessageWidget)
         assert widgets[1]._msg_text == "testo"

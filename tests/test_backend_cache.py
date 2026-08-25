@@ -97,6 +97,23 @@ class TestCacheAddLoad:
         assert msg["attachment_info"] == "photo.jpg"
         assert msg["attachment_id"] == "att-123"
 
+    def test_quote_attachment_fields_survive_roundtrip(self, tmp_db):
+        """I metadati della quote-media (id + content_type) sopravvivono al DB."""
+        _add_message_to_cache(
+            "42",
+            "reply",
+            False,
+            "Mario",
+            2000,
+            quote_text="quoted",
+            quote_attachment_id="tgref:42:12",
+            quote_content_type="image/png",
+        )
+        loaded = _load_cache()
+        msg = loaded["42"][0]
+        assert msg["quote_attachment_id"] == "tgref:42:12"
+        assert msg["quote_content_type"] == "image/png"
+
 
 class TestCachePrune:
     """✂️ Potatura della cache (messaggi vecchi e limite 200)."""

@@ -81,6 +81,14 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
     if "content_type" not in columns:
         conn.execute("ALTER TABLE messages ADD COLUMN content_type TEXT")
 
+    # Quoted-media thumbnail metadata (DESIGN_QUOTE_THUMBNAIL, additive).  The
+    # resolved path is deliberately NOT persisted: it is derived lazily in the
+    # UI via ``get_attachment_path`` (transient local file).
+    if "quote_attachment_id" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN quote_attachment_id TEXT")
+    if "quote_content_type" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN quote_content_type TEXT")
+
     if _current_schema_version(conn) >= _SCHEMA_VERSION:
         return
 
@@ -143,6 +151,8 @@ def _init_db():
                     attachment_info TEXT,
                     attachment_id TEXT,
                     content_type TEXT,
+                    quote_attachment_id TEXT,
+                    quote_content_type TEXT,
                     read INTEGER DEFAULT 0,
                     status TEXT DEFAULT 'read',
                     msg_id TEXT,
@@ -204,6 +214,8 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
                 "attachment_info": row["attachment_info"],
                 "attachment_id": row["attachment_id"],
                 "content_type": row["content_type"],
+                "quote_attachment_id": row["quote_attachment_id"],
+                "quote_content_type": row["quote_content_type"],
                 "quote_timestamp": row["quote_timestamp"],
                 "quote_author": row["quote_author"],
                 "reply_to_message_id": row["reply_to_message_id"],
@@ -233,6 +245,8 @@ def _add_message_to_cache(
     quote_timestamp: int | None = None,
     quote_author: str | None = None,
     reply_to_message_id: str | None = None,
+    quote_attachment_id: str | None = None,
+    quote_content_type: str | None = None,
 ):
     """Add a message to the SQLite cache (incremental INSERT).
     msg_type: "text", "image", "sticker", "attachment"
@@ -252,9 +266,10 @@ def _add_message_to_cache(
             conn.execute(
                 """INSERT INTO messages
                    (protocol, contact_number, text, is_mine, sender, timestamp,
-                    quote_text, msg_type, attachment_info, attachment_id, content_type,
-                     read, status, msg_id, quote_timestamp, quote_author, reply_to_message_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     quote_text, msg_type, attachment_info, attachment_id, content_type,
+                     quote_attachment_id, quote_content_type,
+                      read, status, msg_id, quote_timestamp, quote_author, reply_to_message_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     protocol,
                     contact_number,
@@ -267,6 +282,8 @@ def _add_message_to_cache(
                     attachment_info,
                     attachment_id,
                     content_type,
+                    quote_attachment_id,
+                    quote_content_type,
                     int(is_mine),
                     status or ("sent" if is_mine else "read"),
                     msg_id,

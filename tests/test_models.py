@@ -10,9 +10,28 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import (
     MEDIA_QUOTE_PLACEHOLDERS,
+    ChatMessage,
     is_media_quote_placeholder,
     media_quote_placeholder,
 )
+
+
+class TestChatMessageQuoteAttachment:
+    """Campi additivi della quote-media (chunk 5): default None."""
+
+    def test_quote_attachment_fields_default_none(self):
+        msg = ChatMessage(
+            id="1",
+            contact_id="42",
+            protocol="telegram",
+            text="hi",
+            is_mine=False,
+            sender="Ada",
+            timestamp=1,
+        )
+        assert msg.quote_attachment_id is None
+        assert msg.quote_attachment_path is None
+        assert msg.quote_content_type is None
 
 
 class TestMediaQuotePlaceholder:

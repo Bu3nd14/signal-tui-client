@@ -12,6 +12,7 @@ from rich.text import Text as RichText
 from textual import events
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -605,6 +606,7 @@ class ImageWidget(Static):
             message_id: str | None = None,
             attachment_id: str = "",
             content_type: str | None = None,
+            attachment_path: Path | None = None,
         ) -> None:
             super().__init__()
             self.text = text
@@ -615,6 +617,7 @@ class ImageWidget(Static):
             self.message_id = message_id
             self.attachment_id = attachment_id
             self.content_type = content_type
+            self.attachment_path = attachment_path
 
     BINDINGS: ClassVar[list] = [
         Binding("alt+r", "request_reply", "Reply", show=False),
@@ -706,6 +709,7 @@ class ImageWidget(Static):
             message_id=self._message_id,
             attachment_id=self.attachment_id,
             content_type=self._content_type,
+            attachment_path=self.attachment_path,
         )
 
     def on_click(self, event: events.Click | None = None) -> None:
@@ -788,6 +792,89 @@ class ImageWidget(Static):
             self.post_message(
                 self.ImageClicked(self.attachment_path, self.attachment_id)
             )
+
+
+class QuoteWidget(Horizontal):
+    """Container bubble for a quoted message (text + optional native thumbnail).
+
+    Replaces the plain ``Static(f"▎ {quote_text}")`` quote bubble.  The textual
+    content is byte-identical to today (the ``▎ `` prefix is added internally,
+    so ``quote_text`` keeps its wire meaning), therefore non-kitty rendering is
+    unchanged.  A small fixed thumbnail area sits beside the text; it is empty
+    unless a native thumbnail is registered via ``show_native_thumbnail``.
+    """
+
+    def __init__(
+        self,
+        quote_text: str,
+        *,
+        classes: str = "msg-quote",
+        attachment_id: str | None = None,
+        attachment_path: Path | None = None,
+        content_type: str | None = None,
+        protocol: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._quote_text = quote_text
+        # Applied to the internal text Static (same class as today's bubble).
+        self._text_classes = classes
+        # Metadata for the future ingresso/uscita flow.
+        self.attachment_id = attachment_id
+        self.attachment_path = attachment_path
+        self.content_type = content_type
+        # Source protocol, used to resolve the quoted attachment lazily (ingresso).
+        self.protocol = protocol
+
+        # Native kitty-rendering state (same pattern as ``ImageWidget``).  The
+        # placement is performed by the app's ``post_display_hook`` — never in
+        # this widget's render path.
+        self.native_renderer: KittyRenderer | None = None
+        self.native_image_id: int | None = None
+        self.native_width_px: int | None = None
+        self.native_height_px: int | None = None
+
+    def compose(self):
+        yield Static(f"▎ {self._quote_text}", classes=self._text_classes)
+        yield Static("", classes="quote-thumb")
+
+    def thumbnail_region(self):
+        """Return the content region of the internal thumbnail slot, or ``None``.
+
+        Used by the app's ``post_display_hook`` to place the native thumbnail
+        only over the thumbnail slot (never over the text).  Returns ``None``
+        if the slot is not (yet) composed.
+        """
+        try:
+            return self.query_one(".quote-thumb", Static).content_region
+        except NoMatches:
+            return None
+
+    def show_native_thumbnail(
+        self, renderer: KittyRenderer, image_id: int, png_bytes: bytes
+    ) -> None:
+        """Register the native kitty thumbnail state for this widget.
+
+        Mirrors ``ImageWidget.show_native_thumbnail`` but keeps the textual
+        content intact (the text lives in the internal ``Static``).  The real
+        ``a=p`` emission happens in the app's ``post_display_hook``.
+        """
+        self.native_renderer = renderer
+        self.native_image_id = image_id
+        width_px, height_px = png_size(png_bytes)
+        self.native_width_px = width_px
+        self.native_height_px = height_px
+        rows = max(1, (height_px + renderer.cell_h - 1) // renderer.cell_h)
+        self.styles.height = rows
+        self.refresh(layout=True)
+
+    def native_cleanup(self) -> None:
+        """Free the kitty image data (``d=I``) and clear the native state."""
+        if self.native_renderer is not None and self.native_image_id is not None:
+            self.native_renderer.delete(self.native_image_id, keep_data=False)
+        self.native_renderer = None
+        self.native_image_id = None
+        self.native_width_px = None
+        self.native_height_px = None
 
 
 #: Cap on the hi-res modal image's long side, in pixels (DESIGN §6).
