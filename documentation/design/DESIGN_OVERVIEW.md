@@ -67,7 +67,7 @@ Horizontal
 ## 4. Widget custom principali (`ui_components.py`)
 
 - `MessageWidget(Static)`: bolla cliccabile e focalizzabile. Posta i messaggi `MessageClicked` (reply/download/retry failed) e `EditRequested` (Alt+click o `Alt+E`). Stile status per messaggi propri: *sent* italic, pending dim, delivered/failed bold, read normale. `update_text()` riscrive la bolla in place (edit) con suffisso `" (modificato)"` se `edited`. Accento protocollo via classe CSS, rimosso quando selezionata (vince l'highlight reply).
-- `ImageWidget`: placeholder cliccabile risolto in modo asincrono (`update_attachment`), apre `ImageModalScreen` (fullscreen render via `catimg`) oppure serve il file in download mode.
+- `ImageWidget`: bolla immagine cliccabile e focalizzabile; placeholder risolto in modo asincrono (`update_attachment`); su terminale kitty mostra la miniatura nativa (`show_native_thumbnail`, nessun testo sotto l'immagine) con fallback placeholder+`catimg` altrove; Enter/click apre `ImageModalScreen` (kitty hi-res o catimg), Alt+click/Alt+R emette `ReplyRequested` (reply all'immagine, con caption fedele + `attachment_id`/`content_type` per la quote), download mode serve il file. Dettagli: [DESIGN_NATIVE_IMAGES.md](DESIGN_NATIVE_IMAGES.md).
 - `StatusBar` + `StatusSegment`: segmenti clickabili per protocollo con totale unread (`📱 N  💬 N  📨 N`, `-` se 0); `show_message` per messaggi transienti/persistenti, `sync_active` per evidenziare filtro attivo. I segmenti si nascondono quando è mostrato un messaggio transiente.
 - `ContactListWidget` / `ContactListView`: contenitore e ListView specializzata con azione toggle gruppo (Enter/space sull'header).
 - `MessageTextArea`: TextArea con submit su Enter (`Submitted`), newline con Shift+Enter/Ctrl+J/Ctrl+Enter, normalizzazione dei newline nel testo incollato, `insert_at_cursor`/`replace_completion` per gli emoji; `ctrl+u` è deliberatamente rimosso dai binding di editing (liberato per il filtro unread).
@@ -110,12 +110,14 @@ Regole chiave:
 | `_protocol_filter` / `_unread_only` | stato filtri Ctrl+W / Ctrl+U |
 | `_reply_to` / `_editing_message` | target reply / edit attivo (mutuamente esclusivi) |
 | `_pending_backends` | backend attesi per l'auto-selezione post-connessione |
+| `_native_renderer` / `_native_last_key` / `_chat_native_ids` | stato immagini kitty: renderer, cache placement per no-op skip, id delle immagini della chat (gate screen-stack) — vedi [DESIGN_NATIVE_IMAGES.md](DESIGN_NATIVE_IMAGES.md) |
 
 ## 7. Interazioni notevoli
 
-- **Reply**: click su una bolla → `MessageClicked` → `_reply_to` compilato (testo, ts, sender, eventuale `message_id`), highlight verde, reply bar `↩️ Replying to:`. Click ripetuto annulla. Per Telegram una reply senza id server valido è rifiutata esplicitamente (evita bolle impossibili).
-- **Edit**: Alt+click / `Alt+E` su messaggio proprio testuale già inviato → input precaricato, bar `✏️ Modifica:`; submit ottimistico + worker con rollback completo su rifiuto server.
+- **Reply**: click su una bolla → `MessageClicked` → `_reply_to` compilato (testo, ts, sender, eventuale `message_id`), highlight verde, reply bar `↩️ Replying to:`. Click ripetuto annulla. Per Telegram una reply senza id server valido è rifiutata esplicitamente (evita bolle impossibili); per WhatsApp vale la stessa regola. Su un'immagine la reply si cattura con Alt+click/Alt+R (`ReplyRequested`, caption reale separata dal display placeholder — vedi [CONTRACTS.md §11](../api-contracts/CONTRACTS.md#11-quote-media-reply-con-immagine)).
+- **Edit**: Alt+click / `Alt+E` su messaggio proprio testuale già inviato → input precaricato, bar `✏️ Modifica:`; submit ottimistico + worker con rollback completo su rifiuto server. Dettagli: [DESIGN_EDIT_MESSAGES.md](DESIGN_EDIT_MESSAGES.md).
 - **Retry failed**: click su una propria bolla `failed` → `_retry_failed_message`.
+- **Contact picker (Ctrl+S)**: mostra subito le chat attive e in parallelo carica la rubrica completa dei backend (worker asincrono, token anti-stale); ricerca su nome/id/phone, raggruppamento cross-backend per persona con eventuale scelta del backend (`BackendChoiceScreen`), open-or-create per contatti sconosciuti.
 - **Download mode (Ctrl+D)**: i click servono contenuti via HTTP invece di selezionare; esce automaticamente dopo un download.
 - **Filtri**: `Ctrl+W` cicla all→signal→whatsapp→telegram; nei filtri singoli la lista diventa flat (solo header senza chevron, badge = unread della vista filtrata); `Ctrl+U` aggiunge il filtro unread (il contatto selezionato resta "pinned" finché è aperto); `Ctrl+A` reset. Click su segmento status bar → vista unread del backend se ha unread, altrimenti filtro semplice.
 
@@ -123,3 +125,5 @@ Regole chiave:
 
 - [DESIGN_MESSAGE_IDENTITY_AND_CACHE.md](DESIGN_MESSAGE_IDENTITY_AND_CACHE.md) — modello a cache, identità dei messaggi e dedup/debounce del rendering.
 - [DESIGN_OUTGOING_MESSAGE_STATUS.md](DESIGN_OUTGOING_MESSAGE_STATUS.md) — protocollo di stato dei messaggi inviati (pending→sent→delivered→read, failed).
+- [DESIGN_EDIT_MESSAGES.md](DESIGN_EDIT_MESSAGES.md) — editing ottimistico con rollback e update in-place degli edit ricevuti.
+- [DESIGN_NATIVE_IMAGES.md](DESIGN_NATIVE_IMAGES.md) — miniature native kitty + modal hi-res, fallback catimg.

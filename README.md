@@ -2,7 +2,7 @@
 
 [![codecov](https://codecov.io/gh/Bu3nd14/signal-tui-client/graph/badge.svg)](https://codecov.io/gh/Bu3nd14/signal-tui-client)
 
-A terminal-based (TUI) multi-protocol client built with [Textual](https://textual.textualize.io/).
+A terminal-based (TUI) multi-protocol messaging client built with [Textual](https://textual.textualize.io/).
 
 - **Signal**: uses `signal-cli` daemon via JSON-RPC over HTTP for fast operations, with automatic
   fallback to subprocess if the daemon is unavailable.
@@ -20,52 +20,77 @@ A terminal-based (TUI) multi-protocol client built with [Textual](https://textua
 ![Image modal viewer (alternate)](assets/screenshots/screenshot3.png)
 *Fullscreen image viewer modal (alternate view)*
 
+## Table of Contents
+
+- [Features](#features)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+  - [Option A — Automatic installation](#option-a--automatic-installation-recommended)
+  - [Option B — Manual installation](#option-b--manual-installation)
+  - [Enabling the WhatsApp backend (optional)](#enabling-the-whatsapp-backend-optional)
+  - [Enabling the Telegram backend (optional)](#enabling-the-telegram-backend-optional)
+- [Virtual environment](#virtual-environment-optional-but-recommended)
+- [Updating signal-cli](#updating-signal-cli)
+- [Device linking](#device-linking)
+- [Usage](#usage)
+  - [Controls](#controls)
+  - [Composing messages](#composing-messages)
+  - [Emoji picker](#emoji-picker)
+  - [Contact search and address book](#contact-search-and-address-book)
+  - [Message editing](#message-editing)
+  - [Replies and quoted media](#replies-and-quoted-media)
+  - [Message delivery status](#message-delivery-status)
+  - [Download mode](#download-mode)
+  - [Contact grouping and unread filters](#contact-grouping-and-unread-filters)
+- [Native inline images (kitty graphics protocol)](#native-inline-images-kitty-graphics-protocol)
+- [Performance profiling](#performance-profiling)
+- [Testing](#testing)
+- [Project structure](#project-structure)
+- [License](#license)
+
 ## Features
 
-- Full contact list with unread badges — unified across Signal, WhatsApp, and Telegram
-- Real-time message receiving and sending on all three protocols
-- **Multiple attachments** — a message with several photos shows each one separately (both Signal and WhatsApp).  Clickable image placeholders with fullscreen viewer (via catimg).
-- **Native inline images on kitty** — high-resolution inline thumbnails and a fullscreen hi-res viewer via the kitty graphics protocol (kitty ≥ 0.20, direct terminal or ssh); automatic `catimg` fallback everywhere else.  See [Immagini native inline](#immagini-native-inline-kitty-graphics-protocol).
-- Message history with local SQLite cache (last 200 messages per contact retained)
-- Device linking via QR code — Signal, WhatsApp, and Telegram
-- Daemon mode for fast JSON-RPC communication (Signal)
-- WhatsApp event-driven mode — webhook-based, no polling (WAHA + Docker)
-- Telegram native mode — MTProto event loop in dedicated thread (Telethon)
-- Automatic fallback to subprocess if daemon is not running (Signal)
-- Reply to messages — click any message to quote it in your reply
-- Emoji picker (`Ctrl+E`) with category navigation, search, and `:alias:` auto-completion
-- Contact search (`Ctrl+S`) — search contacts by name or number with a live-updating picker
-- Download mode (`Ctrl+D`) — serve message text or attachments via temporary HTTP server for download
-- Device linking (`Ctrl+L`) — link a new Signal, WhatsApp, or Telegram device directly from the TUI with QR code scanning
-- Unified multi-protocol contact list with `Ctrl+W` cycle filter: all → Signal → WhatsApp → Telegram
-- **Contacts grouped per person** — the same person on Signal + WhatsApp + Telegram appears once, as an expandable group; groups are **collapsed by default** (click/`Enter`/`space` on the header expands/collapses them)
-- **Per-backend unread counters in the status bar** — `📱 N  💬 N  📨 N` (total unread per protocol, `-` when zero), always visible even when a filter hides those contacts; **click an icon** to jump straight to that backend (its unread view if it has unread, otherwise its plain filter)
-- **Unread-only filter (`Ctrl+U`)** — show only contacts with unread messages; combines with the `Ctrl+W` protocol filter (`Ctrl+A` returns to the full **All** view)
-- **Flat filtered views** — when a single backend filter is active the list becomes flat (one row per person, no expand): clicking a row opens the chat directly
-- Protocol-aware theming — 📱 Signal, 💬 WhatsApp, 📨 Telegram with distinct emoji labels
-- Message delivery and read receipts — sent messages show status: *sent* (italic), **delivered** (bold), read (normal).  Works for all three protocols.
-- Typing indicators — see when a contact is typing (✍️ icon next to their name); a 💭 icon shows briefly after they stop typing or send a message.  Works for Signal and WhatsApp.
-
-
-
+| Feature | Description | Details |
+|---|---|---|
+| Unified multi-protocol inbox | Signal, WhatsApp, and Telegram contacts and chats in a single list, with real-time send/receive on all three protocols | [Usage](#usage) |
+| **Message editing** *(new)* | Edit your own text messages after sending; incoming edits update the bubble in place | [Message editing](#message-editing) |
+| **Replies with quoted media** *(new)* | Quote an image in a reply (`Alt+R` or Alt+click); incoming media quotes are displayed with caption or typed label | [Replies and quoted media](#replies-and-quoted-media) |
+| **Multi-line message input** *(new)* | `Enter` sends, `Shift+Enter` / `Ctrl+Enter` / `Ctrl+J` insert a newline | [Composing messages](#composing-messages) |
+| **Full address book search** *(new)* | `Ctrl+S` searches the complete address book of all three backends — including contacts with no existing chat — and can open-or-create the conversation | [Contact search and address book](#contact-search-and-address-book) |
+| **Failed-send tracking** *(new)* | Messages that fail to send are marked clearly instead of being silently lost; delivery status transitions are robust to daemon echo races | [Message delivery status](#message-delivery-status) |
+| **Instant chat reordering** *(new)* | After an optimistic send the chat list re-sorts by recency immediately, without waiting for the server round trip | [Message delivery status](#message-delivery-status) |
+| Native inline images | High-resolution inline thumbnails and fullscreen viewer via the kitty graphics protocol; automatic `catimg` fallback everywhere else | [Native inline images](#native-inline-images-kitty-graphics-protocol) |
+| Multiple attachments | A message with several photos shows each one separately (Signal and WhatsApp); clickable placeholders open a fullscreen viewer | [Usage](#usage) |
+| Message history | Local SQLite cache, last 200 messages per contact retained; "Load more" fetches older cached messages | [Tips](#tips) |
+| Device linking via QR code | Link new devices for Signal, WhatsApp, and Telegram directly from the TUI (`Ctrl+L`) or from helper scripts | [Device linking](#device-linking) |
+| Delivery and read receipts | Sent / delivered / read states on outgoing bubbles, plus a distinct failed state; receipts persist across restarts (Telegram) | [Message delivery status](#message-delivery-status) |
+| Typing indicators | See when a contact is typing, and briefly after they stop | [Tips](#tips) |
+| Emoji picker | Category navigation, search, suggestions, and `:alias:` auto-completion while typing | [Emoji picker](#emoji-picker) |
+| Download mode | Serve any message text or attachment via a temporary HTTP URL for easy download | [Download mode](#download-mode) |
+| Contacts grouped per person | The same person across backends appears once as an expandable group; flat views when a single backend filter is active | [Contact grouping and unread filters](#contact-grouping-and-unread-filters) |
+| Protocol and unread filters | Cycle backend filter (`Ctrl+W`), unread-only view (`Ctrl+U`), full view (`Ctrl+A`), clickable per-backend unread counters in the status bar | [Contact grouping and unread filters](#contact-grouping-and-unread-filters) |
 
 ## Prerequisites
 
-- **Python 3.10+**
-- **Java 25 (JRE)** — required by `signal-cli` (the JVM build). Without it, Signal will not start.
-- **signal-cli** — download and place in `./bin/` directory (see Installation).  Required for the **Signal** backend only.
-- **Docker + Docker Compose** — required for the **WhatsApp** backend (runs the WAHA container).
-  Skip this if you only use Signal.
-- **catimg** — for rendering images in the terminal (optional; falls back to text placeholder if missing).  On **kitty ≥ 0.20** images render natively, no `catimg` needed — see [Immagini native inline](#immagini-native-inline-kitty-graphics-protocol).
-- A linked account — Signal (via `link_account.py` or TUI `Ctrl+L`) and/or WhatsApp (via `link_whatsapp.py` or TUI `Ctrl+L`)
+| Requirement | Needed for | Notes |
+|---|---|---|
+| **Python 3.10+** | Everything | |
+| **Java 25 (JRE)** | Signal | Required by the `signal-cli` JVM build. Without it, Signal will not start. |
+| **signal-cli** (JVM build) in `./bin/` | Signal | Downloaded automatically by `install.sh`; see [Installation](#installation). |
+| **Docker + Docker Compose** | WhatsApp | Runs the WAHA container. Skip if you only use Signal. |
+| **catimg** | Image rendering | Optional; falls back to text placeholders if missing. On kitty >= 0.20 images render natively, no `catimg` needed — see [Native inline images](#native-inline-images-kitty-graphics-protocol). |
+| **A linked account** | Signal and/or WhatsApp and/or Telegram | Via `link_account.py` / `link_whatsapp.py` or the TUI `Ctrl+L` — see [Device linking](#device-linking). |
 
-> **Note:** A Python virtual environment (venv) is **recommended** but not strictly required. See [Virtual environment](#virtual-environment-optional-but-recommended).
+> **Note:** A Python virtual environment (venv) is **recommended** but not strictly required. See
+> [Virtual environment](#virtual-environment-optional-but-recommended).
 
 ## Installation
 
 ### Option A — Automatic installation (recommended)
 
-The easiest way is to use the provided `install.sh` script, which checks prerequisites, downloads the correct `signal-cli` build, optionally starts the WAHA Docker container for WhatsApp, creates a virtual environment and installs the Python dependencies:
+The easiest way is to use the provided `install.sh` script, which checks prerequisites, downloads the
+correct `signal-cli` build, optionally starts the WAHA Docker container for WhatsApp, creates a
+virtual environment and installs the Python dependencies:
 
 ```bash
 git clone https://github.com/Bu3nd14/signal-tui-client.git
@@ -73,7 +98,7 @@ cd signal-tui-client
 ./install.sh
 ```
 
-The script supports several options:
+Supported options:
 
 ```bash
 ./install.sh --no-venv            # install without creating a virtual environment
@@ -96,7 +121,8 @@ cd signal-tui-client
 
 #### 2. Install Python dependencies
 
-It is recommended to use a virtual environment (see [Virtual environment](#virtual-environment-optional-but-recommended)):
+It is recommended to use a virtual environment (see
+[Virtual environment](#virtual-environment-optional-but-recommended)):
 
 ```bash
 pip install -r requirements.txt
@@ -104,7 +130,8 @@ pip install -r requirements.txt
 
 #### 3. Download signal-cli
 
-Download the **JVM build** of `signal-cli` (the full `signal-cli-X.Y.Z.tar.gz` archive, **not** the `-Linux-client` or `-Linux-native` variants):
+Download the **JVM build** of `signal-cli` (the full `signal-cli-X.Y.Z.tar.gz` archive, **not** the
+`-Linux-client` or `-Linux-native` variants):
 
 ```bash
 # Example for Linux x86_64 — replace X.Y.Z with the actual version (e.g. 0.14.7)
@@ -116,12 +143,22 @@ rm signal-cli-X.Y.Z.tar.gz
 cd ..
 ```
 
-> **⚠️ Important — which build to download:**
-> - ✅ **`signal-cli-X.Y.Z.tar.gz`** — the **JVM build** (full archive with `bin/signal-cli` + `lib/*.jar`). This is the **correct** one: it includes the `daemon` command (JSON-RPC over HTTP) that this client uses, and it produces the `./bin/signal-cli-*/bin/signal-cli` structure the app expects.
-> - ❌ **`signal-cli-X.Y.Z-Linux-client.tar.gz`** — this is only a **JSON-RPC client** (a single native executable). It does **not** include the `daemon` command, so it cannot start the JSON-RPC server this client needs. **Do not use it.**
-> - ❌ **`signal-cli-X.Y.Z-Linux-native.tar.gz`** — the GraalVM native build. It does not produce the `./bin/signal-cli-*/bin/signal-cli` structure the app expects. **Do not use it.**
+> **Important — which build to download:**
 >
-> The `releases/latest/download/` URL does **not** work with a versioned filename (the filename changes with each release). You must use the explicit `releases/download/vX.Y.Z/` URL and replace `X.Y.Z` with the actual version (e.g. `0.14.7`). The `install.sh` script resolves the latest version automatically.
+> - **Use:** `signal-cli-X.Y.Z.tar.gz` — the **JVM build** (full archive with `bin/signal-cli` +
+>   `lib/*.jar`). This is the **correct** one: it includes the `daemon` command (JSON-RPC over HTTP)
+>   that this client uses, and it produces the `./bin/signal-cli-*/bin/signal-cli` structure the app
+>   expects.
+> - **Do not use:** `signal-cli-X.Y.Z-Linux-client.tar.gz` — only a **JSON-RPC client** (a single
+>   native executable). It does **not** include the `daemon` command, so it cannot start the
+>   JSON-RPC server this client needs.
+> - **Do not use:** `signal-cli-X.Y.Z-Linux-native.tar.gz` — the GraalVM native build. It does not
+>   produce the `./bin/signal-cli-*/bin/signal-cli` structure the app expects.
+>
+> The `releases/latest/download/` URL does **not** work with a versioned filename (the filename
+> changes with each release). You must use the explicit `releases/download/vX.Y.Z/` URL and replace
+> `X.Y.Z` with the actual version (e.g. `0.14.7`). The `install.sh` script resolves the latest
+> version automatically.
 
 The app will automatically find `signal-cli` in the `./bin/signal-cli-*/` directory.
 
@@ -149,15 +186,19 @@ Or create a `config.json` file in the project root:
 
 > **Note:** `config.json` is in `.gitignore` and will not be committed.
 
-#### 6. (Optional) Enable the WhatsApp backend
+Next, optionally enable the extra backends:
+[WhatsApp](#enabling-the-whatsapp-backend-optional) and/or
+[Telegram](#enabling-the-telegram-backend-optional).
+
+### Enabling the WhatsApp backend (optional)
 
 WhatsApp is an **optional** backend that talks to a lightweight WhatsApp HTTP API.
 The recommended way is to run the official **WAHA** (`devlikeapro/waha`) container
-via Docker Compose — **no Node.js to install, no manual service to run**.  If it
+via Docker Compose — **no Node.js to install, no manual service to run**. If it
 is not configured/started, the client runs exactly as before (Signal only) and
 gracefully skips WhatsApp.
 
-##### 6a. One-command startup (Docker)
+#### One-command startup (Docker)
 
 ```bash
 docker compose up -d            # start WAHA (WhatsApp HTTP API) on http://127.0.0.1:3005
@@ -172,8 +213,8 @@ or use the installer:
 
 The API then listens on `127.0.0.1:3005` by default (override with
 `WHATSAPP_API_PORT`); session + media persist in `./whatsapp-data/` (git-ignored).
-If Docker isn't installed, the instructions in section 6b below still let you
-point the backend at any compatible Baileys API.
+If Docker isn't installed, the configuration below still lets you point the
+backend at any compatible Baileys API.
 
 > **API key (authentication):** WAHA generates credentials on its **first** start
 > and requires them afterwards — REST calls without the correct key return `401`.
@@ -185,14 +226,14 @@ point the backend at any compatible Baileys API.
 > ```
 >
 > `docker-compose.yml` loads `.env` via `env_file`, so WAHA reuses the key across
-> restarts instead of regenerating it.  The Python client reads the same
+> restarts instead of regenerating it. The Python client reads the same
 > `WAHA_API_KEY` from `.env` automatically; it can also be set explicitly with
-> `WHATSAPP_API_KEY` (see 6b).  To grab the current values from a running
+> `WHATSAPP_API_KEY` (see below). To grab the current values from a running
 > container: `docker exec signal-tui-whatsapp env | grep WAHA_API_KEY`.
 
-##### 6b. Configuration (env or `config.json`)
+#### Configuration (env or `config.json`)
 
-Env variables:
+Environment variables:
 
 ```bash
 export WHATSAPP_API_PORT="3005"                       # docker-compose host port (default 3005)
@@ -214,7 +255,7 @@ export WHATSAPP_MEDIA_DIR="/srv/whatsapp-media"      # local media download dir
 }
 ```
 
-##### 6c. Pair the device
+#### Pair the device
 
 With the API running, link the device with:
 
@@ -228,15 +269,15 @@ python3 link_whatsapp.py         # prints a QR to scan with WhatsApp
 >
 > **Alternatively**, link directly from the TUI: launch the app and press `Ctrl+L`,
 > select WhatsApp, and scan the QR code. The TUI handles the entire flow including
-> waiting for server-side contacts sync with a progress indicator.
+> waiting for server-side contacts sync with a progress indicator. See
+> [Device linking](#device-linking).
 
-
-#### 7. (Optional) Enable the Telegram backend
+### Enabling the Telegram backend (optional)
 
 The Telegram backend uses [Telethon](https://docs.telethon.dev/) and requires
 **no external daemon** — everything runs in-process.
 
-##### 7a. Get API credentials
+#### Get API credentials
 
 1. Go to [my.telegram.org](https://my.telegram.org) and log in with your phone number
 2. Click **API Development Tools**
@@ -244,9 +285,9 @@ The Telegram backend uses [Telethon](https://docs.telethon.dev/) and requires
 4. Click **Create application**
 5. Copy your **`api_id`** (integer) and **`api_hash`** (string)
 
-> ⚠️ Your `api_hash` is **secret** — never commit it or share it publicly.
+> Your `api_hash` is **secret** — never commit it or share it publicly.
 
-##### 7b. Configure credentials
+#### Configure credentials
 
 Add to the project `.env` file (`cp .env.example .env` if not already present):
 
@@ -255,7 +296,7 @@ TELEGRAM_API_ID=123456
 TELEGRAM_API_HASH=your_hash_here
 ```
 
-##### 7c. Pair the device (QR login)
+#### Pair the device (QR login)
 
 With credentials configured, launch the TUI:
 
@@ -264,19 +305,21 @@ source .venv/bin/activate
 python3 signal_tui.py
 ```
 
-Press `Ctrl+L`, select **📨 Telegram**, and scan the QR code with your phone.
+Press `Ctrl+L`, select **Telegram**, and scan the QR code with your phone.
 
 > If your Telegram account has **2FA** enabled, the TUI will show a password
 > field after scanning the QR. Enter your 2FA password and press Enter.
 >
 > If you don't have 2FA, the login completes automatically.
 
-
 ## Virtual environment (optional but recommended)
 
-A Python virtual environment is **recommended** to avoid polluting your system Python and to prevent dependency conflicts. It is **not strictly required** — the app is a standalone script launched with `python3 signal_tui.py`.
+A Python virtual environment is **recommended** to avoid polluting your system Python and to prevent
+dependency conflicts. It is **not strictly required** — the app is a standalone script launched with
+`python3 signal_tui.py`.
 
-> **Note:** On many Linux distributions, `pip install` at the system level is blocked (PEP 668 / "externally-managed-environment"). In that case a virtual environment is **required**.
+> **Note:** On many Linux distributions, `pip install` at the system level is blocked (PEP 668 /
+> "externally-managed-environment"). In that case a virtual environment is **required**.
 
 ```bash
 # Create the virtual environment
@@ -289,11 +332,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-To deactivate the environment later, run `deactivate`. The `install.sh` script creates and uses the virtual environment automatically (unless you pass `--no-venv`).
+To deactivate the environment later, run `deactivate`. The `install.sh` script creates and uses the
+virtual environment automatically (unless you pass `--no-venv`).
 
 ## Updating signal-cli
 
-Signal's servers change over time, and `signal-cli` releases older than ~3 months may stop working. To update `signal-cli` to the latest version, run:
+Signal's servers change over time, and `signal-cli` releases older than ~3 months may stop working.
+To update `signal-cli` to the latest version, run:
 
 ```bash
 ./install.sh --update
@@ -301,32 +346,37 @@ Signal's servers change over time, and `signal-cli` releases older than ~3 month
 
 This downloads the latest JVM build, extracts it into `./bin/`, and removes the previous version(s).
 
-## Device Linking
+## Device linking
 
-Before using the client, you need to link your accounts. You can do this
-either from the command line or directly from the TUI.
+Before using the client, you need to link your accounts. You can do this either from the command
+line or directly from the TUI.
 
 ### From the command line
 
 ```bash
 python3 link_account.py          # Signal
 python3 link_whatsapp.py         # WhatsApp
-python3 link_telegram.py         # Telegram (if script exists)
 ```
 
-Each script displays a QR code. Scan it with the respective app on your phone.
+Each script displays a QR code. Scan it with the respective app on your phone. There is no CLI
+script for Telegram — pair it from the TUI as described below.
 
 ### From the TUI
 
-Launch the app and press `Ctrl+L`, select Signal, WhatsApp, or Telegram, then
-scan the QR code. For Signal you may need to enter your phone number. For
-Telegram with 2FA, the TUI will prompt for your password after scanning.
+Launch the app and press `Ctrl+L`, select Signal, WhatsApp, or Telegram, then scan the QR code. For
+Signal you may need to enter your phone number. For Telegram with 2FA, the TUI will prompt for your
+password after scanning.
 
 ## Usage
 
 ```bash
 python3 signal_tui.py
 ```
+
+The app starts the `signal-cli` daemon automatically on first launch (for Signal) and a webhook
+HTTP server for WhatsApp push events. See the subsections below for details on each area.
+
+<a id="tips"></a>
 
 ### Controls
 
@@ -336,129 +386,234 @@ python3 signal_tui.py
 | `Enter` | Select contact / open chat |
 | `Enter` (on image) | Open image in fullscreen modal |
 | `Escape` / `q` (in modal) | Close image modal |
-| `Click` / `Enter` (on message) | Select message to reply to |
-| `✕` button | Cancel reply selection |
 | Type message + `Enter` | Send message (with quote if replying) |
+| `Shift+Enter` / `Ctrl+Enter` / `Ctrl+J` | Insert a newline in the message input |
+| `Click` / `Enter` (on message) | Select message to reply to |
+| Close button (reply bar) | Cancel reply selection |
+| `Alt+E` (or Alt+click, on your own text message) | Start editing that message — see [Message editing](#message-editing) |
+| `Alt+R` (or Alt+click, on an image) | Quote that media in a reply — see [Replies and quoted media](#replies-and-quoted-media) |
 | `Ctrl+E` | Open emoji picker |
-| `Ctrl+S` | Open contact search picker |
+| `Ctrl+S` | Open contact search over the full address book of all backends |
 | `Ctrl+D` | Toggle download mode |
 | `Ctrl+W` | Cycle contact filter: all → Signal → WhatsApp → Telegram (single-backend views are flat) |
 | `Ctrl+U` | Toggle the "unread only" filter (combines with the `Ctrl+W` backend filter) |
 | `Ctrl+A` | Return to the full **All** view (backend filter + unread filter off) |
-| `Click` / `Enter` (on group header) | Expand / collapse a contact group (in the All view) |
-| `space` (on group header) | Expand / collapse a contact group |
+| `Click` / `Enter` / `space` (on group header) | Expand / collapse a contact group (in the All view) |
 | `Click` / `Enter` (on a row in a filtered view) | Open the chat directly |
-| `Click` (on a status-bar icon) | Jump to that backend — unread view if it has unread, else its plain filter |
+| Click (on a status-bar segment) | Jump to that backend — unread view if it has unread, else its plain filter |
 | `Ctrl+L` | Link a new device (Signal / WhatsApp / Telegram) via QR code |
 | `Ctrl+N` / `Ctrl+P` | Navigate emoji suggestions / emoji picker categories |
-| `Ctrl+Q` | Quit |
-| `Ctrl+C` | Quit |
+| `Ctrl+Q` / `Ctrl+C` | Quit |
 
+### Composing messages
 
-### Emoji
+The message input is a small multi-line editor:
+
+- **`Enter`** sends the message.
+- **`Shift+Enter`**, **`Ctrl+Enter`**, or **`Ctrl+J`** insert a newline, so you can write multi-line
+  messages before sending.
+- Pasted text with Windows/Mac line endings is normalized to `\n`.
+- While typing, `:alias:` shortcuts are auto-completed (see [Emoji picker](#emoji-picker)).
+
+### Emoji picker
 
 Press **`Ctrl+E`** to open the emoji picker. Inside the picker:
 
 - **`Tab`** / **`Shift+Tab`** — move focus between: category tabs → emoji grid → search bar
+- **`Ctrl+F`** — jump to the search bar
 - **`Ctrl+N`** / **`Ctrl+P`** — switch between emoji categories
 - **`←`** / **`→`** / **`↑`** / **`↓`** — navigate the emoji grid
 - **`Enter`** — insert the selected emoji at the cursor position
 - **`Escape`** — close the picker without inserting
 
-You can also type `:alias:` shortcuts directly in the message input (e.g. `:smile:` → 😊, `:heart:` → ❤️). A completion popup will appear as you type; use `Ctrl+N`/`Ctrl+P` to navigate and `Enter` to confirm.
+You can also type `:alias:` shortcuts directly in the message input — for example, typing
+`:smile:` inserts a smiley face and `:heart:` inserts a heart symbol. A completion popup appears as
+you type; use `Ctrl+N`/`Ctrl+P` to navigate and `Enter` to confirm.
 
-### Contact Search
+### Contact search and address book
 
-Press **`Ctrl+S`** to open the contact search picker. Inside the picker:
+Press **`Ctrl+S`** to open the contact picker. Since the address-book update it searches the
+**complete address book of all three backends** — not just contacts with an existing chat:
 
-- **Type** — the result list updates live as you type, filtering contacts by name or number (case-insensitive)
-- **`Tab`** — move focus from the search input to the results list (`Shift+Tab` to go back)
-- **`↑`** / **`↓`** — navigate the list of matching contacts
-- **`Enter`** — select the highlighted contact, open its chat, and close the picker
-- **Click** — select a contact directly with the mouse
-- **`Escape`** — close the picker without selecting
+- **Type** — the result list updates live as you type, filtering by name or number (case-insensitive)
+- **Tab** — move focus from the search input to the results list (`Shift+Tab` to go back)
+- **↑** / **↓** — navigate the matching entries
+- **Enter** / **click** — select the highlighted entry and close the picker
+- **Escape** — close the picker without selecting
+- **`Ctrl+W`** (inside the picker) — cycle the protocol filter: all → Signal → WhatsApp → Telegram
 
-Selecting a contact from the picker opens its chat **and** highlights it in the contact list on the left, exactly as if you had selected it manually.
+Behavior details:
 
+- Contacts from the three backends are aggregated and sorted by recency, then alphabetically.
+  The same person present on multiple protocols is shown as a single entry; selecting it opens a
+  small sub-dialog to choose the backend (the most recent one is pre-selected; `Escape` returns to
+  the picker).
+- Selecting a contact **without an existing chat** opens-or-creates the conversation on that
+  backend. Newly opened WhatsApp numbers get a best-effort existence check.
+- The address book is loaded asynchronously; a loading indicator is shown while fetching.
+- The selected contact's chat opens and is highlighted in the contact list, exactly as if you had
+  selected it manually.
 
-### Download Mode
+Implementation: `contact_picker.py`; design notes in `docs/DESIGN_CTRLS_RUBRICA.md`.
 
+![Address book picker](assets/screenshots/address-book.png)
+> **Screenshot placeholder** — capture with the real TUI and replace `address-book.png`
+
+### Message editing
+
+Your own **text** messages can be edited after sending, on all three protocols (Signal, Telegram,
+WhatsApp):
+
+- Press **`Alt+E`** (or **Alt+click**) on one of your own text messages: the text is loaded into the
+  message input and the bubble is highlighted. Replying and editing are mutually exclusive —
+  starting one cancels the other.
+- **`Enter`** submits the edit **optimistically**: the bubble, in-memory cache, and database are
+  updated immediately, then the network call runs in a worker thread. On failure or rejection the
+  original text is restored automatically.
+- The edited bubble keeps its original timestamp and gains a persistent `(modificato)` marker.
+- **Incoming edits** from other people update the existing bubble **in place** — no duplicated
+  messages, no unread bump. Edits you make from another linked device are applied to this session
+  idempotently.
+
+Limitations: only text messages can be edited (not media or captions); messages still *pending* or
+*failed* cannot be edited; there is no edit history — the latest text wins.
+
+Implementation: `tui/edit.py`; design notes in `docs/DESIGN_EDIT_MESSAGES.md`.
+
+![Editing a sent message](assets/screenshots/message-editing.png)
+> **Screenshot placeholder** — capture with the real TUI and replace `message-editing.png`
+
+### Replies and quoted media
+
+- **Reply to a text message**: click it (or focus and press `Enter`) — the reply bar shows what you
+  are quoting; the close button cancels.
+- **Quote an image in a reply**: press **`Alt+R`** or **Alt+click** on an image. A plain click /
+  `Enter` still opens the fullscreen viewer, unchanged.
+- **Incoming media quotes are visible**: when someone replies quoting a photo/video/audio/file, the
+  quoted bubble shows the real caption when present, otherwise a typed media label.
+- **Outgoing media quotes reach recipients correctly**: on Signal the quoted thumbnail travels with
+  the message (`quoteAttachments`), so the recipient sees the quoted image; WhatsApp and Telegram
+  use their native reply IDs.
+
+Retrying a failed media reply preserves the correct quote even after a restart.
+
+Implementation: `ui_components.py` (`alt+r` binding on `ImageWidget`), `tui/send.py`;
+design notes in `docs/DESIGN_QUOTE_MEDIA_37_V2.md` and `docs/DESIGN_QUOTE_MEDIA_37_PLANB.md`.
+
+![Replying with a quoted image](assets/screenshots/quote-media.png)
+> **Screenshot placeholder** — capture with the real TUI and replace `quote-media.png`
+
+### Message delivery status
+
+Outgoing messages show their delivery status directly on the bubble:
+
+| Status | Style | Meaning |
+|---|---|---|
+| *pending* | dim/muted color | Being sent (optimistic phase) |
+| *sent* | italic | Accepted by the server, not yet delivered |
+| *delivered* | bold | Reached the recipient's device |
+| read | normal | Seen by the recipient |
+| ***failed*** | bold, red | Send rejected or errored — the message was not delivered |
+
+Notes:
+
+- The *pending → sent* transition is robust against timestamp differences in the daemon's echo of
+  your own message (no stuck grey bubble).
+- Failed sends remain marked as such so nothing is silently lost.
+- Right after you send a message, the contact list **re-sorts immediately by recency** — the chat
+  you just wrote to jumps to the top without waiting for the server round trip.
+- Read receipts work on all three protocols: WhatsApp runtime receipts are reflected live, and
+  Telegram read state persists across restarts.
+
+### Download mode
 
 Press **`Ctrl+D`** to enter download mode, then click any message to serve it for download:
 
 - **Text messages** are served as `.txt` files
 - **Images and attachments** are served with their original filename and extension
 
-A persistent HTTP server starts on port **10042** (first download only) and stays alive for the duration of the app. The download URL is shown in a selectable `Input` widget — use **Tab** to focus it, then **Cmd+C / Ctrl+C** to copy the URL and paste it into your browser.
+A persistent HTTP server starts on port **10042** (first download only) and stays alive for the
+duration of the app. The download URL is shown in a selectable `Input` widget — use **Tab** to focus
+it, then **Cmd+C / Ctrl+C** to copy the URL and paste it into your browser.
 
 > **Note:** You need to open port **10042** on your server's firewall for downloads to work.
 
-> **macOS users:** The download URL is shown in a selectable `Input` widget, but **Terminal.app** does not allow copying text from Textual widgets with `Cmd+C`. For the best experience, use **[iTerm2](https://iterm2.com/)** (free) which supports clipboard access from terminal applications.
+> **macOS users:** Terminal.app does not allow copying text from Textual widgets with `Cmd+C`. For
+> the best experience, use **[iTerm2](https://iterm2.com/)** (free), which supports clipboard access
+> from terminal applications.
 
-### Contact Grouping & Unread Filters
+### Contact grouping and unread filters
 
-The contact list groups the same person across backends: one **header** row shows the
-person's best name plus an aggregate unread badge (in the "All" view), and one
-**member** row per protocol (`📱 Signal`, `💬 WhatsApp`, `📨 Telegram`) sits below it.
+The contact list groups the same person across backends: one **header** row shows the person's best
+name plus an aggregate unread badge (in the "All" view), and one **member** row per protocol sits
+below it, labeled with that protocol's icon and color.
 
-- Groups are **collapsed by default**: you see one row per person. `Click`/`Enter`/`space`
-  on the header expands or collapses the group; `Click`/`Enter` on a **member** row opens
-  that backend's chat.
+- Groups are **collapsed by default**: you see one row per person. `Click`/`Enter`/`space` on the
+  header expands or collapses the group; `Click`/`Enter` on a **member** row opens that backend's
+  chat.
 - In **"All"** view the header badge is the aggregate unread count of the person's members.
-- With a **single-backend filter** (`Ctrl+W`) the list becomes **flat**: one row per person
-  (no chevron), clicking a row opens the chat directly, and the badge shows only the unread
-  of that filtered view. The backend border color is kept even when the unread filter is on.
-- **`Ctrl+U`** toggles the **unread-only** filter: only contacts/groups with at least one
-  unread message are shown. It composes with `Ctrl+W` (e.g. `Ctrl+W` → WhatsApp, `Ctrl+U` →
-  only your unread WhatsApp messages).
+- With a **single-backend filter** (`Ctrl+W`) the list becomes **flat**: one row per person (no
+  chevron), clicking a row opens the chat directly, and the badge shows only the unread of that
+  filtered view. Rows are sorted by per-backend recency and the first contact is auto-selected when
+  you change filter. The backend border color is kept even when the unread filter is on.
+- **`Ctrl+U`** toggles the **unread-only** filter: only contacts/groups with at least one unread
+  message are shown. It composes with `Ctrl+W` (e.g. `Ctrl+W` → WhatsApp, then `Ctrl+U` → only your
+  unread WhatsApp messages). The currently selected contact stays pinned in view.
 - **`Ctrl+A`** returns to the full All view (both filters off).
-- The **status bar** always shows the per-backend unread totals (`📱 N  💬 N  📨 N`, `-` when
-  zero). Clicking an icon jumps to that backend: to its **unread view** if it has unread
-  messages, otherwise to its **plain filter**. When the bar shows a transient message or an
-  error the icons are hidden and reappear (updated) once the message clears.
+- The **status bar** always shows the per-backend unread totals as three clickable segments (one per
+  protocol, `-` when zero). Clicking a segment jumps to that backend: to its **unread view** if it
+  has unread messages, otherwise to its **plain filter**. When the bar shows a transient message or
+  an error the segments are hidden and reappear (updated) once the message clears.
 
 > Note: `Ctrl+U` and `Ctrl+A` take over two text-editing shortcuts in the message input
 > ("delete to line start", "cursor to line start"); use `super+backspace` / `home` instead.
-> While the contact search picker (`Ctrl+S`) is open the new shortcuts are disabled.
+> While the contact picker (`Ctrl+S`) is open these shortcuts are disabled.
 
 ### Tips
 
-- The app starts the `signal-cli` daemon automatically on first launch (for Signal) and a webhook HTTP server for WhatsApp push events
-- Messages are persisted locally in a SQLite database (`~/.local/share/signal-tui-client/messages.db`) with up to 200 messages retained per contact
+- Messages are persisted locally in a SQLite database
+  (`~/.local/share/signal-tui-client/messages.db`) with up to 200 messages retained per contact
 - The last 20 messages are shown when opening a chat; click "Load more" to see older cached messages
-- Unread messages are shown with a `*N` badge: aggregate on the group header in the "All" view, filtered to the current backend in filtered views
-- The contact list is **grouped per person and sorted by recency** — typing, mumbling and unread states are shown as icons/badges; use `Ctrl+U` to focus on unread, `Ctrl+A` to go back to All
-- Sent messages show their delivery status: *sent* (italic), **delivered** (bold), read (normal)
-- A `✍️` icon next to a contact name means they are typing; a `💭` icon shows briefly after they send the message or stop typing
-- The contact list is **grouped per person and sorted by recency** — typing, mumbling and unread states are shown as icons/badges; use `Ctrl+U` to focus on unread, `Ctrl+A` to go back to All
+- Unread messages are shown with a `*N` badge: aggregate on the group header in the "All" view,
+  filtered to the current backend in filtered views
+- A writing-hand icon next to a contact name means they are typing; a thought-bubble icon appears
+  briefly after they send a message or stop typing
+- Use `Ctrl+U` to focus on unread conversations, `Ctrl+A` to go back to All — see
+  [Contact grouping and unread filters](#contact-grouping-and-unread-filters)
 
+## Native inline images (kitty graphics protocol)
 
+In chats with images the client renders **high-resolution inline thumbnails** directly in the
+conversation and opens the viewer as a **hi-res modal**, when the terminal supports the *kitty
+graphics protocol*. Everywhere else the classic behavior applies: clickable placeholder + `catimg`
+in the modal.
 
-## Immagini native inline (kitty graphics protocol)
+### Requirements (native mode)
 
-Nei messaggi con immagini il client mostra **miniature inline ad alta risoluzione** direttamente nella chat e apre il visualizzatore in un **modal hi-res**, quando il terminale supporta il *kitty graphics protocol*.  Negli altri ambienti resta il comportamento classico: placeholder cliccabile + `catimg` nel modal.
+- **[kitty](https://sw.kovidgoyal.net/kitty/) >= 0.20** terminal (developed and tested on kitty 0.48)
+- Client launched in a **direct** terminal or over **ssh** (does not work inside tmux/screen)
+- `pillow>=10.3` — already included in `requirements.txt`
 
-### Requisiti (modalità nativa)
+> Detection runs once at startup (`TERM=xterm-kitty` + a graphics-protocol query); any error
+> degrades gracefully to the `catimg` fallback without blocking the app.
 
-- Terminale **[kitty](https://sw.kovidgoyal.net/kitty/) ≥ 0.20** (sviluppo e test su kitty 0.48)
-- Client lanciato in un terminale **diretto** o via **ssh** (dentro tmux/screen non funziona)
-- `pillow>=10.3` — già inclusa in `requirements.txt`
+### Behavior per environment
 
-> La detection gira una sola volta all'avvio (`TERM=xterm-kitty` + query al protocollo grafico); qualsiasi errore degrada al fallback `catimg` senza bloccare l'app.
-
-### Comportamento per ambiente
-
-| Ambiente | Modalità | Cosa succede |
+| Environment | Mode | What happens |
 |---|---|---|
-| kitty, diretto o via ssh (`TERM=xterm-kitty`) | **kitty** | miniature inline ad alta risoluzione + modal hi-res (cap 1600 px sul lato lungo); scroll fluido senza ritrasmissioni; immagini mai sopra picker/modal |
-| Altri terminali (Ghostty, iTerm2, Windows Terminal, xterm…) | `catimg` | esperienza **invariata** rispetto a prima della feature: placeholder + modal `catimg` |
-| tmux / GNU screen (anche se il terminale è kitty) | `catimg` | il passthrough delle immagini non è affidabile → sempre fallback |
-| Pipe / CI / shell headless (non-tty) | `catimg` | nessuna query al terminale → suite e CI restano sicure |
-| Terminale non supportato e `catimg` assente | `off` | solo placeholder; il click mostra lo stato «rendering disabilitato», nessun modal |
+| kitty, direct or ssh (`TERM=xterm-kitty`) | **kitty** | High-resolution inline thumbnails + hi-res modal (1600 px cap on the long side); smooth scrolling without retransmissions; images never overlap pickers/modals |
+| Other terminals (Ghostty, iTerm2, Windows Terminal, xterm…) | `catimg` | Experience unchanged: placeholder + `catimg` modal |
+| tmux / GNU screen (even inside kitty) | `catimg` | Image passthrough is unreliable → always falls back |
+| Pipe / CI / headless shell (non-tty) | `catimg` | No terminal query → test suites and CI stay safe |
+| Unsupported terminal and `catimg` missing | `off` | Placeholder only; clicking shows a "rendering disabled" status, no modal |
 
-### Configurazione
+![Native kitty thumbnails](assets/screenshots/native-images-kitty.png)
+> **Screenshot placeholder** — capture with the real TUI and replace `native-images-kitty.png`
 
-La modalità è automatica (`auto`). Per forzarla usa la variabile d'ambiente `IMAGE_PROTOCOL` oppure la chiave `image_protocol` in `config.json`:
+### Configuration
+
+The mode is automatic (`auto`). To force it, use the `IMAGE_PROTOCOL` environment variable or the
+`image_protocol` key in `config.json`:
 
 ```bash
 export IMAGE_PROTOCOL=auto    # auto | kitty | catimg | off
@@ -470,157 +625,179 @@ export IMAGE_PROTOCOL=auto    # auto | kitty | catimg | off
 }
 ```
 
-I limiti delle miniature sono configurabili allo stesso modo (env o `config.json`):
+Thumbnail limits are configurable the same way (env or `config.json`):
 
-| Chiave `config.json` | Variabile d'ambiente | Default | Significato |
+| `config.json` key | Environment variable | Default | Meaning |
 |---|---|---|---|
-| `thumbnail_max_lines` | `THUMBNAIL_MAX_LINES` | `12` | altezza massima della miniatura, in righe |
-| `thumbnail_max_cols` | `THUMBNAIL_MAX_COLS` | `60` | larghezza massima, in colonne (comunque clampata alla larghezza della chat) |
+| `thumbnail_max_lines` | `THUMBNAIL_MAX_LINES` | `12` | Maximum thumbnail height, in rows |
+| `thumbnail_max_cols` | `THUMBNAIL_MAX_COLS` | `60` | Maximum width, in columns (also clamped to the chat width) |
 
-> **Nota sviluppo:** il client si lancia con l'alias **`signal`** (log DEBUG su `/tmp/signal-tui.log`).  La validazione manuale su kitty reale segue la checklist **locale** `docs/CHECKLIST_MANUAL_KITTY.md` (gitignored, non distribuita con il repo).  I dettagli tecnici (protocollo, clipping, gestione screen-stack) sono nel design `documentation/design/DESIGN_NATIVE_IMAGES.md` del repo principale (`signal-tui-client`).
+> **Developer note:** the client is normally launched with the **`signal`** alias (DEBUG log on
+> `/tmp/signal-tui.log`; the app also accepts a `--debug` flag for verbose logging). Manual
+> validation on a real kitty follows the **local** checklist `docs/CHECKLIST_MANUAL_KITTY.md`
+> (gitignored, not distributed with the repo). Technical details (protocol handling, clipping,
+> screen-stack management) are in `documentation/design/DESIGN_NATIVE_IMAGES.md`.
 
-## Performance Profiling
+## Performance profiling
 
-Per profilare l'applicazione in termini di **CPU**, **RAM** e **I/O**, usa gli strumenti nella cartella `profiling/`:
+To profile the application in terms of **CPU**, **RAM**, and **I/O**, use the tools in the
+`profiling/` folder:
 
 ```bash
-# Monitoraggio risorse (CPU, RAM, I/O nel tempo)
+# Resource monitoring (CPU, RAM, I/O over time)
 python profiling/monitor_resources.py --duration 120
 python profiling/analyze_resources.py
 
-# Flamegraph CPU (py-spy — campiona tutti i thread)
+# CPU flamegraph (py-spy — samples all threads)
 ./profiling/run_pyspy.sh 120
 
-# Profiling RAM (tracemalloc)
+# RAM profiling (tracemalloc)
 python profiling/profile_memory.py --duration 120
 
-# Profiling I/O (strace)
+# I/O profiling (strace)
 ./profiling/run_strace.sh 120
 ```
 
-Vedi [profiling/README.md](profiling/README.md) per istruzioni dettagliate, interpretazione dei risultati e i punti critici noti.
+See [profiling/README.md](profiling/README.md) for detailed instructions, result interpretation,
+and known hotspots.
+
+Notable performance work: UI freezes on message arrival/send were eliminated (all blocking work
+runs in worker threads), and the WhatsApp presence subscription was disabled to cut idle load and
+speed up outgoing bubbles.
 
 ## Testing
 
-### Suite standard (unit + integration, CI-safe)
+### Standard suite (unit + integration, CI-safe)
 
-Esegue tutti i test di `tests/` e `Telegram/` (niente rete, niente account reali):
+Runs every test in `tests/` and `Telegram/` (no network, no real accounts):
 
 ```bash
-make test PYTHON=.venv-test/bin/python      # o: source .venv-test/bin/activate && make test
+make test PYTHON=.venv-test/bin/python      # or: source .venv-test/bin/activate && make test
 make lint                                   # ruff check
 make coverage                               # test + coverage (gate 68%)
 ```
 
-Questa suite gira anche in CI (`.github/workflows/ci.yml`, Python 3.12/3.13).
+This suite also runs in CI (`.github/workflows/ci.yml`, Python 3.12/3.13).
 
-### Test di integrazione "live" (run opzionale, su filo reale)
+### Optional "live" integration tests (real accounts)
 
-I test in `tests/test_live_quote_media.py` (E1–E7) verificano il comportamento
-end-to-end **contro un account di test reale** ("Roberto BMW", presente sui 3
-protocolli) e **inviano messaggi reali**. Non girano in CI: sono sempre skippati
-senza `LIVE_TESTS=1`.
+The tests in `tests/test_live_quote_media.py` (E1–E7) verify end-to-end behavior **against a real
+test account** (present on all three protocols) and **send real messages**. They never run in CI:
+without `LIVE_TESTS=1` they are always skipped.
 
-**Prerequisiti:**
-- Daemon signal-cli attivo (`config.json` con `user_number`) — richiesto per Signal;
-- WAHA raggiungibile con sessione WORKING (per WhatsApp);
-- `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` + sessione Telethon autorizzata (per Telegram);
-- contatto di test "Roberto BMW" presente sui 3 protocolli, oppure override esplicito
-  degli id con `LIVE_TARGET_SIGNAL` / `LIVE_TARGET_WHATSAPP` / `LIVE_TARGET_TELEGRAM`.
+**Prerequisites:**
 
-**Esecuzione:**
+- signal-cli daemon running (`config.json` with `user_number`) — required for Signal;
+- WAHA reachable with a WORKING session (for WhatsApp);
+- `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` + an authorized Telethon session (for Telegram);
+- the test contact present on all three protocols, or explicit ID overrides with
+  `LIVE_TARGET_SIGNAL` / `LIVE_TARGET_WHATSAPP` / `LIVE_TARGET_TELEGRAM`.
+
+**Run them:**
 
 ```bash
 make live-test PYTHON=.venv-test/bin/python
-# equivale a: LIVE_TESTS=1 .venv-test/bin/python -m pytest tests/test_live_quote_media.py -v
+# equivalent to: LIVE_TESTS=1 .venv-test/bin/python -m pytest tests/test_live_quote_media.py -v
 ```
 
-Cosa copre (criteri §10.2 di `docs/DESIGN_QUOTE_MEDIA_37_V2.md`):
-- **E1/E2/E3/E7** — Signal: quote media senza/con caption (params `quoteMessage`/`quoteAttachments`
-  verificati sul filo), reply a testo invariata, retry dopo fallimento;
-- **E5** — WhatsApp: quote foto (`reply_to` = id Baileys);
-- **E6** — Telegram: quote foto (`reply_to` = id numerico).
+Coverage (criteria §10.2 of `docs/DESIGN_QUOTE_MEDIA_37_V2.md`):
 
-Se nella chat non ci sono media freschi con `content_type` persistito (i media
-legacy pre-piano-B non sono backfillati automaticamente), i test Signal stampano
-"⏳ INVIA ORA una NUOVA immagine…" e attendono fino a 90 s: basta mandare una foto
-dal client ufficiale del contatto di test e il test procede da solo.
+- **E1/E2/E3/E7** — Signal: media quote with/without caption (`quoteMessage`/`quoteAttachments`
+  verified on the wire), plain text reply unchanged, retry after failure;
+- **E5** — WhatsApp: photo quote (`reply_to` = Baileys ID);
+- **E6** — Telegram: photo quote (`reply_to` = numeric ID).
 
-**E4 (ingresso, manuale):** richiede di quotare un'immagine dal client ufficiale
-del contatto di test mentre il test è in attesa:
+If the chat has no fresh media with a persisted `content_type` (legacy media predating plan B is
+not auto-backfilled — use `migrate_content_type.py`), the Signal tests print a reminder to send a
+new image and wait up to 90 seconds: just send a photo from the official client of the test contact
+and the test proceeds on its own.
+
+**E4 (ingress, manual):** requires quoting an image from the official client of the test contact
+while the test waits:
 
 ```bash
 make live-test-manual PYTHON=.venv-test/bin/python
 ```
 
-**Note:** ogni test invia messaggi marcati `[live-test #37]` (riconoscibili sul
-device). I test saltano con messaggi chiari quando un backend non è configurato,
-il contatto non è risolto o non c'è un media adatto — non falliscono la suite.
+**Notes:** every test sends messages tagged `[live-test]` (recognizable on the device). Tests skip
+with clear messages when a backend is unconfigured, the contact cannot be resolved, or no suitable
+media exists — they never fail the suite.
 
-## Project Structure
+## Project structure
 
 ```
 signal-tui-client/
-├── signal_tui.py            # Main TUI application (Textual App) — multi-protocol
-├── backend/                 # Shared backend: SQLite persistence, signal-cli RPC/subprocess, webhook/HTTP server, receipts
-├── backends/                # Per-protocol backend implementations
-│   ├── __init__.py          #   Package init — exports ChatBackend, BackendManager, SignalBackend, WhatsAppBackend, TelegramBackend
-│   ├── base.py              #   Abstract ChatBackend interface
-│   ├── manager.py           #   Multi-backend registry and routing
-│   ├── signal.py            #   Signal backend (signal-cli daemon / subprocess, envelope parsing)
-│   ├── whatsapp.py          #   WhatsApp backend (WAHA REST + webhook push)
-│   ├── telegram.py          #   Telegram backend (Telethon MTProto, QR login, read receipts)
-│   └── config.py            #   WhatsApp + Telegram configuration helpers
-├── tui/                     # TUI screens, mixins and widgets (Textual App composition)
-│   └── images/              # Native kitty rendering: detect.py (terminal detection), cellsize.py, kitty_renderer.py
-├── models.py                # Shared data models (ChatContact, ChatMessage, ChatEvent)
-├── ui_components.py         # Custom Textual widgets (MessageWidget, ImageWidget, ImageModalScreen, …)
-├── emoji_picker.py          # Emoji picker modal screen and auto-completion widget (Ctrl+E)
-├── emoji_data.py            # Emoji database (categories, aliases, search index)
-├── contact_picker.py        # Contact search picker modal screen (Ctrl+S)
-├── device_link_screen.py    # Device link picker (Signal / WhatsApp / Telegram QR pairing)
-├── qr_utils.py              # QR code renderer (ASCII / PNG-to-ASCII)
-├── link_account.py          # Signal device linking script (QR code — or use Ctrl+L in TUI)
-├── link_whatsapp.py         # WhatsApp device linking script (QR code — or use Ctrl+L in TUI)
-├── migrate_cache_sqlite.py  # One-shot migration: JSON cache → SQLite
-├── migrate_cache_protocol.py# One-shot migration: add protocol field to cache
-├── migrate_cache_status.py  # One-shot migration: add status field to cache
-├── purge_whatsapp_cache.py  # Utility: purge WhatsApp messages from cache
-├── Telegram/                # Telegram test suite (74 tests)
-│   ├── test_telegram_backend.py  (35 tests)
-│   └── test_regression.py        (39 tests)
-├── tests/                   # Test suite (pytest, 1006 tests)
+├── signal_tui.py              # Entry point — main TUI application (Textual App), multi-protocol
+├── backend/                   # Shared backend: SQLite persistence, signal-cli RPC/subprocess,
+│                              #   webhook/HTTP server, receipts
+├── backends/                  # Per-protocol backend implementations
+│   ├── base.py                #   Abstract ChatBackend interface (+ address book, edit contracts)
+│   ├── manager.py             #   Multi-backend registry and routing
+│   ├── signal.py              #   Signal backend (signal-cli daemon / subprocess, envelope parsing)
+│   ├── whatsapp.py            #   WhatsApp backend facade
+│   ├── whatsapp_events.py     #   WhatsApp webhook event ingestion
+│   ├── whatsapp_rest.py       #   WhatsApp REST calls (WAHA)
+│   ├── telegram.py            #   Telegram backend (Telethon MTProto, QR login, read receipts)
+│   └── config.py              #   WhatsApp + Telegram configuration helpers
+├── tui/                       # TUI composition: mixins split by concern
+│   ├── app.py                 #   App wiring, bindings, layout
+│   ├── contacts.py            #   Contact list logic (grouping, filters, open-or-create)
+│   ├── chat_view.py           #   Chat rendering (bubbles, images, thumbnails)
+│   ├── events.py              #   Event handling (messages, receipts, typing, edits)
+│   ├── send.py                #   Optimistic send flow + retries
+│   ├── edit.py                #   Message editing flow (optimistic submit, rollback)
+│   ├── unread_reply.py        #   Reply/edit bars and handlers
+│   ├── download.py            #   Download mode HTTP server glue
+│   ├── pickers.py             #   Modal screens (emoji/contact/device-link launching)
+│   ├── polling.py             #   Timed refreshes
+│   ├── backend_connect.py     #   Backend startup/connection
+│   ├── css.py                 #   TUI stylesheet
+│   └── images/                #   Native kitty rendering: detect.py, cellsize.py, kitty_renderer.py
+├── models.py                  # Shared data models (ChatContact, ChatMessage, ChatEvent)
+├── ui_components.py           # Custom Textual widgets (MessageWidget, ImageWidget, StatusBar,
+│                              #   ImageModalScreen, MessageTextArea, …)
+├── emoji_picker.py            # Emoji picker modal screen and auto-completion widget (Ctrl+E)
+├── emoji_data.py              # Emoji database (categories, aliases, search index)
+├── contact_picker.py          # Address-book contact picker modal screen (Ctrl+S)
+├── device_link_screen.py      # Device link picker (Signal / WhatsApp / Telegram QR pairing)
+├── qr_utils.py                # QR code renderer (ASCII / PNG-to-ASCII)
+├── link_account.py            # Signal device linking script (QR code — or use Ctrl+L in TUI)
+├── link_whatsapp.py           # WhatsApp device linking script (QR code — or use Ctrl+L in TUI)
+├── migrate_cache_sqlite.py    # One-shot migration: JSON cache → SQLite
+├── migrate_cache_protocol.py  # One-shot migration: add protocol field to cache
+├── migrate_cache_status.py    # One-shot migration: add status field to cache
+├── migrate_content_type.py    # Backfill MIME type for legacy cached media (quote media plan B)
+├── purge_whatsapp_cache.py    # Utility: purge WhatsApp messages from cache
+├── Telegram/                  # Telegram test suite
+│   ├── test_telegram_backend.py
+│   └── test_regression.py
+├── tests/                     # Test suite (pytest; unit, UI pilot, integration, live-gated)
 │   ├── conftest.py
-│   ├── test_whatsapp_backend.py (102 tests)
-│   ├── test_ui_protocol.py      (55 tests)
-│   ├── test_typing_indicator.py (29 tests)
-│   ├── test_backend_lazy_config.py (5 tests)
-│   └── ... (24 test files total)
-│   └── run_regression_tests.sh  # legacy (superseded by Makefile)
-├── profiling/               # Performance profiling tools (CPU, RAM, I/O)
-├── scripts/                 # Helper scripts (start_whatsapp.sh)
-├── docs/                    # Documentation & design notes
-│   ├── BUGS.md              #   Known bugs and limitations
-│   ├── TEST_REPORT.md       #   Test report (last run: 1080/1080 ✅)
-│   ├── PERF_ANALYSIS.md     #   Performance analysis (UI reactivity hotspots)
-│   ├── DESIGN_*.md          #   Design documents (edit messages, ctrls rubrica, UI freeze, fixes)
-│   └── PLAN_*.md            #   Work/implementation plans (testing, UI block analysis, …)
-├── assets/screenshots/      # README screenshots (main UI, image viewer)
-├── docker-compose.yml       # WAHA (WhatsApp HTTP API) Docker container
-├── .env.example             # Template for WAHA + Telegram credentials
-├── .dockerignore            # Docker build exclusions
-├── install.sh               # Automatic installation script
-├── Makefile                 # Shared commands: make test / lint / coverage / check
-├── pyproject.toml           # Config condivisa pytest / coverage / ruff
-├── .github/workflows/ci.yml # CI: lint + test (matrice 3.12/3.13) + coverage gate + Codecov
-├── requirements.txt         # Python dependencies (textual, telethon, qrcode, ...)
-├── requirements-dev.txt     # Development dependencies (pytest, pytest-cov, coverage, ruff)
-├── config.json              # Local configuration (not committed)
-├── README.md                # This file
-├── bin/                     # signal-cli binaries (not committed)
-└── LICENSE                  # GPLv3
+│   ├── test_live_quote_media.py   # Live E2E tests (opt-in via LIVE_TESTS=1)
+│   └── …                      # Backend, UI, grouping, filters, edit flow, quote media, …
+├── profiling/                 # Performance profiling tools (CPU, RAM, I/O)
+├── scripts/                   # Helper scripts (start_whatsapp.sh, dump_address_book_fixtures.py)
+├── documentation/             # Generated technical docs (architecture, design, API contracts,
+│                              #   test suite, review)
+├── docs/                      # Working docs: BUGS.md, TEST_REPORT.md, PERF_ANALYSIS.md,
+│                              #   DESIGN_*.md, PLAN_*.md
+├── assets/screenshots/        # README screenshots (main UI, image viewer)
+├── docker-compose.yml         # WAHA (WhatsApp HTTP API) Docker container
+├── .env.example               # Template for WAHA + Telegram credentials
+├── install.sh                 # Automatic installation script
+├── Makefile                   # Shared commands: make test / lint / coverage / live-test
+├── pyproject.toml             # Shared pytest / coverage / ruff config
+├── .github/workflows/ci.yml   # CI: lint + test (3.12/3.13 matrix) + coverage gate + Codecov
+├── requirements.txt           # Python dependencies (textual, telethon, qrcode, ...)
+├── requirements-dev.txt       # Development dependencies (pytest, pytest-cov, coverage, ruff)
+├── config.json                # Local configuration (not committed)
+├── README.md                  # This file
+├── bin/                       # signal-cli binaries (not committed)
+└── LICENSE                    # GPLv3
 ```
 
+Current test-suite status is tracked in [docs/TEST_REPORT.md](docs/TEST_REPORT.md); known bugs and
+limitations in [docs/BUGS.md](docs/BUGS.md).
 
 ## License
 

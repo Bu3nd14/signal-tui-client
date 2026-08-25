@@ -38,7 +38,8 @@ Convenzioni osservate:
 - docstring di modulo che dichiara lo scopo e le garanzie (vedi `test_edit_contract.py`, `test_cache_debounce.py`);
 - classi `Test*` per raggruppare (con emoji tematiche nel docstring in molti file esistenti);
 - helper `_MinimalBackend(ChatBackend)` / mock backend minimi per testare i default del contratto base senza I/O;
-- marker `@pytest.mark.integration` per i test che lanciano davvero la TUI headless.
+- marker `@pytest.mark.integration` per i test che lanciano davvero la TUI headless;
+- **test live** (filo reale): marker `@pytest.mark.live` + skipif su env gate, sul modello di `tests/test_live_quote_media.py` (`LIVE_TESTS=1`; `LIVE_MANUAL=1` per i passi che richiedono intervento manuale sul device). Restano FUORI dalla CI: si eseguono solo con `make live-test`. Qualsiasi nuovo test che parli con backend reali deve adottare lo stesso pattern (skip di default, target/account sovrascrivibili via env).
 
 ## 3. Fixture disponibili (`tests/conftest.py`)
 
@@ -75,7 +76,7 @@ In `Telegram/conftest.py`: fixture autouse `_mock_sqlite_writes` che patcha `bac
 ## 5. Configurazione rilevante (`pyproject.toml`)
 
 - `testpaths = ["tests", "Telegram"]`, `pythonpath = ["."]`.
-- `addopts = "-ra --tb=short --strict-markers"` → marker non registrati fanno fallire la suite: registrare nuovi marker in `markers`.
+- `addopts = "-ra --tb=short --strict-markers"` → marker non registrati fanno fallire la suite: registrare nuovi marker in `markers` (oggi registrati: `integration`, `live`, `live-manual`).
 - `asyncio_mode = "auto"` → i coroutine test si scrivono con `async def test_...` senza decorator.
 - Coverage gate: `fail_under = 68` (branch on); per la CI viene prodotto `coverage.xml`.
 

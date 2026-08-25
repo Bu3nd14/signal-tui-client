@@ -47,7 +47,7 @@ Attributo di classe richiesto: `protocol: str` (una delle costanti `PROTOCOL_*` 
 | `needs_pairing` (property) | `False` | richiede pairing QR interattivo |
 | `async get_pairing_qr() -> str \| None` | `None` | link QR corrente |
 
-Convenzione `*_sync`: le versioni sincrone sono pensate per i worker thread della TUI (stesso pattern di `send_message_sync`, presente nelle implementazioni concrete).
+Convenzione `*_sync`: le versioni sincrone sono pensate per i worker thread della TUI (stesso pattern di `send_message_sync`, presente nelle implementazioni concrete). Estensione per-protocollo: solo `SignalBackend.send_message_sync` accetta il kwarg extra `quote_attachments` (thumbnail della quote media — vedi [CONTRACTS.md](CONTRACTS.md#11-quote-media-reply-con-immagine) §11); non fa parte del contratto astratto.
 
 ### Contratto duale: async nominale vs flusso reale (leggere prima di estendere)
 
@@ -81,12 +81,12 @@ Test che fissano il contratto: `tests/test_edit_contract.py` (default `False`/`N
 - Payload JSON-RPC 2.0: `{"jsonrpc":"2.0","id":<int crescente>,"method":str,"params":{}}`.
 - Metodi usati:
   - `listContacts` — probe daemon + lista contatti;
-  - `send` — parametri: `message`, `recipient: [numero]`, opzionali `timestamp` (ignorato da signal-cli), `quoteTimestamp`, `quoteAuthor`, `quoteMessage`, `editTimestamp` (quando presente il messaggio è una MODIFICA); la risposta contiene `result.timestamp` = vero timestamp server;
+  - `send` — parametri: `message`, `recipient: [numero]`, opzionali `timestamp` (ignorato da signal-cli), `quoteTimestamp`, `quoteAuthor`, `quoteMessage`, `editTimestamp` (quando presente il messaggio è una MODIFICA) e `quoteAttachments` (lista di stringhe `contentType[:filename[:previewFile]]`: la thumbnail che rende visibile una quote media su Signal); la risposta contiene `result.timestamp` = vero timestamp server;
   - `receive` — polling legacy.
 - Errori: ogni fallimento HTTP/socket è restituito come `{"error": "<messaggio>"}` (mai eccezioni da `_call`); `send_message_sync` converte `"error"` in `RuntimeError`.
 - SSE: `listen_events(user_number)` yielda dict `{"envelope": {...}}`; keep-alive ogni 15 s; timeout socket 30 s → il generatore termina e il chiamante riconnette dopo una breve pausa (~1 s, commento "keep it short (1s)" in `SignalBackend._sse_listener`).
 - Limiti SSE noti (stato attuale): nessun backoff/jitter/tetto — il retry resta ~1 Hz indefinitamente durante un outage del daemon, senza alcun segnale di stato verso la UI; il log può essere fuorviante (`if envelope:` a valle del `for` valuta una variabile mai assegnata o stale quando il generatore ritorna senza yield → NameError catturato o "SSE: envelope received" spurio, la causa reale non appare); `restart_sse()` è dead code (nessun chiamante) con una race latente: un restart ri-armerebbe la guardia del vecchio thread (bloccato in `urlopen` fino a 30 s), che al risveglio riconnetterebbe → doppio listener ed eventi duplicati. Nota: il commento nel codice a `backends/signal.py:140` ("reconnects every 5s") è stale, la pausa reale è ~1 s.
-- Fallback subprocess: `[signal-cli, "-u", numero, ...args]`, timeout 60 s, stdout testuale; `send` subprocess ritorna il timestamp stampato su stdout.
+- Fallback subprocess: `[signal-cli, "-u", numero, ...args]`, timeout 60 s, stdout testuale; `send` subprocess ritorna il timestamp stampato su stdout e ripete `--quote-attachment <contentType[:filename[:previewFile]]>` per ogni elemento di `quoteAttachments`.
 
 Test: `tests/test_backend_rpc.py`, `tests/test_backend_send.py`, `tests/test_signal_real_timestamp.py`.
 

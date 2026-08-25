@@ -14,6 +14,7 @@ Indice:
 8. [Contatti, raggruppamento e unread](#8-contatti-raggruppamento-e-unread)
 9. [Payload webhook WAHA](#9-payload-webhook-waha)
 10. [Errori e convenzioni di ritorno](#10-errori-e-convenzioni-di-ritorno)
+11. [Quote media (reply con immagine)](#11-quote-media-reply-con-immagine)
 
 ---
 
@@ -45,6 +46,7 @@ Test: `tests/test_contact_grouping.py`, `tests/test_address_book.py`.
 | `quote_text` | `str \| None` | `None` | testo citato |
 | `msg_type` | `str` | `"text"` | `text` \| `image` \| `sticker` \| `attachment` |
 | `attachment_info` / `attachment_id` | `str \| None` | `None` | dettagli/id attachment |
+| `content_type` | `str \| None` | `None` | mime dell'attachment (es. `"image/png"`); persistito per ricostruire la thumbnail di una quote media Signal (vedi §11); `None` per testo/sticker e righe legacy pre-migrazione |
 | `status` | `str` | `"sent"` | vedi §5 |
 | `reply_to_message_id` | `str \| None` | `None` | id server del messaggio a cui si risponde |
 
@@ -69,6 +71,7 @@ Forma usata da backend cache, cache UI e mirror eventi (`tui/events.py::_handle_
     "msg_type": "text" | "image" | "sticker" | "attachment",
     "attachment_info": str | None,
     "attachment_id": str | None,  # per Telegram anche "tgref:<chat_id>:<msg_id>"
+    "content_type": str | None,  # mime attachment (quote media, vedi §11)
     "read": bool,  # incoming letti (outgoing sempre True)
     "status": "pending" | "failed" | "sent" | "delivered" | "read",
     # opzionali:
@@ -84,7 +87,8 @@ Vincoli semantici verificati nei test:
 
 - l'ingest è idempotente (`ingest_message` ritorna `True` solo se nuovo);
 - le righe ottimistiche nascono `status="pending"`, `id=None`;
-- `sender_color`: nei gruppi WhatsApp (`@g.us`) il prefisso `<nome:>` usa `#DAA520` (`test_image_caption.py`, `test_ui_components.py`).
+- `sender_color`: nei gruppi WhatsApp (`@g.us`) il prefisso `<nome:>` usa `#DAA520` (`test_image_caption.py`, `test_ui_components.py`);
+- placeholder quote media: `quote_text` di un messaggio che cita media senza caption è uno dei 5 valori canonici di `MEDIA_QUOTE_PLACEHOLDERS` (`models.py`) — valori **display-only** che non devono mai viaggiare sul filo Signal (vedi §11); test `tests/test_models.py`.
 
 ## 3. Persistenza SQLite
 
@@ -96,6 +100,7 @@ protocol        TEXT NOT NULL DEFAULT 'signal'
 contact_number  TEXT NOT NULL          -- id grezzo del contatto (senza prefisso protocollo)
 text TEXT · is_mine INTEGER · sender TEXT · timestamp INTEGER NOT NULL
 quote_text TEXT · msg_type TEXT DEFAULT 'text' · attachment_info TEXT · attachment_id TEXT
+content_type TEXT               -- mime attachment (backfill: migrate_content_type.py)
 read INTEGER DEFAULT 0 · status TEXT DEFAULT 'read'
 msg_id TEXT · quote_timestamp INTEGER · quote_author TEXT · reply_to_message_id TEXT
 edited INTEGER NOT NULL DEFAULT 0
@@ -189,17 +194,23 @@ Test correlati: `tests/test_edit_flow.py`, `tests/test_edit_signal.py`, `tests/t
 | Protocollo | Payload evento | Matching verso i messaggi | Test |
 |---|---|---|---|
 | Signal | `{receipt: {"isDelivery": bool, "isRead": bool, "timestamps": [int ms]}}` | fuzzy `±1000 ms` sui timestamp propri (`is_mine=True`), rank guard | `tests/conftest.py::sample_envelope_receipt`, `tests/test_ui_protocol.py` |
-| WhatsApp | `{message_ids: [...], is_read: bool}`; enum ack WAHA `-1..4` (`DEVICE=2 → delivered`, `READ=3 → read`) | confronto tramite `canonical_msg_id()`: riduce `true_{jid}_{hex}` / hex puro allo stesso token upper-case; forme ambigue restano raw (log mismatch) | `tests/test_whatsapp_receipt_id_match.py`, `tests/test_whatsapp_read_receipt_fix.py` |
+| WhatsApp | `{message_ids: [...], is_read: bool}`; due path di ingresso: evento `receipt` raw (`receiptType` `"read"`/`"read-receipt"`) e `message.ack` con enum WAHA `-1..4` (`DEVICE=2 → delivered`, `READ=3 → read`, `PLAYED=4 → read`); gli ack `< 2` non sono receipt | confronto tramite `canonical_msg_id()` (applicata già nel payload): riduce `true_{jid}_{hex}` / hex puro allo stesso token upper-case; forme ambigue restano raw (log mismatch); solo `fromMe: true` | `tests/test_whatsapp_receipt_id_match.py`, `tests/test_whatsapp_read_receipt_fix.py` |
 | Telegram | `{message_ids: [...], is_read: bool}` (raw update) | update DB per `_update_message_status_by_id(msg_id)` | `tests/test_telegram_read_receipt_fix.py` |
 
 Effetti comuni: upgrade status in cache backend/UI/DB + refresh widget se la chat è aperta.
 
 ## 8. Contatti, raggruppamento e unread
 
-- **Grouping**: `group_by_person(contacts)` (`contact_picker.py`) raggruppa i contatti per persona usando `extras["phone"]` (E.164 senza `+`); `PickerEntry.key` identifica il gruppo; ordine gruppi = recency del membro default (`entry_default_contact` + `contact_sort_key`); membri in ordine fisso Signal→WhatsApp→Telegram (`_protocol_priority`).
+- **Grouping**: `group_by_person(contacts)` (`contact_picker.py`) raggruppa i contatti per persona usando `extras["phone"]` (E.164 senza `+`); `PickerEntry.key` identifica il gruppo (`phone:<numero>` oppure `raw:<protocol>:<id>` — gruppi/canali, `@lid` irrisolti e id Telegram non sono mai chiavi di phone-grouping); ordine gruppi = recency del membro default (`entry_default_contact` + `contact_sort_key`, con override `picker_preferred_backend`); membri in ordine fisso Signal→WhatsApp→Telegram (`_protocol_priority`).
   Test: `tests/test_contact_grouping.py`, `tests/test_contact_grouping_integration.py`, `tests/test_contact_picker.py`.
+- **Rubrica completa e picker (Ctrl+S)**: apertura in due fasi — la picker mostra subito le chat attive (`loading=True`) mentre un worker thread chiama `manager.list_address_book_sync(protocols=filtro)` (fan-out parallelo, errori parziali segnalati in status bar) e aggiorna la lista via `screen.set_contacts(...)`; il token `_address_book_token` invalida i worker in volo a chiusura picker. La ricerca filtra per nome/id/phone su qualunque membro dell'entry; selezione multi-backend senza filtro → `BackendChoiceScreen` (default = membro più recente). **Open-or-create**: selezionare un contatto sconosciuto lo crea come "ghost" (`extras["ghost"]`), lo registra nel backend (`register_contact`) e — per WhatsApp — verifica in background l'esistenza del numero (`check_number_exists`; `False` esplicito → warning non bloccante).
+  Test: `tests/test_contact_picker.py`, `tests/test_address_book.py`, `tests/test_open_or_create.py`.
 - **Unread**: conteggio sui dati della cache UI: `not is_mine AND not read`, dedup per `(timestamp, text)`; chiave `cache_key`; badge `*N` sull'header aggregato (vista All) o sul membro filtrato; il contatto selezionato non mostra badge ed è "pinned" sotto filtro unread; totali per backend nella status bar (`📱 N 💬 N 📨 N`, `-` se 0).
   Test: `tests/test_unread_filter.py`, `tests/test_status_backend_unread.py`, `tests/test_typing_indicator.py` (label riga).
+- **Status bar clickabile**: click su un segmento di protocollo (`StatusSegment.Pressed`) → filtro protocollo + vista unread **solo se** quel backend ha unread > 0, altrimenti filtro semplice senza unread; ri-click sul segmento attivo in modalità unread disattiva la vista unread (mantenendo il filtro protocollo). Nessun effetto mentre uno screen modale è aperto.
+  Test: `tests/test_status_backend_unread.py`.
+- **Ordinamento e auto-selezione**: ordine contatti = `contact_sort_key` (con messaggi per `last_message_ts` desc → con nome alfabetici → solo numero); l'invio ottimistico avanza subito `last_message_ts` e ri-renderizza la lista (`_promote_contact_after_send`, prima ancora dell'eco — test `tests/test_telegram_send_reorder.py`); a ogni cambio filtro viene aperto automaticamente il primo contatto visibile della nuova vista; al boot l'auto-selezione parte quando tutti i backend attesi hanno riportato esito (`_pending_backends`).
+  Test: `tests/test_telegram_send_reorder.py`, `tests/test_unread_filter.py`.
 - **Typing**: `✍️` mentre `STARTED` attivo (auto-expire 10 s → stato mumbling `💭` per 60 s); un messaggio reale del contatto sposta in mumbling; `STOPPED` → mumbling.
   Test: `tests/test_typing_indicator.py`.
 
@@ -211,7 +222,7 @@ Envelope ricevuto su `POST .../webhook`:
 {"event": "message", "session": "...", "payload": { ... }}
 ```
 
-- `event` riconosciuti: `message`, `message.ack` (anche varianti con suffisso), presence/typing, receipt (ack ≥ 2).
+- `event` riconosciuti: `message`, `message.ack` (anche varianti con suffisso), presence/typing, receipt (`receipt`/`receipts.update` con `receiptType`, e ack ≥ 2).
 - Campi `payload` consumati (via `_jid_string` tollerante alle forme stringa/dict): `from`, `to`/`chatId`/`remoteJid` (o `key.remoteJid`), `body`/`text`, `fromMe`, `timestamp` (**secondi** → convertiti in ms), `id`, `hasMedia`/`media{mimetype,url,caption,filename}`, `ack`/`ackName`, `type`/`messageType`.
 - Contratto risposta: sempre `200 {"ok": true}` dopo l'inoltro; `404 {"ok": false}` path errato; `400` JSON malformato.
 
@@ -232,3 +243,32 @@ Test: `tests/test_backend_webhook.py`, `tests/test_whatsapp_backend.py`.
 | Config (`config.py`) | fallback a default (`""`/3005/8088/…) senza raise |
 
 Test: `tests/test_backend_rpc.py`, `tests/test_config.py`, `tests/test_backend_download.py`, `tests/test_address_book.py`.
+
+## 11. Quote media (reply con immagine)
+
+Contratto della reply a un messaggio media (bug #37, fix V2 + piano B). Fissato da `tests/test_models.py`, `tests/test_reply_media.py` e dai test live gated `tests/test_live_quote_media.py`.
+
+### 11.1 Display vs filo
+
+- **Display** (bolla quote, reply bar): per un media senza caption la `quote_text` è un segnaposto tipizzato canonico — `MEDIA_QUOTE_PLACEHOLDERS = {image: "🖼️ Immagine", sticker: "🎨 Sticker", attachment: "📎 File", audio: "🎵 Audio", video: "🎬 Video"}`; con caption/filename reale vince il dettaglio (`media_quote_placeholder(msg_type, detail)`); forma composta `"filename — placeholder"` solo su path di display. I segnaposto sono **display-only**: non devono mai viaggiare come `quoteMessage` Signal (il destinatario risponderebbe "Original message not found").
+- **Filo**: il body fedele viaggia nella chiave separata `quote_wire_body` di `_reply_to` (caption reale o `""`) e — per Signal — nei parametri `quoteTimestamp`/`quoteAuthor`/`quoteMessage` + `quoteAttachments`.
+- Predicato `is_media_quote_placeholder(text)`: riconosce SOLO i 5 valori canonici (mai la forma composta); usato dal retry.
+
+### 11.2 Ingresso
+
+| Protocollo | Come arriva la quote |
+|---|---|
+| Signal | `dataMessage.quote`: testo reale se presente; altrimenti placeholder tipizzato da `quote.attachments[0].contentType` (`_signal_quote_text`), con prefisso filename se noto |
+| WhatsApp / Telegram | quote nativa lato server via `reply_to` (Baileys id / id numerico); il testo citato locale è letto dalla cache |
+
+Rendering locale: bolla `▎ <testo>` sopra il messaggio (classi `msg-quote` / `msg-quote-right`).
+
+### 11.3 Uscita (creazione dalla TUI)
+
+1. **Cattura target**: Alt+click o Alt+R su un'immagine → `ImageWidget.ReplyRequested(text=<caption o placeholder>, caption=<caption reale o None>, timestamp, sender, is_mine, message_id, attachment_id, content_type)` → `_reply_to` con `quote_wire_body` (= caption), `attachment_id`, `content_type`. La reply bar mostra il display text.
+2. **Guardie pre-bolla** (nessun pending orfano): WhatsApp senza `reply_to_message_id` → rifiuto; Telegram con id assente/non intero positivo → rifiuto.
+3. **Invio Signal** (`tui/send.py::_send_message_worker`): `quoteMessage = quote_wire_body or ""` (mai il segnaposto, mai omesso); se la riga porta un mime noto (`content_type` persistito) viene costruito `quoteAttachments = ["contentType:filename:previewFile"]` risolvendo l'allegato locale via `get_attachment_path(attachment_id)` — è ciò che rende VISIBILE la thumbnail sul destinatario; file locale assente → descrittore `"contentType"` alone (quote senza thumbnail). Parametro passato solo a `send_message_sync` del backend Signal (RPC `quoteAttachments` / subprocess ripetuti `--quote-attachment`).
+4. **WhatsApp / Telegram**: nessun testo di quote sul filo — solo `reply_to` (id server validato).
+5. **Persistenza e retry**: la riga del messaggio inviato salva `attachment_id` + `content_type`; il retry di una reply fallita ricostruisce `reply_data` dalla riga (mime marker → `quote_wire_body` = caption o `""`) così il piano B viene ricomposto identico al vivo. Righe legacy senza mime (`content_type NULL`) degradano al comportamento V2: quote testuale corretta, senza thumbnail.
+
+Test: `tests/test_reply_media.py` (flusso UI headless), `tests/test_models.py` (placeholder/predicato), `tests/test_live_quote_media.py` (verifica empirica sul filo, gated `LIVE_TESTS=1`).
