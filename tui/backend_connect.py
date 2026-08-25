@@ -26,6 +26,23 @@ def _status_rank(status: str | None) -> int:
     return _STATUS_RANK.get(status, 0)
 
 
+def _dedup_key(m: dict) -> tuple | None:
+    """Composite dedup key for the id-based merge: ``(id, attachment_id)``.
+
+    Signal splits a multi-attachment message into one cached row per
+    attachment: every row shares the same ``id`` (the message timestamp) but
+    carries a distinct ``attachment_id``.  Keying only on ``id`` collapses
+    those attachments into a single entry (the "one image lost after re-entry"
+    bug).  Messages without an id (optimistic sends) have no key; messages
+    with an id but no attachment_id (text, ack-echo, captions) keep the
+    ``(id, None)`` identity.
+    """
+    mid = m.get("id")
+    if not mid:
+        return None
+    return (mid, m.get("attachment_id"))
+
+
 class BackendConnectMixin:
     def _mark_backend_connecting(self, proto: str) -> None:
         """UI thread: un backend ha avviato la connessione (in attesa di report)."""
@@ -66,6 +83,7 @@ class BackendConnectMixin:
         for cid, msgs in backend.cache.items():
             key = contact_cache_key(proto, cid)
             ui_msgs = self._cache.setdefault(key, [])
+            by_key = {_dedup_key(m): m for m in ui_msgs if _dedup_key(m) is not None}
             by_id = {m.get("id"): m for m in ui_msgs if m.get("id")}
             by_identity = {
                 (
@@ -83,7 +101,20 @@ class BackendConnectMixin:
                     int(m.get("timestamp") or 0),
                 )
                 existing = None
-                if mid and mid in by_id:
+                dk = _dedup_key(m)
+                if dk is not None and dk in by_key:
+                    existing = by_key[dk]
+                elif (
+                    mid
+                    and mid in by_id
+                    and (
+                        not m.get("attachment_id")
+                        or not by_id[mid].get("attachment_id")
+                    )
+                ):
+                    # ack-echo / text-echo (#36): one of the two entries has no
+                    # attachment_id (the echo shares the media's id but has no
+                    # distinguishing attachment) → pure id-first identity.
                     existing = by_id[mid]
                 elif identity in by_identity:
                     existing = by_identity[identity]
@@ -93,6 +124,9 @@ class BackendConnectMixin:
                     if mid and not existing.get("id"):
                         existing["id"] = mid
                         by_id[mid] = existing
+                        learned = _dedup_key(existing)
+                        if learned is not None:
+                            by_key[learned] = existing
                     # Already present: still upgrade the status if the incoming
                     # rank is higher (never downgrade read → sent).
                     if _status_rank(m.get("status")) > _status_rank(
@@ -103,6 +137,8 @@ class BackendConnectMixin:
                 ui_msgs.append(m)
                 if mid:
                     by_id[mid] = m
+                    if dk is not None:
+                        by_key[dk] = m
                 by_identity[identity] = m
             ui_msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
 
