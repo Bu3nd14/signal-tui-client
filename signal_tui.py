@@ -7,6 +7,7 @@ The application itself lives in the ``tui`` package (see ``tui.app.SignalTUI``).
 
 import logging
 import os
+import shutil
 import sys
 import traceback
 
@@ -128,10 +129,20 @@ if __name__ == "__main__":
             override=image_protocol(),
         )
     except Exception:
-        logger.debug(
+        logger.info(
             "Image support detection failed, falling back to CATIMG", exc_info=True
         )
         image_support = ImageSupport.CATIMG
+
+    logger.info(
+        "Image support: %s (TERM=%r, override=%r, isatty=%s, TMUX=%r, catimg=%s)",
+        image_support.value,
+        os.environ.get("TERM"),
+        image_protocol(),
+        sys.stdin.isatty() and sys.stdout.isatty(),
+        os.environ.get("TMUX"),
+        bool(shutil.which("catimg")),
+    )
 
     # P2: measure the cell size BEFORE ``app.run()``, in the same pre-run window
     # where the TGP query is already safe (no Textual key-thread yet).  The CSI
@@ -142,6 +153,7 @@ if __name__ == "__main__":
             initial_cell_size = get_cell_size(sys.stdin.fileno())
         except Exception:
             logger.debug("Cell-size pre-run detection failed", exc_info=True)
+        logger.info("Native image cell size: %r", initial_cell_size)
 
     app = SignalTUI(image_support=image_support, initial_cell_size=initial_cell_size)
 
