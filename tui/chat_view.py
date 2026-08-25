@@ -444,6 +444,7 @@ class ChatViewMixin:
         *,
         max_lines: int = 0,
         max_cols: int = 0,
+        window_token: int | None = None,
     ):
         """Worker thread: resolve the path (and prepare a native thumbnail).
 
@@ -451,12 +452,21 @@ class ChatViewMixin:
         never floods the CPU with parallel Pillow decodes.  For KITTY the PNG
         thumbnail is generated here (Pillow); the transmit and widget-state
         update happen on the UI thread via ``call_from_thread``.
+
+        ``window_token`` (when set) ties this worker to a specific cache-window
+        generation: every terminal branch forwards it to the UI handler, which
+        decrements the pending counter and re-anchors the chat at the end of the
+        window load.
         """
         with self._image_resolve_semaphore:
             path = self.manager.get_attachment_path(protocol, attachment_id)
             if path is None:
                 self.call_from_thread(
-                    self._finish_attachment_resolve, widget, None, attachment_info
+                    self._finish_attachment_resolve,
+                    widget,
+                    None,
+                    attachment_info,
+                    window_token=window_token,
                 )
                 return
             renderer = self._native_renderer
@@ -466,19 +476,58 @@ class ChatViewMixin:
                 except Exception as _e:
                     logger.debug("Thumbnail prepare failed", exc_info=True)
                     self.call_from_thread(
-                        self._finish_attachment_resolve, widget, path, attachment_info
+                        self._finish_attachment_resolve,
+                        widget,
+                        path,
+                        attachment_info,
+                        window_token=window_token,
                     )
                     return
-                self.call_from_thread(self._finish_native_thumbnail, widget, path, png)
+                self.call_from_thread(
+                    self._finish_native_thumbnail,
+                    widget,
+                    path,
+                    png,
+                    window_token=window_token,
+                )
             else:
                 self.call_from_thread(
-                    self._finish_attachment_resolve, widget, path, attachment_info
+                    self._finish_attachment_resolve,
+                    widget,
+                    path,
+                    attachment_info,
+                    window_token=window_token,
+                )
+
+    def _window_worker_done(self, window_token: int | None) -> None:
+        """Decrement the pending window counter and re-anchor when it drains.
+
+        Runs on the UI thread (called at the top of the finish handlers), so the
+        decrement has no cross-thread race.  A stale ``window_token`` (from a
+        previous window) is ignored, so orphan workers never scroll the newly
+        opened chat.
+        """
+        if window_token is None or window_token != self._window_native_token:
+            return
+        self._window_native_pending -= 1
+        if self._window_native_pending <= 0:
+            self._window_native_pending = 0
+            try:
+                self.chat_log.scroll_end(animate=False)
+            except Exception as _e:
+                logger.debug(
+                    "Failed to scroll to bottom after window load", exc_info=True
                 )
 
     def _finish_attachment_resolve(
-        self, widget: ImageWidget, path: Path | None, attachment_info: str
+        self,
+        widget: ImageWidget,
+        path: Path | None,
+        attachment_info: str,
+        window_token: int | None = None,
     ):
         """UI thread: update the placeholder with the resolved attachment path."""
+        self._window_worker_done(window_token)
         if not widget.is_mounted:
             return
         if path is None:
@@ -488,11 +537,18 @@ class ChatViewMixin:
                 path, f"[🖼️ Image: {path.name} — Click Enter to View]"
             )
 
-    def _finish_native_thumbnail(self, widget: ImageWidget, path: Path, png: bytes):
+    def _finish_native_thumbnail(
+        self,
+        widget: ImageWidget,
+        path: Path,
+        png: bytes,
+        window_token: int | None = None,
+    ):
         """UI thread: transmit the thumbnail once and register the widget.
 
         Placement happens later in the app's ``post_display_hook`` — never here.
         """
+        self._window_worker_done(window_token)
         if not widget.is_mounted:
             return
         renderer = self._native_renderer
@@ -542,9 +598,19 @@ class ChatViewMixin:
                 continue
             protocol = widget._protocol or PROTOCOL_SIGNAL
             info = widget._attachment_info or "Photo"
+            self._window_native_pending += 1
+            token = self._window_native_token
             self.run_worker(
-                lambda w=widget, p=protocol, i=info: self._resolve_attachment_worker(
-                    p, w.attachment_id, w, i, max_lines=max_lines, max_cols=max_cols
+                lambda w=widget, p=protocol, i=info, t=token: (
+                    self._resolve_attachment_worker(
+                        p,
+                        w.attachment_id,
+                        w,
+                        i,
+                        max_lines=max_lines,
+                        max_cols=max_cols,
+                        window_token=t,
+                    )
                 ),
                 thread=True,
                 exclusive=False,
@@ -562,6 +628,10 @@ class ChatViewMixin:
         # All placements were freed above (d=I); drop their cache keys too.
         self._native_last_key.clear()
         self._chat_native_ids.clear()
+        # Invalidate any in-flight window workers: their deferred scroll_end must
+        # not fire on the newly-opened chat.
+        self._window_native_token += 1
+        self._window_native_pending = 0
 
     def _load_messages_worker(self):
         """Load messages: last 20 from cache, then reconcile remote history.
@@ -744,6 +814,10 @@ class ChatViewMixin:
                 chat_log.scroll_end(animate=False)
                 # C4: cached image widgets mount with path=None; kick off the
                 # (KITTY-only) resolution so native thumbnails can appear.
+                # Start a fresh window generation: reset the pending counter for
+                # the workers started below and invalidate any previous window.
+                self._window_native_token += 1
+                self._window_native_pending = 0
                 self._resolve_mounted_image_paths(widgets)
 
             # "load more" banner remounted AFTER the _clear_chat.

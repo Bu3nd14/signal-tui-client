@@ -116,6 +116,11 @@ class SignalTUI(
         self._native_image_counter = 0
         # Concurrency gate for attachment path resolution + thumbnail prepare.
         self._image_resolve_semaphore = threading.Semaphore(4)
+        # Window load anchor: token + pending-native-worker counter, used to
+        # scroll to the bottom exactly once when the cache-window thumbnails
+        # have all finished growing (see ChatViewMixin).
+        self._window_native_token = 0
+        self._window_native_pending = 0
 
         # Multi-protocol backend manager + the always-registered Signal backend.
         self.manager = BackendManager()

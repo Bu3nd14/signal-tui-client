@@ -317,3 +317,104 @@ class TestScrollAnchor:
             _is_scrolled_to_bottom(_ScrollFakeChatLog(max_y=50, offset_y=48)) is False
         )
         assert _is_scrolled_to_bottom(_ScrollFakeChatLog(max_y=-3, offset_y=0)) is True
+
+
+class TestWindowLoadAnchor:
+    """Window token + pending counter guarantee scroll-to-bottom at window end.
+
+    Reproduces the race: the mount's ``scroll_end`` is deferred (call_after_refresh)
+    so when the resolution workers complete the scroll is NOT yet at the bottom.
+    The pending counter must re-anchor exactly once when the LAST worker drains.
+    """
+
+    def _setup(self, tmp_path, n_images):
+        app, _ = _make_kitty_app()
+        log = _ScrollFakeChatLog(max_y=100, offset_y=10)  # NOT at bottom (race)
+        app._chat_log = log
+        img_path = tmp_path / "photo.png"
+        Image.new("RGB", (64, 32), "red").save(img_path)
+        app.manager.get_attachment_path.return_value = img_path
+        widgets = []
+        for i in range(n_images):
+            widget = ImageWidget(attachment_path=None, attachment_id=f"att-{i}")
+            widget._is_mounted = True
+            widget._protocol = PROTOCOL_SIGNAL
+            widget._attachment_info = "Photo"
+            widgets.append(widget)
+        return app, log, widgets
+
+    def _run_window(self, app, widgets):
+        # Mirror the _mount_window preamble (token++ / pending=0) before the
+        # resolution workers are started.
+        app._window_native_token += 1
+        app._window_native_pending = 0
+        app._resolve_mounted_image_paths(widgets)
+
+    def _drain_workers(self, app):
+        for call in app.run_worker.call_args_list:
+            call.args[0]()  # run the worker lambda inline
+
+    def test_window_load_scrolls_once_at_end(self, tmp_path):
+        app, log, widgets = self._setup(tmp_path, n_images=3)
+        self._run_window(app, widgets)
+
+        assert app._window_native_pending == 3
+        assert log.scroll_end_calls == 0  # workers still pending
+
+        self._drain_workers(app)
+
+        assert app._window_native_pending == 0
+        assert log.scroll_end_calls == 1  # exactly once, at the end
+
+    def test_all_terminal_branches_decrement(self, tmp_path):
+        app, log, widgets = self._setup(tmp_path, n_images=3)
+        img_ok = tmp_path / "ok.png"
+        Image.new("RGB", (64, 32), "red").save(img_ok)
+        img_bad = tmp_path / "bad.png"
+        img_bad.write_text("garbage")
+
+        def _get_path(protocol, aid):
+            if aid == "att-0":
+                return None  # path None branch
+            if aid == "att-1":
+                return img_bad  # prepare-failed branch
+            return img_ok  # native success branch
+
+        app.manager.get_attachment_path.side_effect = _get_path
+
+        self._run_window(app, widgets)
+        assert app._window_native_pending == 3
+        self._drain_workers(app)
+
+        assert app._window_native_pending == 0  # no deadlock
+        assert log.scroll_end_calls == 1
+
+    def test_token_change_ignores_orphan_workers(self, tmp_path):
+        app, log, widgets = self._setup(tmp_path, n_images=1)
+        self._run_window(app, widgets)
+        assert app._window_native_pending == 1
+
+        # Switch chat mid-load (what _clear_chat does): invalidate the window.
+        app._window_native_token += 1
+        app._window_native_pending = 0
+
+        # The orphan worker completes with the OLD token.
+        app.run_worker.call_args_list[0].args[0]()
+
+        # It must NOT scroll the new chat, nor touch the new counter.
+        assert log.scroll_end_calls == 0
+        assert app._window_native_pending == 0
+
+    def test_live_worker_does_not_touch_counter(self, tmp_path):
+        app, log, widgets = self._setup(tmp_path, n_images=1)
+        widget = widgets[0]
+        app._window_native_pending = 5  # sentinel
+        app._window_native_token = 7
+
+        # Live path: no window_token → no counter effect.
+        app._resolve_attachment_worker(
+            PROTOCOL_SIGNAL, "att-0", widget, "Photo", max_lines=12, max_cols=60
+        )
+
+        assert app._window_native_pending == 5  # untouched
+        assert log.scroll_end_calls == 0
