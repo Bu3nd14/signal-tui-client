@@ -320,6 +320,8 @@ class TestTelegramMessages:
             "sender": "Ada Lovelace",
             "timestamp": 1735787045000,
             "quote_text": "quoted",
+            "quote_attachment_id": None,
+            "quote_content_type": None,
             "reply_to_message_id": "12",
             "msg_type": "text",
             "attachment_info": None,
@@ -329,6 +331,35 @@ class TestTelegramMessages:
         }
 
         assert backend._message_to_chat_event(_message(chat_id=None)) is None
+
+    def test_quote_resolves_target_attachment_metadata(self):
+        """Una quote verso un target cached media popola quote_attachment_*.
+
+        Il path NON viene risolto qui: resta None (il download lazy è di
+        ``get_attachment_path``); vengono copiati solo id + content_type.
+        """
+        backend = _backend()
+        contact = ChatContact(id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM)
+        backend._contacts_by_id = {42: contact}
+        backend.cache = {
+            "42": [
+                {
+                    "id": "12",
+                    "text": "",
+                    "msg_type": "image",
+                    "attachment_info": "Photo",
+                    "attachment_id": "tgref:42:12",
+                    "content_type": "image/png",
+                }
+            ]
+        }
+        message = _message(reply_to=SimpleNamespace(reply_to_msg_id=12))
+
+        event = backend._message_to_chat_event(message)
+
+        assert event.payload["quote_text"] == "🖼️ Immagine"
+        assert event.payload["quote_attachment_id"] == "tgref:42:12"
+        assert event.payload["quote_content_type"] == "image/png"
 
     @pytest.mark.parametrize(
         ("field", "expected_type", "expected_info", "extra"),

@@ -49,6 +49,7 @@ from ui_components import (
     ChatAreaWidget,
     ContactListWidget,
     ImageWidget,
+    QuoteWidget,
     StatusBar,
 )
 
@@ -361,13 +362,20 @@ class SignalTUI(
         cell_w = renderer.cell_w
         cell_h = renderer.cell_h
         chat_ids: set[int] = set()
-        for widget in self.query(ImageWidget):
+        for widget in self.query("ImageWidget, QuoteWidget"):
             image_id = widget.native_image_id
             if image_id is None or not widget.visible:
                 continue
             if widget.native_width_px is None:
                 continue
-            region = widget.content_region
+            # For a QuoteWidget the native thumbnail is placed over its internal
+            # thumbnail slot (not the container, which would cover the text).
+            if isinstance(widget, QuoteWidget):
+                region = widget.thumbnail_region()
+                if region is None:
+                    continue
+            else:
+                region = widget.content_region
             rect = compute_source_rect(
                 region, container, cell_w, cell_h, widget.native_width_px
             )

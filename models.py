@@ -199,6 +199,13 @@ class ChatMessage:
     content_type: str | None = None
     status: str = "sent"
     reply_to_message_id: str | None = None
+    # Quoted-media thumbnail metadata (DESIGN_QUOTE_THUMBNAIL, additive).
+    # ``quote_attachment_id``/``quote_content_type`` are backend-produced and
+    # persisted; ``quote_attachment_path`` is UI-derived (resolved lazily via
+    # ``get_attachment_path``) and is NOT persisted.
+    quote_attachment_id: str | None = None
+    quote_attachment_path: str | None = None
+    quote_content_type: str | None = None
 
 
 @dataclass

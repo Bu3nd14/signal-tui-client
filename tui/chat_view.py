@@ -20,6 +20,7 @@ from tui.images.detect import ImageSupport
 from ui_components import (
     ImageWidget,
     MessageWidget,
+    QuoteWidget,
 )
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,9 @@ class ChatViewMixin:
         protocol: str | None = None,
         message_id: str | None = None,
         edited: bool = False,
+        quote_attachment_id: str | None = None,
+        quote_attachment_path: Path | None = None,
+        quote_content_type: str | None = None,
     ):
         """Add a message to the chat with correct alignment.
 
@@ -212,8 +216,18 @@ class ChatViewMixin:
 
         if quote_text:
             quote_class = "msg-quote-right" if is_mine else "msg-quote"
-            quote_widget = Static(f"▎ {quote_text}", classes=quote_class)
+            quote_widget = QuoteWidget(
+                quote_text,
+                classes=quote_class,
+                attachment_id=quote_attachment_id,
+                attachment_path=quote_attachment_path,
+                content_type=quote_content_type,
+                protocol=protocol,
+            )
             chat_log.mount(quote_widget)
+            # Native quote thumbnail (uscita): resolve the already-known path in
+            # a worker and register the thumbnail on the quote bubble.
+            self._maybe_resolve_quote_thumbnail(quote_widget)
 
         # ── Image messages: render inline via async worker ──────────────
         if msg_type == "image":
@@ -573,6 +587,80 @@ class ChatViewMixin:
         if was_at_bottom:
             chat_log.scroll_end(animate=False)
 
+    # ── Native quote thumbnail (uscita + ingresso) ──────────────────────────
+    def _maybe_resolve_quote_thumbnail(self, quote_widget: QuoteWidget) -> None:
+        """Start native thumbnail generation for a quote bubble.
+
+        Uscita: an already-resolved ``attachment_path`` drives the thumbnail.
+        Ingresso: a backend-produced ``attachment_id`` (+ ``protocol``) is
+        resolved lazily via ``get_attachment_path`` in the worker (best-effort).
+
+        Falls back silently to the text-only bubble otherwise (degrado): no
+        path nor resolvable id, non-kitty, renderer gone, or an
+        already-registered thumbnail.
+        """
+        if quote_widget.native_image_id is not None:
+            return  # already has a thumbnail → no double generation
+        if self.image_support is not ImageSupport.KITTY:
+            return
+        if self._native_renderer is None:
+            return
+        path = quote_widget.attachment_path
+        attachment_id = quote_widget.attachment_id
+        protocol = quote_widget.protocol
+        if path is None and not (attachment_id and protocol):
+            return  # nothing resolvable → text-only bubble
+        self.run_worker(
+            lambda w=quote_widget, p=path, a=attachment_id, pr=protocol: (
+                self._resolve_quote_thumbnail_worker(w, p, a, pr)
+            ),
+            thread=True,
+            exclusive=False,
+        )
+
+    def _resolve_quote_thumbnail_worker(
+        self,
+        widget: QuoteWidget,
+        path: Path | None,
+        attachment_id: str | None,
+        protocol: str | None,
+    ) -> None:
+        """Worker thread: resolve (ingresso) and generate the 3×6 quote thumb."""
+        with self._image_resolve_semaphore:
+            renderer = self._native_renderer
+            if renderer is None:
+                return
+            if path is None:
+                # Ingresso: lazy resolve of the quoted attachment (best-effort).
+                try:
+                    path = self.manager.get_attachment_path(protocol, attachment_id)
+                except Exception as _e:
+                    logger.debug("Quote attachment resolve failed", exc_info=True)
+                    path = None
+                if path is None:
+                    return  # degrado pulito: bolla solo testo
+            try:
+                png = renderer.prepare_thumbnail(path, 3, 6)
+            except Exception as _e:
+                logger.debug("Quote thumbnail prepare failed", exc_info=True)
+                return
+            self.call_from_thread(self._finish_quote_thumbnail, widget, png)
+
+    def _finish_quote_thumbnail(self, widget: QuoteWidget, png: bytes) -> None:
+        """UI thread: transmit the quote thumbnail once and register the widget.
+
+        Placement happens in the app's ``post_display_hook`` (chunk 3) — never
+        here.  The wire (#37) is untouched: the thumbnail is display-only.
+        """
+        if not widget.is_mounted:
+            return
+        renderer = self._native_renderer
+        if renderer is None:
+            return
+        image_id = self._next_native_image_id()
+        renderer.transmit(image_id, png)
+        widget.show_native_thumbnail(renderer, image_id, png)
+
     def _resolve_mounted_image_paths(self, widgets: list) -> None:
         """Start path resolution for cached image widgets (C4).
 
@@ -592,35 +680,38 @@ class ChatViewMixin:
             max_cols = min(max_cols, max(1, chat_width))
 
         for widget in widgets:
-            if not isinstance(widget, ImageWidget):
-                continue
-            if widget.attachment_path is not None or not widget.attachment_id:
-                continue
-            protocol = widget._protocol or PROTOCOL_SIGNAL
-            info = widget._attachment_info or "Photo"
-            self._window_native_pending += 1
-            token = self._window_native_token
-            self.run_worker(
-                lambda w=widget, p=protocol, i=info, t=token: (
-                    self._resolve_attachment_worker(
-                        p,
-                        w.attachment_id,
-                        w,
-                        i,
-                        max_lines=max_lines,
-                        max_cols=max_cols,
-                        window_token=t,
-                    )
-                ),
-                thread=True,
-                exclusive=False,
-            )
+            if isinstance(widget, ImageWidget):
+                if widget.attachment_path is not None or not widget.attachment_id:
+                    continue
+                protocol = widget._protocol or PROTOCOL_SIGNAL
+                info = widget._attachment_info or "Photo"
+                self._window_native_pending += 1
+                token = self._window_native_token
+                self.run_worker(
+                    lambda w=widget, p=protocol, i=info, t=token: (
+                        self._resolve_attachment_worker(
+                            p,
+                            w.attachment_id,
+                            w,
+                            i,
+                            max_lines=max_lines,
+                            max_cols=max_cols,
+                            window_token=t,
+                        )
+                    ),
+                    thread=True,
+                    exclusive=False,
+                )
+            elif isinstance(widget, QuoteWidget):
+                # Native quote thumbnail (ingresso): resolve the quoted
+                # attachment lazily when a resolvable id is present.
+                self._maybe_resolve_quote_thumbnail(widget)
 
     def _clear_chat(self):
         """Clear the chat and reset the render-level de-dup set."""
         chat_log = self.chat_log
         for widget in list(getattr(chat_log, "children", [])):
-            if isinstance(widget, ImageWidget):
+            if isinstance(widget, (ImageWidget, QuoteWidget)):
                 widget.native_cleanup()
         chat_log.remove_children()
         self._shown_in_log.clear()
@@ -942,7 +1033,18 @@ class ChatViewMixin:
         widgets: list = []
         if quote_text:
             quote_class = "msg-quote-right" if is_mine else "msg-quote"
-            widgets.append(Static(f"▎ {quote_text}", classes=quote_class))
+            # Forward future quoted-attachment metadata (chunk 5) when already
+            # present in the message dict; resolution stays out of scope here.
+            widgets.append(
+                QuoteWidget(
+                    quote_text,
+                    classes=quote_class,
+                    attachment_id=msg.get("quote_attachment_id"),
+                    attachment_path=msg.get("quote_attachment_path"),
+                    content_type=msg.get("quote_content_type"),
+                    protocol=protocol,
+                )
+            )
 
         if msg_type == "image":
             caption = _image_caption(text, attachment_info, attachment_id, protocol)

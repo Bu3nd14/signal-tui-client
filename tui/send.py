@@ -186,6 +186,15 @@ class SendMixin:
             message,
             is_mine=True,
             quote_text=quote_text,
+            quote_attachment_id=(
+                reply_data.get("quote_attachment_id") if reply_data else None
+            ),
+            quote_attachment_path=(
+                reply_data.get("quote_attachment_path") if reply_data else None
+            ),
+            quote_content_type=(
+                reply_data.get("quote_content_type") if reply_data else None
+            ),
             timestamp=ts,
             sender="You",
             status="pending",

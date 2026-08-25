@@ -172,6 +172,7 @@ Screen {
     padding: 0 1 0 3;
     color: $text-muted;
     text-style: italic;
+    width: 1fr;
 }
 
 .msg-quote-right {
@@ -179,6 +180,18 @@ Screen {
     padding: 0 3 0 1;
     color: $text-muted;
     text-style: italic;
+    width: 1fr;
+}
+
+/* QuoteWidget (native quote bubble): the container must not expand to 1fr
+   (Textual Horizontal default) and the thumbnail slot keeps a fixed ~6×3 area. */
+QuoteWidget {
+    height: auto;
+}
+
+QuoteWidget .quote-thumb {
+    width: 6;
+    height: 3;
 }
 
 .msg-load-more {
