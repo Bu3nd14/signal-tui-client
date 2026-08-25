@@ -586,14 +586,17 @@ class SendMixin:
                 or message.get("quote_author") is not None
             )
         ):
-            self._status(
+            self.call_from_thread(
+                self._status,
                 "❌ Cannot retry a Telegram reply; original message ID is unavailable",
                 0,
             )
             return
         if message.get("quote_text") and message.get("quote_timestamp") is None:
-            self._status(
-                "❌ Cannot retry a reply after reload; quote metadata is unavailable", 0
+            self.call_from_thread(
+                self._status,
+                "❌ Cannot retry a reply after reload; quote metadata is unavailable",
+                0,
             )
             return
         if not self._transition_outgoing_status(

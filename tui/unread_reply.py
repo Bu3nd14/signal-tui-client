@@ -143,7 +143,14 @@ class UnreadReplyMixin:
             return
 
         if event.is_mine and event.status == "failed":
-            self._retry_failed_message(event.timestamp, event.text)
+            # Il retry tocca DB/cache e usa call_from_thread: DEVE girare in un
+            # worker thread, mai sul thread UI (il flusso _transition_outgoing_status
+            # lo richiede, altrimenti RuntimeError da call_from_thread).
+            self.run_worker(
+                lambda: self._retry_failed_message(event.timestamp, event.text),
+                exclusive=False,
+                thread=True,
+            )
             return
 
         # If clicking the same message, cancel the reply
