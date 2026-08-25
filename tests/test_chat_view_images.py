@@ -9,6 +9,7 @@ injected with a recording write callback and the UI-thread hops run inline.
 
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,9 +22,16 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import PROTOCOL_SIGNAL
 from tui.app import SignalTUI
+from tui.chat_view import _is_scrolled_to_bottom
 from tui.images.detect import ImageSupport
 from tui.images.kitty_renderer import KittyRenderer
 from ui_components import ImageWidget
+
+
+def _make_png_bytes(width: int = 16, height: int = 32) -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), "red").save(buf, "PNG")
+    return buf.getvalue()
 
 
 def _make_kitty_app() -> tuple[SignalTUI, list[str]]:
@@ -33,6 +41,7 @@ def _make_kitty_app() -> tuple[SignalTUI, list[str]]:
     app.manager = MagicMock()
     app.run_worker = MagicMock()
     app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+    app._chat_log = _FakeChatLog()
     return app, written
 
 
@@ -42,6 +51,9 @@ class _FakeChatLog:
     def __init__(self, width: int = 60) -> None:
         self.content_region = SimpleNamespace(width=width)
         self.children: list = []
+        self.max_scroll_y = 0
+        self.scroll_offset = SimpleNamespace(y=0)
+        self.scroll_end_calls = 0
 
     def mount(self, *widgets, before=None, after=None):
         for w in widgets:
@@ -49,7 +61,7 @@ class _FakeChatLog:
             self.children.append(w)
 
     def scroll_end(self, animate: bool = False) -> None:
-        pass
+        self.scroll_end_calls += 1
 
 
 class TestResolveAttachmentWorkerKitty:
@@ -242,3 +254,66 @@ class TestNativePlaceholder:
         assert isinstance(widget, ImageWidget)
         assert widget.content == ""
         assert app.run_worker.call_count == 1
+
+
+class _ScrollFakeChatLog:
+    """Fake ``#chat-log`` exposing a controllable scroll state (headless)."""
+
+    def __init__(self, *, max_y: int, offset_y: int) -> None:
+        self.max_scroll_y = max_y
+        self.scroll_offset = SimpleNamespace(y=offset_y)
+        self.scroll_end_calls = 0
+
+    def scroll_end(self, animate: bool = False) -> None:
+        self.scroll_end_calls += 1
+
+
+class TestScrollAnchor:
+    """_finish_native_thumbnail keeps the chat stuck to the bottom on growth."""
+
+    def _mounted_widget(self) -> ImageWidget:
+        widget = ImageWidget(attachment_path=None, attachment_id="att-1")
+        widget._is_mounted = True
+        return widget
+
+    def _call(self, app, widget, log, tmp_path):
+        app._chat_log = log
+        app._finish_native_thumbnail(widget, tmp_path / "x.png", _make_png_bytes())
+
+    def test_scrolls_when_at_bottom(self, tmp_path):
+        app, _ = _make_kitty_app()
+        log = _ScrollFakeChatLog(max_y=50, offset_y=50)
+        widget = self._mounted_widget()
+
+        self._call(app, widget, log, tmp_path)
+
+        # Widget grew (thumbnail applied) AND the log was re-anchored.
+        assert widget.styles.height.value > 1
+        assert log.scroll_end_calls == 1
+
+    def test_no_scroll_when_user_scrolled_up(self, tmp_path):
+        app, _ = _make_kitty_app()
+        log = _ScrollFakeChatLog(max_y=50, offset_y=25)
+        widget = self._mounted_widget()
+
+        self._call(app, widget, log, tmp_path)
+
+        assert widget.styles.height.value > 1
+        assert log.scroll_end_calls == 0
+
+    def test_scrolls_when_shorter_than_viewport(self, tmp_path):
+        app, _ = _make_kitty_app()
+        log = _ScrollFakeChatLog(max_y=0, offset_y=0)
+        widget = self._mounted_widget()
+
+        self._call(app, widget, log, tmp_path)
+
+        assert log.scroll_end_calls == 1
+
+    def test_is_scrolled_to_bottom_tolerance(self):
+        # At exactly max_y - 1 the 1-cell tolerance still counts as "bottom".
+        assert _is_scrolled_to_bottom(_ScrollFakeChatLog(max_y=50, offset_y=49)) is True
+        assert (
+            _is_scrolled_to_bottom(_ScrollFakeChatLog(max_y=50, offset_y=48)) is False
+        )
+        assert _is_scrolled_to_bottom(_ScrollFakeChatLog(max_y=-3, offset_y=0)) is True

@@ -119,6 +119,26 @@ def _image_caption(
     return None
 
 
+def _is_scrolled_to_bottom(chat_log: Vertical) -> bool:
+    """Return True if ``#chat-log`` is at (or near) its scroll bottom.
+
+    Used to keep the chat "stuck to the bottom" when a native thumbnail grows
+    the content *after* the initial ``scroll_end`` of a mount (see
+    ``_finish_native_thumbnail``).
+
+    Textual 8.2.8 API verified in the venv: ``Widget.scroll_offset`` is an
+    ``Offset`` (``.y`` is the rounded scroll position) and ``Widget.max_scroll_y``
+    is an int (``max(0, virtual_size.height - container_size.height + …)``);
+    there is **no** ``max_scroll_offset_y`` nor ``is_scrolled_to_bottom`` method.
+    A chat shorter than the viewport (``max_scroll_y <= 0``) counts as "at the
+    bottom".
+    """
+    max_y = chat_log.max_scroll_y
+    if max_y <= 0:
+        return True
+    return chat_log.scroll_offset.y >= max_y - 1
+
+
 class ChatViewMixin:
     @property
     def chat_log(self) -> Vertical:
@@ -486,7 +506,16 @@ class ChatViewMixin:
         renderer.transmit(image_id, png)
         # Native mode: no textual placeholder — the kitty image covers the area.
         widget.update_attachment(path, "")
+        # "Stick to bottom": ``show_native_thumbnail`` grows the widget (and thus
+        # the chat content) asynchronously, AFTER the mount's ``scroll_end``.
+        # Capture the anchored state BEFORE the growth and re-anchor only when
+        # the user was already at the bottom — otherwise we'd yank a user who
+        # scrolled up to read while thumbnails were still loading.
+        chat_log = self.chat_log
+        was_at_bottom = _is_scrolled_to_bottom(chat_log)
         widget.show_native_thumbnail(renderer, image_id, png)
+        if was_at_bottom:
+            chat_log.scroll_end(animate=False)
 
     def _resolve_mounted_image_paths(self, widgets: list) -> None:
         """Start path resolution for cached image widgets (C4).
