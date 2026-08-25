@@ -144,6 +144,20 @@ if __name__ == "__main__":
         bool(shutil.which("catimg")),
     )
 
+    # Diagnostic: when TERM claims kitty, also log the raw TGP probe result
+    # with its timing (the probe above may have degraded to catimg even on a
+    # real kitty if the reply is late/absent in the process context).
+    if os.environ.get("TERM") == "xterm-kitty":
+        import time as _time
+
+        from tui.images.detect import query_kitty_ok
+
+        _t0 = _time.monotonic()
+        _ok = query_kitty_ok(sys.stdin.fileno(), sys.stdout.fileno())
+        logger.info(
+            "TGP probe (TERM=xterm-kitty): %s in %.2fs", _ok, _time.monotonic() - _t0
+        )
+
     # P2: measure the cell size BEFORE ``app.run()``, in the same pre-run window
     # where the TGP query is already safe (no Textual key-thread yet).  The CSI
     # ``16 t`` fallback reads stdin, so it must never run inside the app.
