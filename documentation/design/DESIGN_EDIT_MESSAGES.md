@@ -76,9 +76,11 @@ L'identità di render è `(protocol, cache_key, ts, text)` (+ variante `(protoco
 
 ```python
 for s in (self._seen_message_ids, self._shown_in_log):
-    s.discard((protocol, cache_key, int(ts), old_text)); s.add((protocol, cache_key, int(ts), new_text))
+    s.discard((protocol, cache_key, int(ts), old_text))
+    s.add((protocol, cache_key, int(ts), new_text))
     if message_id:
-        s.discard((protocol, cache_key, str(id), old_text)); s.add((protocol, cache_key, str(id), new_text))
+        s.discard((protocol, cache_key, str(id), old_text))
+        s.add((protocol, cache_key, str(id), new_text))
 # _seen_timestamps NON si tocca: il timestamp non cambia mai.
 ```
 
