@@ -75,44 +75,61 @@ La colonna **Correlazione review** riporta la sigla della review architetturale 
 ## 📋 Bug aperti — sintesi
 
 Riepilogo dei soli bug **APERTO** (35 totali: 7 Alti, 17 Medi, 11 Minori). Dettagli e fix nelle sezioni per severità.
+**Validazione cluster (25/08/2026):** tutti i 35 bug verificati sul codice `master` — **32 VALIDI, 3 PARZIALMENTE VALIDI** (#34, #54, #62: mitigati dalle PR recenti ma problema di fondo ancora presente). Nessun bug risolto dalle PR recenti. La colonna **Cluster** raggruppa i bug per area/root cause comune (vedi tabella "Cluster — ordine di fix" più sotto).
 
-| # | Titolo sintetico | Severità | Correlazione review |
-|---|------------------|----------|---------------------|
-| #26 | Download server esposto sulla LAN senza controllo d'accesso | Alti | — |
-| #27 | Webhook WhatsApp accetta POST non autenticati dalla rete | Alti | P1-1 |
-| #28 | Signal scarta i messaggi di mittenti non presenti nei contatti | Alti | — |
-| #42 | Webhook WAHA single-thread, payload illimitato, ack prima della persistenza | Alti | P1-1 |
-| #43 | Stato mutabile condiviso senza lock; I/O bloccanti sul thread UI | Alti | P1-2 |
-| #44 | Perdita dati: `_update_message_id` multi-riga + dedup al boot | Alti | P1-3 |
-| #56 | Perdita permanente dei messaggi Signal durante le finestre di disconnessione | Alti | — |
-| #6 | Hot loop del polling; retry SSE a pausa fissa | Medi | P1-4 |
-| #9 | Ricerca emoji senza alias alternativi | Medi | — |
-| #24 | Scadenze typing/mumbling legate all'arrivo di eventi | Medi | — |
-| #30 | Reply a messaggio proprio: autore della quote errato | Medi | — |
-| #38 | Lista principale non aggiornata dopo risoluzione `@lid` | Medi | — |
-| #45 | Race del doppio listener SSE; `restart_sse` dead code | Medi | P1-4 |
-| #46 | `.env` letto solo per 3 chiavi: drift con docker-compose | Medi | P2-1 |
-| #47 | Coda eventi senza maxsize; set anti-retry senza bound | Medi | P2-2 |
-| #48 | Interfaccia async cerimoniale; `get_pairing_qr` viola Liskov | Medi | P2-4 |
-| #49 | Transizione `sent`→`failed` impossibile (rank guard) | Medi | P2-6 |
-| #50 | Edit su messaggio mai visto: drop o bolla senza marker edited | Medi | P2-7 |
-| #51 | Igiene SQLite: init doppio, dedup full-scan ×3, prune solo WA | Medi | P2-8 |
-| #52 | Lifecycle thread: leak Telethon, shutdown assente | Medi | P2-9 |
-| #55 | Receipt WhatsApp senza match `is_mine` residui (`@lid`) | Medi | P2-6 |
-| #57 | Quote media non-immagine su Signal non fedele al body | Medi | — |
-| #60 | Transmit thumbnail sul thread UI: micro-blocco su ssh lento | Medi | — |
-| #64 | Memoria kitty su chat lunghe: nessuna LRU su eviction | Medi | — |
-| #10 | Picker emoji duplica la ricerca e omette risultati | Minori | — |
-| #11 | Modale vuota con stdout catimg vuoto | Minori | — |
-| #33 | `UnboundLocalError` su stream SSE vuoto | Minori | P1-4 |
-| #34 | Seconda bolla pending senza riga DB su invii deduplicati | Minori | P2-5 |
-| #53 | Fallback verso `signal_backend`; `register()` non protetta | Minori | P3-5 |
-| #54 | `DuplicateIds` sul widget `load-more-msg` al remount | Minori | — |
-| #58 | Cursore non ripristinato dopo il placement kitty (cosmetico) | Minori | — |
-| #59 | Focus border clippa il fondo della thumbnail nativa (kitty) | Minori | — |
-| #61 | Accesso a `widget._protocol` privato (smell) | Minori | — |
-| #62 | Margini del modal nativo assumono header/footer a 1 riga | Minori | — |
-| #63 | Guardia tmux/screen conservativa: kitty-in-tmux mai nativo | Minori | — |
+| # | Titolo sintetico | Severità | Cluster | Correlazione review |
+|---|------------------|----------|---------|---------------------|
+| #26 | Download server esposto sulla LAN senza controllo d'accesso | Alti | A | — |
+| #27 | Webhook WhatsApp accetta POST non autenticati dalla rete | Alti | A | P1-1 |
+| #42 | Webhook WAHA single-thread, payload illimitato, ack prima della persistenza | Alti | A | P1-1 |
+| #28 | Signal scarta i messaggi di mittenti non presenti nei contatti | Alti | C | — |
+| #43 | Stato mutabile condiviso senza lock; I/O bloccanti sul thread UI | Alti | B | P1-2 |
+| #44 | Perdita dati: `_update_message_id` multi-riga + dedup al boot | Alti | C | P1-3 |
+| #56 | Perdita permanente dei messaggi Signal durante le finestre di disconnessione | Alti | C | — |
+| #6 | Hot loop del polling; retry SSE a pausa fissa | Medi | B | P1-4 |
+| #9 | Ricerca emoji senza alias alternativi | Medi | G | — |
+| #24 | Scadenze typing/mumbling legate all'arrivo di eventi | Medi | D | — |
+| #30 | Reply a messaggio proprio: autore della quote errato | Medi | D | — |
+| #38 | Lista principale non aggiornata dopo risoluzione `@lid` | Medi | D | — |
+| #45 | Race del doppio listener SSE; `restart_sse` dead code | Medi | B | P1-4 |
+| #46 | `.env` letto solo per 3 chiavi: drift con docker-compose | Medi | F | P2-1 |
+| #47 | Coda eventi senza maxsize; set anti-retry senza bound | Medi | B | P2-2 |
+| #48 | Interfaccia async cerimoniale; `get_pairing_qr` viola Liskov | Medi | F | P2-4 |
+| #49 | Transizione `sent`→`failed` impossibile (rank guard) | Medi | D | P2-6 |
+| #50 | Edit su messaggio mai visto: drop o bolla senza marker edited | Medi | D | P2-7 |
+| #51 | Igiene SQLite: init doppio, dedup full-scan ×3, prune solo WA | Medi | C | P2-8 |
+| #52 | Lifecycle thread: leak Telethon, shutdown assente | Medi | B | P2-9 |
+| #55 | Receipt WhatsApp senza match `is_mine` residui (`@lid`) | Medi | D | P2-6 |
+| #57 | Quote media non-immagine su Signal non fedele al body | Medi | E | — |
+| #60 | Transmit thumbnail sul thread UI: micro-blocco su ssh lento | Medi | E | — |
+| #64 | Memoria kitty su chat lunghe: nessuna LRU su eviction | Medi | E | — |
+| #10 | Picker emoji duplica la ricerca e omette risultati | Minori | G | — |
+| #11 | Modale vuota con stdout catimg vuoto | Minori | G | — |
+| #33 | `UnboundLocalError` su stream SSE vuoto | Minori | B | P1-4 |
+| #34 | Seconda bolla pending senza riga DB su invii deduplicati | Minori | D | P2-5 |
+| #53 | Fallback verso `signal_backend`; `register()` non protetta | Minori | F | P3-5 |
+| #54 | `DuplicateIds` sul widget `load-more-msg` al remount | Minori | E | — |
+| #58 | Cursore non ripristinato dopo il placement kitty (cosmetico) | Minori | E | — |
+| #59 | Focus border clippa il fondo della thumbnail nativa (kitty) | Minori | E | — |
+| #61 | Accesso a `widget._protocol` privato (smell) | Minori | E | — |
+| #62 | Margini del modal nativo assumono header/footer a 1 riga | Minori | E | — |
+| #63 | Guardia tmux/screen conservativa: kitty-in-tmux mai nativo | Minori | E | — |
+
+### Cluster — root cause, sinergie e ordine di fix consigliato
+
+Validazione del 25/08/2026 (verifica sul codice `master`, riferimenti file:riga aggiornati). Ordine per cluster = sequenza di intervento consigliata (prima i fondamenti/le dipendenze, poi i derivati).
+
+| Cluster | Tema | Bug | Root cause comune | Ordine di fix consigliato | Sinergie |
+|---------|------|-----|-------------------|---------------------------|----------|
+| **A** | 🔒 Sicurezza / rete | #26, #27, #42 | Due daemon HTTP temporanei (`download.py`, `webhook.py`) bindati su `0.0.0.0` con `TCPServer` vanilla: zero auth, no threading/timeout/body-limit | 1) **#26** (loopback + listing off, isolato) → 2) **#42** (`ThreadingTCPServer` + timeout + tetto payload, prerequisito strutturale) → 3) **#27** (HMAC/token nello stesso handler già re-hardened) | #27 e #42 sono lo stesso endpoint (`_WebhookHTTPHandler`); #42 condivide la coda `_events` con #47 (cluster B) |
+| **B** | ⚙️ Concorrenza / thread / SSE | #6, #33, #43, #45, #47, #52 | Assenza di ownership/concorrenza applicativa: nessun possessore unico di consumer eventi, connessioni SSE, strutture mutabili e lifecycle thread | 1) **#45+#33** (refactor listener SSE con token di generazione) → 2) **#6** (backoff + except dentro il ciclo) → 3) **#43** (mutazione a consumatore unico / RLock) → 4) **#47** (Queue maxsize + LRU) → 5) **#52** (loop.stop + shutdown + disconnect_all) | #6/#33/#45 = tre facce dello stesso listener SSE/poll worker; #43 è la stessa mancanza di ownership sui dati; #47 è il bound su code/set; #52 è il lifecycle |
+| **C** | 💾 Persistenza / perdita dati | #28, #44, #51, #56 | Identità dei messaggi non stabile (match per testo/ts + dedup distruttivo) + consegna Signal volatile senza recupero (SSE-only, no backfill, no contatto provvisorio) | 1) **#28** (contatto provvisorio, piccolo e autocontenuto) → 2) **#44** (LIMIT 1 + finestra in `_update_message_id`, dedup difensivo) → 3) **#51** (dipende dal #44: dedup fuori da `_load_cache`, init una tantum, prune per tutti) → 4) **#56** (il più costoso: receive/backfill al boot, indipendente) | #44/#51 condividono la stessa area DB (dedup/scrittura id); #28/#56 sono entrambe vie di perdita Signal in ingresso |
+| **D** | 🚦 Stati dei messaggi | #24, #30, #34, #38, #49, #50, #55 | Identità/status frammentati su 4 layer (DB, cache backend, cache UI, widget) senza sorgente unica: rank-guard copiato in 7 punti, matching multiplo | 1) **#49** (centralizzare rank in `models.py`, permettere `sent`→`failed` dal solo percorso errore — sblocca il retry) → 2) **#34** (impedire la seconda bolla, dipende da #49) → 3) **#55** (risoluzione `@lid`→phone in `process_receipt`) → 4) **#50** (split `apply_edit`/`apply_local_edit` + upsert + marker edited) → 5) **#38** (reload lista a fine `_lid_resolver_run`) → 6) **#24** (expiry fuori dal `for event`) | #49+#55 = stessa macchina receipt/status (P2-6); #50+#43 = edit ottimistico SQLite sul thread UI (cluster B); #38+#55 = entrambi `@lid` → una risoluzione phone centralizzata giova a entrambi; #30 isolato; #24 ortogonale |
+| **E** | 🖼️ Media / rendering UI (kitty) | #54, #57, #58, #59, #60, #61, #62, #63, #64 | Feature kitty "cucita" su Textual come reconciliation post-frame ad-hoc senza controller unico di placement/emissione; #57 e #54 hanno radici diverse | 1) **#61** (property pubblica, banale) → 2) **#58+#59+#62** (placement unico: restore cursore, compensazione bordo, margini dal layout) → 3) **#60** (transmit nel worker) → 4) **#64** (LRU + ri-trasmissione, dipende da #60 e dal placement) → 5) **#54** (id per-mount/remove-before-mount, indipendente) → 6) **#57** (quote media non-immagine, generalizza il piano B del #37) | #58/#59/#62 = geometry del placement; #60+#64 = emissione/memoria non vincolate; #61 = sintomo del resolver che legge stato privato; #54 è la pipeline di mount; #57 è il contratto display-vs-filo (stesso ramo del #37) |
+| **F** | ⚠️ Config / API surface | #46, #48, #53 | Contratti dichiarati ma non enforceati sul layer backends/manager (config con precedenze ad hoc, superficie async cerimoniale, registry senza semantica di presenza) | 1) **#48** (contratto sync-first + `asyncio.to_thread`, allineare `get_pairing_qr`) → 2) **#53** (registry con guardia, no fallback cross-protocollo) → 3) **#46** (precedenza unica con `.env`, indipendente → per ultimo per evitare conflitti di merge) | #53 dipende dalla superficie pulita del #48; #46 è auto-contenuto |
+| **G** | 🔤 Emoji / altro | #9, #10, #11 | #9+#10: manca un indice di ricerca unico (due indici disallineati + due implementazioni duplicate). #11: indipendente (validazione output subprocess mancante) | 1) **#9+#10 insieme** (un solo indice alias-based + riuso di `search_emoji()` — sblocca 4.180 emoji invisibili nel picker) → 2) **#11** (guardia `ansi_output.strip()` + test) | #9/#10 stessa radice, stesso refactor; #11 isolato e triviale |
+
+**Priorità complessiva suggerita:** cluster **A** (sicurezza) e **C** (perdita dati) coprono tutti i 7 bug Alti; il cluster **D** ha la base già costruita dai fix #39/#41/#30. I cluster E (7 bug kitty) e B (6 bug concorrenza) sono i più densi. F/G sono i meno impattanti.
 
 ---
 
