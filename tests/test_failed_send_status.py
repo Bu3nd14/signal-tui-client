@@ -78,6 +78,11 @@ class _ReplyHandler(UnreadReplyMixin):
         self.chat_log = SimpleNamespace(children=children)
         self.input = MagicMock()
         self.query_one = MagicMock(return_value=self.input)
+        # Il retry dal click gira in un worker thread (run_worker): nel test
+        # esegui subito la lambda per verificare il comportamento.
+        self.run_worker = MagicMock(
+            side_effect=lambda fn, *a, **kw: fn() if callable(fn) else None
+        )
 
 
 class TestFailedMessageClick:
@@ -129,6 +134,9 @@ class _SendHandler(SendMixin):
         self._status = MagicMock()
         self._transition_outgoing_status = MagicMock(return_value=True)
         self.run_worker = MagicMock()
+        self.call_from_thread = MagicMock(
+            side_effect=lambda fn, *a, **kw: fn(*a, **kw) if callable(fn) else None
+        )
 
 
 class TestRetryGuards:
