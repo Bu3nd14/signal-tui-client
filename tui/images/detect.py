@@ -35,12 +35,17 @@ class ImageSupport(Enum):
     OFF = "off"
 
 
-def query_kitty_ok(stdin_fd: int, stdout_fd: int, timeout: float = 0.15) -> bool:
+def query_kitty_ok(stdin_fd: int, stdout_fd: int, timeout: float = 1.0) -> bool:
     """Send a TGP query and return True iff the terminal answers ``OK``.
 
     Switches stdin to raw mode for the duration of the query (restored in a
     ``finally``), so the terminal's reply is not line-buffered.  Never raises:
     any failure (non-tty, broken pipe, timeout) returns ``False``.
+
+    Timeout: 1.0s by default.  Empirically (2026-08-25, kitty 0.48 via ssh) the
+    terminal reply arrives between 0.5s and 1.0s on real connections; the
+    previous 0.15s default was far too tight and caused a spurious CATIMG
+    fallback even on genuine kitty.
     """
     try:
         old = termios.tcgetattr(stdin_fd)
