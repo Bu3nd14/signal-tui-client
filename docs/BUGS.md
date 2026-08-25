@@ -72,6 +72,50 @@ La colonna **Correlazione review** riporta la sigla della review architetturale 
 
 ---
 
+## 📋 Bug aperti — sintesi
+
+Riepilogo dei soli bug **APERTO** (35 totali: 7 Alti, 17 Medi, 11 Minori). Dettagli e fix nelle sezioni per severità.
+
+| # | Titolo sintetico | Severità | Correlazione review |
+|---|------------------|----------|---------------------|
+| #26 | Download server esposto sulla LAN senza controllo d'accesso | Alti | — |
+| #27 | Webhook WhatsApp accetta POST non autenticati dalla rete | Alti | P1-1 |
+| #28 | Signal scarta i messaggi di mittenti non presenti nei contatti | Alti | — |
+| #42 | Webhook WAHA single-thread, payload illimitato, ack prima della persistenza | Alti | P1-1 |
+| #43 | Stato mutabile condiviso senza lock; I/O bloccanti sul thread UI | Alti | P1-2 |
+| #44 | Perdita dati: `_update_message_id` multi-riga + dedup al boot | Alti | P1-3 |
+| #56 | Perdita permanente dei messaggi Signal durante le finestre di disconnessione | Alti | — |
+| #6 | Hot loop del polling; retry SSE a pausa fissa | Medi | P1-4 |
+| #9 | Ricerca emoji senza alias alternativi | Medi | — |
+| #24 | Scadenze typing/mumbling legate all'arrivo di eventi | Medi | — |
+| #30 | Reply a messaggio proprio: autore della quote errato | Medi | — |
+| #38 | Lista principale non aggiornata dopo risoluzione `@lid` | Medi | — |
+| #45 | Race del doppio listener SSE; `restart_sse` dead code | Medi | P1-4 |
+| #46 | `.env` letto solo per 3 chiavi: drift con docker-compose | Medi | P2-1 |
+| #47 | Coda eventi senza maxsize; set anti-retry senza bound | Medi | P2-2 |
+| #48 | Interfaccia async cerimoniale; `get_pairing_qr` viola Liskov | Medi | P2-4 |
+| #49 | Transizione `sent`→`failed` impossibile (rank guard) | Medi | P2-6 |
+| #50 | Edit su messaggio mai visto: drop o bolla senza marker edited | Medi | P2-7 |
+| #51 | Igiene SQLite: init doppio, dedup full-scan ×3, prune solo WA | Medi | P2-8 |
+| #52 | Lifecycle thread: leak Telethon, shutdown assente | Medi | P2-9 |
+| #55 | Receipt WhatsApp senza match `is_mine` residui (`@lid`) | Medi | P2-6 |
+| #57 | Quote media non-immagine su Signal non fedele al body | Medi | — |
+| #60 | Transmit thumbnail sul thread UI: micro-blocco su ssh lento | Medi | — |
+| #64 | Memoria kitty su chat lunghe: nessuna LRU su eviction | Medi | — |
+| #10 | Picker emoji duplica la ricerca e omette risultati | Minori | — |
+| #11 | Modale vuota con stdout catimg vuoto | Minori | — |
+| #33 | `UnboundLocalError` su stream SSE vuoto | Minori | P1-4 |
+| #34 | Seconda bolla pending senza riga DB su invii deduplicati | Minori | P2-5 |
+| #53 | Fallback verso `signal_backend`; `register()` non protetta | Minori | P3-5 |
+| #54 | `DuplicateIds` sul widget `load-more-msg` al remount | Minori | — |
+| #58 | Cursore non ripristinato dopo il placement kitty (cosmetico) | Minori | — |
+| #59 | Focus border clippa il fondo della thumbnail nativa (kitty) | Minori | — |
+| #61 | Accesso a `widget._protocol` privato (smell) | Minori | — |
+| #62 | Margini del modal nativo assumono header/footer a 1 riga | Minori | — |
+| #63 | Guardia tmux/screen conservativa: kitty-in-tmux mai nativo | Minori | — |
+
+---
+
 ## 🔴 Critici (impatto diretto sull'esperienza utente)
 
 | # | Titolo | Riferimenti (file:riga) | Scenario | Impatto | Fix | Stato | Review |
