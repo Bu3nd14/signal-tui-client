@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import queue
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -1494,6 +1495,93 @@ class WhatsAppBackend(ChatBackend):
             reply_to_message_id=data.get("reply_to_message_id"),
         )
 
+    def _reuse_failed_db_row(
+        self, contact_id: str, data: dict, text: str, msg_id: str, ts: int
+    ) -> bool:
+        """Reuse the single failed id-less DB row for the echo of a retried send.
+
+        Scenario concreto (bug #44): il retry di un messaggio ``failed`` può
+        lasciare in SQLite una riga id-less (``msg_id IS NULL``/``''``) con
+        ``status='failed'`` che NON è specchiata in ``self.cache`` (cache
+        ri-seminata/sfoltita senza quella entry).  Quando l'echo del retry
+        arriva con l'id reale, ``_message_already_cached`` non la trova e —
+        senza questo fallback — verrebbe inserita una NUOVA riga, lasciando
+        cache e DB divergenti (split-brain).  Qui riusiamo la riga ``failed``
+        unica entro la finestra echo, agganciando l'id SOLO a quella riga
+        esatta (UPDATE scoped per ``id``) e avanzandone lo status a quello
+        dell'echo (default ``sent``: l'echo è la prova che il messaggio è
+        partito, quindi non resta ``failed``).
+
+        Guardia di unicità (pattern del fallback id-less del #39): procediamo
+        SOLO con esattamente un candidato; con 0 o 2+ candidati non facciamo
+        nulla e il chiamante segue il normale percorso di insert.
+
+        Returns ``True`` when a row was reused, ``False`` otherwise.
+        """
+        from backend import _DB_LOCK, _ECHO_MATCH_WINDOW_MS, DB_FILE, _init_db
+
+        _init_db()
+        status = data.get("status", "sent" if data.get("is_mine") else "read")
+        with _DB_LOCK:
+            conn = sqlite3.connect(DB_FILE)
+            try:
+                rows = conn.execute(
+                    "SELECT id, msg_id, timestamp FROM messages "
+                    "WHERE protocol = ? AND contact_number = ? AND is_mine = 1 "
+                    "AND text = ? AND (msg_id IS NULL OR msg_id = '') "
+                    "AND status = 'failed' AND ABS(timestamp - ?) <= ? "
+                    "ORDER BY ABS(timestamp - ?) ASC, rowid ASC",
+                    (
+                        PROTOCOL_WHATSAPP,
+                        contact_id,
+                        text,
+                        ts,
+                        _ECHO_MATCH_WINDOW_MS,
+                        ts,
+                    ),
+                ).fetchall()
+
+                if len(rows) != 1:
+                    return False
+
+                row_id, existing_msg_id, existing_ts = rows[0]
+                # Aggiorna il timestamp solo se il msg_id era NULL (l'echo
+                # sostituisce il ts ottimistico); se era '' (legacy) resta.
+                new_ts = ts if existing_msg_id is None else existing_ts
+                cursor = conn.execute(
+                    "UPDATE messages SET msg_id = ?, timestamp = ?, status = ? "
+                    "WHERE id = ?",
+                    (msg_id, new_ts, status, row_id),
+                )
+                conn.commit()
+                if cursor.rowcount == 0:
+                    return False
+            finally:
+                conn.close()
+
+        # Specchia la riga riusata in self.cache così cache e DB non divergono
+        # mai (stesso id/testo/ts/status del DB).
+        self._add_cached_message(
+            contact_id,
+            {
+                "id": msg_id,
+                "text": text,
+                "is_mine": True,
+                "sender": data.get("sender", ""),
+                "timestamp": new_ts,
+                "quote_text": data.get("quote_text"),
+                "msg_type": data.get("msg_type", "text"),
+                "attachment_info": data.get("attachment_info"),
+                "attachment_id": data.get("attachment_id"),
+                "read": True,
+                "status": status,
+                "quote_timestamp": data.get("quote_timestamp"),
+                "quote_author": data.get("quote_author"),
+                "reply_to_message_id": data.get("reply_to_message_id"),
+            },
+        )
+        return True
+
     def ingest_message(
         self, contact_id: str, data: dict, ts: int, persist: bool = True
     ) -> bool:
@@ -1533,6 +1621,19 @@ class WhatsAppBackend(ChatBackend):
                     msg_id,
                     protocol=PROTOCOL_WHATSAPP,
                 )
+            return False
+
+        # Fallback DB post-send (bug #44): un messaggio failed può avere la sua
+        # riga id-less nel DB ma NON in self.cache.  Prima di inserire una nuova
+        # riga, riusiamo quella riga (se unica entro la finestra echo) invece di
+        # creare un duplicato.  Attivato solo per l'echo outgoing (is_mine=True)
+        # con id reale: l'ingest ottimistico non ha ancora id e gli ingressi
+        # generici incoming hanno is_mine=False, quindi nessun parametro extra.
+        if (
+            is_mine
+            and msg_id
+            and self._reuse_failed_db_row(contact_id, data, text, msg_id, ts)
+        ):
             return False
 
         if persist:

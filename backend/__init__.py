@@ -12,6 +12,7 @@ to live in the single ``backend.py`` module, so ``from backend import X`` and
 
 from .db import (
     _DB_LOCK,
+    _ECHO_MATCH_WINDOW_MS,
     CACHE_DIR,
     CACHE_FILE,
     CACHE_RETENTION_DAYS,
@@ -91,6 +92,7 @@ __all__ = [
     "_DB_LOCK",
     "_DOWNLOAD_SERVER",
     "_DOWNLOAD_URL_BASE",
+    "_ECHO_MATCH_WINDOW_MS",
     "_TEMP_DOWNLOAD_DIR",
     "_WEBHOOK_SERVER",
     "Contact",
