@@ -215,7 +215,12 @@ class TestStatusUpgrade:
 class TestMediaGuard:
     def test_media_message_text_not_updated_on_edit(self):
         """Messaggio media (msg_type != 'text') con stesso id e testo diverso →
-        il testo NON viene aggiornato (guard ``msg_type == "text"``)."""
+        il testo NON viene aggiornato (guard ``msg_type == "text"``).
+
+        Stesso ``attachment_id`` (un edit di caption dello stesso media), quindi
+        la riconciliazione è sullo STESSO messaggio e la guard media evita
+        l'aggiornamento del testo.
+        """
         existing = {
             "id": "m1",
             "text": "Media: old-media-id",
@@ -224,7 +229,7 @@ class TestMediaGuard:
             "timestamp": 1000,
             "msg_type": "image",
             "attachment_info": "photo.jpg",
-            "attachment_id": "old-media-id",
+            "attachment_id": "same-media-id",
             "status": "read",
             "read": False,
         }
@@ -236,7 +241,7 @@ class TestMediaGuard:
             "timestamp": 1000,
             "msg_type": "image",
             "attachment_info": "photo.jpg",
-            "attachment_id": "new-media-id",
+            "attachment_id": "same-media-id",
             "status": "read",
             "read": False,
         }
@@ -248,6 +253,97 @@ class TestMediaGuard:
         assert len(harness._cache[contact.cache_key]) == 1
         assert entry["text"] == "Media: old-media-id"  # NON aggiornato
         assert "edited" not in entry
+
+    def test_distinct_attachments_same_id_are_kept_both(self):
+        """Due media con stesso ``id`` ma ``attachment_id`` diversi (allegati
+        multipli di un messaggio Signal) NON collidono: entrambi restano."""
+        first = {
+            "id": "1787648916285",
+            "text": "Image: IMG_0115.jpg",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": 1787648916285,
+            "msg_type": "image",
+            "attachment_info": "Image: IMG_0115.jpg",
+            "attachment_id": "att-0115",
+            "status": "sent",
+            "read": True,
+        }
+        second = {
+            "id": "1787648916285",
+            "text": "Image: IMG_0114.jpg",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": 1787648916285,
+            "msg_type": "image",
+            "attachment_info": "Image: IMG_0114.jpg",
+            "attachment_id": "att-0114",
+            "status": "sent",
+            "read": True,
+        }
+
+        harness, contact, changed = _merge(existing=[first], incoming=[second])
+
+        entries = harness._cache[contact.cache_key]
+        assert changed is True
+        assert len(entries) == 2
+        ids = {e["attachment_id"] for e in entries}
+        assert ids == {"att-0115", "att-0114"}
+
+    def test_same_attachment_same_id_still_deduped(self):
+        """Stesso id E stesso attachment_id → un solo messaggio (redelivery)."""
+        existing = {
+            "id": "m1",
+            "text": "Media: url",
+            "is_mine": False,
+            "sender": "Mario",
+            "timestamp": 1000,
+            "msg_type": "image",
+            "attachment_info": "photo.jpg",
+            "attachment_id": "att-1",
+            "status": "read",
+            "read": False,
+        }
+
+        harness, contact, changed = _merge(existing=[existing], incoming=[existing])
+
+        assert changed is False
+        assert len(harness._cache[contact.cache_key]) == 1
+
+    def test_ack_echo_without_attachment_id_still_deduped_by_id(self):
+        """L'ack-echo (#36) — stesso id ma senza attachment_id e testo=caption —
+        resta deduplicato per id contro il media uscente."""
+        media = {
+            "id": "true_189025889575055",
+            "text": "Media: https://wa.to/img/abc123.jpg",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": 1700000000,
+            "msg_type": "image",
+            "attachment_info": "Yes, nice",
+            "attachment_id": "https://wa.to/img/abc123.jpg",
+            "status": "sent",
+            "read": True,
+        }
+        ack = {
+            "id": "true_189025889575055",
+            "text": "Yes, nice",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": 1700000001,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+            "status": "sent",
+            "read": True,
+        }
+
+        harness, contact, changed = _merge(existing=[media], incoming=[ack])
+
+        entries = harness._cache[contact.cache_key]
+        assert changed is False
+        assert len(entries) == 1
+        assert entries[0]["msg_type"] == "image"
 
 
 # ─── _load_messages_worker remount ────────────────────────────────────────────

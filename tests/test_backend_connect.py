@@ -14,7 +14,12 @@ from unittest.mock import MagicMock
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import PROTOCOL_SIGNAL, ChatContact
+from models import (
+    PROTOCOL_SIGNAL,
+    PROTOCOL_WHATSAPP,
+    ChatContact,
+    contact_cache_key,
+)
 from signal_tui import SignalTUI
 
 
@@ -190,3 +195,132 @@ class TestReconnectTouchedBackends:
         app.telegram_backend = None
         app._reconnect_touched_backends({"telegram"})
         app.run_worker.assert_not_called()
+
+
+def _media_msg(
+    *,
+    mid: str,
+    att: str | None,
+    text: str,
+    is_mine: bool = True,
+    ts: int = 1787648916285,
+    msg_type: str = "image",
+    status: str = "sent",
+) -> dict:
+    """Build a cached media-message dict coherent with the UI cache."""
+    return {
+        "id": mid,
+        "text": text,
+        "is_mine": is_mine,
+        "sender": "You" if is_mine else "Mario",
+        "timestamp": ts,
+        "msg_type": msg_type,
+        "attachment_info": text,
+        "attachment_id": att,
+        "content_type": "image/jpeg",
+        "read": is_mine,
+        "status": status,
+    }
+
+
+class TestBackendReadyMergeDedup:
+    """🖼️ Il merge ``_on_backend_ready`` tiene ENTRAMBI gli allegati di un
+    messaggio multi-allegato (stesso ``id``, ``attachment_id`` diversi)."""
+
+    @staticmethod
+    def _make_app() -> SignalTUI:
+        app = SignalTUI()
+        app._render_contact_list = MagicMock()
+        app._update_unread_badges = MagicMock()
+        app._status = MagicMock()
+        app._sync_last_ts = MagicMock()
+        app._sort_contacts = MagicMock()
+        app._refresh_backend_status_if_idle = MagicMock()
+        app.contacts = []
+        app._pending_backends = set()
+        app.selected_contact = None
+        return app
+
+    @staticmethod
+    def _make_backend(protocol: str, cache: dict) -> MagicMock:
+        backend = MagicMock()
+        backend.protocol = protocol
+        backend.cache = cache
+        backend.contacts = []
+        return backend
+
+    def test_two_attachments_same_id_both_kept(self):
+        """Due allegati con lo stesso msg_id ma attachment_id diversi restano
+        entrambi nella UI cache dopo il merge (bug "una sola immagine")."""
+        app = self._make_app()
+        cid = "+393356912240"
+        msg_id = "1787648916285"
+        backend = self._make_backend(
+            PROTOCOL_SIGNAL,
+            {
+                cid: [
+                    _media_msg(
+                        mid=msg_id,
+                        att="att-0115",
+                        text="Image: IMG_0115.jpg",
+                    ),
+                    _media_msg(
+                        mid=msg_id,
+                        att="att-0114",
+                        text="Image: IMG_0114.jpg",
+                    ),
+                ]
+            },
+        )
+
+        app._on_backend_ready(backend)
+
+        key = contact_cache_key(PROTOCOL_SIGNAL, cid)
+        entries = app._cache[key]
+        assert len(entries) == 2
+        assert {e["attachment_id"] for e in entries} == {"att-0115", "att-0114"}
+
+    def test_same_id_same_attachment_is_deduped(self):
+        """Redelivery dello stesso allegato (id + attachment_id identici) → un solo."""
+        app = self._make_app()
+        cid = "+393356912240"
+        msg_id = "1787648916285"
+        msg = _media_msg(mid=msg_id, att="att-0115", text="Image: IMG_0115.jpg")
+        backend = self._make_backend(PROTOCOL_SIGNAL, {cid: [msg, dict(msg)]})
+
+        app._on_backend_ready(backend)
+
+        key = contact_cache_key(PROTOCOL_SIGNAL, cid)
+        assert len(app._cache[key]) == 1
+
+    def test_ack_echo_without_attachment_id_still_deduped(self):
+        """#36: l'ack-echo (stesso id, nessun attachment_id, text=caption) non
+        diventa un nuovo messaggio accanto al media uscente."""
+        app = self._make_app()
+        cid = "1@c.us"
+        msg_id = "true_189025889575055"
+        media = _media_msg(
+            mid=msg_id,
+            att="https://wa.to/img/abc123.jpg",
+            text="Media: https://wa.to/img/abc123.jpg",
+        )
+        ack = {
+            "id": msg_id,
+            "text": "Yes, nice",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": 1700000001,
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+            "read": True,
+            "status": "sent",
+        }
+        backend = self._make_backend(PROTOCOL_WHATSAPP, {cid: [media, ack]})
+
+        app._on_backend_ready(backend)
+
+        key = contact_cache_key(PROTOCOL_WHATSAPP, cid)
+        entries = app._cache[key]
+        assert len(entries) == 1
+        assert entries[0]["msg_type"] == "image"

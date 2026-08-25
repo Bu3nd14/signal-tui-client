@@ -864,14 +864,23 @@ class ChatViewMixin:
             text = m.get("text", "")
             ts = int(m.get("timestamp") or 0)
             mid = m.get("id")
+            inc_att = m.get("attachment_id")
             for existing in ui_msgs:
                 if bool(existing.get("is_mine", False)) != is_mine:
                     continue
                 # Id-first for BOTH directions: an edit keeps the id but
                 # changes the text, so the id match must precede the text
-                # comparison (mirror of _message_already_cached).
+                # comparison (mirror of _message_already_cached).  Exception:
+                # two entries sharing the id but carrying DISTINCT
+                # attachment_ids are separate attachments of one multi-attachment
+                # message (Signal) and must NOT collapse; when one side lacks an
+                # attachment_id (ack-echo / caption echo) the id-first identity
+                # still applies.
                 if mid and existing.get("id") and existing.get("id") == mid:
-                    return existing
+                    ex_att = existing.get("attachment_id")
+                    if not (inc_att and ex_att and inc_att != ex_att):
+                        return existing
+                    # Distinct attachment → keep scanning for a text twin.
                 if existing.get("text", "") != text:
                     continue
                 existing_ts = int(existing.get("timestamp") or 0)
