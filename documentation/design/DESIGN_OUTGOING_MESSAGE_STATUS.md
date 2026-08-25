@@ -30,10 +30,11 @@ Come una bolla inviata passa da `pending` a `sent`/`delivered`/`read` (o `failed
 ## 2. Flusso ottimistico (tui/send.py)
 
 1. **Submit** (UI thread): timestamp client `ts = int(time.time()*1000)`; il messaggio viene ingerito nel backend corretto con `status="pending"` e `ingest_message(..., persist=False)` (cache senza DB) e specchiato nella cache UI; la bolla nasce subito grigia.
-2. **Persist off-thread**: il worker `_send_message_worker` riceve `(backend, contact_id, data, ts)` e chiama `_persist_message(...)` PRIMA dell'invio di rete: così l'echo (spesso più veloce del worker) trova sempre la riga da aggiornare (`test_send_persist_offthread.py`).
-3. **Invio sincrono**: `backend.send_message_sync(contact_id, text, quote_*, reply_to_message_id)` — bloccante ma in worker thread; la durata è loggata (warning sopra i 1000 ms).
-4. **Transizione a `sent`**: `_transition_outgoing_status(protocol, contact_id, ts, text, "sent", ("pending",))` aggiorna atomicamente tutti i layer.
-5. **Ingest echo**: l'id server restituito dal backend viene ingerito (`ingest_message`) e scritto via `_update_message_id`: la riga ottimistica (senza id) acquisisce l'id reale senza duplicati e senza cambiare il proprio timestamp.
+2. **Riordino immediato della chat**: `_promote_contact_after_send(contact, ts)` avanza `last_message_ts` e ri-renderizza la lista SUBITO dopo il submit ottimistico, senza aspettare l'eco del backend (contratto fissato da `test_telegram_send_reorder.py`).
+3. **Persist off-thread**: il worker `_send_message_worker` riceve `(backend, contact_id, data, ts)` e chiama `_persist_message(...)` PRIMA dell'invio di rete: così l'echo (spesso più veloce del worker) trova sempre la riga da aggiornare (`test_send_persist_offthread.py`).
+4. **Invio sincrono**: `backend.send_message_sync(contact_id, text, quote_*, reply_to_message_id[, quote_attachments])` — bloccante ma in worker thread; la durata è loggata a debug e a warning sopra i 1000 ms (backoff/degrado del backend).
+5. **Transizione a `sent`**: `_transition_outgoing_status(protocol, contact_id, ts, text, "sent", ("pending",))` aggiorna atomicamente tutti i layer.
+6. **Ingest echo**: l'id server restituito dal backend viene ingerito (`ingest_message`) e scritto via `_update_message_id`: la riga ottimistica (senza id) acquisisce l'id reale senza duplicati e senza cambiare il proprio timestamp; mirror dell'id anche nella cache UI e sul widget (`_update_outgoing_message_id`) così i receipt successivi matchano per id.
 
 ## 3. Chiavi delle transizioni e fallback
 
@@ -66,14 +67,19 @@ La UI applica gli aggiornamenti (`events.py::_handle_receipt_event`):
 
 - Backend assente per il protocollo → `failed` immediato + status bar persistente.
 - Eccezione durante `send_message_sync` → `failed` + status bar con l'errore.
-- Reply Telegram senza `reply_to_message_id` valido → rifiuto PRIMA di creare la bolla (nessun pending orfano).
-- Click su bolla `failed` → `_retry_failed_message(timestamp, text)` (re-invio).
+- Reply Telegram senza `reply_to_message_id` valido e reply WhatsApp senza id → rifiuto PRIMA di creare la bolla (nessun pending orfano).
+- Click su bolla `failed` → `_retry_failed_message(timestamp, text)` (re-invio senza nuova riga/bolla), con guardie:
+  - reply Telegram il cui id originale non è più disponibile → rifiuto esplicito;
+  - reply il cui metadata di quote è andato perso dopo un reload (`quote_text` senza `quote_timestamp`) → rifiuto;
+  - la transizione `failed → pending` deve riuscire, altrimenti il messaggio resta failed;
+  - una reply media ricostruisce i metadati dell'allegato (`content_type`/`attachment_id` persistiti) così il Signal quote viene ricomposto identico al primo invio (vedi [CONTRACTS.md §11](../api-contracts/CONTRACTS.md#11-quote-media-reply-con-immagine)).
 
 ## Test che documentano questo design
 
-- `tests/test_failed_send_status.py` — transizione a failed e retry.
+- `tests/test_failed_send_status.py` — transizione a failed, retry e guardie.
 - `tests/test_outgoing_status_fallback.py` — fallback by-text della transizione pending→sent.
 - `tests/test_send_persist_offthread.py` — persistenza ottimistica nel worker prima della rete.
+- `tests/test_telegram_send_reorder.py` — riordino immediato della lista dopo il submit ottimistico.
 - `tests/test_send_timing.py`, `tests/test_signal_real_timestamp.py` — timing/echo del vero timestamp server.
 - `tests/test_whatsapp_receipt_id_match.py`, `tests/test_telegram_read_receipt_fix.py`, `tests/test_whatsapp_read_receipt_fix.py` — receipt per id/canonicalizzazione.
 - `tests/test_ui_components.py`, `tests/test_ui_protocol.py` — stili visuali per status.

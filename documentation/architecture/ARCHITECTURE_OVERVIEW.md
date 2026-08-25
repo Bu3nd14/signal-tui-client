@@ -41,9 +41,12 @@ Persistenza: SQLite locale in `~/.local/share/signal-tui-client/messages.db` (WA
  │    edit.py           EditMessageMixin: flusso edit con rollback           │
  │    unread_reply.py   UnreadReplyMixin: badge unread, reply bar            │
  │    download.py       DownloadModeMixin: modalità download HTTP (Ctrl+D)   │
- │    pickers.py        PickerMixin: emoji picker, contact picker (Ctrl+S),  │
- │                      device link (Ctrl+L), completamento :alias:          │
- │    css.py            APP_CSS (foglio di stile Textual)                    │
+  │    pickers.py        PickerMixin: emoji picker, contact picker (Ctrl+S),  │
+  │                      device link (Ctrl+L), completamento :alias:          │
+  │    images/           immagini native kitty: detect (rilevamento           │
+  │                      terminale), kitty_renderer (protocollo graphics),    │
+  │                      cellsize; fallback catimg/off                        │
+  │    css.py            APP_CSS (foglio di stile Textual)                    │
  └───────────────┬──────────────────────────────────┬────────────────────────┘
                  │ usa                              │ registra/interroga
                  ▼                                  ▼
@@ -116,7 +119,7 @@ Disciplina threading dichiarata: il thread UI non esegue le operazioni di rete l
 
 Vedi `tui/send.py::on_message_text_area_submitted` e `_send_message_worker`:
 
-1. Enter sull'input → conversione alias emoji → **invio ottimistico**: cache in-memory aggiornata subito (via `ingest_message(persist=False)` nel backend corretto + mirror nella cache UI) con `status="pending"` e bolla mostrata immediatamente; l'INSERT nel DB avviene nel worker, prima dell'invio di rete.
+1. Enter sull'input → conversione alias emoji → **invio ottimistico**: cache in-memory aggiornata subito (via `ingest_message(persist=False)` nel backend corretto + mirror nella cache UI) con `status="pending"` e bolla mostrata immediatamente; la posizione del contatto in lista è aggiornata subito (`_promote_contact_after_send`); l'INSERT nel DB avviene nel worker, prima dell'invio di rete.
 2. Un worker thread chiama `backend.send_message_sync(...)` (bloccante).
 3. Al successo: transizione atomica `pending → sent` su tutti i layer (DB per timestamp, fallback per testo; rank guard mai in downgrade) e ingest dell'echo col vero id server (`_update_message_id` aggancia l'id alla riga ottimistica senza duplicare).
 4. I receipt successivi (`delivered`/`read`) arrivano come eventi `receipt` e aggiornano lo stato per id o timestamp.

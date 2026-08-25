@@ -1,6 +1,6 @@
 # Analisi di copertura funzionale
 
-Confronto tra aree funzionali del prodotto (ricavate dal codice) e test presenti. La copertura misurata dall'ultima run registrata (`docs/TEST_REPORT.md`, 2026-08-22) è ~90% globale con gate `fail_under = 68` in `pyproject.toml`; questa analisi è qualitativa, per area funzionale.
+Confronto tra aree funzionali del prodotto (ricavate dal codice) e test presenti. La copertura misurata dall'ultima run registrata (`docs/TEST_REPORT.md`, 2026-08-24) è ~80% globale con gate `fail_under = 68` in `pyproject.toml`; questa analisi è qualitativa, per area funzionale.
 
 Legenda: **Robusta** = suite dedicata ampia; **Coperta** = test presenti ma su percorsi principali; **Parziale** = solo casi limite/indiretti; **Lacuna** = nessun test dedicato.
 
@@ -31,8 +31,10 @@ Legenda: **Robusta** = suite dedicata ampia; **Coperta** = test presenti ma su p
 | Device link (Ctrl+L, QR, 2FA) | Coperta | `test_device_link_screen` — i worker di polling completamento sono mockati |
 | Emoji picker + completamento alias | Coperta | `test_emoji_picker` |
 | Chat view (finestra 20, refresh, load-more, merge) | Robusta | `test_refresh_chat`, `test_merge_cache_edit`, `test_image_caption` |
-| Invio ottimistico + stato outgoing | Robusta | `test_send_persist_offthread`, `test_failed_send_status`, `test_outgoing_status_fallback`, `test_send_timing` |
+| Invio ottimistico + stato outgoing (pending/sent/delivered/read/**failed**) | Robusta | `test_send_persist_offthread` (26), `test_failed_send_status`, `test_outgoing_status_fallback`, `test_send_timing`, `test_telegram_send_reorder` (riordino post-invio) |
 | Edit messaggi (3 protocolli) | Robusta | `test_edit_*` (contract/flow/signal/whatsapp/telegram/db/merge) |
+| Quote media / reply con immagine (bug #37) | Coperta | headless: `test_reply_media`, `test_models`; la resa a destinazione è verificata solo dai test live gated (`test_live_quote_media`, fuori CI) |
+| Immagini native kitty + fallback catimg | Robusta | `test_kitty_renderer` (48), `test_image_detect`, `test_image_modal`, `test_chat_view_images`; la resa su terminale reale resta coperta dalla checklist manuale |
 | Typing indicator | Robusta | `test_typing_indicator` |
 | Status bar unread per-backend | Coperta | `test_status_backend_unread` |
 | Download mode (Ctrl+D) + server HTTP | Coperta | `test_download_mode`, `test_backend_download` |
@@ -68,7 +70,7 @@ Queste lacune NON indicano codice rotto: sono aree dove l'esecuzione reale è di
 
 ## 5. Metriche registrate
 
-- File di test: 57 (`tests/`) + 2 (`Telegram/`) = 59.
-- Funzioni `test_*`: ~1.242 (prima di parametrizzazioni).
-- Ultima run documentata (`docs/TEST_REPORT.md`): **1268/1268 pass**, coverage ~90%, lint/format puliti.
-- Gate configurati: coverage `fail_under=68` (branch on), marker `integration` separato, `--strict-markers`.
+- File di test: 64 (`tests/`) + 2 (`Telegram/`) = **66**.
+- Funzioni `test_*`: ~1.44k (prima di parametrizzazioni), di cui 7 live gated (`test_live_quote_media`).
+- Ultima run documentata (`docs/TEST_REPORT.md`, 2026-08-24): **1389/1389 pass** + 7 test live opzionali, coverage ~80%, lint/format puliti. La fonte aggiornata per gli esiti resta la CI.
+- Gate configurati: coverage `fail_under=68` (branch on), marker `integration`/`live`/`live-manual` separati e `--strict-markers`.
