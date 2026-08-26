@@ -568,6 +568,7 @@ class ChatViewMixin:
             # widget is mounted (bounded: cleared by native_cleanup on unmount).
             widget._pending_native_png = png
             widget._pending_native_path = path
+            self._native_pending_count += 1
             return
         self._register_native_thumbnail(widget, path, png)
 
@@ -695,6 +696,7 @@ class ChatViewMixin:
             # Mount is async: stash the PNG; the app hook registers it once the
             # widget is mounted (bounded: cleared by native_cleanup on unmount).
             widget._pending_quote_png = png
+            self._native_pending_count += 1
             return
         self._register_quote_thumbnail(widget, png)
 

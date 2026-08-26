@@ -124,6 +124,9 @@ class SignalTUI(
         self._chat_native_ids: set[int] = set()
         self._screen_stack_cleared = False
         self._native_image_counter = 0
+        # Number of thumbnails stashed (not yet registered) on unmounted widgets;
+        # lets ``_native_sync_tick`` bail out early when nothing is pending.
+        self._native_pending_count = 0
         # Concurrency gate for attachment path resolution + thumbnail prepare.
         self._image_resolve_semaphore = threading.Semaphore(4)
         # Dedicated gate for quote thumbnails (P3): they are small/fast and must
@@ -348,6 +351,16 @@ class SignalTUI(
         renderer = self._native_renderer
         if self.image_support is not ImageSupport.KITTY or renderer is None:
             return
+        # CPU guard: with no placements and no stashed thumbnails there is
+        # nothing to reconcile — skip the DOM query entirely.  The common
+        # (idle chat) case must not pay for ``query("ImageWidget, QuoteWidget")``
+        # on every frame / timer tick.
+        if (
+            not self._native_last_key
+            and not self._chat_native_ids
+            and not self._native_pending_count
+        ):
+            return
         # C5 screen-stack gate: while a modal/picker sits on top, the chat
         # placements would bleed over it.  Drop ONLY the chat placements (P3:
         # per-id ``d=i``, keeping data) — never the modal's own placement.
@@ -383,6 +396,9 @@ class SignalTUI(
                 pending = getattr(widget, "_pending_quote_png", None)
                 if pending is not None and widget.native_image_id is None:
                     widget._pending_quote_png = None
+                    self._native_pending_count = max(
+                        0, self._native_pending_count - 1
+                    )
                     self._register_quote_thumbnail(widget, pending)
             else:
                 pending = getattr(widget, "_pending_native_png", None)
@@ -390,6 +406,9 @@ class SignalTUI(
                     widget._pending_native_png = None
                     path = getattr(widget, "_pending_native_path", None)
                     widget._pending_native_path = None
+                    self._native_pending_count = max(
+                        0, self._native_pending_count - 1
+                    )
                     self._register_native_thumbnail(widget, path, pending)
 
     def _sync_native_images(self) -> None:

@@ -38,10 +38,10 @@ async def _broadcast(app: Any) -> None:
     while True:
         push_queue = get_push_queue()
         if push_queue is None:
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
             continue
         try:
-            event = await asyncio.to_thread(push_queue.get, True, 0.1)
+            event = await asyncio.to_thread(push_queue.get, True, 0.5)
         except queue.Empty:
             continue
         stale = []
