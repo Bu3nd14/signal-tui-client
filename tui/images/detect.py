@@ -146,19 +146,11 @@ def detect_image_support(
     if env.get("TMUX") or term.startswith("screen"):
         return ImageSupport.CATIMG
 
-    # 4. Native-graphics gate.
-    #
-    #    WezTerm: the env marker is reliable (only WezTerm sets it) and the
-    #    rendering is verified — so activate KITTY WITHOUT the TGP query.  Via
-    #    ssh the query reply does not reach us (even with a 4s timeout) while
-    #    the image transmission/placement still paint correctly, so the query is
-    #    NOT a reliable discriminator for WezTerm.
-    #
-    #    kitty: with TERM=xterm-kitty (no WezTerm marker) the query REMAINS
-    #    mandatory — it is what excludes iTerm2/Ghostty false positives.
-    if _is_wezterm(env):
-        return ImageSupport.KITTY
-    if term == "xterm-kitty":
+    # 4. Native-graphics gate: kitty (TERM=xterm-kitty) or WezTerm (empirically
+    #    verified to paint kitty placements) AND the TGP query answers OK.
+    #    The gate excludes iTerm2/Ghostty, whose xterm-256color TERM would answer
+    #    OK to the query but never actually render (false positive).
+    if term == "xterm-kitty" or _is_wezterm(env):
         query = query_cb if query_cb is not None else _default_kitty_query
         if query():
             return ImageSupport.KITTY
