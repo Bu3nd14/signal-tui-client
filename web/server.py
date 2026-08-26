@@ -30,7 +30,7 @@ _active_server: WebServerHandle | None = None
 
 def start_web_server(
     manager: Any,
-    port: int = 8080,
+    port: int = 4242,
     token: str | None = None,
     *,
     host: str = "127.0.0.1",

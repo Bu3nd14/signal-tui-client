@@ -323,12 +323,25 @@ def web_enabled() -> bool:
 
 
 def web_port() -> int:
-    """Return the web reader port (default ``8080``)."""
+    """Return the web reader port (default ``4242``)."""
     try:
-        port = int(_web_config().get("port", 8080))
+        port = int(_web_config().get("port", 4242))
     except (TypeError, ValueError):
-        return 8080
-    return port if 1 <= port <= 65535 else 8080
+        return 4242
+    return port if 1 <= port <= 65535 else 4242
+
+
+def web_host() -> str:
+    """Return the web reader bind host (default ``127.0.0.1``).
+
+    ``127.0.0.1`` keeps the web server local-only; set ``web.host`` in the
+    config (or use ``--web-host``) to bind on another interface, e.g.
+    ``0.0.0.0`` when exposing it over a VPN or tunnel.
+    """
+    value = _web_config().get("host", "127.0.0.1")
+    if value is None:
+        return "127.0.0.1"
+    return str(value)
 
 
 def web_token() -> str:

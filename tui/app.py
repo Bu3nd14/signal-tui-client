@@ -94,7 +94,8 @@ class SignalTUI(
         *,
         initial_cell_size: tuple[int, int] | None = None,
         web_enabled: bool = False,
-        web_port: int = 8080,
+        web_port: int = 4242,
+        web_host: str = "127.0.0.1",
         web_token: str = "",
     ):
         super().__init__()
@@ -107,6 +108,7 @@ class SignalTUI(
         self._initial_cell_size = initial_cell_size
         self._web_enabled = web_enabled
         self._web_port = web_port
+        self._web_host = web_host
         self._web_token = web_token
         self._web_server = None
 
@@ -273,7 +275,7 @@ class SignalTUI(
             from web.server import start_web_server
 
             self._web_server = start_web_server(
-                self.manager, self._web_port, self._web_token
+                self.manager, self._web_port, self._web_token, host=self._web_host
             )
         # Start poll worker immediately — Signal and WhatsApp events flow
         # as soon as their backends are ready (independent workers below).
