@@ -36,6 +36,10 @@ function showError(message) {
   elements.errorBanner.hidden = false;
 }
 
+function scrollThreadToBottom() {
+  elements.messages.scrollTop = elements.messages.scrollHeight;
+}
+
 function requestToken(invalid = false) {
   elements.tokenError.hidden = !invalid;
   elements.tokenInput.value = state.token;
@@ -168,7 +172,10 @@ async function loadImage(container, image, path) {
     const response = await apiFetch(path, { signal: controller.signal });
     const url = URL.createObjectURL(await response.blob());
     state.objectUrls.add(url);
-    image.addEventListener("load", () => container.querySelector(".attachment-loading")?.remove(), { once: true });
+    image.addEventListener("load", () => {
+      container.querySelector(".attachment-loading")?.remove();
+      scrollThreadToBottom();
+    }, { once: true });
     image.src = url;
   } catch (error) {
     if (error.name !== "AbortError") {
@@ -208,6 +215,8 @@ function renderMessages(messages, protocol) {
     empty.className = "empty-state";
     empty.textContent = "Nessun messaggio archiviato in questa conversazione.";
     elements.messages.append(empty);
+    scrollThreadToBottom();
+    requestAnimationFrame(scrollThreadToBottom);
     return;
   }
   for (const item of messages) {
@@ -235,7 +244,8 @@ function renderMessages(messages, protocol) {
     message.append(bubble);
     elements.messages.append(message);
   }
-  elements.messages.scrollTop = elements.messages.scrollHeight;
+  scrollThreadToBottom();
+  requestAnimationFrame(scrollThreadToBottom);
 }
 
 async function loadMessages() {
@@ -248,7 +258,10 @@ async function loadMessages() {
     const query = new URLSearchParams({ proto: active.protocol, contact_id: active.id });
     const response = await apiFetch(`/api/messages?${query}`, { signal: controller.signal });
     const messages = await response.json();
-    if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(messages, active.protocol);
+    if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
+      renderMessages(messages, active.protocol);
+      scrollThreadToBottom();
+    }
   } catch (error) {
     if (error.name !== "AbortError" && error.message !== "unauthorized") showError("Errore di rete durante il caricamento dei messaggi.");
   } finally {
