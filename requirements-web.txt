@@ -1,2 +1,4 @@
 fastapi
 uvicorn>=0.20
+# TestClient (starlette.testclient) richiede httpx2 nelle versioni recenti.
+httpx2
