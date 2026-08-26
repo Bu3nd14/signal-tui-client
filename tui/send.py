@@ -276,6 +276,20 @@ class SendMixin:
         if persist is not None:
             persist_backend, persist_contact_id, data, ts = persist
             persist_backend._persist_message(persist_contact_id, data, ts)
+            if getattr(self, "_web_enabled", False):
+                from web.bridge import push_event
+
+                push_event(
+                    {
+                        "type": "message",
+                        "payload": {
+                            "id": data.get("id"),
+                            "protocol": protocol,
+                            "contact_id": persist_contact_id,
+                            "timestamp": ts,
+                        },
+                    }
+                )
 
         # Extract quote parameters from reply_data
         # quote_author MUST be a contact id, not a display name.

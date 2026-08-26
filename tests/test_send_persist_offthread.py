@@ -252,6 +252,54 @@ class TestSendPersistOffthread:
         assert len(_db_rows(tmp_db)) == 1
         assert len(app.signal_backend.cache[contact.id]) == 1
 
+    def test_persisted_send_pushes_web_event_once_across_echo(self, tmp_db):
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        app._web_enabled = True
+        _prepare_send(app)
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        with patch("web.bridge.push_event") as push_event:
+            _send_text(app, "ciao web")
+            ts = app._cache[contact.cache_key][0]["timestamp"]
+            push_event.assert_not_called()
+            _run_workers(app)
+
+            app._handle_message_event(
+                ChatEvent(
+                    type="message",
+                    protocol=PROTOCOL_SIGNAL,
+                    contact_id=contact.id,
+                    payload={
+                        "id": "ts-1",
+                        "text": "ciao web",
+                        "is_mine": True,
+                        "sender": "You",
+                        "timestamp": ts,
+                        "quote_text": None,
+                        "msg_type": "text",
+                        "attachment_info": None,
+                        "attachment_id": None,
+                        "contact": contact,
+                    },
+                )
+            )
+
+        push_event.assert_called_once_with(
+            {
+                "type": "message",
+                "payload": {
+                    "id": None,
+                    "protocol": PROTOCOL_SIGNAL,
+                    "contact_id": contact.id,
+                    "timestamp": ts,
+                },
+            }
+        )
+
     # ── T2e: double identical send within 5s ─────────────────────────────
 
     def test_double_same_text_not_persisted(self, tmp_db):
