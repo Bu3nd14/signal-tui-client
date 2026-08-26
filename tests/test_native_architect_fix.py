@@ -52,11 +52,10 @@ def test_first_direct_mounted_registration_is_placed_on_next_tick(
     widget._is_mounted = True
     png = _png()
     app._register_native_thumbnail(widget, tmp_path / "photo.png", png)
-    assert app._native_pending_count == 0
+    assert app._native_widgets == {1: widget}
     assert app._native_renderer.has_data is True
     written.clear()
 
-    app.query = lambda *_a, **_kw: [widget]
     with patch.object(
         ImageWidget, "content_region", PropertyMock(return_value=Region(2, 5, 20, 2))
     ):
@@ -77,10 +76,12 @@ def test_cold_gate_skips_every_sync_and_rearms_after_cleanup(app_for_test):
     widget = ImageWidget(attachment_path=None)
     app._native_renderer.transmit(7, _png())
     widget.show_native_thumbnail(app._native_renderer, 7, _png())
+    app._native_widgets[7] = widget
     app._native_sync_tick()
     sync.assert_called_once()
 
-    widget.native_cleanup()
+    with patch.object(ImageWidget, "app", PropertyMock(return_value=app)):
+        widget.native_cleanup()
     assert app._native_renderer.has_data is False
     for _ in range(20):
         app._native_sync_tick()
@@ -165,6 +166,7 @@ def test_screen_stack_deletes_chat_once_keeps_modal_and_replaces_chat(app_for_te
     renderer.transmit(99, _png())
     renderer.place(99, 99, row=4, col=4, w_px=16, h_px=32)
     app._chat_native_ids = {5}
+    app._native_widgets[5] = MagicMock()
     written.clear()
 
     main, modal = object(), object()
@@ -182,10 +184,11 @@ def test_screen_stack_deletes_chat_once_keeps_modal_and_replaces_chat(app_for_te
         native_image_id=5,
         native_width_px=16,
         visible=True,
+        is_mounted=True,
         content_region=Region(2, 5, 2, 2),
         has_class=lambda _class: False,
     )
-    app.query = lambda *_a, **_kw: [widget]
+    app._native_widgets[5] = widget
     app._screen_stacks[app._current_mode] = [main]
     written.clear()
     app._native_sync_tick()
@@ -198,12 +201,12 @@ def test_pending_stash_cleanup_cools_gate(app_for_test, tmp_path):
     widget = ImageWidget(attachment_path=None)
     widget._is_mounted = False
     app._finish_native_thumbnail(widget, tmp_path / "photo.png", _png())
-    assert app._native_pending_count == 1
+    assert app._native_stashed == {widget}
 
     with patch.object(ImageWidget, "app", PropertyMock(return_value=app)):
         widget.native_cleanup()
 
-    assert app._native_pending_count == 0
+    assert app._native_stashed == set()
     assert widget._pending_native_png is None
     app.query = MagicMock()
     app._native_sync_tick()

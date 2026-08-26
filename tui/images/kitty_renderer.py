@@ -49,11 +49,14 @@ def prepare_hi_res(path, max_w_px: int, max_h_px: int) -> bytes:
     Stateless (Pillow only); used by the modal's native branch to cap the image
     at ~1600px on its long side while still fitting the terminal.
     """
+    max_w = max(1, max_w_px)
+    max_h = max(1, max_h_px)
     with Image.open(path) as img:
+        img.draft("RGB", (max_w, max_h))
         img = img.convert("RGB")
-        img.thumbnail((max(1, max_w_px), max(1, max_h_px)), Image.Resampling.LANCZOS)
+        img.thumbnail((max_w, max_h), Image.Resampling.BILINEAR)
         buf = io.BytesIO()
-        img.save(buf, "PNG")
+        img.save(buf, "PNG", compress_level=1)
         return buf.getvalue()
 
 

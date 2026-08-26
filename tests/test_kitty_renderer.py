@@ -399,15 +399,17 @@ class TestImageWidgetNative:
         widget.native_cleanup()
         assert written == []
 
-    def test_native_cleanup_releases_pending_count(self):
+    def test_native_cleanup_releases_pending_stash(self):
         widget = ImageWidget(attachment_path=None)
         widget._pending_native_png = b"png"
-        app = MagicMock(_native_pending_count=1)
+        app = MagicMock()
+        app._native_widgets = {}
+        app._native_stashed = {widget}
 
         with patch.object(ImageWidget, "app", PropertyMock(return_value=app)):
             widget.native_cleanup()
 
-        assert app._native_pending_count == 0
+        assert widget not in app._native_stashed
         assert widget._pending_native_png is None
 
     def test_focus_border_still_works(self):
@@ -434,6 +436,7 @@ class _FakeImageWidget:
         self.native_image_id = image_id
         self.native_width_px = width_px
         self.visible = True
+        self.is_mounted = True
         self._msg_right = msg_right
 
     def has_class(self, cls: str) -> bool:
@@ -459,6 +462,7 @@ class TestAppHook:
         app._chat_native_ids = {5, 6}  # chat ids, NOT the modal's id (99)
         app._native_renderer.transmit(5, b"png")
         app._native_renderer.transmit(6, b"png")
+        app._native_widgets[5] = MagicMock()
         written.clear()
 
         main_screen = object()
@@ -466,7 +470,7 @@ class TestAppHook:
         app._screen_stacks[app._current_mode] = [main_screen, modal_screen]
         app._compose_screen = main_screen
 
-        app.post_display_hook()
+        app._native_sync_tick()
         # Per-id delete (d=i), keep data; never the global d=a.
         assert any("a=d,d=i,i=5" in s for s in written)
         assert any("a=d,d=i,i=6" in s for s in written)
@@ -475,7 +479,7 @@ class TestAppHook:
 
         # Second call while still on the modal: already cleared → no-op.
         written.clear()
-        app.post_display_hook()
+        app._native_sync_tick()
         assert written == []
 
     def test_empty_renderer_gate_skips_widget_query(self, app_for_test):
@@ -494,7 +498,8 @@ class TestAppHook:
         written: list[str] = []
         app._native_renderer = KittyRenderer(write=written.append, cell_w=8, cell_h=16)
         app._chat_log = _FakeChatLog(Region(0, 0, 60, 40))
-        app.query = lambda *a, **k: [_FakeImageWidget(Region(2, 5, 40, 12))]
+        widget = _FakeImageWidget(Region(2, 5, 40, 12))
+        app._native_widgets[5] = widget
         app._native_last_key.clear()
 
         app._sync_native_images()
@@ -513,9 +518,8 @@ class TestAppHook:
         app._native_renderer = KittyRenderer(write=written.append, cell_w=8, cell_h=16)
         app._chat_log = _FakeChatLog(Region(0, 0, 60, 40))
         # Region 40 cols wide, image only 160px (20 cols) → right-align shifts it.
-        app.query = lambda *a, **k: [
-            _FakeImageWidget(Region(2, 5, 40, 12), width_px=160, msg_right=True)
-        ]
+        widget = _FakeImageWidget(Region(2, 5, 40, 12), width_px=160, msg_right=True)
+        app._native_widgets[5] = widget
 
         app._sync_native_images()
 
@@ -528,7 +532,8 @@ class TestAppHook:
         written: list[str] = []
         app._native_renderer = KittyRenderer(write=written.append, cell_w=8, cell_h=16)
         app._chat_log = _FakeChatLog(Region(0, 0, 60, 40))
-        app.query = lambda *a, **k: [_FakeImageWidget(Region(2, 5, 40, 12))]
+        widget = _FakeImageWidget(Region(2, 5, 40, 12))
+        app._native_widgets[5] = widget
 
         app._sync_native_images()
         first_len = len(written)
@@ -541,7 +546,8 @@ class TestAppHook:
         written: list[str] = []
         app._native_renderer = KittyRenderer(write=written.append, cell_w=8, cell_h=16)
         app._chat_log = _FakeChatLog(Region(0, 0, 60, 40))
-        app.query = lambda *a, **k: [_FakeImageWidget(Region(2, 5, 40, 12))]
+        widget = _FakeImageWidget(Region(2, 5, 40, 12))
+        app._native_widgets[5] = widget
 
         # Populate chat ids by syncing once on the default screen.
         app._native_renderer.transmit(5, b"png")
@@ -554,14 +560,14 @@ class TestAppHook:
         app._compose_screen = main_screen
 
         # Modal open → chat placements deleted per-id (d=i), data kept.
-        app.post_display_hook()
+        app._native_sync_tick()
         assert any("a=d,d=i,i=5" in s for s in written)
         assert not any("a=d,d=a" in s for s in written)
         written.clear()
 
         # Dismiss: back on the default screen → re-emit placements.
         app._screen_stacks[app._current_mode] = [main_screen]
-        app.post_display_hook()
+        app._native_sync_tick()
         assert any("a=p" in s for s in written)
         assert not any("a=d,d=a,q=2" in s for s in written)
 

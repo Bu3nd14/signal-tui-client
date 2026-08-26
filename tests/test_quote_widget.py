@@ -143,15 +143,17 @@ class TestQuoteWidgetNative:
 
         assert widget._text_static.display is True
 
-    def test_native_cleanup_releases_pending_count(self):
+    def test_native_cleanup_releases_pending_stash(self):
         widget = QuoteWidget("🖼️ Immagine")
         widget._pending_quote_png = b"png"
-        app = MagicMock(_native_pending_count=1)
+        app = MagicMock()
+        app._native_widgets = {}
+        app._native_stashed = {widget}
 
         with patch.object(QuoteWidget, "app", PropertyMock(return_value=app)):
             widget.native_cleanup()
 
-        assert app._native_pending_count == 0
+        assert widget not in app._native_stashed
         assert widget._pending_quote_png is None
 
     def test_text_visible_without_thumbnail(self):
@@ -242,6 +244,7 @@ class TestQuoteWidgetHook:
         widget.native_image_id = image_id
         widget.native_width_px = width_px
         widget.native_height_px = 54
+        widget._is_mounted = True
         if thumb_region is None:
             thumb_region = Region(2, 5, 6, 3)
         widget.thumbnail_region = lambda: thumb_region
@@ -250,7 +253,8 @@ class TestQuoteWidgetHook:
     def test_sync_places_quote_widget_from_thumb_region(self, app_for_test):
         app, written = self._kitty_app(app_for_test)
         app._chat_log = _HookFakeChatLog(Region(0, 0, 60, 40))
-        app.query = lambda *a, **k: [self._quote_widget()]
+        widget = self._quote_widget()
+        app._native_widgets[5] = widget
         app._native_last_key.clear()
 
         app._sync_native_images()
@@ -268,7 +272,7 @@ class TestQuoteWidgetHook:
         # 16px thumbnail (2 cols) inside a full-width bubble (right=60).
         widget = self._quote_widget(width_px=16)
         widget.aligned_right = True
-        app.query = lambda *a, **k: [widget]
+        app._native_widgets[5] = widget
         app._native_last_key.clear()
 
         with patch.object(
@@ -286,9 +290,8 @@ class TestQuoteWidgetHook:
         app, written = self._kitty_app(app_for_test)
         app._chat_log = _HookFakeChatLog(Region(0, 0, 60, 40))
         # Thumb region fully below the container → no placement.
-        app.query = lambda *a, **k: [
-            self._quote_widget(thumb_region=Region(2, 100, 6, 3))
-        ]
+        widget = self._quote_widget(thumb_region=Region(2, 100, 6, 3))
+        app._native_widgets[5] = widget
         app._native_last_key.clear()
 
         app._sync_native_images()
@@ -316,7 +319,8 @@ class TestQuoteWidgetHook:
     def test_gate_deletes_quote_placements_and_reemits(self, app_for_test):
         app, written = self._kitty_app(app_for_test)
         app._chat_log = _HookFakeChatLog(Region(0, 0, 60, 40))
-        app.query = lambda *a, **k: [self._quote_widget()]
+        widget = self._quote_widget()
+        app._native_widgets[5] = widget
 
         # Sync on the default screen → place + track in _chat_native_ids.
         app._native_renderer.transmit(5, b"png")
@@ -330,14 +334,14 @@ class TestQuoteWidgetHook:
         app._compose_screen = main_screen
 
         # Modal open → quote placement dropped (d=i), data kept.
-        app.post_display_hook()
+        app._native_sync_tick()
         assert any("a=d,d=i,i=5" in s for s in written)
         assert not any("a=p" in s for s in written)
         written.clear()
 
         # Dismiss → re-emitted.
         app._screen_stacks[app._current_mode] = [main_screen]
-        app.post_display_hook()
+        app._native_sync_tick()
         assert any("a=p" in s for s in written)
 
     def test_non_kitty_no_writes(self, app_for_test):

@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
@@ -120,13 +121,15 @@ class SignalTUI(
         # image_id → last placed (row, col, x_src, y_src, w_px, h_px) key, used
         # to skip no-op re-emissions during scroll.
         self._native_last_key: dict[int, tuple] = {}
+        self._native_widgets: dict[int, object] = {}
+        self._native_stashed: set = set()
+        self._last_sync = 0.0
+        self._native_sync_timer = None
         # Chat image ids (P3): the screen-stack gate deletes only these, never
         # the modal's own placement.
         self._chat_native_ids: set[int] = set()
         self._screen_stack_cleared = False
         self._native_image_counter = 0
-        # Number of thumbnails stashed (not yet registered) on unmounted widgets.
-        self._native_pending_count = 0
         self._hires_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="hires"
         )
@@ -347,6 +350,18 @@ class SignalTUI(
 
     def post_display_hook(self) -> None:
         """Reconcile native image placements right after each frame flush."""
+        if not (self._native_widgets or self._native_stashed):
+            return
+        now = time.monotonic()
+        if now - self._last_sync >= 0.075:
+            self._last_sync = now
+            self._native_sync_tick()
+        elif self._native_sync_tick and self._native_sync_timer is None:
+            self._native_sync_timer = self.set_timer(0.075, self._fire_sync)
+
+    def _fire_sync(self) -> None:
+        """Run the trailing native-image reconciliation."""
+        self._native_sync_timer = None
         self._native_sync_tick()
 
     def _native_sync_tick(self) -> None:
@@ -354,11 +369,7 @@ class SignalTUI(
         renderer = self._native_renderer
         if self.image_support is not ImageSupport.KITTY or renderer is None:
             return
-        # CPU guard: with no native images anywhere (placed or stashed) there is
-        # nothing to reconcile — skip the DOM query entirely.  The common
-        # (idle chat) case must not pay for ``query("ImageWidget, QuoteWidget")``
-        # on every frame / timer tick.
-        if not (renderer.has_data or self._native_pending_count):
+        if not (self._native_widgets or self._native_stashed):
             return
         # C5 screen-stack gate: while a modal/picker sits on top, the chat
         # placements would bleed over it.  Drop ONLY the chat placements (P3:
@@ -388,23 +399,23 @@ class SignalTUI(
             return
         if self._native_renderer is None:
             return
-        for widget in self.query("ImageWidget, QuoteWidget"):
+        for widget in tuple(self._native_stashed):
             if not getattr(widget, "is_mounted", False):
                 continue
             if isinstance(widget, QuoteWidget):
                 pending = getattr(widget, "_pending_quote_png", None)
                 if pending is not None and widget.native_image_id is None:
                     widget._pending_quote_png = None
-                    self._native_pending_count = max(0, self._native_pending_count - 1)
                     self._register_quote_thumbnail(widget, pending)
+                    self._native_stashed.discard(widget)
             else:
                 pending = getattr(widget, "_pending_native_png", None)
                 if pending is not None and widget.native_image_id is None:
                     widget._pending_native_png = None
                     path = getattr(widget, "_pending_native_path", None)
                     widget._pending_native_path = None
-                    self._native_pending_count = max(0, self._native_pending_count - 1)
                     self._register_native_thumbnail(widget, path, pending)
+                    self._native_stashed.discard(widget)
 
     def _sync_native_images(self) -> None:
         """Place/delete kitty placements for every native image widget."""
@@ -423,8 +434,12 @@ class SignalTUI(
         cell_w = renderer.cell_w
         cell_h = renderer.cell_h
         chat_ids: set[int] = set()
-        for widget in self.query("ImageWidget, QuoteWidget"):
-            image_id = widget.native_image_id
+        for image_id, widget in list(self._native_widgets.items()):
+            if getattr(widget, "native_image_id", None) != image_id or not getattr(
+                widget, "is_mounted", False
+            ):
+                self._native_widgets.pop(image_id, None)
+                continue
             if image_id is None or not widget.visible:
                 continue
             if widget.native_width_px is None:

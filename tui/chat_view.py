@@ -568,7 +568,7 @@ class ChatViewMixin:
             # widget is mounted (bounded: cleared by native_cleanup on unmount).
             widget._pending_native_png = png
             widget._pending_native_path = path
-            self._native_pending_count += 1
+            self._native_stashed.add(widget)
             return
         self._register_native_thumbnail(widget, path, png)
 
@@ -595,6 +595,7 @@ class ChatViewMixin:
         chat_log = self.chat_log
         was_at_bottom = _is_scrolled_to_bottom(chat_log)
         widget.show_native_thumbnail(renderer, image_id, png)
+        self._native_widgets[image_id] = widget
         if was_at_bottom:
             chat_log.scroll_end(animate=False)
 
@@ -696,7 +697,7 @@ class ChatViewMixin:
             # Mount is async: stash the PNG; the app hook registers it once the
             # widget is mounted (bounded: cleared by native_cleanup on unmount).
             widget._pending_quote_png = png
-            self._native_pending_count += 1
+            self._native_stashed.add(widget)
             return
         self._register_quote_thumbnail(widget, png)
 
@@ -708,6 +709,7 @@ class ChatViewMixin:
         image_id = self._next_native_image_id()
         renderer.transmit(image_id, png)
         widget.show_native_thumbnail(renderer, image_id, png)
+        self._native_widgets[image_id] = widget
 
     def _resolve_mounted_image_paths(self, widgets: list) -> None:
         """Start path resolution for cached image widgets (C4).

@@ -780,21 +780,20 @@ class ImageWidget(Static):
 
     def native_cleanup(self) -> None:
         """Free the kitty image data (``d=I``) and clear the native state."""
+        image_id = self.native_image_id
         if self.native_renderer is not None and self.native_image_id is not None:
             self.native_renderer.delete(self.native_image_id, keep_data=False)
+        try:
+            app = self.app
+            app._native_widgets.pop(image_id, None)
+            app._native_stashed.discard(self)
+        except Exception:
+            logger.debug("Failed to unregister native thumbnail", exc_info=True)
         self.native_renderer = None
         self.native_image_id = None
         self.native_width_px = None
         self.native_height_px = None
         # Drop any pending (not-yet-consumed) thumbnail stashed by the worker.
-        if self._pending_native_png is not None:
-            try:
-                app = self.app
-                app._native_pending_count = max(0, app._native_pending_count - 1)
-            except Exception:
-                logger.debug(
-                    "Failed to release pending native thumbnail", exc_info=True
-                )
         self._pending_native_png = None
         self._pending_native_path = None
 
@@ -910,19 +909,20 @@ class QuoteWidget(Horizontal):
 
     def native_cleanup(self) -> None:
         """Free the kitty image data (``d=I``) and clear the native state."""
+        image_id = self.native_image_id
         if self.native_renderer is not None and self.native_image_id is not None:
             self.native_renderer.delete(self.native_image_id, keep_data=False)
+        try:
+            app = self.app
+            app._native_widgets.pop(image_id, None)
+            app._native_stashed.discard(self)
+        except Exception:
+            logger.debug("Failed to unregister quote thumbnail", exc_info=True)
         self.native_renderer = None
         self.native_image_id = None
         self.native_width_px = None
         self.native_height_px = None
         # Drop any pending (not-yet-consumed) thumbnail stashed by the worker.
-        if self._pending_quote_png is not None:
-            try:
-                app = self.app
-                app._native_pending_count = max(0, app._native_pending_count - 1)
-            except Exception:
-                logger.debug("Failed to release pending quote thumbnail", exc_info=True)
         self._pending_quote_png = None
         # Re-show the textual placeholder (fallback text) when freed.
         self._text_static.display = True
@@ -964,10 +964,11 @@ class ImageModalScreen(ModalScreen):
         self._hires_executor = hires_executor
         # Native branch state: bytes of the prepared hi-res PNG.
         self._native_png: bytes | None = None
+        self._cancelled = False
 
     def compose(self):
-        # Native branch: no Textual widgets — kitty draws the image itself.
         if self._renderer is not None:
+            yield Static("🖼️ Loading…", id="native-modal-loading")
             return
         yield RichLog(id="modal-image", highlight=True, markup=False, wrap=False)
         yield Static("Press Escape or q to close", id="modal-hint")
@@ -975,6 +976,13 @@ class ImageModalScreen(ModalScreen):
     def on_mount(self) -> None:
         """Set up the screen: native placement or catimg rendering."""
         if self._renderer is not None and self._image_id is not None:
+            try:
+                loading = self.query_one("#native-modal-loading", Static)
+                loading.styles.width = "100%"
+                loading.styles.height = "100%"
+                loading.styles.content_align = ("center", "middle")
+            except NoMatches:
+                pass
             box = self._native_target_box()
             self.run_worker(self._prepare_native(self._image_id, box), exclusive=False)
             return
@@ -1019,30 +1027,43 @@ class ImageModalScreen(ModalScreen):
 
     async def _prepare_native(self, image_id: int, box: tuple[int, int]) -> None:
         """Prepare and chunk hi-res image data on the dedicated executor."""
+        if self._cancelled:
+            return
         try:
             if self._hires_executor is None:
                 raise RuntimeError("hi-res executor is unavailable")
             loop = asyncio.get_running_loop()
-            png, payload = await loop.run_in_executor(
+            result = await loop.run_in_executor(
                 self._hires_executor, self._build_native_payload, image_id, box
             )
         except Exception as _e:
             logger.debug("Native hi-res prepare failed", exc_info=True)
             self._native_error(str(_e))
             return
+        if self._cancelled or result is None:
+            return
+        png, payload = result
         self._finish_native(png, payload)
 
     def _build_native_payload(
         self, image_id: int, box: tuple[int, int]
-    ) -> tuple[bytes, str]:
+    ) -> tuple[bytes, str] | None:
         """Decode, resize, encode and chunk an image outside the UI thread."""
+        if self._cancelled:
+            return None
         png = prepare_hi_res(self._attachment_path, *box)
+        if self._cancelled:
+            return None
         return png, transmit_chunks(image_id, png)
 
     def _finish_native(self, png: bytes, payload: str) -> None:
         """UI thread: transmit once and place the image centered."""
-        if self._renderer is None or self._image_id is None:
+        if self._cancelled or self._renderer is None or self._image_id is None:
             return
+        try:
+            self.query_one("#native-modal-loading", Static).remove()
+        except NoMatches:
+            pass
         self._native_png = png
         self._renderer.transmit_prepared(self._image_id, payload)
         self._place_native()
@@ -1082,6 +1103,7 @@ class ImageModalScreen(ModalScreen):
             self._place_native()
 
     def dismiss(self, result=None):
+        self._cancelled = True
         self._native_cleanup()
         return super().dismiss(result)
 

@@ -118,9 +118,11 @@ class TestNativeModal:
         assert ctx.screen._image_id is None
         mock_dismiss.assert_called_once()
 
-    def test_native_compose_yields_nothing(self, tmp_path):
+    def test_native_compose_shows_loading_feedback(self, tmp_path):
         ctx = _NativeScreen(tmp_path)
-        assert list(ctx.screen.compose()) == []
+        children = list(ctx.screen.compose())
+        assert len(children) == 1
+        assert children[0].id == "native-modal-loading"
 
     def test_catimg_compose_unchanged(self, tmp_path):
         screen = ImageModalScreen(tmp_path / "photo.jpg")
