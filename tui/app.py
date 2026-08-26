@@ -354,14 +354,22 @@ class SignalTUI(
             return
         now = time.monotonic()
         if now - self._last_sync >= 0.075:
+            # Cancel a pending trailing timer before a fresh leading sync, so a
+            # frame that arrives right after the timer does not double-sync.
+            if self._native_sync_timer is not None:
+                cancel = getattr(self._native_sync_timer, "cancel", None)
+                if cancel is not None:
+                    cancel()
+                self._native_sync_timer = None
             self._last_sync = now
             self._native_sync_tick()
-        elif self._native_sync_tick and self._native_sync_timer is None:
+        elif self._native_sync_timer is None:
             self._native_sync_timer = self.set_timer(0.075, self._fire_sync)
 
     def _fire_sync(self) -> None:
         """Run the trailing native-image reconciliation."""
         self._native_sync_timer = None
+        self._last_sync = time.monotonic()
         self._native_sync_tick()
 
     def _native_sync_tick(self) -> None:
