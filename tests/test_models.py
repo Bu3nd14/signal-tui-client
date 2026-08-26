@@ -12,6 +12,7 @@ from models import (
     MEDIA_QUOTE_PLACEHOLDERS,
     ChatMessage,
     is_media_quote_placeholder,
+    is_media_quote_placeholder_composite,
     media_quote_placeholder,
 )
 
@@ -77,3 +78,21 @@ class TestIsMediaQuotePlaceholder:
     def test_composed_form_is_not_recognised(self):
         # La forma "filename — segnaposto" esiste solo sul display.
         assert is_media_quote_placeholder("photo.jpg — 🖼️ Immagine") is False
+
+
+class TestIsMediaQuotePlaceholderComposite:
+    """Chunk 6 — ``is_media_quote_placeholder_composite`` (canonico + composito)."""
+
+    def test_canonical_placeholders_are_recognised(self):
+        for value in MEDIA_QUOTE_PLACEHOLDERS.values():
+            assert is_media_quote_placeholder_composite(value) is True
+
+    def test_composed_form_is_recognised(self):
+        assert is_media_quote_placeholder_composite("photo.jpg — 🖼️ Immagine") is True
+        assert is_media_quote_placeholder_composite("video.mp4 — 🎬 Video") is True
+
+    def test_real_caption_is_not_recognised(self):
+        assert is_media_quote_placeholder_composite("Che bella!") is False
+        assert is_media_quote_placeholder_composite("photo.jpg") is False
+        assert is_media_quote_placeholder_composite("") is False
+        assert is_media_quote_placeholder_composite(None) is False

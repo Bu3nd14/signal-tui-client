@@ -101,6 +101,49 @@ class TestQuoteWidgetNative:
         assert widget.native_height_px == 32
         assert widget.styles.height.value == 2  # 32px / 16px per cell
 
+    def test_show_hides_placeholder_text(self):
+        """Il segnaposto tipizzato viene nascosto quando la thumb è attiva."""
+        renderer = KittyRenderer(write=lambda s: None, cell_w=8, cell_h=16)
+        widget = QuoteWidget("🖼️ Immagine")
+
+        widget.show_native_thumbnail(renderer, 5, _make_png(16, 32))
+
+        assert widget._text_static.display is False
+
+    def test_show_keeps_real_caption_visible(self):
+        """Una caption reale resta visibile accanto alla thumbnail."""
+        renderer = KittyRenderer(write=lambda s: None, cell_w=8, cell_h=16)
+        widget = QuoteWidget("Che bella!")
+
+        widget.show_native_thumbnail(renderer, 5, _make_png(16, 32))
+
+        assert widget._text_static.display is True
+
+    def test_show_hides_composite_placeholder(self):
+        """Il caso composito "filename — placeholder" viene nascosto."""
+        renderer = KittyRenderer(write=lambda s: None, cell_w=8, cell_h=16)
+        widget = QuoteWidget("foto.png — 🖼️ Immagine")
+
+        widget.show_native_thumbnail(renderer, 5, _make_png(16, 32))
+
+        assert widget._text_static.display is False
+
+    def test_native_cleanup_reshows_text(self):
+        """Al cleanup il fallback testuale riappare."""
+        renderer = KittyRenderer(write=lambda s: None, cell_w=8, cell_h=16)
+        widget = QuoteWidget("🖼️ Immagine")
+        widget.show_native_thumbnail(renderer, 5, _make_png(16, 32))
+        assert widget._text_static.display is False
+
+        widget.native_cleanup()
+
+        assert widget._text_static.display is True
+
+    def test_text_visible_without_thumbnail(self):
+        """Senza thumbnail (non-kitty / non ancora risolta) il testo è visibile."""
+        widget = QuoteWidget("🖼️ Immagine")
+        assert widget._text_static.display is True
+
     def test_show_native_thumbnail_does_not_touch_text(self):
         renderer = KittyRenderer(write=lambda s: None, cell_w=8, cell_h=16)
         widget = QuoteWidget("🖼️ Immagine")
@@ -418,3 +461,22 @@ class TestQuoteThumbnailFlow:
 
         assert app.run_worker.call_count == 0
         assert written == []
+
+    def test_uscita_lazy_whatsapp_attachment_id(self, tmp_path):
+        """Uscita con path=None ma attachment_id+protocol → lazy resolve (WA)."""
+        app, written = _make_kitty_app()
+        img_path = self._write_png(tmp_path)
+        app.manager = MagicMock()
+        app.manager.get_attachment_path.return_value = img_path
+        quote = QuoteWidget(
+            "🖼️ Immagine", attachment_id="wa-media-123", protocol="whatsapp"
+        )
+        quote._is_mounted = True
+
+        app._maybe_resolve_quote_thumbnail(quote)
+
+        assert any("a=t" in s for s in written)
+        assert quote.native_image_id == 1
+        app.manager.get_attachment_path.assert_called_once_with(
+            "whatsapp", "wa-media-123"
+        )
