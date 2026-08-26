@@ -12,7 +12,7 @@ from __future__ import annotations
 import io
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from PIL import Image
 from textual.geometry import Region
@@ -254,17 +254,22 @@ class TestQuoteWidgetHook:
     def test_sync_right_aligns_quote_widget(self, app_for_test):
         app, written = self._kitty_app(app_for_test)
         app._chat_log = _HookFakeChatLog(Region(0, 0, 60, 40))
-        # 16px thumbnail (2 cols) inside a 6-col slot → right-aligned.
+        # 16px thumbnail (2 cols) inside a full-width bubble (right=60).
         widget = self._quote_widget(width_px=16)
         widget.aligned_right = True
         app.query = lambda *a, **k: [widget]
         app._native_last_key.clear()
 
-        app._sync_native_images()
+        with patch.object(
+            QuoteWidget,
+            "content_region",
+            PropertyMock(return_value=Region(0, 5, 60, 3)),
+        ):
+            app._sync_native_images()
 
-        # region.right=8, image_cols=2 → col = 8 - 2 + 1 = 7.
+        # Container content region right=60, image_cols=2 → col = 60 - 2 + 1 = 59.
         assert len(written) == 1
-        assert written[0].startswith("\x1b[6;7H")
+        assert written[0].startswith("\x1b[6;59H")
 
     def test_sync_skips_out_of_viewport_quote_widget(self, app_for_test):
         app, written = self._kitty_app(app_for_test)
@@ -499,3 +504,46 @@ class TestQuoteThumbnailFlow:
         app.manager.get_attachment_path.assert_called_once_with(
             "whatsapp", "wa-media-123"
         )
+
+    def test_stale_path_falls_back_to_lazy_resolve(self, tmp_path):
+        """Path persistito ma file mancante → fallback lazy su attachment_id."""
+        app, written = _make_kitty_app()
+        img_path = self._write_png(tmp_path)
+        app.manager = MagicMock()
+        app.manager.get_attachment_path.return_value = img_path
+        stale = tmp_path / "gone.png"  # never created → missing
+        quote = QuoteWidget(
+            "🖼️ Immagine",
+            attachment_path=stale,
+            attachment_id="tgref:42:12",
+            protocol="telegram",
+        )
+        quote._is_mounted = True
+
+        app._maybe_resolve_quote_thumbnail(quote)
+
+        # Stale path detected → lazy resolve produced a valid file → thumbnail.
+        assert any("a=t" in s for s in written)
+        assert quote.native_image_id == 1
+        app.manager.get_attachment_path.assert_called_once_with(
+            "telegram", "tgref:42:12"
+        )
+
+    def test_stale_path_and_lazy_fails_text_only(self, tmp_path):
+        """Path stale + lazy resolve None → testo, nessun crash."""
+        app, written = _make_kitty_app()
+        app.manager = MagicMock()
+        app.manager.get_attachment_path.return_value = None
+        stale = tmp_path / "gone.png"
+        quote = QuoteWidget(
+            "🖼️ Immagine",
+            attachment_path=stale,
+            attachment_id="tgref:42:12",
+            protocol="telegram",
+        )
+        quote._is_mounted = True
+
+        app._maybe_resolve_quote_thumbnail(quote)
+
+        assert not any("a=t" in s for s in written)
+        assert quote.native_image_id is None

@@ -828,6 +828,42 @@ class TestRenderDedupSameSecond:
         assert image_widgets[0].attachment_path is None
         assert image_widgets[0].attachment_id == "img-001.jpg"
 
+    def test_merge_backend_cache_copies_quote_metadata(self):
+        """Il twin backend ricco copia le chiavi quote mancanti (add-only)."""
+        app = self._make_wa_app()
+        contact = app.selected_contact
+        app._cache = {
+            contact.cache_key: [
+                {
+                    "text": "x",
+                    "is_mine": False,
+                    "timestamp": 1000,
+                    "quote_text": "🖼️ Immagine",
+                }
+            ]
+        }
+        backend = MagicMock()
+        backend.cache = {
+            contact.id: [
+                {
+                    "text": "x",
+                    "is_mine": False,
+                    "timestamp": 1000,
+                    "quote_text": "🖼️ Immagine",
+                    "quote_attachment_id": "att-1",
+                    "quote_content_type": "image/png",
+                    "quote_attachment_path": "/tmp/quote-thumbs/abc.png",
+                }
+            ]
+        }
+
+        app._merge_backend_cache(contact, backend)
+
+        entry = app._cache[contact.cache_key][0]
+        assert entry["quote_attachment_id"] == "att-1"
+        assert entry["quote_content_type"] == "image/png"
+        assert entry["quote_attachment_path"] == "/tmp/quote-thumbs/abc.png"
+
 
 class TestCacheImageReplyMetadata:
     """🖼️ Bug #37 — ``_build_message_widgets`` propaga i metadati reply all'ImageWidget."""

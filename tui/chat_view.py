@@ -630,8 +630,17 @@ class ChatViewMixin:
             renderer = self._native_renderer
             if renderer is None:
                 return
+            if path is not None and not Path(path).is_file():
+                # Persisted path went stale (cleanup/restart): fall back to the
+                # lazy resolve of the quoted attachment id, if any.
+                logger.debug(
+                    "Quote thumbnail path stale (missing %r) — falling back", path
+                )
+                path = None
             if path is None:
-                # Ingresso: lazy resolve of the quoted attachment (best-effort).
+                # Lazy resolve (ingresso, or stale-path fallback), best-effort.
+                if not (attachment_id and protocol):
+                    return
                 try:
                     path = self.manager.get_attachment_path(protocol, attachment_id)
                 except Exception as _e:
@@ -1019,6 +1028,16 @@ class ChatViewMixin:
                 # (never downgrade read → sent).
                 if _status_rank(m.get("status")) > _status_rank(existing.get("status")):
                     existing["status"] = m.get("status")
+                # Additive quoted-attachment metadata: a backend twin may carry
+                # the thumbnail fields while the UI entry (optimistic/older) does
+                # not — copy them without touching identity/dedup.
+                for _key in (
+                    "quote_attachment_id",
+                    "quote_attachment_path",
+                    "quote_content_type",
+                ):
+                    if existing.get(_key) is None and m.get(_key) is not None:
+                        existing[_key] = m.get(_key)
                 continue
             ui_msgs.append(m)
             added = True
@@ -1173,6 +1192,9 @@ class ChatViewMixin:
                 status=status,
                 message_id=msg.get("id"),
                 edited=msg.get("edited", False),
+                quote_attachment_id=msg.get("quote_attachment_id"),
+                quote_attachment_path=msg.get("quote_attachment_path"),
+                quote_content_type=msg.get("quote_content_type"),
             )
 
         self._loaded_all = True
@@ -1254,6 +1276,9 @@ class ChatViewMixin:
                     sender=sender,
                     status=status,
                     message_id=msg.get("id"),
+                    quote_attachment_id=msg.get("quote_attachment_id"),
+                    quote_attachment_path=msg.get("quote_attachment_path"),
+                    quote_content_type=msg.get("quote_content_type"),
                 )
                 new_count += 1
 
