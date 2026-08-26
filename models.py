@@ -96,6 +96,22 @@ def is_media_quote_placeholder(text: str | None) -> bool:
     return text is not None and text in MEDIA_QUOTE_PLACEHOLDERS.values()
 
 
+def is_media_quote_placeholder_composite(text: str | None) -> bool:
+    """Return True if *text* is a media placeholder or its composed form.
+
+    The composed form ``"filename — placeholder"`` is display-only (built by
+    ``_signal_quote_text``); the exact ``is_media_quote_placeholder`` remains the
+    retry/wire predicate.  Used by ``QuoteWidget`` to hide the textual
+    placeholder when a native thumbnail replaces it (a real caption stays
+    visible).
+    """
+    if not text:
+        return False
+    if text in MEDIA_QUOTE_PLACEHOLDERS.values():
+        return True
+    return any(text.endswith(f" — {p}") for p in MEDIA_QUOTE_PLACEHOLDERS.values())
+
+
 # ─── Data models ─────────────────────────────────────────────────────────────
 
 

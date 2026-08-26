@@ -31,6 +31,7 @@ from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
     PROTOCOL_WHATSAPP,
+    is_media_quote_placeholder_composite,
     media_quote_placeholder,
     protocol_emoji,
 )
@@ -816,6 +817,9 @@ class QuoteWidget(Horizontal):
     ) -> None:
         super().__init__()
         self._quote_text = quote_text
+        # Raw text (no "▎ " prefix), used to decide whether the native thumbnail
+        # must hide a typed placeholder (a real caption stays visible).
+        self._quote_text_raw = quote_text
         # Applied to the internal text Static (same class as today's bubble).
         self._text_classes = classes
         # Metadata for the future ingresso/uscita flow.
@@ -833,8 +837,13 @@ class QuoteWidget(Horizontal):
         self.native_width_px: int | None = None
         self.native_height_px: int | None = None
 
+        # The internal text Static, created eagerly so it can be toggled (hidden
+        # when the native thumbnail replaces a placeholder) without requiring a
+        # mounted DOM.
+        self._text_static = Static(f"▎ {quote_text}", classes=classes)
+
     def compose(self):
-        yield Static(f"▎ {self._quote_text}", classes=self._text_classes)
+        yield self._text_static
         yield Static("", classes="quote-thumb")
 
     def thumbnail_region(self):
@@ -855,8 +864,11 @@ class QuoteWidget(Horizontal):
         """Register the native kitty thumbnail state for this widget.
 
         Mirrors ``ImageWidget.show_native_thumbnail`` but keeps the textual
-        content intact (the text lives in the internal ``Static``).  The real
-        ``a=p`` emission happens in the app's ``post_display_hook``.
+        content intact (the text lives in the internal ``Static``).  When the
+        quote text is a typed placeholder (canonical or composed), the internal
+        text ``Static`` is hidden — the native thumbnail replaces it (a real
+        caption stays visible).  The real ``a=p`` emission happens in the app's
+        ``post_display_hook``.
         """
         self.native_renderer = renderer
         self.native_image_id = image_id
@@ -865,6 +877,8 @@ class QuoteWidget(Horizontal):
         self.native_height_px = height_px
         rows = max(1, (height_px + renderer.cell_h - 1) // renderer.cell_h)
         self.styles.height = rows
+        if is_media_quote_placeholder_composite(self._quote_text_raw):
+            self._text_static.display = False
         self.refresh(layout=True)
 
     def native_cleanup(self) -> None:
@@ -875,6 +889,8 @@ class QuoteWidget(Horizontal):
         self.native_image_id = None
         self.native_width_px = None
         self.native_height_px = None
+        # Re-show the textual placeholder (fallback text) when freed.
+        self._text_static.display = True
 
 
 #: Cap on the hi-res modal image's long side, in pixels (DESIGN §6).
