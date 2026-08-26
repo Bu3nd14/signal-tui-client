@@ -1,9 +1,36 @@
 """Read-only REST API for contacts, persisted messages, and media."""
 
+import mimetypes
 import sqlite3
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
+
+_IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".heic",
+    ".heif",
+    ".tif",
+    ".tiff",
+}
+
+
+def _infer_attachment_type(attachment_id: str, content_type: str | None) -> str | None:
+    if content_type and content_type.strip():
+        return content_type
+    path = attachment_id.split("?", 1)[0]
+    suffix = Path(path).suffix.lower()
+    if suffix not in _IMAGE_EXTENSIONS:
+        return None
+    guessed_type, _ = mimetypes.guess_type(path)
+    if guessed_type and guessed_type.startswith("image/"):
+        return guessed_type
+    return f"image/{'jpeg' if suffix in {'.jpg', '.jpeg'} else suffix[1:]}"
 
 
 def _unread_counts() -> dict[tuple[str, str], int]:
@@ -51,10 +78,12 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
     for row in rows:
         attachment = None
         if row["attachment_id"]:
+            attachment_id = row["attachment_id"]
+            attachment_path = attachment_id.split("?", 1)[0]
             attachment = {
-                "attachment_id": row["attachment_id"],
-                "name": row["attachment_info"],
-                "type": row["content_type"],
+                "attachment_id": attachment_id,
+                "name": row["attachment_info"] or Path(attachment_path).name,
+                "type": _infer_attachment_type(attachment_id, row["content_type"]),
             }
         messages.append(
             {

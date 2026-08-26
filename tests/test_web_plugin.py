@@ -328,6 +328,52 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
     assert body[2]["direction"] == "out"
 
 
+def test_messages_infers_missing_image_content_type(web_client):
+    client, _, db_file = web_client
+    import sqlite3
+
+    with sqlite3.connect(db_file) as connection:
+        connection.executemany(
+            "INSERT INTO messages(protocol, contact_number, text, is_mine, timestamp, attachment_id, attachment_info, content_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "whatsapp",
+                    "alice",
+                    "image",
+                    0,
+                    1,
+                    "http://localhost:3000/api/files/photo.jpeg?download=1",
+                    None,
+                    None,
+                ),
+                ("whatsapp", "alice", "unknown", 0, 2, "media.unknown", "Media", None),
+                (
+                    "whatsapp",
+                    "alice",
+                    "existing",
+                    0,
+                    3,
+                    "photo.png",
+                    "Photo",
+                    "application/custom",
+                ),
+            ],
+        )
+
+    response = client.get(
+        "/api/messages",
+        params={"proto": "whatsapp", "contact_id": "alice"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    attachments = [message["attachment"] for message in response.json()]
+    assert attachments[0]["type"] == "image/jpeg"
+    assert attachments[0]["name"] == "photo.jpeg"
+    assert attachments[1]["type"] is None
+    assert attachments[2]["type"] == "application/custom"
+
+
 def test_bridge_is_bounded_nonblocking_and_counts_drop():
     from web import bridge
 
