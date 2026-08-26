@@ -147,7 +147,10 @@ h2 { font-size: 1.05rem; }
 .contact-copy { min-width: 0; }
 .contact-name { overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .contact-detail { margin-top: 4px; color: var(--muted); font-size: .76rem; }
-.protocol-badge { text-transform: capitalize; }
+.protocol-icon { display: inline-block; line-height: 0; vertical-align: middle; }
+.protocol-icon svg { width: 15px; height: 15px; fill: currentColor; }
+.thread-heading p .protocol-icon svg { width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; }
+.thread-proto-name { text-transform: capitalize; }
 .unread-badge {
   min-width: 22px;
   padding: 3px 6px;
