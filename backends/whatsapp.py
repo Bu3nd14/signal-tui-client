@@ -1493,6 +1493,8 @@ class WhatsAppBackend(ChatBackend):
             quote_timestamp=data.get("quote_timestamp"),
             quote_author=data.get("quote_author"),
             reply_to_message_id=data.get("reply_to_message_id"),
+            quote_attachment_id=data.get("quote_attachment_id"),
+            quote_content_type=data.get("quote_content_type"),
         )
 
     def _reuse_failed_db_row(
@@ -1655,6 +1657,8 @@ class WhatsAppBackend(ChatBackend):
                 "quote_timestamp": data.get("quote_timestamp"),
                 "quote_author": data.get("quote_author"),
                 "reply_to_message_id": data.get("reply_to_message_id"),
+                "quote_attachment_id": data.get("quote_attachment_id"),
+                "quote_content_type": data.get("quote_content_type"),
             },
         )
         return True

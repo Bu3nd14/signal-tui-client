@@ -138,6 +138,16 @@ class SendMixin:
             "quote_timestamp": reply_data.get("timestamp") if reply_data else None,
             "quote_author": contact_id if reply_data else None,
             "reply_to_message_id": reply_to_message_id,
+            # Quoted-media thumbnail metadata (display-only; wire #37 unchanged).
+            "quote_attachment_id": (
+                reply_data.get("quote_attachment_id") if reply_data else None
+            ),
+            "quote_attachment_path": (
+                reply_data.get("quote_attachment_path") if reply_data else None
+            ),
+            "quote_content_type": (
+                reply_data.get("quote_content_type") if reply_data else None
+            ),
         }
         # Ingerisci l'ottimista nel backend CORRETTO del contatto (non hardcoded
         # su signal_backend): per WhatsApp deve finire nel WhatsAppBackend.cache,
@@ -175,6 +185,9 @@ class SendMixin:
                 "quote_timestamp": data["quote_timestamp"],
                 "quote_author": data["quote_author"],
                 "reply_to_message_id": reply_to_message_id,
+                "quote_attachment_id": data["quote_attachment_id"],
+                "quote_attachment_path": data["quote_attachment_path"],
+                "quote_content_type": data["quote_content_type"],
             }
         )
 
