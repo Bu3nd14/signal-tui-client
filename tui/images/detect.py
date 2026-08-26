@@ -1,8 +1,8 @@
 """Terminal image-protocol detection (pure, dependency-injectable).
 
 Implements DESIGN_NATIVE_IMAGES.md §5.1: config override → tty check →
-tmux/screen guard → true-kitty gate (``TERM=xterm-kitty`` + TGP query) →
-catimg fallback, else OFF.
+tmux/screen guard → native-graphics gate (kitty ``TERM=xterm-kitty`` or WezTerm
++ TGP query) → catimg fallback, else OFF.
 
 Everything is injectable (``isatty``, ``env``, ``override``, ``which``,
 ``query_cb``) so the detection can be unit-tested headlessly with no real
@@ -25,6 +25,19 @@ from enum import Enum
 # TGP (Kitty Graphics Protocol) query/response bytes.
 _KITTY_QUERY = b"\x1b_Gi=1,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\"
 _KITTY_OK = b"\x1b_Gi=1;OK\x1b\\"
+
+#: Env markers that identify a WezTerm session (empirically verified: WezTerm
+#: paints kitty placements correctly — Xvfb + screenshot on the server).
+_WEZTERM_MARKERS = ("WEZTERM_PANE", "WEZTERM_UNIX_SOCKET")
+
+
+def _is_wezterm(env: Mapping[str, str]) -> bool:
+    """Return True if *env* identifies a WezTerm terminal."""
+    return (
+        env.get("TERM_PROGRAM") == "WezTerm"
+        or any(env.get(m) for m in _WEZTERM_MARKERS)
+        or env.get("TERM", "") == "wezterm"
+    )
 
 
 class ImageSupport(Enum):
@@ -133,10 +146,11 @@ def detect_image_support(
     if env.get("TMUX") or term.startswith("screen"):
         return ImageSupport.CATIMG
 
-    # 4. True-kitty gate: TERM=xterm-kitty AND the TGP query answers OK.
-    #    The TERM gate excludes iTerm2/Ghostty, whose xterm-256color TERM would
-    #    answer OK to the query but never actually render (false positive).
-    if term == "xterm-kitty":
+    # 4. Native-graphics gate: kitty (TERM=xterm-kitty) or WezTerm (empirically
+    #    verified to paint kitty placements) AND the TGP query answers OK.
+    #    The gate excludes iTerm2/Ghostty, whose xterm-256color TERM would answer
+    #    OK to the query but never actually render (false positive).
+    if term == "xterm-kitty" or _is_wezterm(env):
         query = query_cb if query_cb is not None else _default_kitty_query
         if query():
             return ImageSupport.KITTY
