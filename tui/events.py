@@ -91,6 +91,20 @@ class EventHandlingMixin:
 
         # Mirror into the UI's protocol-aware cache only when actually new.
         if added:
+            if getattr(self, "_web_enabled", False):
+                from web.bridge import push_event
+
+                push_event(
+                    {
+                        "type": "message",
+                        "payload": {
+                            "id": event.payload.get("id"),
+                            "protocol": event.protocol,
+                            "contact_id": contact.id,
+                            "timestamp": ts,
+                        },
+                    }
+                )
             if cache_key not in self._cache:
                 self._cache[cache_key] = []
             self._cache[cache_key].append(

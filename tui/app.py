@@ -2,6 +2,8 @@
 
 import logging
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
 from textual.app import App
@@ -93,6 +95,10 @@ class SignalTUI(
         image_support: ImageSupport = ImageSupport.CATIMG,
         *,
         initial_cell_size: tuple[int, int] | None = None,
+        web_enabled: bool = False,
+        web_port: int = 4242,
+        web_host: str = "127.0.0.1",
+        web_token: str = "",
     ):
         super().__init__()
         # Terminal image backend detected in ``signal_tui`` before ``run()``.
@@ -102,6 +108,11 @@ class SignalTUI(
         # Cell size measured BEFORE ``run()`` (P2): the CSI fallback can only run
         # safely outside the app (no Textual key-thread racing for stdin).
         self._initial_cell_size = initial_cell_size
+        self._web_enabled = web_enabled
+        self._web_port = web_port
+        self._web_host = web_host
+        self._web_token = web_token
+        self._web_server = None
 
         # Native kitty image rendering state (phase 2).  The renderer is created
         # in ``on_mount`` when the terminal supports it; placements are reconciled
@@ -110,11 +121,18 @@ class SignalTUI(
         # image_id → last placed (row, col, x_src, y_src, w_px, h_px) key, used
         # to skip no-op re-emissions during scroll.
         self._native_last_key: dict[int, tuple] = {}
+        self._native_widgets: dict[int, object] = {}
+        self._native_stashed: set = set()
+        self._last_sync = 0.0
+        self._native_sync_timer = None
         # Chat image ids (P3): the screen-stack gate deletes only these, never
         # the modal's own placement.
         self._chat_native_ids: set[int] = set()
         self._screen_stack_cleared = False
         self._native_image_counter = 0
+        self._hires_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="hires"
+        )
         # Concurrency gate for attachment path resolution + thumbnail prepare.
         self._image_resolve_semaphore = threading.Semaphore(4)
         # Dedicated gate for quote thumbnails (P3): they are small/fast and must
@@ -262,6 +280,12 @@ class SignalTUI(
     def on_mount(self):
         """On startup, start poll worker and backend connections in parallel."""
         self._chat_log = self.query_one("#chat-log", Vertical)
+        if self._web_enabled:
+            from web.server import start_web_server
+
+            self._web_server = start_web_server(
+                self.manager, self._web_port, self._web_token, host=self._web_host
+            )
         # Start poll worker immediately — Signal and WhatsApp events flow
         # as soon as their backends are ready (independent workers below).
         self._polling_active = True
@@ -326,12 +350,34 @@ class SignalTUI(
 
     def post_display_hook(self) -> None:
         """Reconcile native image placements right after each frame flush."""
+        if not (self._native_widgets or self._native_stashed):
+            return
+        now = time.monotonic()
+        if now - self._last_sync >= 0.075:
+            # Cancel a pending trailing timer before a fresh leading sync, so a
+            # frame that arrives right after the timer does not double-sync.
+            if self._native_sync_timer is not None:
+                cancel = getattr(self._native_sync_timer, "cancel", None)
+                if cancel is not None:
+                    cancel()
+                self._native_sync_timer = None
+            self._last_sync = now
+            self._native_sync_tick()
+        elif self._native_sync_timer is None:
+            self._native_sync_timer = self.set_timer(0.075, self._fire_sync)
+
+    def _fire_sync(self) -> None:
+        """Run the trailing native-image reconciliation."""
+        self._native_sync_timer = None
+        self._last_sync = time.monotonic()
         self._native_sync_tick()
 
     def _native_sync_tick(self) -> None:
         """Gate + reconcile placements (shared by the hook and the timer)."""
         renderer = self._native_renderer
         if self.image_support is not ImageSupport.KITTY or renderer is None:
+            return
+        if not (self._native_widgets or self._native_stashed):
             return
         # C5 screen-stack gate: while a modal/picker sits on top, the chat
         # placements would bleed over it.  Drop ONLY the chat placements (P3:
@@ -361,7 +407,7 @@ class SignalTUI(
             return
         if self._native_renderer is None:
             return
-        for widget in self.query("ImageWidget, QuoteWidget"):
+        for widget in tuple(self._native_stashed):
             if not getattr(widget, "is_mounted", False):
                 continue
             if isinstance(widget, QuoteWidget):
@@ -369,6 +415,7 @@ class SignalTUI(
                 if pending is not None and widget.native_image_id is None:
                     widget._pending_quote_png = None
                     self._register_quote_thumbnail(widget, pending)
+                    self._native_stashed.discard(widget)
             else:
                 pending = getattr(widget, "_pending_native_png", None)
                 if pending is not None and widget.native_image_id is None:
@@ -376,6 +423,7 @@ class SignalTUI(
                     path = getattr(widget, "_pending_native_path", None)
                     widget._pending_native_path = None
                     self._register_native_thumbnail(widget, path, pending)
+                    self._native_stashed.discard(widget)
 
     def _sync_native_images(self) -> None:
         """Place/delete kitty placements for every native image widget."""
@@ -394,8 +442,12 @@ class SignalTUI(
         cell_w = renderer.cell_w
         cell_h = renderer.cell_h
         chat_ids: set[int] = set()
-        for widget in self.query("ImageWidget, QuoteWidget"):
-            image_id = widget.native_image_id
+        for image_id, widget in list(self._native_widgets.items()):
+            if getattr(widget, "native_image_id", None) != image_id or not getattr(
+                widget, "is_mounted", False
+            ):
+                self._native_widgets.pop(image_id, None)
+                continue
             if image_id is None or not widget.visible:
                 continue
             if widget.native_width_px is None:
@@ -537,6 +589,14 @@ class SignalTUI(
     def on_exit(self):
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
+        try:
+            self._hires_executor.shutdown(wait=False)
+        except Exception as _e:
+            logger.debug("Hi-res executor shutdown failed", exc_info=True)
+        if self._web_enabled:
+            from web.server import stop_web_server
+
+            stop_web_server(self._web_server)
         if self.telegram_backend is not None:
             try:
                 self.telegram_backend.disconnect_sync()

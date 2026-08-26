@@ -9,7 +9,9 @@ the click handler runs on a ``SimpleNamespace`` app (same convention as
 
 from __future__ import annotations
 
+import asyncio
 import sys
+from concurrent.futures import Executor, Future
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, PropertyMock, patch
@@ -31,6 +33,20 @@ def _make_png(path: Path, width: int = 40, height: int = 80) -> None:
     Image.new("RGB", (width, height), "blue").save(path)
 
 
+class _RecordingExecutor(Executor):
+    def __init__(self) -> None:
+        self.submissions = []
+
+    def submit(self, fn, /, *args, **kwargs):
+        self.submissions.append((fn, args, kwargs))
+        future = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except Exception as error:  # noqa: BLE001 - mirror Executor.submit semantics
+            future.set_exception(error)
+        return future
+
+
 class _NativeScreen:
     """Bare native modal + recorder, with inline worker/thread dispatch."""
 
@@ -39,14 +55,14 @@ class _NativeScreen:
         _make_png(path, width, height)
         self.written: list[str] = []
         self.renderer = KittyRenderer(write=self.written.append, cell_w=8, cell_h=16)
-        self.screen = ImageModalScreen(path, self.renderer, image_id=42)
-        self.screen.run_worker = MagicMock(side_effect=lambda fn, **kw: fn())
-        # The UI-thread hop must go through the App (``call_from_thread`` lives
-        # on App, not Screen/Widget) — provide a fake app and patch ``.app``.
-        self.app = MagicMock()
-        self.app.call_from_thread = MagicMock(
-            side_effect=lambda fn, *a, **k: fn(*a, **k)
+        self.executor = _RecordingExecutor()
+        self.screen = ImageModalScreen(
+            path, self.renderer, image_id=42, hires_executor=self.executor
         )
+        self.screen.run_worker = MagicMock(
+            side_effect=lambda awaitable, **kw: asyncio.run(awaitable)
+        )
+        self.app = MagicMock()
 
     def size(self) -> Size:
         return Size(80, 24)
@@ -74,6 +90,7 @@ class TestNativeModal:
         assert "w=40,h=80" in places[0]
         assert "C=1,q=2" in places[0]
         assert ctx.screen._native_png is not None
+        assert len(ctx.executor.submissions) == 1
 
     def test_re_place_on_resize_without_retransmit(self, tmp_path):
         ctx = _NativeScreen(tmp_path)
@@ -101,9 +118,11 @@ class TestNativeModal:
         assert ctx.screen._image_id is None
         mock_dismiss.assert_called_once()
 
-    def test_native_compose_yields_nothing(self, tmp_path):
+    def test_native_compose_shows_loading_feedback(self, tmp_path):
         ctx = _NativeScreen(tmp_path)
-        assert list(ctx.screen.compose()) == []
+        children = list(ctx.screen.compose())
+        assert len(children) == 1
+        assert children[0].id == "native-modal-loading"
 
     def test_catimg_compose_unchanged(self, tmp_path):
         screen = ImageModalScreen(tmp_path / "photo.jpg")
@@ -112,47 +131,45 @@ class TestNativeModal:
 
 
 class TestNativePrepareThreadHop:
-    """Regression: ``_prepare_native`` must hop to the UI thread via the APP.
+    """Native preparation and DCS chunking use the dedicated executor."""
 
-    ``call_from_thread`` lives on ``App``, not ``Screen``/``Widget`` — before
-    the fix ``_prepare_native`` raised ``AttributeError`` here.
-    """
-
-    def _screen(self, tmp_path) -> ImageModalScreen:
+    def _screen(self, tmp_path) -> tuple[ImageModalScreen, _RecordingExecutor]:
         path = tmp_path / "photo.png"
         _make_png(path, 40, 80)
         renderer = KittyRenderer(write=lambda s: None, cell_w=8, cell_h=16)
-        return ImageModalScreen(path, renderer, image_id=42)
+        executor = _RecordingExecutor()
+        return (
+            ImageModalScreen(path, renderer, image_id=42, hires_executor=executor),
+            executor,
+        )
 
-    def test_success_branch_calls_app_call_from_thread(self, tmp_path):
-        screen = self._screen(tmp_path)
-        fake_app = MagicMock()
+    def test_success_branch_uses_dedicated_executor(self, tmp_path):
+        screen, executor = self._screen(tmp_path)
+        png = (tmp_path / "photo.png").read_bytes()
         with (
-            patch.object(ImageModalScreen, "app", PropertyMock(return_value=fake_app)),
+            patch.object(
+                screen, "_build_native_payload", return_value=(png, "prepared-payload")
+            ),
             patch.object(Screen, "size", PropertyMock(return_value=Size(80, 24))),
-            patch("ui_components.prepare_hi_res", return_value=b"png-bytes"),
         ):
-            screen._prepare_native()
+            asyncio.run(screen._prepare_native(42, (640, 352)))
 
-        fake_app.call_from_thread.assert_called_once()
-        args = fake_app.call_from_thread.call_args.args
-        assert args[0] == screen._finish_native
-        assert args[1] == b"png-bytes"
+        assert len(executor.submissions) == 1
+        assert screen._native_png == png
+        assert screen._renderer.has_data is True
 
-    def test_error_branch_calls_app_call_from_thread(self, tmp_path):
-        screen = self._screen(tmp_path)
-        fake_app = MagicMock()
+    def test_error_branch_reports_prepare_failure(self, tmp_path):
+        screen, executor = self._screen(tmp_path)
+        screen._native_error = MagicMock()
         with (
-            patch.object(ImageModalScreen, "app", PropertyMock(return_value=fake_app)),
-            patch.object(Screen, "size", PropertyMock(return_value=Size(80, 24))),
-            patch("ui_components.prepare_hi_res", side_effect=ValueError("boom")),
+            patch.object(
+                screen, "_build_native_payload", side_effect=ValueError("boom")
+            ),
         ):
-            screen._prepare_native()
+            asyncio.run(screen._prepare_native(42, (640, 352)))
 
-        fake_app.call_from_thread.assert_called_once()
-        args = fake_app.call_from_thread.call_args.args
-        assert args[0] == screen._native_error
-        assert "boom" in args[1]
+        assert len(executor.submissions) == 1
+        screen._native_error.assert_called_once_with("boom")
 
 
 class TestOffAndClickRouting:
@@ -167,6 +184,7 @@ class TestOffAndClickRouting:
             "push_screen": MagicMock(),
             "_status": MagicMock(),
             "image_support": image_support,
+            "_hires_executor": _RecordingExecutor(),
         }
         defaults.update(extra)
         return SimpleNamespace(**defaults)

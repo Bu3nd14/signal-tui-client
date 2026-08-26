@@ -303,3 +303,51 @@ def thumbnail_max_lines() -> int:
 def thumbnail_max_cols() -> int:
     """Return the max thumbnail width in columns (default ``60``)."""
     return _get_int("thumbnail_max_cols", "THUMBNAIL_MAX_COLS", 60)
+
+
+# ─── Optional web reader configuration ──────────────────────────────────────
+
+
+def _web_config() -> dict:
+    """Return the ``web`` config section, or an empty dict."""
+    value = _load_config().get("web", {})
+    return value if isinstance(value, dict) else {}
+
+
+def web_enabled() -> bool:
+    """Return whether the optional web reader is enabled (default off)."""
+    value = _web_config().get("enabled", False)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return value is True
+
+
+def web_port() -> int:
+    """Return the web reader port (default ``4242``)."""
+    try:
+        port = int(_web_config().get("port", 4242))
+    except (TypeError, ValueError):
+        return 4242
+    return port if 1 <= port <= 65535 else 4242
+
+
+def web_host() -> str:
+    """Return the web reader bind host (default ``127.0.0.1``).
+
+    ``127.0.0.1`` keeps the web server local-only; set ``web.host`` in the
+    config (or use ``--web-host``) to bind on another interface, e.g.
+    ``0.0.0.0`` when exposing it over a VPN or tunnel.
+    """
+    value = _web_config().get("host", "127.0.0.1")
+    if value is None:
+        return "127.0.0.1"
+    return str(value)
+
+
+def web_token() -> str:
+    """Return the web Bearer token from env or the ``web`` config section."""
+    env_token = os.environ.get("SIGNAL_TUI_WEB_TOKEN")
+    if env_token:
+        return env_token
+    value = _web_config().get("token", "")
+    return str(value) if value is not None else ""

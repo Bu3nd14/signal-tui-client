@@ -5,6 +5,7 @@ Thin entry point: single-instance lock, crash logging, and process startup.
 The application itself lives in the ``tui`` package (see ``tui.app.SignalTUI``).
 """
 
+import argparse
 import logging
 import os
 import shutil
@@ -78,7 +79,7 @@ def _global_exception_handler(exc_type, exc_value, exc_traceback):
 
 sys.excepthook = _global_exception_handler
 
-from backends.config import image_protocol
+from backends.config import image_protocol, web_enabled, web_host, web_port, web_token
 from emoji_picker import (
     replace_emoji_aliases,  # noqa: F401 (re-exported for test patching)
 )
@@ -95,13 +96,35 @@ logger.addHandler(_link_fh)
 logger.setLevel(logging.DEBUG)
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line options for the TUI entry point."""
+    parser = argparse.ArgumentParser(description="Signal TUI Client")
+    parser.add_argument("--debug", action="store_true", help="enable debug logging")
+    parser.add_argument(
+        "--web",
+        action="store_true",
+        default=None,
+        help="enable the optional read-only web UI",
+    )
+    parser.add_argument("--web-port", type=int, help="web UI listen port")
+    parser.add_argument(
+        "--web-host", type=str, help="web UI bind host (default 127.0.0.1)"
+    )
+    args = parser.parse_args(argv)
+    if args.web_port is not None and not 1 <= args.web_port <= 65535:
+        parser.error("--web-port must be between 1 and 65535")
+    return args
+
+
 if __name__ == "__main__":
     import logging
+
+    args = _parse_args()
 
     # --debug: logging di livello DEBUG su /tmp/signal-tui.log (default INFO).
     # Utile per la strumentazione (es. timing di send_message_sync) senza
     # interferire con stderr usato da Textual per la TUI.
-    level = logging.DEBUG if "--debug" in sys.argv else logging.INFO
+    level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -169,7 +192,15 @@ if __name__ == "__main__":
             logger.debug("Cell-size pre-run detection failed", exc_info=True)
         logger.info("Native image cell size: %r", initial_cell_size)
 
-    app = SignalTUI(image_support=image_support, initial_cell_size=initial_cell_size)
+    enable_web = args.web if args.web is not None else web_enabled()
+    app = SignalTUI(
+        image_support=image_support,
+        initial_cell_size=initial_cell_size,
+        web_enabled=enable_web,
+        web_port=args.web_port if args.web_port is not None else web_port(),
+        web_host=args.web_host if args.web_host is not None else web_host(),
+        web_token=web_token(),
+    )
 
     def _handle_sigint(sig, frame):
         """Handle Ctrl+C: stop polling and exit cleanly."""

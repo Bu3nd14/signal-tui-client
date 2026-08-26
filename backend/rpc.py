@@ -170,6 +170,11 @@ def get_attachment_path(attachment_id: str) -> Path | None:
     if not attachment_id:
         return None
     att_path = _backend.SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id
+    if not att_path.resolve().is_relative_to(
+        _backend.SIGNAL_CLI_ATTACHMENTS_DIR.resolve()
+    ):
+        logger.warning("Rejected attachment path outside the attachments directory")
+        return None
     if att_path.exists() and att_path.is_file():
         return att_path
     return None

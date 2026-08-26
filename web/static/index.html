@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Signal TUI Reader</title>
+  <link rel="stylesheet" href="/style.css?v=5">
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <aside class="sidebar" aria-label="Conversazioni">
+      <header class="sidebar-header">
+        <div>
+          <p class="eyebrow">Signal TUI</p>
+          <h1>Conversazioni</h1>
+        </div>
+        <div class="header-actions">
+          <button id="refresh-contacts" class="icon-button" type="button" aria-label="Ricarica conversazioni" title="Ricarica">↻</button>
+          <button id="open-token" class="icon-button" type="button" aria-label="Imposta token" title="Token">⌁</button>
+        </div>
+      </header>
+      <div id="protocol-tabs" class="protocol-tabs" role="tablist" aria-label="Filtra conversazioni per protocollo">
+        <button class="protocol-tab active" type="button" role="tab" data-protocol="all" aria-selected="true">Tutti</button>
+        <button class="protocol-tab" type="button" role="tab" data-protocol="signal" aria-selected="false">Signal</button>
+        <button class="protocol-tab" type="button" role="tab" data-protocol="whatsapp" aria-selected="false">WhatsApp</button>
+        <button class="protocol-tab" type="button" role="tab" data-protocol="telegram" aria-selected="false">Telegram</button>
+      </div>
+      <div id="contact-status" class="list-status">Inserisci il token per iniziare.</div>
+      <nav id="contact-list" class="contact-list" aria-live="polite"></nav>
+    </aside>
+
+    <main class="thread-panel">
+      <header class="thread-header">
+        <button id="back-button" class="icon-button back-button" type="button" aria-label="Torna alle conversazioni">‹</button>
+        <div class="thread-heading">
+          <h2 id="thread-name">Reader web</h2>
+          <p id="thread-meta">Seleziona una conversazione</p>
+        </div>
+        <span id="connection-state" class="connection-state offline">offline</span>
+      </header>
+      <div id="error-banner" class="error-banner" role="alert" hidden>
+        <span id="error-text"></span>
+        <button id="dismiss-error" type="button" aria-label="Chiudi avviso">×</button>
+      </div>
+      <section id="message-list" class="message-list" aria-live="polite">
+        <div class="empty-state">
+          <span class="empty-icon">◫</span>
+          <strong>Archivio in sola lettura</strong>
+          <p>Scegli una chat per consultarne i messaggi e gli allegati.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="token-dialog" class="token-dialog">
+    <form id="token-form" method="dialog">
+      <p class="eyebrow">Autenticazione</p>
+      <h2>Bearer token</h2>
+      <p class="dialog-copy">Il token viene conservato solo nel localStorage di questo browser.</p>
+      <label for="token-input">Token</label>
+      <input id="token-input" name="token" type="password" autocomplete="current-password" required>
+      <p id="token-error" class="field-error" hidden>Token non valido. Riprova.</p>
+      <div class="dialog-actions">
+        <button id="cancel-token" class="secondary-button" type="button">Annulla</button>
+        <button class="primary-button" type="submit">Salva e connetti</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js?v=5" defer></script>
+</body>
+</html>

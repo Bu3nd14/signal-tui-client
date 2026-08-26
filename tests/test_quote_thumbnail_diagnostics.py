@@ -229,7 +229,6 @@ class TestQuoteFinishAfterUnmount:
 
         # Once mounted again, the hook consumes the stash → thumbnail registered.
         quote._is_mounted = True
-        app.query = lambda *a, **k: [quote]
         app._consume_pending_thumbnails()
         assert quote.native_image_id is not None
 

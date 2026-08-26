@@ -141,7 +141,12 @@ class DownloadModeMixin:
             if image_support is ImageSupport.KITTY and renderer is not None:
                 image_id = self._next_native_image_id()
                 self.push_screen(
-                    ImageModalScreen(att_path, renderer, image_id=image_id)
+                    ImageModalScreen(
+                        att_path,
+                        renderer,
+                        image_id=image_id,
+                        hires_executor=self._hires_executor,
+                    )
                 )
             else:
                 self.push_screen(ImageModalScreen(att_path))

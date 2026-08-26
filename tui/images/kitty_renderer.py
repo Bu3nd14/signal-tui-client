@@ -49,11 +49,14 @@ def prepare_hi_res(path, max_w_px: int, max_h_px: int) -> bytes:
     Stateless (Pillow only); used by the modal's native branch to cap the image
     at ~1600px on its long side while still fitting the terminal.
     """
+    max_w = max(1, max_w_px)
+    max_h = max(1, max_h_px)
     with Image.open(path) as img:
+        img.draft("RGB", (max_w, max_h))
         img = img.convert("RGB")
-        img.thumbnail((max(1, max_w_px), max(1, max_h_px)), Image.Resampling.LANCZOS)
+        img.thumbnail((max_w, max_h), Image.Resampling.BILINEAR)
         buf = io.BytesIO()
-        img.save(buf, "PNG")
+        img.save(buf, "PNG", compress_level=1)
         return buf.getvalue()
 
 
@@ -80,6 +83,11 @@ def dcs_transmit(image_id: int, png_bytes: bytes) -> list[str]:
             header = f"m={'0' if last else '1'}"
         chunks.append(f"{_DCS}{header};{chunk}{_ST}")
     return chunks
+
+
+def transmit_chunks(image_id: int, png_bytes: bytes) -> str:
+    """Build the complete chunked transmit payload for one image."""
+    return "".join(dcs_transmit(image_id, png_bytes))
 
 
 def dcs_place(
@@ -196,6 +204,11 @@ class KittyRenderer:
         self._transmitted: set[int] = set()
         self._placed: set[tuple[int, int]] = set()
 
+    @property
+    def has_data(self) -> bool:
+        """Whether the renderer currently owns transmitted image data."""
+        return bool(self._transmitted)
+
     # ── Thumbnail preparation (stateless, Pillow only) ─────────────────────
     def prepare_thumbnail(self, path, max_lines: int, max_cols: int) -> bytes:
         """Resize *path* proportionally into ``max_lines``×``max_cols`` cells
@@ -217,6 +230,13 @@ class KittyRenderer:
         self._transmitted.add(image_id)
         for chunk in dcs_transmit(image_id, png_bytes):
             self._write(chunk)
+
+    def transmit_prepared(self, image_id: int, payload: str) -> None:
+        """Send a prebuilt complete transmit payload with one driver write."""
+        if image_id in self._transmitted:
+            return
+        self._transmitted.add(image_id)
+        self._write(payload)
 
     def place(
         self,
