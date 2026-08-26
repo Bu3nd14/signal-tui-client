@@ -822,6 +822,9 @@ class QuoteWidget(Horizontal):
         self._quote_text_raw = quote_text
         # Applied to the internal text Static (same class as today's bubble).
         self._text_classes = classes
+        # Right-aligned quote (msg-quote-right): the native thumbnail slot must be
+        # shifted to the right edge, mirroring the chat thumbnails (msg-right).
+        self.aligned_right = "msg-quote-right" in classes.split()
         # Metadata for the future ingresso/uscita flow.
         self.attachment_id = attachment_id
         self.attachment_path = attachment_path

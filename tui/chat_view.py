@@ -635,10 +635,24 @@ class ChatViewMixin:
                 try:
                     path = self.manager.get_attachment_path(protocol, attachment_id)
                 except Exception as _e:
-                    logger.debug("Quote attachment resolve failed", exc_info=True)
+                    logger.debug(
+                        "Quote attachment resolve raised (protocol=%s id=%r)",
+                        protocol,
+                        attachment_id,
+                        exc_info=True,
+                    )
                     path = None
                 if path is None:
-                    return  # degrado pulito: bolla solo testo
+                    # Best-effort: a lazy download (WAHA/Telegram) can fail
+                    # silently — no session, unreachable, or media gone.  The
+                    # quote stays text-only (no thumbnail, no UI error).
+                    logger.debug(
+                        "Quote attachment not resolvable (protocol=%s id=%r) "
+                        "— text-only bubble",
+                        protocol,
+                        attachment_id,
+                    )
+                    return
             try:
                 png = renderer.prepare_thumbnail(path, 3, 6)
             except Exception as _e:

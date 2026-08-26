@@ -114,6 +114,21 @@ class TestCacheAddLoad:
         assert msg["quote_attachment_id"] == "tgref:42:12"
         assert msg["quote_content_type"] == "image/png"
 
+    def test_quote_attachment_path_survives_roundtrip(self, tmp_db):
+        """Il path della thumbnail Signal (persistente) sopravvive al DB."""
+        _add_message_to_cache(
+            "42",
+            "reply",
+            False,
+            "Mario",
+            2000,
+            quote_text="quoted",
+            quote_attachment_path="/tmp/quote-thumbs/abc123.png",
+        )
+        loaded = _load_cache()
+        msg = loaded["42"][0]
+        assert msg["quote_attachment_path"] == "/tmp/quote-thumbs/abc123.png"
+
 
 class TestCachePrune:
     """✂️ Potatura della cache (messaggi vecchi e limite 200)."""

@@ -87,6 +87,10 @@ class TestQuoteWidgetLayout:
         text_static, _ = _children(widget)
         assert text_static.has_class("msg-quote-right")
 
+    def test_aligned_right_flag(self):
+        assert QuoteWidget("x", classes="msg-quote").aligned_right is False
+        assert QuoteWidget("x", classes="msg-quote-right").aligned_right is True
+
 
 class TestQuoteWidgetNative:
     def test_show_native_thumbnail_registers_state(self):
@@ -246,6 +250,21 @@ class TestQuoteWidgetHook:
         assert "a=p,i=5,p=5" in written[0]
         assert "x=0,y=0,w=48,h=48" in written[0]
         assert app._chat_native_ids == {5}
+
+    def test_sync_right_aligns_quote_widget(self, app_for_test):
+        app, written = self._kitty_app(app_for_test)
+        app._chat_log = _HookFakeChatLog(Region(0, 0, 60, 40))
+        # 16px thumbnail (2 cols) inside a 6-col slot → right-aligned.
+        widget = self._quote_widget(width_px=16)
+        widget.aligned_right = True
+        app.query = lambda *a, **k: [widget]
+        app._native_last_key.clear()
+
+        app._sync_native_images()
+
+        # region.right=8, image_cols=2 → col = 8 - 2 + 1 = 7.
+        assert len(written) == 1
+        assert written[0].startswith("\x1b[6;7H")
 
     def test_sync_skips_out_of_viewport_quote_widget(self, app_for_test):
         app, written = self._kitty_app(app_for_test)

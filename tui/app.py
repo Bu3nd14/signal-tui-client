@@ -388,9 +388,17 @@ class SignalTUI(
                     del self._native_last_key[image_id]
                 continue
             row, col, x_src, y_src, w_px, h_px = rect
-            if widget.has_class("msg-right"):
-                # P4: right-align — the thumb must end at the content region's
-                # right edge, matching the placeholder ``text-align: right``.
+            # P4: right-align — the thumb must end at the content region's right
+            # edge, matching the placeholder ``text-align: right``.  A QuoteWidget
+            # carries its alignment in ``aligned_right`` (the class is applied to
+            # the internal Static, not the container); an ImageWidget uses the
+            # ``msg-right`` class on the widget itself.
+            right_aligned = (
+                widget.aligned_right
+                if isinstance(widget, QuoteWidget)
+                else widget.has_class("msg-right")
+            )
+            if right_aligned:
                 image_cols = (w_px + cell_w - 1) // cell_w
                 col = region.right - image_cols + 1
             key = (image_id, placement_id, row, col, x_src, y_src, w_px, h_px)
