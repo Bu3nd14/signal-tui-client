@@ -434,13 +434,13 @@ class TestQuoteThumbnailFlow:
 
     def test_worker_uses_semaphore(self, tmp_path):
         app, _ = _make_kitty_app()
-        app._image_resolve_semaphore = MagicMock()
+        app._quote_resolve_semaphore = MagicMock()
         quote = QuoteWidget("🖼️ Immagine", attachment_path=self._write_png(tmp_path))
 
         app._maybe_resolve_quote_thumbnail(quote)
 
-        app._image_resolve_semaphore.__enter__.assert_called_once()
-        app._image_resolve_semaphore.__exit__.assert_called_once()
+        app._quote_resolve_semaphore.__enter__.assert_called_once()
+        app._quote_resolve_semaphore.__exit__.assert_called_once()
 
     # ── Ingresso (chunk 5): resolve via quote_attachment_id ──────────────
     def test_generates_thumbnail_from_attachment_id(self, tmp_path):

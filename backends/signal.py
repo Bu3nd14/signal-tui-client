@@ -131,6 +131,22 @@ def _signal_quote_content_type(quote: dict | None) -> str | None:
     return (first.get("contentType") or "").strip() or None
 
 
+def _signal_quote_attachment_id(quote: dict | None) -> str | None:
+    """Return the quoted first attachment's id (``id``/``attachmentId``).
+
+    signal-cli may expose the quoted attachment id alongside (or instead of) the
+    embedded thumbnail; it enables a lazy ``get_attachment_path`` fallback when
+    the thumbnail is absent/stale.  ``None`` when not exposed (degrado).
+    """
+    if not quote:
+        return None
+    attachments = quote.get("attachments") or []
+    if not attachments:
+        return None
+    first = attachments[0] or {}
+    return (first.get("id") or first.get("attachmentId") or "").strip() or None
+
+
 def _coerce_thumbnail_bytes(value) -> bytes | None:
     """Normalize a Signal quote ``thumbnail`` field into raw image bytes.
 
@@ -680,6 +696,7 @@ class SignalBackend(ChatBackend):
             is_mine: bool,
             quote_text: str | None,
             attachments: list,
+            quote_attachment_id: str | None,
             quote_attachment_path: Path | None,
             quote_content_type: str | None,
         ) -> list[dict]:
@@ -713,6 +730,7 @@ class SignalBackend(ChatBackend):
                             "attachment_info": att_info,
                             "attachment_id": att_id,
                             "content_type": content_type,
+                            "quote_attachment_id": quote_attachment_id,
                             "quote_attachment_path": quote_attachment_path,
                             "quote_content_type": quote_content_type,
                         }
@@ -729,6 +747,7 @@ class SignalBackend(ChatBackend):
                     "attachment_info": None,
                     "attachment_id": None,
                     "content_type": None,
+                    "quote_attachment_id": quote_attachment_id,
                     "quote_attachment_path": quote_attachment_path,
                     "quote_content_type": quote_content_type,
                 }
@@ -740,6 +759,7 @@ class SignalBackend(ChatBackend):
             sender = source_name or source_number
             quote = data_msg.get("quote")
             quote_text = _signal_quote_text(quote)
+            quote_attachment_id = _signal_quote_attachment_id(quote)
             quote_attachment_path = _extract_quote_thumbnail(quote)
             quote_content_type = _signal_quote_content_type(quote)
 
@@ -757,6 +777,7 @@ class SignalBackend(ChatBackend):
                         "msg_type": msg_type,
                         "attachment_info": att_info,
                         "content_type": None,
+                        "quote_attachment_id": quote_attachment_id,
                         "quote_attachment_path": quote_attachment_path,
                         "quote_content_type": quote_content_type,
                     }
@@ -768,6 +789,7 @@ class SignalBackend(ChatBackend):
                 is_mine=False,
                 quote_text=quote_text,
                 attachments=data_msg.get("attachments", []),
+                quote_attachment_id=quote_attachment_id,
                 quote_attachment_path=quote_attachment_path,
                 quote_content_type=quote_content_type,
             )
@@ -779,6 +801,7 @@ class SignalBackend(ChatBackend):
             sender = "You"
             quote = sent.get("quote")
             quote_text = _signal_quote_text(quote)
+            quote_attachment_id = _signal_quote_attachment_id(quote)
             quote_attachment_path = _extract_quote_thumbnail(quote)
             quote_content_type = _signal_quote_content_type(quote)
 
@@ -796,6 +819,7 @@ class SignalBackend(ChatBackend):
                         "msg_type": msg_type,
                         "attachment_info": att_info,
                         "content_type": None,
+                        "quote_attachment_id": quote_attachment_id,
                         "quote_attachment_path": quote_attachment_path,
                         "quote_content_type": quote_content_type,
                     }
@@ -807,6 +831,7 @@ class SignalBackend(ChatBackend):
                 is_mine=True,
                 quote_text=quote_text,
                 attachments=sent.get("attachments", []),
+                quote_attachment_id=quote_attachment_id,
                 quote_attachment_path=quote_attachment_path,
                 quote_content_type=quote_content_type,
             )
