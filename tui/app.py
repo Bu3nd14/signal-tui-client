@@ -400,7 +400,13 @@ class SignalTUI(
             )
             if right_aligned:
                 image_cols = (w_px + cell_w - 1) // cell_w
-                col = region.right - image_cols + 1
+                # For a QuoteWidget anchor to the CONTAINER's right edge: the
+                # internal slot collapses when the placeholder text is hidden,
+                # so thumbnail_region().right is no longer the bubble's right.
+                anchor = (
+                    widget.content_region if isinstance(widget, QuoteWidget) else region
+                )
+                col = anchor.right - image_cols + 1
             key = (image_id, placement_id, row, col, x_src, y_src, w_px, h_px)
             if self._native_last_key.get(image_id) != key:
                 renderer.place(

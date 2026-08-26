@@ -407,6 +407,51 @@ class TestSendPersistOffthread:
         assert rows[0]["quote_attachment_id"] == "https://waha.local/media/123"
         assert rows[0]["quote_content_type"] == "image/jpeg"
 
+    def test_live_event_propagates_quote_attachment_metadata(self, tmp_db):
+        """L'evento live con quote immagine propaga i metadati a cache UI + bubble."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.contacts = [contact]
+        app.selected_contact = contact
+        _prepare_send(app)
+
+        payload = {
+            "text": "testo",
+            "is_mine": False,
+            "sender": "Mario",
+            "timestamp": 1000,
+            "quote_text": "🖼️ Immagine",
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+            "contact": contact,
+            "quote_attachment_id": "att-1",
+            "quote_attachment_path": "/tmp/quote-thumbs/abc.png",
+            "quote_content_type": "image/png",
+        }
+
+        handled = app._handle_message_event(
+            ChatEvent(
+                type="message",
+                protocol=PROTOCOL_SIGNAL,
+                contact_id=contact.id,
+                payload=payload,
+            )
+        )
+
+        assert handled is True
+        entry = app._cache[contact.cache_key][0]
+        assert entry["quote_attachment_id"] == "att-1"
+        assert entry["quote_attachment_path"] == "/tmp/quote-thumbs/abc.png"
+        assert entry["quote_content_type"] == "image/png"
+        # Live rendering (_add_message) received the metadata too.
+        kwargs = app._add_message.call_args.kwargs
+        assert kwargs["quote_attachment_id"] == "att-1"
+        assert kwargs["quote_attachment_path"] == "/tmp/quote-thumbs/abc.png"
+        assert kwargs["quote_content_type"] == "image/png"
+
     # ── T2h: worker submission target is immutable ───────────────────────
 
     def test_worker_uses_original_contact_after_same_protocol_switch(self, tmp_db):

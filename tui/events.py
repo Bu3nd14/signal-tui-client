@@ -108,6 +108,9 @@ class EventHandlingMixin:
                     "quote_timestamp": event.payload.get("quote_timestamp"),
                     "quote_author": event.payload.get("quote_author"),
                     "reply_to_message_id": event.payload.get("reply_to_message_id"),
+                    "quote_attachment_id": event.payload.get("quote_attachment_id"),
+                    "quote_attachment_path": event.payload.get("quote_attachment_path"),
+                    "quote_content_type": event.payload.get("quote_content_type"),
                     "read": is_mine,
                     "status": event.payload.get(
                         "status", "sent" if is_mine else "read"
@@ -156,6 +159,9 @@ class EventHandlingMixin:
                     sender=event.payload.get("sender", ""),
                     status=event.payload.get("status", "sent" if is_mine else "read"),
                     message_id=event.payload.get("id"),
+                    quote_attachment_id=event.payload.get("quote_attachment_id"),
+                    quote_attachment_path=event.payload.get("quote_attachment_path"),
+                    quote_content_type=event.payload.get("quote_content_type"),
                 )
         else:
             # Message for another contact: mark the list dirty; the unread
