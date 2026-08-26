@@ -30,7 +30,9 @@ button { color: inherit; }
 .app-shell {
   display: grid;
   grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   height: 100dvh;
+  overflow: hidden;
   max-width: 1600px;
   margin: auto;
   background: var(--panel);
@@ -40,13 +42,16 @@ button { color: inherit; }
 .sidebar {
   display: flex;
   min-width: 0;
+  min-height: 0;
   flex-direction: column;
+  overflow: hidden;
   border-right: 1px solid var(--line);
   background: #0d141d;
 }
 
 .sidebar-header, .thread-header {
   display: flex;
+  flex: none;
   min-height: 76px;
   align-items: center;
   gap: 12px;
@@ -84,6 +89,7 @@ h2 { font-size: 1.05rem; }
 .icon-button:hover, .icon-button:focus-visible { border-color: var(--line); background: var(--panel-raised); color: var(--text); }
 
 .list-status {
+  flex: none;
   padding: 20px;
   color: var(--muted);
   font-size: .86rem;
@@ -131,7 +137,7 @@ h2 { font-size: 1.05rem; }
   text-align: center;
 }
 
-.thread-panel { display: flex; min-width: 0; flex-direction: column; background: radial-gradient(circle at 60% 0, #131e2b 0, var(--bg) 45%); }
+.thread-panel { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; background: radial-gradient(circle at 60% 0, #131e2b 0, var(--bg) 45%); }
 .thread-heading { min-width: 0; flex: 1; }
 .thread-heading h2, .thread-heading p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-heading p { margin-top: 3px; color: var(--muted); font-size: .78rem; text-transform: capitalize; }
@@ -142,6 +148,7 @@ h2 { font-size: 1.05rem; }
 
 .error-banner {
   display: flex;
+  flex: none;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
@@ -195,8 +202,8 @@ h2 { font-size: 1.05rem; }
 .secondary-button { background: transparent; }
 
 @media (max-width: 700px) {
-  .app-shell { display: block; border: 0; }
-  .sidebar, .thread-panel { height: 100%; }
+  .app-shell { display: block; height: 100dvh; overflow: hidden; border: 0; }
+  .sidebar, .thread-panel { height: 100%; min-height: 0; overflow: hidden; }
   .thread-panel { display: none; }
   .app-shell.thread-open .sidebar { display: none; }
   .app-shell.thread-open .thread-panel { display: flex; }
