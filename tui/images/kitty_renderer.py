@@ -82,6 +82,11 @@ def dcs_transmit(image_id: int, png_bytes: bytes) -> list[str]:
     return chunks
 
 
+def transmit_chunks(image_id: int, png_bytes: bytes) -> str:
+    """Build the complete chunked transmit payload for one image."""
+    return "".join(dcs_transmit(image_id, png_bytes))
+
+
 def dcs_place(
     image_id: int,
     placement_id: int,
@@ -196,6 +201,11 @@ class KittyRenderer:
         self._transmitted: set[int] = set()
         self._placed: set[tuple[int, int]] = set()
 
+    @property
+    def has_data(self) -> bool:
+        """Whether the renderer currently owns transmitted image data."""
+        return bool(self._transmitted)
+
     # ── Thumbnail preparation (stateless, Pillow only) ─────────────────────
     def prepare_thumbnail(self, path, max_lines: int, max_cols: int) -> bytes:
         """Resize *path* proportionally into ``max_lines``×``max_cols`` cells
@@ -217,6 +227,13 @@ class KittyRenderer:
         self._transmitted.add(image_id)
         for chunk in dcs_transmit(image_id, png_bytes):
             self._write(chunk)
+
+    def transmit_prepared(self, image_id: int, payload: str) -> None:
+        """Send a prebuilt complete transmit payload with one driver write."""
+        if image_id in self._transmitted:
+            return
+        self._transmitted.add(image_id)
+        self._write(payload)
 
     def place(
         self,

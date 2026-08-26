@@ -12,7 +12,7 @@ import io
 import struct
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 from PIL import Image
@@ -146,6 +146,20 @@ class TestRendererSplit:
         renderer.transmit(5, png)
         assert len(written) == count
         assert 5 in renderer._transmitted
+
+    def test_has_data_reflects_transmitted_state(self):
+        renderer, _ = self._renderer()
+        assert renderer.has_data is False
+        renderer.transmit(5, b"png")
+        assert renderer.has_data is True
+        renderer.delete(5, keep_data=False)
+        assert renderer.has_data is False
+
+    def test_prepared_transmit_uses_one_write(self):
+        renderer, written = self._renderer()
+        renderer.transmit_prepared(5, "chunk-1chunk-2")
+        assert written == ["chunk-1chunk-2"]
+        assert renderer.has_data is True
 
     def test_reenter_viewport_only_replaces(self):
         renderer, written = self._renderer()
@@ -385,6 +399,17 @@ class TestImageWidgetNative:
         widget.native_cleanup()
         assert written == []
 
+    def test_native_cleanup_releases_pending_count(self):
+        widget = ImageWidget(attachment_path=None)
+        widget._pending_native_png = b"png"
+        app = MagicMock(_native_pending_count=1)
+
+        with patch.object(ImageWidget, "app", PropertyMock(return_value=app)):
+            widget.native_cleanup()
+
+        assert app._native_pending_count == 0
+        assert widget._pending_native_png is None
+
     def test_focus_border_still_works(self):
         widget = ImageWidget(attachment_path=None)
         widget.set_selected(True)
@@ -432,7 +457,9 @@ class TestAppHook:
         written: list[str] = []
         app._native_renderer = KittyRenderer(write=written.append, cell_w=8, cell_h=16)
         app._chat_native_ids = {5, 6}  # chat ids, NOT the modal's id (99)
-        app._native_has_images = True  # images exist → sync must not early-out
+        app._native_renderer.transmit(5, b"png")
+        app._native_renderer.transmit(6, b"png")
+        written.clear()
 
         main_screen = object()
         modal_screen = object()
@@ -450,6 +477,16 @@ class TestAppHook:
         written.clear()
         app.post_display_hook()
         assert written == []
+
+    def test_empty_renderer_gate_skips_widget_query(self, app_for_test):
+        app = app_for_test
+        app.image_support = ImageSupport.KITTY
+        app._native_renderer = KittyRenderer(write=lambda _s: None, cell_w=8, cell_h=16)
+        app.query = MagicMock()
+
+        app.post_display_hook()
+
+        app.query.assert_not_called()
 
     def test_sync_places_visible_native_widget(self, app_for_test):
         app = app_for_test
@@ -507,6 +544,7 @@ class TestAppHook:
         app.query = lambda *a, **k: [_FakeImageWidget(Region(2, 5, 40, 12))]
 
         # Populate chat ids by syncing once on the default screen.
+        app._native_renderer.transmit(5, b"png")
         app._sync_native_images()
         written.clear()
 

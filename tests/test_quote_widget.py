@@ -143,6 +143,17 @@ class TestQuoteWidgetNative:
 
         assert widget._text_static.display is True
 
+    def test_native_cleanup_releases_pending_count(self):
+        widget = QuoteWidget("🖼️ Immagine")
+        widget._pending_quote_png = b"png"
+        app = MagicMock(_native_pending_count=1)
+
+        with patch.object(QuoteWidget, "app", PropertyMock(return_value=app)):
+            widget.native_cleanup()
+
+        assert app._native_pending_count == 0
+        assert widget._pending_quote_png is None
+
     def test_text_visible_without_thumbnail(self):
         """Senza thumbnail (non-kitty / non ancora risolta) il testo è visibile."""
         widget = QuoteWidget("🖼️ Immagine")
@@ -308,6 +319,7 @@ class TestQuoteWidgetHook:
         app.query = lambda *a, **k: [self._quote_widget()]
 
         # Sync on the default screen → place + track in _chat_native_ids.
+        app._native_renderer.transmit(5, b"png")
         app._sync_native_images()
         assert app._chat_native_ids == {5}
         written.clear()

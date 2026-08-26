@@ -2,6 +2,7 @@
 
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
 from textual.app import App
@@ -124,13 +125,11 @@ class SignalTUI(
         self._chat_native_ids: set[int] = set()
         self._screen_stack_cleared = False
         self._native_image_counter = 0
-        # Set whenever a thumbnail is registered or stashed; cleared only when a
-        # sync pass finds no native images at all.  Lets ``_native_sync_tick``
-        # bail out early (no DOM query) in the common no-images case, without
-        # ever skipping real placements.
-        self._native_has_images = False
         # Number of thumbnails stashed (not yet registered) on unmounted widgets.
         self._native_pending_count = 0
+        self._hires_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="hires"
+        )
         # Concurrency gate for attachment path resolution + thumbnail prepare.
         self._image_resolve_semaphore = threading.Semaphore(4)
         # Dedicated gate for quote thumbnails (P3): they are small/fast and must
@@ -359,7 +358,7 @@ class SignalTUI(
         # nothing to reconcile — skip the DOM query entirely.  The common
         # (idle chat) case must not pay for ``query("ImageWidget, QuoteWidget")``
         # on every frame / timer tick.
-        if not self._native_has_images:
+        if not (renderer.has_data or self._native_pending_count):
             return
         # C5 screen-stack gate: while a modal/picker sits on top, the chat
         # placements would bleed over it.  Drop ONLY the chat placements (P3:
@@ -396,9 +395,7 @@ class SignalTUI(
                 pending = getattr(widget, "_pending_quote_png", None)
                 if pending is not None and widget.native_image_id is None:
                     widget._pending_quote_png = None
-                    self._native_pending_count = max(
-                        0, self._native_pending_count - 1
-                    )
+                    self._native_pending_count = max(0, self._native_pending_count - 1)
                     self._register_quote_thumbnail(widget, pending)
             else:
                 pending = getattr(widget, "_pending_native_png", None)
@@ -406,9 +403,7 @@ class SignalTUI(
                     widget._pending_native_png = None
                     path = getattr(widget, "_pending_native_path", None)
                     widget._pending_native_path = None
-                    self._native_pending_count = max(
-                        0, self._native_pending_count - 1
-                    )
+                    self._native_pending_count = max(0, self._native_pending_count - 1)
                     self._register_native_thumbnail(widget, path, pending)
 
     def _sync_native_images(self) -> None:
@@ -487,8 +482,6 @@ class SignalTUI(
                 )
                 self._native_last_key[image_id] = key
         self._chat_native_ids = chat_ids
-        # Re-arm the CPU guard: no images anywhere → next tick bails out early.
-        self._native_has_images = bool(chat_ids or self._native_pending_count)
 
     def on_resize(self, event) -> None:
         """Re-detect cell size and force delayed re-emissions (kitty remap)."""
@@ -573,6 +566,10 @@ class SignalTUI(
     def on_exit(self):
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
+        try:
+            self._hires_executor.shutdown(wait=False)
+        except Exception as _e:
+            logger.debug("Hi-res executor shutdown failed", exc_info=True)
         if self._web_enabled:
             from web.server import stop_web_server
 

@@ -5,6 +5,7 @@ Contains reusable UI components based on Textual.
 
 import asyncio
 import logging
+from concurrent.futures import Executor
 from pathlib import Path
 from typing import ClassVar
 
@@ -35,7 +36,12 @@ from models import (
     media_quote_placeholder,
     protocol_emoji,
 )
-from tui.images.kitty_renderer import KittyRenderer, png_size, prepare_hi_res
+from tui.images.kitty_renderer import (
+    KittyRenderer,
+    png_size,
+    prepare_hi_res,
+    transmit_chunks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -781,6 +787,14 @@ class ImageWidget(Static):
         self.native_width_px = None
         self.native_height_px = None
         # Drop any pending (not-yet-consumed) thumbnail stashed by the worker.
+        if self._pending_native_png is not None:
+            try:
+                app = self.app
+                app._native_pending_count = max(0, app._native_pending_count - 1)
+            except Exception:
+                logger.debug(
+                    "Failed to release pending native thumbnail", exc_info=True
+                )
         self._pending_native_png = None
         self._pending_native_path = None
 
@@ -903,6 +917,12 @@ class QuoteWidget(Horizontal):
         self.native_width_px = None
         self.native_height_px = None
         # Drop any pending (not-yet-consumed) thumbnail stashed by the worker.
+        if self._pending_quote_png is not None:
+            try:
+                app = self.app
+                app._native_pending_count = max(0, app._native_pending_count - 1)
+            except Exception:
+                logger.debug("Failed to release pending quote thumbnail", exc_info=True)
         self._pending_quote_png = None
         # Re-show the textual placeholder (fallback text) when freed.
         self._text_static.display = True
@@ -935,11 +955,13 @@ class ImageModalScreen(ModalScreen):
         renderer: KittyRenderer | None = None,
         *,
         image_id: int | None = None,
+        hires_executor: Executor | None = None,
     ) -> None:
         super().__init__()
         self._attachment_path = attachment_path
         self._renderer = renderer
         self._image_id = image_id
+        self._hires_executor = hires_executor
         # Native branch state: bytes of the prepared hi-res PNG.
         self._native_png: bytes | None = None
 
@@ -953,7 +975,8 @@ class ImageModalScreen(ModalScreen):
     def on_mount(self) -> None:
         """Set up the screen: native placement or catimg rendering."""
         if self._renderer is not None and self._image_id is not None:
-            self.run_worker(self._prepare_native, thread=True)
+            box = self._native_target_box()
+            self.run_worker(self._prepare_native(self._image_id, box), exclusive=False)
             return
 
         # catimg branch: defer rendering so the RichLog has final layout
@@ -994,23 +1017,34 @@ class ImageModalScreen(ModalScreen):
         col = 1 + max(0, (avail_w - image_cols) // 2)
         return row, col
 
-    def _prepare_native(self) -> None:
-        """Worker thread: decode/resize/encode the hi-res PNG (cap 1600px)."""
+    async def _prepare_native(self, image_id: int, box: tuple[int, int]) -> None:
+        """Prepare and chunk hi-res image data on the dedicated executor."""
         try:
-            box_w, box_h = self._native_target_box()
-            png = prepare_hi_res(self._attachment_path, box_w, box_h)
+            if self._hires_executor is None:
+                raise RuntimeError("hi-res executor is unavailable")
+            loop = asyncio.get_running_loop()
+            png, payload = await loop.run_in_executor(
+                self._hires_executor, self._build_native_payload, image_id, box
+            )
         except Exception as _e:
             logger.debug("Native hi-res prepare failed", exc_info=True)
-            self.app.call_from_thread(self._native_error, str(_e))
+            self._native_error(str(_e))
             return
-        self.app.call_from_thread(self._finish_native, png)
+        self._finish_native(png, payload)
 
-    def _finish_native(self, png: bytes) -> None:
+    def _build_native_payload(
+        self, image_id: int, box: tuple[int, int]
+    ) -> tuple[bytes, str]:
+        """Decode, resize, encode and chunk an image outside the UI thread."""
+        png = prepare_hi_res(self._attachment_path, *box)
+        return png, transmit_chunks(image_id, png)
+
+    def _finish_native(self, png: bytes, payload: str) -> None:
         """UI thread: transmit once and place the image centered."""
         if self._renderer is None or self._image_id is None:
             return
         self._native_png = png
-        self._renderer.transmit(self._image_id, png)
+        self._renderer.transmit_prepared(self._image_id, payload)
         self._place_native()
 
     def _place_native(self) -> None:
