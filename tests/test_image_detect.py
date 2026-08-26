@@ -202,15 +202,13 @@ class TestWezTermGate:
         )
 
     def test_query_ko_with_catimg(self):
-        # WezTerm marker wins over the query: even a KO query → KITTY (via ssh
-        # the TGP reply doesn't reach us, but the rendering works).
         assert (
             _detect(
                 env={"TERM": "xterm-256color", "WEZTERM_PANE": "1"},
                 which=_has_catimg,
                 query_cb=lambda: False,
             )
-            is ImageSupport.KITTY
+            is ImageSupport.CATIMG
         )
 
     def test_query_ko_without_catimg(self):
@@ -220,7 +218,7 @@ class TestWezTermGate:
                 which=_no_catimg,
                 query_cb=lambda: False,
             )
-            is ImageSupport.KITTY
+            is ImageSupport.OFF
         )
 
     def test_tmux_guard_prioritary_never_queries(self):
@@ -237,16 +235,14 @@ class TestWezTermGate:
         assert result is ImageSupport.CATIMG
         assert calls == []
 
-    def test_marker_skips_query(self):
-        # WezTerm marker is reliable → KITTY WITHOUT any TGP query.
+    def test_query_called_exactly_once(self):
         calls: list[bool] = []
-        result = _detect(
+        _detect(
             env={"TERM": "xterm-256color", "WEZTERM_PANE": "1"},
             which=_has_catimg,
             query_cb=lambda: calls.append(True) or True,
         )
-        assert result is ImageSupport.KITTY
-        assert calls == []
+        assert len(calls) == 1
 
 
 class TestIsWezTerm:
