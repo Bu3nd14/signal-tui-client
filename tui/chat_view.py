@@ -564,7 +564,17 @@ class ChatViewMixin:
         """
         self._window_worker_done(window_token)
         if not widget.is_mounted:
+            # Mount is async: stash the PNG; the app hook registers it once the
+            # widget is mounted (bounded: cleared by native_cleanup on unmount).
+            widget._pending_native_png = png
+            widget._pending_native_path = path
             return
+        self._register_native_thumbnail(widget, path, png)
+
+    def _register_native_thumbnail(
+        self, widget: ImageWidget, path: Path, png: bytes
+    ) -> None:
+        """Transmit + register a native chat thumbnail (widget is mounted)."""
         renderer = self._native_renderer
         if renderer is None:
             # Renderer vanished (e.g. a resize disabled it): CATIMG fallback.
@@ -626,25 +636,31 @@ class ChatViewMixin:
         protocol: str | None,
     ) -> None:
         """Worker thread: resolve (ingresso) and generate the 3×6 quote thumb."""
-        with self._image_resolve_semaphore:
+        with self._quote_resolve_semaphore:
             renderer = self._native_renderer
             if renderer is None:
                 return
             if path is not None and not Path(path).is_file():
                 # Persisted path went stale (cleanup/restart): fall back to the
                 # lazy resolve of the quoted attachment id, if any.
-                logger.debug(
+                logger.warning(
                     "Quote thumbnail path stale (missing %r) — falling back", path
                 )
                 path = None
             if path is None:
                 # Lazy resolve (ingresso, or stale-path fallback), best-effort.
                 if not (attachment_id and protocol):
+                    logger.warning(
+                        "Quote thumbnail: no path and no resolvable id "
+                        "(protocol=%s id=%r) — text-only bubble",
+                        protocol,
+                        attachment_id,
+                    )
                     return
                 try:
                     path = self.manager.get_attachment_path(protocol, attachment_id)
                 except Exception as _e:
-                    logger.debug(
+                    logger.warning(
                         "Quote attachment resolve raised (protocol=%s id=%r)",
                         protocol,
                         attachment_id,
@@ -655,7 +671,7 @@ class ChatViewMixin:
                     # Best-effort: a lazy download (WAHA/Telegram) can fail
                     # silently — no session, unreachable, or media gone.  The
                     # quote stays text-only (no thumbnail, no UI error).
-                    logger.debug(
+                    logger.warning(
                         "Quote attachment not resolvable (protocol=%s id=%r) "
                         "— text-only bubble",
                         protocol,
@@ -665,7 +681,7 @@ class ChatViewMixin:
             try:
                 png = renderer.prepare_thumbnail(path, 3, 6)
             except Exception as _e:
-                logger.debug("Quote thumbnail prepare failed", exc_info=True)
+                logger.warning("Quote thumbnail prepare failed", exc_info=True)
                 return
             self.call_from_thread(self._finish_quote_thumbnail, widget, png)
 
@@ -676,7 +692,14 @@ class ChatViewMixin:
         here.  The wire (#37) is untouched: the thumbnail is display-only.
         """
         if not widget.is_mounted:
+            # Mount is async: stash the PNG; the app hook registers it once the
+            # widget is mounted (bounded: cleared by native_cleanup on unmount).
+            widget._pending_quote_png = png
             return
+        self._register_quote_thumbnail(widget, png)
+
+    def _register_quote_thumbnail(self, widget: QuoteWidget, png: bytes) -> None:
+        """Transmit + register a native quote thumbnail (widget is mounted)."""
         renderer = self._native_renderer
         if renderer is None:
             return

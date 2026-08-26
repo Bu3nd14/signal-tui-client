@@ -24,7 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from backends import BackendManager, SignalBackend
 from backends.base import ChatBackend
-from backends.signal import _extract_quote_thumbnail
+from backends.signal import _extract_quote_thumbnail, _signal_quote_attachment_id
 from models import (
     PROTOCOL_SIGNAL,
     ChatContact,
@@ -1257,3 +1257,59 @@ class TestSignalQuoteThumbnail:
         payload = events[0].payload
         assert payload["quote_content_type"] == "image/jpeg"
         assert payload["quote_attachment_path"] is None
+
+
+class TestSignalQuoteAttachmentId:
+    """🖼️ P4 — Signal quote_attachment_id estratto da attachments[].id/attachmentId."""
+
+    def test_attachment_id_from_id(self):
+        quote = {"attachments": [{"contentType": "image/png", "id": "att-123"}]}
+        assert _signal_quote_attachment_id(quote) == "att-123"
+
+    def test_attachment_id_from_attachmentId(self):
+        quote = {
+            "attachments": [{"contentType": "image/png", "attachmentId": "att-456"}]
+        }
+        assert _signal_quote_attachment_id(quote) == "att-456"
+
+    def test_attachment_id_none_when_absent(self):
+        assert _signal_quote_attachment_id(None) is None
+        assert _signal_quote_attachment_id({}) is None
+        assert _signal_quote_attachment_id({"attachments": []}) is None
+        assert (
+            _signal_quote_attachment_id({"attachments": [{"contentType": "image/png"}]})
+            is None
+        )
+
+    def test_envelope_carries_quote_attachment_id(self):
+        backend = SignalBackend()
+        backend._set_contacts(
+            [
+                ChatContact(
+                    id="+391234567890",
+                    display_name="Mario",
+                    protocol=PROTOCOL_SIGNAL,
+                )
+            ]
+        )
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 2000,
+            "dataMessage": {
+                "message": "Guarda!",
+                "timestamp": 2000,
+                "quote": {
+                    "id": 1000,
+                    "author": "+391234567890",
+                    "attachments": [{"contentType": "image/png", "id": "att-123"}],
+                },
+            },
+        }
+
+        events = backend.envelope_to_event(envelope)
+
+        payload = events[0].payload
+        assert payload["quote_attachment_id"] == "att-123"
+        assert payload["quote_content_type"] == "image/png"

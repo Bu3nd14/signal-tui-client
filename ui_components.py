@@ -691,6 +691,10 @@ class ImageWidget(Static):
         self.native_image_id: int | None = None
         self.native_width_px: int | None = None
         self.native_height_px: int | None = None
+        # P1: PNG/path stashed by the worker when the widget was not yet mounted;
+        # consumed by the app hook once mounted.
+        self._pending_native_png: bytes | None = None
+        self._pending_native_path: Path | None = None
 
         super().__init__(fallback_text, markup=False)
         self.can_focus = True
@@ -776,6 +780,9 @@ class ImageWidget(Static):
         self.native_image_id = None
         self.native_width_px = None
         self.native_height_px = None
+        # Drop any pending (not-yet-consumed) thumbnail stashed by the worker.
+        self._pending_native_png = None
+        self._pending_native_path = None
 
     def on_focus(self) -> None:
         """Visual feedback when focused."""
@@ -839,6 +846,9 @@ class QuoteWidget(Horizontal):
         self.native_image_id: int | None = None
         self.native_width_px: int | None = None
         self.native_height_px: int | None = None
+        # P1: PNG stashed by the worker when the widget was not yet mounted;
+        # consumed by the app hook once mounted.
+        self._pending_quote_png: bytes | None = None
 
         # The internal text Static, created eagerly so it can be toggled (hidden
         # when the native thumbnail replaces a placeholder) without requiring a
@@ -892,6 +902,8 @@ class QuoteWidget(Horizontal):
         self.native_image_id = None
         self.native_width_px = None
         self.native_height_px = None
+        # Drop any pending (not-yet-consumed) thumbnail stashed by the worker.
+        self._pending_quote_png = None
         # Re-show the textual placeholder (fallback text) when freed.
         self._text_static.display = True
 
