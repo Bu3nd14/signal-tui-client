@@ -112,14 +112,17 @@ function renderContacts() {
     avatar.textContent = contactInitial(contact);
     const copy = document.createElement("span");
     copy.className = "contact-copy";
+    const main = document.createElement("span");
+    main.className = "contact-main";
     const name = document.createElement("span");
     name.className = "contact-name";
     name.textContent = contact.display_name || contact.id;
-    const detail = document.createElement("span");
-    detail.className = "contact-detail protocol-icon";
-    detail.title = contact.protocol;
-    detail.innerHTML = protocolIcon(contact.protocol);
-    copy.append(name, detail);
+    const icon = document.createElement("span");
+    icon.className = "protocol-icon";
+    icon.title = contact.protocol;
+    icon.innerHTML = protocolIcon(contact.protocol);
+    main.append(name, icon);
+    copy.append(main);
     button.append(avatar, copy);
     if (Number(contact.unread) > 0) {
       const unread = document.createElement("span");
