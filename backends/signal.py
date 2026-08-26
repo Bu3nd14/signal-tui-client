@@ -11,6 +11,9 @@ TUI is gathered here so the UI only deals with normalized ``ChatContact`` /
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import io
 import logging
 import queue
 import re
@@ -18,6 +21,9 @@ import subprocess
 import threading
 import time
 from dataclasses import replace
+from pathlib import Path
+
+from PIL import Image
 
 from models import (
     PROTOCOL_SIGNAL,
@@ -37,6 +43,7 @@ logger.addHandler(_fh)
 logger.setLevel(logging.DEBUG)
 
 from backend import (
+    CACHE_DIR,
     DAEMON_HTTP_PORT,
     USER_NUMBER,
     Contact,
@@ -111,6 +118,113 @@ def _signal_quote_text(quote: dict | None) -> str | None:
     if filename:
         return f"{filename} — {placeholder}"
     return placeholder
+
+
+def _signal_quote_content_type(quote: dict | None) -> str | None:
+    """Return the quoted first attachment's ``contentType`` (or ``None``)."""
+    if not quote:
+        return None
+    attachments = quote.get("attachments") or []
+    if not attachments:
+        return None
+    first = attachments[0] or {}
+    return (first.get("contentType") or "").strip() or None
+
+
+def _signal_quote_attachment_id(quote: dict | None) -> str | None:
+    """Return the quoted first attachment's id (``id``/``attachmentId``).
+
+    signal-cli may expose the quoted attachment id alongside (or instead of) the
+    embedded thumbnail; it enables a lazy ``get_attachment_path`` fallback when
+    the thumbnail is absent/stale.  ``None`` when not exposed (degrado).
+    """
+    if not quote:
+        return None
+    attachments = quote.get("attachments") or []
+    if not attachments:
+        return None
+    first = attachments[0] or {}
+    return (first.get("id") or first.get("attachmentId") or "").strip() or None
+
+
+def _coerce_thumbnail_bytes(value) -> bytes | None:
+    """Normalize a Signal quote ``thumbnail`` field into raw image bytes.
+
+    Accepts base64 strings, raw bytes, or a one-level nested dict (``thumbnail``
+    / ``thumbnailData`` / ``data``).  Returns ``None`` on any malformed input.
+    """
+    if isinstance(value, dict):
+        value = (
+            value.get("thumbnail") or value.get("thumbnailData") or value.get("data")
+        )
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+        try:
+            return base64.b64decode(value, validate=True)
+        except ValueError:
+            return None
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value) or None
+    return None
+
+
+def _extract_quote_thumbnail(
+    quote: dict | None, *, cache_dir: Path | None = None
+) -> Path | None:
+    """Extract + persist a quoted attachment thumbnail (structural, safe).
+
+    Signal quotes may carry a thumbnail of the quoted media
+    (``quote.attachments[].thumbnail`` / ``thumbnailData``), exposed by
+    signal-cli as base64 (or raw bytes).  The thumbnail is validated with
+    Pillow, written to ``CACHE_DIR/quote-thumbs/`` keyed by a content hash, and
+    its path returned.  Any failure (absent field, malformed base64, non-image)
+    returns ``None`` — never raises.
+
+    NOTE (design §3.5): the field name is a best-effort guess (``thumbnail`` /
+    ``thumbnailData``); on-wire verification remains (manual test: receive an
+    image quote on Signal and confirm the thumbnail appears).
+    """
+    if not quote:
+        return None
+    attachments = quote.get("attachments") or []
+    if not attachments:
+        return None
+    first = attachments[0] or {}
+    raw = _coerce_thumbnail_bytes(first.get("thumbnail"))
+    if raw is None:
+        raw = _coerce_thumbnail_bytes(first.get("thumbnailData"))
+    if raw is None:
+        return None
+
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.load()  # force a real decode (catches truncated/corrupt data)
+        fmt = (img.format or "").lower()
+    except Exception as _e:
+        logger.debug("Quote thumbnail validation failed", exc_info=True)
+        return None
+    ext = {
+        "jpeg": ".jpg",
+        "png": ".png",
+        "webp": ".webp",
+        "gif": ".gif",
+    }.get(fmt, ".png")
+
+    digest = hashlib.sha1(raw).hexdigest()[:16]
+    base = cache_dir if cache_dir is not None else CACHE_DIR
+    directory = base / "quote-thumbs"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    path = directory / f"{digest}{ext}"
+    try:
+        path.write_bytes(raw)
+    except OSError:
+        return None
+    return path
 
 
 class SignalBackend(ChatBackend):
@@ -582,6 +696,9 @@ class SignalBackend(ChatBackend):
             is_mine: bool,
             quote_text: str | None,
             attachments: list,
+            quote_attachment_id: str | None,
+            quote_attachment_path: Path | None,
+            quote_content_type: str | None,
         ) -> list[dict]:
             """Build one dict per classified attachment, or a single text dict."""
             classified = _classify_attachments(attachments)
@@ -613,6 +730,9 @@ class SignalBackend(ChatBackend):
                             "attachment_info": att_info,
                             "attachment_id": att_id,
                             "content_type": content_type,
+                            "quote_attachment_id": quote_attachment_id,
+                            "quote_attachment_path": quote_attachment_path,
+                            "quote_content_type": quote_content_type,
                         }
                     )
                 return msgs
@@ -627,6 +747,9 @@ class SignalBackend(ChatBackend):
                     "attachment_info": None,
                     "attachment_id": None,
                     "content_type": None,
+                    "quote_attachment_id": quote_attachment_id,
+                    "quote_attachment_path": quote_attachment_path,
+                    "quote_content_type": quote_content_type,
                 }
             ]
 
@@ -634,7 +757,11 @@ class SignalBackend(ChatBackend):
         if data_msg:
             text = data_msg.get("message", "") or ""
             sender = source_name or source_number
-            quote_text = _signal_quote_text(data_msg.get("quote"))
+            quote = data_msg.get("quote")
+            quote_text = _signal_quote_text(quote)
+            quote_attachment_id = _signal_quote_attachment_id(quote)
+            quote_attachment_path = _extract_quote_thumbnail(quote)
+            quote_content_type = _signal_quote_content_type(quote)
 
             sticker_data = _extract_sticker(data_msg.get("sticker"))
             if sticker_data:
@@ -650,6 +777,9 @@ class SignalBackend(ChatBackend):
                         "msg_type": msg_type,
                         "attachment_info": att_info,
                         "content_type": None,
+                        "quote_attachment_id": quote_attachment_id,
+                        "quote_attachment_path": quote_attachment_path,
+                        "quote_content_type": quote_content_type,
                     }
                 ]
 
@@ -659,6 +789,9 @@ class SignalBackend(ChatBackend):
                 is_mine=False,
                 quote_text=quote_text,
                 attachments=data_msg.get("attachments", []),
+                quote_attachment_id=quote_attachment_id,
+                quote_attachment_path=quote_attachment_path,
+                quote_content_type=quote_content_type,
             )
 
         sync = envelope.get("syncMessage", {})
@@ -666,7 +799,11 @@ class SignalBackend(ChatBackend):
         if sent:
             text = sent.get("message", "") or ""
             sender = "You"
-            quote_text = _signal_quote_text(sent.get("quote"))
+            quote = sent.get("quote")
+            quote_text = _signal_quote_text(quote)
+            quote_attachment_id = _signal_quote_attachment_id(quote)
+            quote_attachment_path = _extract_quote_thumbnail(quote)
+            quote_content_type = _signal_quote_content_type(quote)
 
             sticker_data = _extract_sticker(sent.get("sticker"))
             if sticker_data:
@@ -682,6 +819,9 @@ class SignalBackend(ChatBackend):
                         "msg_type": msg_type,
                         "attachment_info": att_info,
                         "content_type": None,
+                        "quote_attachment_id": quote_attachment_id,
+                        "quote_attachment_path": quote_attachment_path,
+                        "quote_content_type": quote_content_type,
                     }
                 ]
 
@@ -691,6 +831,9 @@ class SignalBackend(ChatBackend):
                 is_mine=True,
                 quote_text=quote_text,
                 attachments=sent.get("attachments", []),
+                quote_attachment_id=quote_attachment_id,
+                quote_attachment_path=quote_attachment_path,
+                quote_content_type=quote_content_type,
             )
 
         return []
@@ -908,6 +1051,9 @@ class SignalBackend(ChatBackend):
             quote_timestamp=data.get("quote_timestamp"),
             quote_author=data.get("quote_author"),
             reply_to_message_id=data.get("reply_to_message_id"),
+            quote_attachment_id=data.get("quote_attachment_id"),
+            quote_attachment_path=data.get("quote_attachment_path"),
+            quote_content_type=data.get("quote_content_type"),
         )
 
     def ingest_message(
@@ -980,6 +1126,9 @@ class SignalBackend(ChatBackend):
                 "quote_timestamp": data.get("quote_timestamp"),
                 "quote_author": data.get("quote_author"),
                 "reply_to_message_id": data.get("reply_to_message_id"),
+                "quote_attachment_id": data.get("quote_attachment_id"),
+                "quote_attachment_path": data.get("quote_attachment_path"),
+                "quote_content_type": data.get("quote_content_type"),
             },
         )
         return True

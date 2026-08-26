@@ -12,6 +12,7 @@ from rich.text import Text as RichText
 from textual import events
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
@@ -30,6 +31,7 @@ from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
     PROTOCOL_WHATSAPP,
+    is_media_quote_placeholder_composite,
     media_quote_placeholder,
     protocol_emoji,
 )
@@ -605,6 +607,7 @@ class ImageWidget(Static):
             message_id: str | None = None,
             attachment_id: str = "",
             content_type: str | None = None,
+            attachment_path: Path | None = None,
         ) -> None:
             super().__init__()
             self.text = text
@@ -615,6 +618,7 @@ class ImageWidget(Static):
             self.message_id = message_id
             self.attachment_id = attachment_id
             self.content_type = content_type
+            self.attachment_path = attachment_path
 
     BINDINGS: ClassVar[list] = [
         Binding("alt+r", "request_reply", "Reply", show=False),
@@ -687,6 +691,10 @@ class ImageWidget(Static):
         self.native_image_id: int | None = None
         self.native_width_px: int | None = None
         self.native_height_px: int | None = None
+        # P1: PNG/path stashed by the worker when the widget was not yet mounted;
+        # consumed by the app hook once mounted.
+        self._pending_native_png: bytes | None = None
+        self._pending_native_path: Path | None = None
 
         super().__init__(fallback_text, markup=False)
         self.can_focus = True
@@ -706,6 +714,7 @@ class ImageWidget(Static):
             message_id=self._message_id,
             attachment_id=self.attachment_id,
             content_type=self._content_type,
+            attachment_path=self.attachment_path,
         )
 
     def on_click(self, event: events.Click | None = None) -> None:
@@ -771,6 +780,9 @@ class ImageWidget(Static):
         self.native_image_id = None
         self.native_width_px = None
         self.native_height_px = None
+        # Drop any pending (not-yet-consumed) thumbnail stashed by the worker.
+        self._pending_native_png = None
+        self._pending_native_path = None
 
     def on_focus(self) -> None:
         """Visual feedback when focused."""
@@ -788,6 +800,112 @@ class ImageWidget(Static):
             self.post_message(
                 self.ImageClicked(self.attachment_path, self.attachment_id)
             )
+
+
+class QuoteWidget(Horizontal):
+    """Container bubble for a quoted message (text + optional native thumbnail).
+
+    Replaces the plain ``Static(f"▎ {quote_text}")`` quote bubble.  The textual
+    content is byte-identical to today (the ``▎ `` prefix is added internally,
+    so ``quote_text`` keeps its wire meaning), therefore non-kitty rendering is
+    unchanged.  A small fixed thumbnail area sits beside the text; it is empty
+    unless a native thumbnail is registered via ``show_native_thumbnail``.
+    """
+
+    def __init__(
+        self,
+        quote_text: str,
+        *,
+        classes: str = "msg-quote",
+        attachment_id: str | None = None,
+        attachment_path: Path | None = None,
+        content_type: str | None = None,
+        protocol: str | None = None,
+    ) -> None:
+        super().__init__()
+        self._quote_text = quote_text
+        # Raw text (no "▎ " prefix), used to decide whether the native thumbnail
+        # must hide a typed placeholder (a real caption stays visible).
+        self._quote_text_raw = quote_text
+        # Applied to the internal text Static (same class as today's bubble).
+        self._text_classes = classes
+        # Right-aligned quote (msg-quote-right): the native thumbnail slot must be
+        # shifted to the right edge, mirroring the chat thumbnails (msg-right).
+        self.aligned_right = "msg-quote-right" in classes.split()
+        # Metadata for the future ingresso/uscita flow.
+        self.attachment_id = attachment_id
+        self.attachment_path = attachment_path
+        self.content_type = content_type
+        # Source protocol, used to resolve the quoted attachment lazily (ingresso).
+        self.protocol = protocol
+
+        # Native kitty-rendering state (same pattern as ``ImageWidget``).  The
+        # placement is performed by the app's ``post_display_hook`` — never in
+        # this widget's render path.
+        self.native_renderer: KittyRenderer | None = None
+        self.native_image_id: int | None = None
+        self.native_width_px: int | None = None
+        self.native_height_px: int | None = None
+        # P1: PNG stashed by the worker when the widget was not yet mounted;
+        # consumed by the app hook once mounted.
+        self._pending_quote_png: bytes | None = None
+
+        # The internal text Static, created eagerly so it can be toggled (hidden
+        # when the native thumbnail replaces a placeholder) without requiring a
+        # mounted DOM.
+        self._text_static = Static(f"▎ {quote_text}", classes=classes)
+
+    def compose(self):
+        yield self._text_static
+        yield Static("", classes="quote-thumb")
+
+    def thumbnail_region(self):
+        """Return the content region of the internal thumbnail slot, or ``None``.
+
+        Used by the app's ``post_display_hook`` to place the native thumbnail
+        only over the thumbnail slot (never over the text).  Returns ``None``
+        if the slot is not (yet) composed.
+        """
+        try:
+            return self.query_one(".quote-thumb", Static).content_region
+        except NoMatches:
+            return None
+
+    def show_native_thumbnail(
+        self, renderer: KittyRenderer, image_id: int, png_bytes: bytes
+    ) -> None:
+        """Register the native kitty thumbnail state for this widget.
+
+        Mirrors ``ImageWidget.show_native_thumbnail`` but keeps the textual
+        content intact (the text lives in the internal ``Static``).  When the
+        quote text is a typed placeholder (canonical or composed), the internal
+        text ``Static`` is hidden — the native thumbnail replaces it (a real
+        caption stays visible).  The real ``a=p`` emission happens in the app's
+        ``post_display_hook``.
+        """
+        self.native_renderer = renderer
+        self.native_image_id = image_id
+        width_px, height_px = png_size(png_bytes)
+        self.native_width_px = width_px
+        self.native_height_px = height_px
+        rows = max(1, (height_px + renderer.cell_h - 1) // renderer.cell_h)
+        self.styles.height = rows
+        if is_media_quote_placeholder_composite(self._quote_text_raw):
+            self._text_static.display = False
+        self.refresh(layout=True)
+
+    def native_cleanup(self) -> None:
+        """Free the kitty image data (``d=I``) and clear the native state."""
+        if self.native_renderer is not None and self.native_image_id is not None:
+            self.native_renderer.delete(self.native_image_id, keep_data=False)
+        self.native_renderer = None
+        self.native_image_id = None
+        self.native_width_px = None
+        self.native_height_px = None
+        # Drop any pending (not-yet-consumed) thumbnail stashed by the worker.
+        self._pending_quote_png = None
+        # Re-show the textual placeholder (fallback text) when freed.
+        self._text_static.display = True
 
 
 #: Cap on the hi-res modal image's long side, in pixels (DESIGN §6).

@@ -10,17 +10,21 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from PIL import Image
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backends import BackendManager, SignalBackend
 from backends.base import ChatBackend
+from backends.signal import _extract_quote_thumbnail, _signal_quote_attachment_id
 from models import (
     PROTOCOL_SIGNAL,
     ChatContact,
@@ -1124,3 +1128,188 @@ class TestSignalQuoteMedia:
             backend.ingest_message("+391234567890", data, 1000, persist=False) is False
         )
         assert len(backend.cache["+391234567890"]) == 1
+
+
+def _png_base64(width: int = 8, height: int = 8) -> str:
+    """Return the base64 of a tiny real PNG (for quote-thumbnail fixtures)."""
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), "red").save(buf, "PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+class TestSignalQuoteThumbnail:
+    """🖼️ Chunk 6 — thumbnail dell'immagine quotata (supporto strutturale)."""
+
+    def test_extract_quote_thumbnail_writes_valid_file(self, tmp_path):
+        quote = {
+            "attachments": [{"contentType": "image/png", "thumbnail": _png_base64()}]
+        }
+        path = _extract_quote_thumbnail(quote, cache_dir=tmp_path)
+        assert path is not None
+        assert path.exists()
+        assert path.parent.name == "quote-thumbs"
+        with Image.open(path) as img:
+            assert img.format == "PNG"
+
+    def test_extract_quote_thumbnail_absent_returns_none(self, tmp_path):
+        quote = {"attachments": [{"contentType": "image/png"}]}
+        assert _extract_quote_thumbnail(quote, cache_dir=tmp_path) is None
+        assert not (tmp_path / "quote-thumbs").exists()
+
+    def test_extract_quote_thumbnail_malformed_base64(self, tmp_path):
+        quote = {
+            "attachments": [{"contentType": "image/png", "thumbnail": "!!!bad!!!"}]
+        }
+        assert _extract_quote_thumbnail(quote, cache_dir=tmp_path) is None
+
+    def test_extract_quote_thumbnail_non_image(self, tmp_path):
+        b64 = base64.b64encode(b"not an image").decode()
+        quote = {"attachments": [{"contentType": "image/png", "thumbnail": b64}]}
+        assert _extract_quote_thumbnail(quote, cache_dir=tmp_path) is None
+
+    def test_extract_quote_thumbnail_none_or_empty(self, tmp_path):
+        assert _extract_quote_thumbnail(None, cache_dir=tmp_path) is None
+        assert _extract_quote_thumbnail({}, cache_dir=tmp_path) is None
+        assert _extract_quote_thumbnail({"attachments": []}, cache_dir=tmp_path) is None
+
+    def test_thumbnailData_fallback(self, tmp_path):
+        quote = {
+            "attachments": [
+                {"contentType": "image/png", "thumbnailData": _png_base64()}
+            ]
+        }
+        path = _extract_quote_thumbnail(quote, cache_dir=tmp_path)
+        assert path is not None
+        assert path.exists()
+
+    def test_thumbnail_raw_bytes(self, tmp_path):
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), "blue").save(buf, "PNG")
+        quote = {
+            "attachments": [{"contentType": "image/png", "thumbnail": buf.getvalue()}]
+        }
+        path = _extract_quote_thumbnail(quote, cache_dir=tmp_path)
+        assert path is not None
+        assert path.exists()
+
+    def test_envelope_carries_quote_thumbnail_and_content_type(self, tmp_path):
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 2000,
+            "dataMessage": {
+                "message": "Guarda!",
+                "timestamp": 2000,
+                "quote": {
+                    "id": 1000,
+                    "author": "+391234567890",
+                    "attachments": [
+                        {"contentType": "image/png", "thumbnail": _png_base64()}
+                    ],
+                },
+            },
+        }
+
+        with patch("backends.signal.CACHE_DIR", tmp_path):
+            events = backend.envelope_to_event(envelope)
+
+        assert len(events) == 1
+        payload = events[0].payload
+        assert payload["quote_content_type"] == "image/png"
+        assert payload["quote_attachment_path"] is not None
+        with Image.open(payload["quote_attachment_path"]) as img:
+            assert img.format == "PNG"
+
+    def test_envelope_without_thumbnail_no_path(self, tmp_path):
+        backend = SignalBackend()
+        contact = ChatContact(
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+        )
+        backend._set_contacts([contact])
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 2000,
+            "dataMessage": {
+                "message": "Guarda!",
+                "timestamp": 2000,
+                "quote": {
+                    "id": 1000,
+                    "author": "+391234567890",
+                    "attachments": [{"contentType": "image/jpeg"}],
+                },
+            },
+        }
+
+        events = backend.envelope_to_event(envelope)
+
+        payload = events[0].payload
+        assert payload["quote_content_type"] == "image/jpeg"
+        assert payload["quote_attachment_path"] is None
+
+
+class TestSignalQuoteAttachmentId:
+    """🖼️ P4 — Signal quote_attachment_id estratto da attachments[].id/attachmentId."""
+
+    def test_attachment_id_from_id(self):
+        quote = {"attachments": [{"contentType": "image/png", "id": "att-123"}]}
+        assert _signal_quote_attachment_id(quote) == "att-123"
+
+    def test_attachment_id_from_attachmentId(self):
+        quote = {
+            "attachments": [{"contentType": "image/png", "attachmentId": "att-456"}]
+        }
+        assert _signal_quote_attachment_id(quote) == "att-456"
+
+    def test_attachment_id_none_when_absent(self):
+        assert _signal_quote_attachment_id(None) is None
+        assert _signal_quote_attachment_id({}) is None
+        assert _signal_quote_attachment_id({"attachments": []}) is None
+        assert (
+            _signal_quote_attachment_id({"attachments": [{"contentType": "image/png"}]})
+            is None
+        )
+
+    def test_envelope_carries_quote_attachment_id(self):
+        backend = SignalBackend()
+        backend._set_contacts(
+            [
+                ChatContact(
+                    id="+391234567890",
+                    display_name="Mario",
+                    protocol=PROTOCOL_SIGNAL,
+                )
+            ]
+        )
+        envelope = {
+            "source": "+391234567890",
+            "sourceNumber": "+391234567890",
+            "sourceName": "Mario",
+            "timestamp": 2000,
+            "dataMessage": {
+                "message": "Guarda!",
+                "timestamp": 2000,
+                "quote": {
+                    "id": 1000,
+                    "author": "+391234567890",
+                    "attachments": [{"contentType": "image/png", "id": "att-123"}],
+                },
+            },
+        }
+
+        events = backend.envelope_to_event(envelope)
+
+        payload = events[0].payload
+        assert payload["quote_attachment_id"] == "att-123"
+        assert payload["quote_content_type"] == "image/png"

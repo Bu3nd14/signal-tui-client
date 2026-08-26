@@ -138,6 +138,16 @@ class SendMixin:
             "quote_timestamp": reply_data.get("timestamp") if reply_data else None,
             "quote_author": contact_id if reply_data else None,
             "reply_to_message_id": reply_to_message_id,
+            # Quoted-media thumbnail metadata (display-only; wire #37 unchanged).
+            "quote_attachment_id": (
+                reply_data.get("quote_attachment_id") if reply_data else None
+            ),
+            "quote_attachment_path": (
+                reply_data.get("quote_attachment_path") if reply_data else None
+            ),
+            "quote_content_type": (
+                reply_data.get("quote_content_type") if reply_data else None
+            ),
         }
         # Ingerisci l'ottimista nel backend CORRETTO del contatto (non hardcoded
         # su signal_backend): per WhatsApp deve finire nel WhatsAppBackend.cache,
@@ -175,6 +185,9 @@ class SendMixin:
                 "quote_timestamp": data["quote_timestamp"],
                 "quote_author": data["quote_author"],
                 "reply_to_message_id": reply_to_message_id,
+                "quote_attachment_id": data["quote_attachment_id"],
+                "quote_attachment_path": data["quote_attachment_path"],
+                "quote_content_type": data["quote_content_type"],
             }
         )
 
@@ -186,6 +199,15 @@ class SendMixin:
             message,
             is_mine=True,
             quote_text=quote_text,
+            quote_attachment_id=(
+                reply_data.get("quote_attachment_id") if reply_data else None
+            ),
+            quote_attachment_path=(
+                reply_data.get("quote_attachment_path") if reply_data else None
+            ),
+            quote_content_type=(
+                reply_data.get("quote_content_type") if reply_data else None
+            ),
             timestamp=ts,
             sender="You",
             status="pending",
@@ -384,9 +406,26 @@ class SendMixin:
                     self._update_outgoing_message_id(
                         protocol, contact_id, timestamp, message, str(result)
                     )
-        except Exception as e:  # noqa: BLE001
-            self._transition_outgoing_status(
+        except Exception as e:
+            # Strumentazione: l'eccezione del send va SOLO su _status (barra di
+            # stato, che resta "permanente"); senza log è impossibile capire il
+            # motivo del fallimento.  Loggiamo la causa e l'esito del passaggio
+            # a failed.
+            logger.exception(
+                "send_message_sync raised (protocol=%r contact=%r ts=%s text=%r)",
+                protocol,
+                contact_id,
+                timestamp,
+                message[:60],
+            )
+            _failed_ok = self._transition_outgoing_status(
                 protocol, contact_id, timestamp, message, "failed", ("pending",)
+            )
+            logger.warning(
+                "send failed: transition to 'failed' ok=%s (protocol=%r contact=%r)",
+                _failed_ok,
+                protocol,
+                contact_id,
             )
             self.call_from_thread(self._status, f"❌ Send error: {e}", 0)
 
@@ -531,11 +570,17 @@ class SendMixin:
         """Retry a failed optimistic message without creating another row or bubble."""
         contact = self.selected_contact
         if contact is None:
+            logger.warning(
+                "retry aborted: selected_contact is None (ts=%s text=%r)",
+                timestamp,
+                text[:40],
+            )
             return
+        cache_entries = self._cache.get(contact.cache_key, [])
         message = next(
             (
                 item
-                for item in self._cache.get(contact.cache_key, [])
+                for item in cache_entries
                 if item.get("is_mine")
                 and item.get("timestamp") == timestamp
                 and item.get("text") == text
@@ -544,6 +589,16 @@ class SendMixin:
             None,
         )
         if message is None:
+            logger.warning(
+                "retry aborted: entry not found in UI cache (contact=%r cache_key=%r "
+                "n_entries=%d ts=%s text=%r; statuses=%r)",
+                contact.id,
+                contact.cache_key,
+                len(cache_entries),
+                timestamp,
+                text[:40],
+                [m.get("status") for m in cache_entries if m.get("is_mine")][:10],
+            )
             return
         if (
             contact.protocol == PROTOCOL_TELEGRAM
@@ -553,20 +608,38 @@ class SendMixin:
                 or message.get("quote_author") is not None
             )
         ):
-            self._status(
+            self.call_from_thread(
+                self._status,
                 "❌ Cannot retry a Telegram reply; original message ID is unavailable",
                 0,
             )
             return
         if message.get("quote_text") and message.get("quote_timestamp") is None:
-            self._status(
-                "❌ Cannot retry a reply after reload; quote metadata is unavailable", 0
+            self.call_from_thread(
+                self._status,
+                "❌ Cannot retry a reply after reload; quote metadata is unavailable",
+                0,
             )
             return
         if not self._transition_outgoing_status(
             contact.protocol, contact.id, timestamp, text, "pending", ("failed",)
         ):
+            logger.warning(
+                "retry aborted: transition failed→pending rejected "
+                "(protocol=%r contact=%r ts=%s text=%r)",
+                contact.protocol,
+                contact.id,
+                timestamp,
+                text[:40],
+            )
             return
+        logger.debug(
+            "retry started: protocol=%r contact=%r ts=%s text=%r",
+            contact.protocol,
+            contact.id,
+            timestamp,
+            text[:40],
+        )
         reply_data = None
         if message.get("quote_text"):
             reply_data = {

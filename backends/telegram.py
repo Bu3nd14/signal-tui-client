@@ -955,6 +955,8 @@ class TelegramBackend(ChatBackend):
 
         # Quote / reply
         quote_text: str | None = None
+        quote_attachment_id: str | None = None
+        quote_content_type: str | None = None
         reply_to_message_id: str | None = None
         if msg.reply_to and getattr(msg.reply_to, "reply_to_msg_id", None):
             reply_to_message_id = str(msg.reply_to.reply_to_msg_id)
@@ -962,6 +964,11 @@ class TelegramBackend(ChatBackend):
             for m in cached:
                 if str(m.get("id")) == str(msg.reply_to.reply_to_msg_id):
                     quote_text = _tg_quote_text_from_cached(m)
+                    # Best-effort quoted-attachment metadata: the cached target
+                    # may carry a resolvable attachment id (tgref).  The path is
+                    # NOT resolved here (lazy download is get_attachment_path's).
+                    quote_attachment_id = m.get("attachment_id")
+                    quote_content_type = m.get("content_type")
                     break
 
         payload: dict[str, Any] = {
@@ -971,6 +978,8 @@ class TelegramBackend(ChatBackend):
             "sender": sender,
             "timestamp": ts,
             "quote_text": quote_text,
+            "quote_attachment_id": quote_attachment_id,
+            "quote_content_type": quote_content_type,
             "reply_to_message_id": reply_to_message_id,
             "msg_type": msg_type,
             "attachment_info": attachment_info,
@@ -1196,6 +1205,9 @@ class TelegramBackend(ChatBackend):
             quote_timestamp=data.get("quote_timestamp"),
             quote_author=data.get("quote_author"),
             reply_to_message_id=data.get("reply_to_message_id"),
+            quote_attachment_id=data.get("quote_attachment_id"),
+            quote_attachment_path=data.get("quote_attachment_path"),
+            quote_content_type=data.get("quote_content_type"),
         )
 
     def ingest_message(
@@ -1293,6 +1305,9 @@ class TelegramBackend(ChatBackend):
                 "quote_timestamp": data.get("quote_timestamp"),
                 "quote_author": data.get("quote_author"),
                 "reply_to_message_id": data.get("reply_to_message_id"),
+                "quote_attachment_id": data.get("quote_attachment_id"),
+                "quote_attachment_path": data.get("quote_attachment_path"),
+                "quote_content_type": data.get("quote_content_type"),
             }
         )
 

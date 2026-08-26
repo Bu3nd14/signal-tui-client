@@ -342,6 +342,116 @@ class TestSendPersistOffthread:
         assert kwargs["quote_author"] == contact.id
         assert kwargs["quote_message"] == "domanda"
 
+    def test_reply_persists_quote_attachment_metadata(self, tmp_db):
+        """(g2) reply a una quote immagine → persiste quote_attachment_id/type."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "quote_wire_body": None,
+            "attachment_id": "att-1",
+            "content_type": "image/png",
+            "quote_attachment_id": "att-1",
+            "quote_attachment_path": Path("/tmp/quote-thumbs/abc123.png"),
+            "quote_content_type": "image/png",
+        }
+        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        rows = _db_rows(tmp_db)
+        assert len(rows) == 1
+        assert rows[0]["quote_attachment_id"] == "att-1"
+        assert rows[0]["quote_attachment_path"] == "/tmp/quote-thumbs/abc123.png"
+        assert rows[0]["quote_content_type"] == "image/png"
+
+    def test_whatsapp_reply_persists_quote_attachment_id(self, tmp_db):
+        """Uscita WhatsApp: l'id della quote immagine è propagato e persistito."""
+        app = SignalTUI()
+        app.manager = BackendManager()
+        wa = WhatsAppBackend()
+        wa.send_message_sync = MagicMock(return_value="wa-ts")
+        app.manager.register(wa)
+        app.signal_backend = SignalBackend()
+        app.manager.register(app.signal_backend)
+
+        contact = ChatContact(
+            id="16660245291231@lid", display_name="Pix", protocol=PROTOCOL_WHATSAPP
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "message_id": "wa-msg-1",
+            "quote_wire_body": None,
+            "attachment_id": "https://waha.local/media/123",
+            "content_type": "image/jpeg",
+            "quote_attachment_id": "https://waha.local/media/123",
+            "quote_attachment_path": None,
+            "quote_content_type": "image/jpeg",
+        }
+
+        _send_text(app, "risposta wa")
+        _run_workers(app)
+
+        rows = _db_rows(tmp_db)
+        assert len(rows) == 1
+        assert rows[0]["protocol"] == "whatsapp"
+        assert rows[0]["quote_attachment_id"] == "https://waha.local/media/123"
+        assert rows[0]["quote_content_type"] == "image/jpeg"
+
+    def test_live_event_propagates_quote_attachment_metadata(self, tmp_db):
+        """L'evento live con quote immagine propaga i metadati a cache UI + bubble."""
+        app = _signal_app()
+        contact = ChatContact(
+            id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
+        )
+        app.contacts = [contact]
+        app.selected_contact = contact
+        _prepare_send(app)
+
+        payload = {
+            "text": "testo",
+            "is_mine": False,
+            "sender": "Mario",
+            "timestamp": 1000,
+            "quote_text": "🖼️ Immagine",
+            "msg_type": "text",
+            "attachment_info": None,
+            "attachment_id": None,
+            "contact": contact,
+            "quote_attachment_id": "att-1",
+            "quote_attachment_path": "/tmp/quote-thumbs/abc.png",
+            "quote_content_type": "image/png",
+        }
+
+        handled = app._handle_message_event(
+            ChatEvent(
+                type="message",
+                protocol=PROTOCOL_SIGNAL,
+                contact_id=contact.id,
+                payload=payload,
+            )
+        )
+
+        assert handled is True
+        entry = app._cache[contact.cache_key][0]
+        assert entry["quote_attachment_id"] == "att-1"
+        assert entry["quote_attachment_path"] == "/tmp/quote-thumbs/abc.png"
+        assert entry["quote_content_type"] == "image/png"
+        # Live rendering (_add_message) received the metadata too.
+        kwargs = app._add_message.call_args.kwargs
+        assert kwargs["quote_attachment_id"] == "att-1"
+        assert kwargs["quote_attachment_path"] == "/tmp/quote-thumbs/abc.png"
+        assert kwargs["quote_content_type"] == "image/png"
+
     # ── T2h: worker submission target is immutable ───────────────────────
 
     def test_worker_uses_original_contact_after_same_protocol_switch(self, tmp_db):

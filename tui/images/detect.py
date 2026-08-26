@@ -35,12 +35,17 @@ class ImageSupport(Enum):
     OFF = "off"
 
 
-def query_kitty_ok(stdin_fd: int, stdout_fd: int, timeout: float = 0.15) -> bool:
+def query_kitty_ok(stdin_fd: int, stdout_fd: int, timeout: float = 1.0) -> bool:
     """Send a TGP query and return True iff the terminal answers ``OK``.
 
     Switches stdin to raw mode for the duration of the query (restored in a
     ``finally``), so the terminal's reply is not line-buffered.  Never raises:
     any failure (non-tty, broken pipe, timeout) returns ``False``.
+
+    Timeout: 1.0s by default.  Empirically (2026-08-25, kitty 0.48 via ssh) the
+    terminal reply arrives between 0.5s and 1.0s on real connections; the
+    previous 0.15s default was far too tight and caused a spurious CATIMG
+    fallback even on genuine kitty.
     """
     try:
         old = termios.tcgetattr(stdin_fd)
@@ -74,13 +79,24 @@ def query_kitty_ok(stdin_fd: int, stdout_fd: int, timeout: float = 0.15) -> bool
 
 
 def _default_kitty_query() -> bool:
-    """Production query: real TGP probe on the process stdin/stdout."""
+    """Production query: real TGP probe on the process stdin/stdout, with retry.
+
+    Empirically (kitty 0.48 via ssh, 2026-08-25) the terminal reply arrives
+    ~0.5-1.0s after the query, and the very first probe right after startup
+    can miss it while a second probe ~0.5s later succeeds.  A short first
+    timeout + a retry with a generous timeout makes the detection robust on
+    real connections (the single 0.15s probe used to spuriously fall back to
+    CATIMG even on genuine kitty).
+    """
     try:
         stdin_fd = sys.stdin.fileno()
         stdout_fd = sys.stdout.fileno()
     except (OSError, ValueError, AttributeError):
         return False
-    return query_kitty_ok(stdin_fd, stdout_fd, timeout=0.15)
+    if query_kitty_ok(stdin_fd, stdout_fd, timeout=0.4):
+        return True
+    time.sleep(0.3)
+    return query_kitty_ok(stdin_fd, stdout_fd, timeout=1.5)
 
 
 def detect_image_support(

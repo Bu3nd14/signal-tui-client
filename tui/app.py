@@ -49,6 +49,7 @@ from ui_components import (
     ChatAreaWidget,
     ContactListWidget,
     ImageWidget,
+    QuoteWidget,
     StatusBar,
 )
 
@@ -116,6 +117,9 @@ class SignalTUI(
         self._native_image_counter = 0
         # Concurrency gate for attachment path resolution + thumbnail prepare.
         self._image_resolve_semaphore = threading.Semaphore(4)
+        # Dedicated gate for quote thumbnails (P3): they are small/fast and must
+        # not starve behind slow image downloads (WAHA/tgref up to 30s).
+        self._quote_resolve_semaphore = threading.Semaphore(2)
         # Window load anchor: token + pending-native-worker counter, used to
         # scroll to the bottom exactly once when the cache-window thumbnails
         # have all finished growing (see ChatViewMixin).
@@ -345,11 +349,40 @@ class SignalTUI(
             self._native_last_key.clear()
         self._sync_native_images()
 
+    def _consume_pending_thumbnails(self) -> None:
+        """Register thumbnails stashed while their widget was not yet mounted (P1).
+
+        ``mount()`` is async, so a fast worker can hand its PNG to the UI thread
+        before the widget's ``Mount`` event; ``_finish_*_thumbnail`` stashes the
+        PNG on the widget and this hook (running after every frame) registers it
+        once the widget is mounted.  Cleared by ``native_cleanup`` on unmount.
+        """
+        if self.image_support is not ImageSupport.KITTY:
+            return
+        if self._native_renderer is None:
+            return
+        for widget in self.query("ImageWidget, QuoteWidget"):
+            if not getattr(widget, "is_mounted", False):
+                continue
+            if isinstance(widget, QuoteWidget):
+                pending = getattr(widget, "_pending_quote_png", None)
+                if pending is not None and widget.native_image_id is None:
+                    widget._pending_quote_png = None
+                    self._register_quote_thumbnail(widget, pending)
+            else:
+                pending = getattr(widget, "_pending_native_png", None)
+                if pending is not None and widget.native_image_id is None:
+                    widget._pending_native_png = None
+                    path = getattr(widget, "_pending_native_path", None)
+                    widget._pending_native_path = None
+                    self._register_native_thumbnail(widget, path, pending)
+
     def _sync_native_images(self) -> None:
         """Place/delete kitty placements for every native image widget."""
         renderer = self._native_renderer
         if renderer is None:
             return
+        self._consume_pending_thumbnails()
         chat_log = self._chat_log
         if chat_log is None:
             return
@@ -361,13 +394,20 @@ class SignalTUI(
         cell_w = renderer.cell_w
         cell_h = renderer.cell_h
         chat_ids: set[int] = set()
-        for widget in self.query(ImageWidget):
+        for widget in self.query("ImageWidget, QuoteWidget"):
             image_id = widget.native_image_id
             if image_id is None or not widget.visible:
                 continue
             if widget.native_width_px is None:
                 continue
-            region = widget.content_region
+            # For a QuoteWidget the native thumbnail is placed over its internal
+            # thumbnail slot (not the container, which would cover the text).
+            if isinstance(widget, QuoteWidget):
+                region = widget.thumbnail_region()
+                if region is None:
+                    continue
+            else:
+                region = widget.content_region
             rect = compute_source_rect(
                 region, container, cell_w, cell_h, widget.native_width_px
             )
@@ -380,11 +420,25 @@ class SignalTUI(
                     del self._native_last_key[image_id]
                 continue
             row, col, x_src, y_src, w_px, h_px = rect
-            if widget.has_class("msg-right"):
-                # P4: right-align — the thumb must end at the content region's
-                # right edge, matching the placeholder ``text-align: right``.
+            # P4: right-align — the thumb must end at the content region's right
+            # edge, matching the placeholder ``text-align: right``.  A QuoteWidget
+            # carries its alignment in ``aligned_right`` (the class is applied to
+            # the internal Static, not the container); an ImageWidget uses the
+            # ``msg-right`` class on the widget itself.
+            right_aligned = (
+                widget.aligned_right
+                if isinstance(widget, QuoteWidget)
+                else widget.has_class("msg-right")
+            )
+            if right_aligned:
                 image_cols = (w_px + cell_w - 1) // cell_w
-                col = region.right - image_cols + 1
+                # For a QuoteWidget anchor to the CONTAINER's right edge: the
+                # internal slot collapses when the placeholder text is hidden,
+                # so thumbnail_region().right is no longer the bubble's right.
+                anchor = (
+                    widget.content_region if isinstance(widget, QuoteWidget) else region
+                )
+                col = anchor.right - image_cols + 1
             key = (image_id, placement_id, row, col, x_src, y_src, w_px, h_px)
             if self._native_last_key.get(image_id) != key:
                 renderer.place(

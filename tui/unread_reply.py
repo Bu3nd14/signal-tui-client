@@ -143,7 +143,14 @@ class UnreadReplyMixin:
             return
 
         if event.is_mine and event.status == "failed":
-            self._retry_failed_message(event.timestamp, event.text)
+            # Il retry tocca DB/cache e usa call_from_thread: DEVE girare in un
+            # worker thread, mai sul thread UI (il flusso _transition_outgoing_status
+            # lo richiede, altrimenti RuntimeError da call_from_thread).
+            self.run_worker(
+                lambda: self._retry_failed_message(event.timestamp, event.text),
+                exclusive=False,
+                thread=True,
+            )
             return
 
         # If clicking the same message, cancel the reply
@@ -259,6 +266,13 @@ class UnreadReplyMixin:
             "quote_wire_body": event.caption,
             "attachment_id": event.attachment_id,
             "content_type": event.content_type,
+            # Native quote-thumbnail metadata (chunk 4, uscita): the resolved
+            # path drives the thumbnail; the id/content-type are kept for the
+            # future ingresso flow.  ``attachment_path`` may be None (unresolved
+            # image) → text-only bubble (degrado).
+            "quote_attachment_path": event.attachment_path,
+            "quote_attachment_id": event.attachment_id,
+            "quote_content_type": event.content_type,
         }
         if event.message_id is not None:
             self._reply_to["message_id"] = event.message_id

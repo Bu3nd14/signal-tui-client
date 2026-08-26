@@ -6,16 +6,25 @@ persist across sessions.  Handles schema migration, incremental inserts,
 dedup, read receipts and unread counts.  No Textual dependency.
 """
 
+import logging
 import sqlite3
 import threading
 from pathlib import Path
 
 import backend as _backend
 
+logger = logging.getLogger(__name__)
+
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 CACHE_FILE = CACHE_DIR / "messages.json"
 DB_FILE = CACHE_DIR / "messages.db"
 CACHE_RETENTION_DAYS = 3
+
+# Window (ms) entro cui un'entry id-less può essere considerata l'echo di un
+# messaggio con id reale.  Condivisa tra ``_update_message_id`` (match mirato a
+# UNA riga entro la finestra) e ``_dedup_messages_by_id`` (guardia difensiva che
+# non cancella partizioni con timestamp divergenti oltre la finestra).
+_ECHO_MATCH_WINDOW_MS = 600_000  # 10 minuti
 
 # Current schema version, persisted via ``PRAGMA user_version`` so the legacy
 # migration below is skipped once the schema is known to be up to date.
@@ -71,6 +80,19 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
     # as ``edited``: a DB can carry user_version == 3 while still lacking it.
     if "content_type" not in columns:
         conn.execute("ALTER TABLE messages ADD COLUMN content_type TEXT")
+
+    # Quoted-media thumbnail metadata (DESIGN_QUOTE_THUMBNAIL, additive).  The
+    # resolved path is deliberately NOT persisted: it is derived lazily in the
+    # UI via ``get_attachment_path`` (transient local file).
+    if "quote_attachment_id" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN quote_attachment_id TEXT")
+    if "quote_content_type" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN quote_content_type TEXT")
+    # Signal extracts the quoted thumbnail from the envelope and stores it under
+    # a content-hash name in ``CACHE_DIR/quote-thumbs/`` (a persistent file), so
+    # its path IS persisted — unlike the lazy Telegram/WhatsApp path.
+    if "quote_attachment_path" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN quote_attachment_path TEXT")
 
     if _current_schema_version(conn) >= _SCHEMA_VERSION:
         return
@@ -134,6 +156,9 @@ def _init_db():
                     attachment_info TEXT,
                     attachment_id TEXT,
                     content_type TEXT,
+                    quote_attachment_id TEXT,
+                    quote_attachment_path TEXT,
+                    quote_content_type TEXT,
                     read INTEGER DEFAULT 0,
                     status TEXT DEFAULT 'read',
                     msg_id TEXT,
@@ -195,6 +220,9 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
                 "attachment_info": row["attachment_info"],
                 "attachment_id": row["attachment_id"],
                 "content_type": row["content_type"],
+                "quote_attachment_id": row["quote_attachment_id"],
+                "quote_attachment_path": row["quote_attachment_path"],
+                "quote_content_type": row["quote_content_type"],
                 "quote_timestamp": row["quote_timestamp"],
                 "quote_author": row["quote_author"],
                 "reply_to_message_id": row["reply_to_message_id"],
@@ -224,6 +252,9 @@ def _add_message_to_cache(
     quote_timestamp: int | None = None,
     quote_author: str | None = None,
     reply_to_message_id: str | None = None,
+    quote_attachment_id: str | None = None,
+    quote_attachment_path: str | None = None,
+    quote_content_type: str | None = None,
 ):
     """Add a message to the SQLite cache (incremental INSERT).
     msg_type: "text", "image", "sticker", "attachment"
@@ -237,15 +268,18 @@ def _add_message_to_cache(
         Persisting it lets the id-based dedup work across sessions.
     """
     _init_db()
+    if quote_attachment_path is not None:
+        quote_attachment_path = str(quote_attachment_path)
     with _DB_LOCK:
         conn = sqlite3.connect(_backend.DB_FILE)
         try:
             conn.execute(
                 """INSERT INTO messages
                    (protocol, contact_number, text, is_mine, sender, timestamp,
-                    quote_text, msg_type, attachment_info, attachment_id, content_type,
-                     read, status, msg_id, quote_timestamp, quote_author, reply_to_message_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     quote_text, msg_type, attachment_info, attachment_id, content_type,
+                     quote_attachment_id, quote_attachment_path, quote_content_type,
+                      read, status, msg_id, quote_timestamp, quote_author, reply_to_message_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     protocol,
                     contact_number,
@@ -258,6 +292,9 @@ def _add_message_to_cache(
                     attachment_info,
                     attachment_id,
                     content_type,
+                    quote_attachment_id,
+                    quote_attachment_path,
+                    quote_content_type,
                     int(is_mine),
                     status or ("sent" if is_mine else "read"),
                     msg_id,
@@ -278,26 +315,48 @@ def _update_message_id(
     timestamp: int,
     msg_id: str,
     protocol: str = "signal",
-):
-    """Attach a real message id to an existing (optimistic) row.
+) -> bool:
+    """Attach a real message id to the single closest id-less optimistic row.
 
     When the echo of an optimistic send arrives with its real id, the row that
     was inserted optimistically (``msg_id IS NULL`` or the legacy ``msg_id = ''``
     used by the Telegram backend) is updated in place instead of inserting a
     duplicate.  Matching is by ``(protocol, contact_number, text, is_mine)`` on
-    the id-less row.
+    the id-less row, but restricted to the echo window
+    (``_ECHO_MATCH_WINDOW_MS``) around ``timestamp`` and limited to a single
+    row: the closest in time, with a deterministic tie-break on ``rowid``
+    (mirrors the ordering used by ``_dedup_messages_by_id``).  This guarantees
+    an id is never attached to two distinct rows sharing the same text (e.g.
+    two failed retries), which ``_dedup_messages_by_id`` would otherwise merge
+    at boot.
+
+    Returns ``True`` when exactly one row was updated, ``False`` otherwise.
     """
     _init_db()
     with _DB_LOCK:
         conn = sqlite3.connect(_backend.DB_FILE)
         try:
-            conn.execute(
+            cursor = conn.execute(
                 "UPDATE messages SET msg_id = ?, timestamp = ? "
-                "WHERE protocol = ? AND contact_number = ? AND text = ? "
-                "AND is_mine = ? AND (msg_id IS NULL OR msg_id = '')",
-                (msg_id, timestamp, protocol, contact_number, text, int(is_mine)),
+                "WHERE id = ("
+                "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
+                "AND text = ? AND is_mine = ? AND (msg_id IS NULL OR msg_id = '') "
+                "AND ABS(timestamp - ?) <= ? "
+                "ORDER BY ABS(timestamp - ?) ASC, rowid ASC LIMIT 1)",
+                (
+                    msg_id,
+                    timestamp,
+                    protocol,
+                    contact_number,
+                    text,
+                    int(is_mine),
+                    timestamp,
+                    _ECHO_MATCH_WINDOW_MS,
+                    timestamp,
+                ),
             )
             conn.commit()
+            return cursor.rowcount > 0
         finally:
             conn.close()
 
@@ -552,6 +611,12 @@ def _dedup_messages_by_id() -> int:
     share the same ``msg_id`` but have different text.  Idempotent: running it
     twice removes no additional rows.
 
+    Defensive guard: a partition whose timestamps span more than
+    ``_ECHO_MATCH_WINDOW_MS`` is a signal that one id was (erroneously) attached
+    to two distinct messages (e.g. two failed retries sharing the same text).
+    Such partitions are never merged — a warning is logged with the partition
+    key, row count and timestamp range, and all rows are kept.
+
     Returns the number of rows removed.
     """
     _init_db()
@@ -559,32 +624,74 @@ def _dedup_messages_by_id() -> int:
         conn = sqlite3.connect(_backend.DB_FILE)
         try:
             before = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            # Defensive: log partitions whose timestamps diverge beyond the echo
+            # window — an id assigned to two distinct messages.  These must never
+            # be merged, otherwise a legitimate row would be deleted at boot.
+            divergent = conn.execute(
+                "SELECT protocol, contact_number, msg_id, text, COUNT(*) AS cnt, "
+                "MIN(timestamp) AS min_ts, MAX(timestamp) AS max_ts "
+                "FROM messages WHERE msg_id IS NOT NULL AND msg_id != '' "
+                "GROUP BY protocol, contact_number, msg_id, text "
+                "HAVING MAX(timestamp) - MIN(timestamp) > ?",
+                (_ECHO_MATCH_WINDOW_MS,),
+            ).fetchall()
+            for (
+                protocol,
+                contact_number,
+                msg_id,
+                text,
+                cnt,
+                min_ts,
+                max_ts,
+            ) in divergent:
+                logger.warning(
+                    "dedup skipped partition with divergent timestamps "
+                    "(protocol=%r, contact_number=%r, msg_id=%r, text=%r, "
+                    "rows=%d, min_ts=%d, max_ts=%d)",
+                    protocol,
+                    contact_number,
+                    msg_id,
+                    text,
+                    cnt,
+                    min_ts,
+                    max_ts,
+                )
             # CTE: for every (protocol, contact_number, msg_id, text) group,
             # order by status rank descending and rowid ascending, then delete
-            # every row past the first one.  This keeps the highest-status row
-            # and breaks ties deterministically by the smallest rowid.
-            conn.execute("""
+            # every row past the first one — but ONLY when the partition's
+            # timestamp range fits within the echo window (see guard above).
+            conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        rowid,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY protocol, contact_number, msg_id, text
+                            ORDER BY
+                                CASE status
+                                WHEN 'pending' THEN 0 WHEN 'failed' THEN 0
+                                WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2
+                                WHEN 'read' THEN 3 ELSE 0
+                                END DESC,
+                                rowid ASC
+                        ) AS rn,
+                        MIN(timestamp) OVER (
+                            PARTITION BY protocol, contact_number, msg_id, text
+                        ) AS min_ts,
+                        MAX(timestamp) OVER (
+                            PARTITION BY protocol, contact_number, msg_id, text
+                        ) AS max_ts
+                    FROM messages
+                    WHERE msg_id IS NOT NULL AND msg_id != ''
+                )
                 DELETE FROM messages
                 WHERE rowid IN (
-                    SELECT rowid FROM (
-                        SELECT
-                            rowid,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY protocol, contact_number, msg_id, text
-                                ORDER BY
-                                    CASE status
-                                    WHEN 'pending' THEN 0 WHEN 'failed' THEN 0
-                                    WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2
-                                    WHEN 'read' THEN 3 ELSE 0
-                                    END DESC,
-                                    rowid ASC
-                            ) AS rn
-                        FROM messages
-                        WHERE msg_id IS NOT NULL AND msg_id != ''
-                    )
-                    WHERE rn > 1
+                    SELECT rowid FROM ranked
+                    WHERE rn > 1 AND (max_ts - min_ts) <= ?
                 )
-            """)
+                """,
+                (_ECHO_MATCH_WINDOW_MS,),
+            )
             conn.commit()
             after = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
             return before - after
