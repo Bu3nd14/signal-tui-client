@@ -88,6 +88,28 @@ h2 { font-size: 1.05rem; }
 }
 .icon-button:hover, .icon-button:focus-visible { border-color: var(--line); background: var(--panel-raised); color: var(--text); }
 
+.protocol-tabs {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  scrollbar-width: thin;
+}
+.protocol-tab {
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: .76rem;
+  cursor: pointer;
+}
+.protocol-tab:hover, .protocol-tab:focus-visible { background: var(--panel-raised); color: var(--text); }
+.protocol-tab.active { border-color: var(--accent); background: #4f8cff25; color: var(--text); }
+
 .list-status {
   flex: none;
   padding: 20px;

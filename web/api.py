@@ -77,6 +77,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
     messages = []
     for row in rows:
         attachment = None
+        text = row["text"] or ""
         if row["attachment_id"]:
             attachment_id = row["attachment_id"]
             attachment_path = attachment_id.split("?", 1)[0]
@@ -85,10 +86,15 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 "name": row["attachment_info"] or Path(attachment_path).name,
                 "type": _infer_attachment_type(attachment_id, row["content_type"]),
             }
+            # WhatsApp stores the WAHA media URL as message text
+            # ("Media: http://..."); drop it for WA only, never for
+            # legitimate captions of other protocols.
+            if row["protocol"] == "whatsapp" and text.startswith("Media: "):
+                text = ""
         messages.append(
             {
                 "id": row["msg_id"] or str(row["id"]),
-                "text": row["text"] or "",
+                "text": text,
                 "direction": "out" if row["is_mine"] else "in",
                 "timestamp": row["timestamp"],
                 "attachment": attachment,

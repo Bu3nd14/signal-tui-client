@@ -339,7 +339,7 @@ def test_messages_infers_missing_image_content_type(web_client):
                 (
                     "whatsapp",
                     "alice",
-                    "image",
+                    "Media: http://localhost:3000/api/files/photo.jpeg?download=1",
                     0,
                     1,
                     "http://localhost:3000/api/files/photo.jpeg?download=1",
@@ -357,6 +357,16 @@ def test_messages_infers_missing_image_content_type(web_client):
                     "Photo",
                     "application/custom",
                 ),
+                (
+                    "signal",
+                    "bob",
+                    "Media: att-1",
+                    0,
+                    4,
+                    "att-1",
+                    None,
+                    None,
+                ),
             ],
         )
 
@@ -367,11 +377,22 @@ def test_messages_infers_missing_image_content_type(web_client):
     )
 
     assert response.status_code == 200
-    attachments = [message["attachment"] for message in response.json()]
+    messages = response.json()
+    attachments = [message["attachment"] for message in messages]
+    assert messages[0]["text"] == ""
     assert attachments[0]["type"] == "image/jpeg"
     assert attachments[0]["name"] == "photo.jpeg"
     assert attachments[1]["type"] is None
     assert attachments[2]["type"] == "application/custom"
+
+    # Non-WhatsApp captions starting with "Media: " must be preserved.
+    response = client.get(
+        "/api/messages",
+        params={"proto": "signal", "contact_id": "bob"},
+        headers=AUTH,
+    )
+    assert response.status_code == 200
+    assert response.json()[0]["text"] == "Media: att-1"
 
 
 def test_bridge_is_bounded_nonblocking_and_counts_drop():

@@ -4,6 +4,7 @@ const TOKEN_KEY = "signal-tui-web-token";
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   contacts: [],
+  protocolFilter: "all",
   active: null,
   socket: null,
   reconnectTimer: null,
@@ -16,6 +17,7 @@ const state = {
 const elements = {
   app: document.querySelector("#app"),
   contacts: document.querySelector("#contact-list"),
+  protocolTabs: document.querySelector("#protocol-tabs"),
   contactStatus: document.querySelector("#contact-status"),
   messages: document.querySelector("#message-list"),
   threadName: document.querySelector("#thread-name"),
@@ -77,7 +79,18 @@ function contactInitial(contact) {
 
 function renderContacts() {
   elements.contacts.replaceChildren();
-  const contacts = [...state.contacts].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
+  const sortedContacts = [...state.contacts].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
+  const contacts = state.protocolFilter === "all"
+    ? sortedContacts
+    : sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
+  if (state.active && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
+    contacts.unshift(state.active);
+  }
+  for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
+    const active = tab.dataset.protocol === state.protocolFilter;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  }
   elements.contactStatus.textContent = contacts.length ? "" : "Nessuna conversazione disponibile.";
   for (const contact of contacts) {
     const button = document.createElement("button");
@@ -189,13 +202,17 @@ function renderMessages(messages, protocol) {
     message.className = `message ${item.direction === "out" ? "out" : "in"}`;
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    if (item.attachment?.type?.toLowerCase().startsWith("image/")) {
+    const isImage = item.attachment?.type?.toLowerCase().startsWith("image/");
+    if (isImage) {
       bubble.append(imageAttachment(item.attachment, protocol));
     }
-    if (item.text) {
+    const attachmentId = item.attachment?.attachment_id || "";
+    const attachmentName = item.attachment?.name || attachmentId.split("?", 1)[0].split("/").filter(Boolean).pop() || "Allegato";
+    const displayText = item.text || (item.attachment && !isImage ? attachmentName : "");
+    if (displayText) {
       const text = document.createElement("div");
       text.className = "message-text";
-      text.textContent = item.text;
+      text.textContent = displayText;
       bubble.append(text);
     }
     const time = document.createElement("time");
@@ -307,6 +324,12 @@ document.querySelector("#refresh-contacts").addEventListener("click", () => load
 document.querySelector("#open-token").addEventListener("click", () => requestToken());
 document.querySelector("#back-button").addEventListener("click", () => elements.app.classList.remove("thread-open"));
 document.querySelector("#dismiss-error").addEventListener("click", () => { elements.errorBanner.hidden = true; });
+elements.protocolTabs.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-protocol]");
+  if (!tab) return;
+  state.protocolFilter = tab.dataset.protocol;
+  renderContacts();
+});
 elements.cancelToken.addEventListener("click", () => elements.tokenDialog.close());
 document.querySelector("#token-form").addEventListener("submit", (event) => {
   event.preventDefault();
