@@ -107,7 +107,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="enable the optional read-only web UI",
     )
     parser.add_argument("--web-port", type=int, help="web UI listen port")
-    parser.add_argument("--web-host", type=str, help="web UI bind host (default 127.0.0.1)")
+    parser.add_argument(
+        "--web-host", type=str, help="web UI bind host (default 127.0.0.1)"
+    )
     args = parser.parse_args(argv)
     if args.web_port is not None and not 1 <= args.web_port <= 65535:
         parser.error("--web-port must be between 1 and 65535")

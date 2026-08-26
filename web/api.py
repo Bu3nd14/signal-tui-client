@@ -1,7 +1,8 @@
 """Read-only REST API for contacts, persisted messages, and media."""
 
 import sqlite3
-from pathlib import Path, PurePath
+import tempfile
+from pathlib import Path
 from typing import Any, Literal
 
 
@@ -67,30 +68,24 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
     return messages
 
 
-def _attachment_root(manager: Any, protocol: str) -> Path:
+def _allowed_media_root(manager: Any, proto: str) -> Path:
     import backend
 
-    if protocol == "signal":
+    if proto == "signal":
         return Path(backend.SIGNAL_CLI_ATTACHMENTS_DIR).resolve()
-    if protocol == "whatsapp":
-        backend_instance = manager.get(protocol)
-        configured = getattr(backend_instance, "media_dir", None)
-        return Path(configured or backend.CACHE_DIR / "whatsapp-media").resolve()
-    return Path.cwd().resolve()
+    if proto == "whatsapp":
+        instance = manager.get(proto)
+        if instance is not None and hasattr(instance, "_ensure_media_dir"):
+            return instance._ensure_media_dir().resolve()
+        return (backend.CACHE_DIR / "whatsapp-media").resolve()
+    if proto == "telegram":
+        try:
+            from backends.telegram import _media_dir
 
-
-def _validate_attachment_id(attachment_id: str, attachment_dir: Path) -> None:
-    from fastapi import HTTPException
-
-    candidate = Path(attachment_id)
-    if (
-        not attachment_id
-        or attachment_id.startswith("tgref:")
-        or candidate.is_absolute()
-        or ".." in PurePath(attachment_id).parts
-        or not (attachment_dir / candidate).resolve().is_relative_to(attachment_dir)
-    ):
-        raise HTTPException(status_code=400, detail="Invalid attachment id")
+            return _media_dir().resolve()
+        except ImportError:
+            return (Path(tempfile.gettempdir()) / "telegram-media").resolve()
+    raise ValueError(f"Unsupported protocol: {proto}")
 
 
 def create_api_router() -> Any:
@@ -130,14 +125,15 @@ def create_api_router() -> Any:
         proto: Literal["signal", "whatsapp", "telegram"],
         attachment_id: str,
     ) -> Any:
-        attachment_root = _attachment_root(request.app.state.manager, proto)
-        _validate_attachment_id(attachment_id, attachment_root)
-        resolved = request.app.state.manager.get_attachment_path(proto, attachment_id)
-        if resolved is None:
-            raise HTTPException(status_code=404, detail="Media not found")
-        path = Path(resolved).resolve()
-        if not path.is_relative_to(attachment_root) or not path.is_file():
-            raise HTTPException(status_code=404, detail="Media not found")
+        manager = request.app.state.manager
+        root = _allowed_media_root(manager, proto)
+        try:
+            resolved = manager.get_attachment_path(proto, attachment_id)
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=404) from None
+        path = Path(resolved).resolve() if resolved else None
+        if path is None or not path.is_file() or not path.is_relative_to(root):
+            raise HTTPException(status_code=404)
         return FileResponse(path)
 
     return router

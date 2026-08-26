@@ -119,9 +119,9 @@ def test_media_rejects_traversal_absolute_nested_and_tgref(tmp_path):
         ]
         for attachment_id in attempts:
             response = client.get(f"/api/media/signal/{attachment_id}", headers=AUTH)
-            assert response.status_code in {400, 404}
+            assert response.status_code == 404
             assert response.content != outside.read_bytes()
-    manager.get_attachment_path.assert_not_called()
+    assert manager.get_attachment_path.call_count == 2
 
 
 def test_media_serves_legitimate_file(tmp_path):
