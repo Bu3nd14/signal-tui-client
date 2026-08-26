@@ -93,6 +93,9 @@ class SignalTUI(
         image_support: ImageSupport = ImageSupport.CATIMG,
         *,
         initial_cell_size: tuple[int, int] | None = None,
+        web_enabled: bool = False,
+        web_port: int = 8080,
+        web_token: str = "",
     ):
         super().__init__()
         # Terminal image backend detected in ``signal_tui`` before ``run()``.
@@ -102,6 +105,10 @@ class SignalTUI(
         # Cell size measured BEFORE ``run()`` (P2): the CSI fallback can only run
         # safely outside the app (no Textual key-thread racing for stdin).
         self._initial_cell_size = initial_cell_size
+        self._web_enabled = web_enabled
+        self._web_port = web_port
+        self._web_token = web_token
+        self._web_server = None
 
         # Native kitty image rendering state (phase 2).  The renderer is created
         # in ``on_mount`` when the terminal supports it; placements are reconciled
@@ -262,6 +269,12 @@ class SignalTUI(
     def on_mount(self):
         """On startup, start poll worker and backend connections in parallel."""
         self._chat_log = self.query_one("#chat-log", Vertical)
+        if self._web_enabled:
+            from web.server import start_web_server
+
+            self._web_server = start_web_server(
+                self.manager, self._web_port, self._web_token
+            )
         # Start poll worker immediately — Signal and WhatsApp events flow
         # as soon as their backends are ready (independent workers below).
         self._polling_active = True
@@ -537,6 +550,10 @@ class SignalTUI(
     def on_exit(self):
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
+        if self._web_enabled:
+            from web.server import stop_web_server
+
+            stop_web_server(self._web_server)
         if self.telegram_backend is not None:
             try:
                 self.telegram_backend.disconnect_sync()

@@ -303,3 +303,38 @@ def thumbnail_max_lines() -> int:
 def thumbnail_max_cols() -> int:
     """Return the max thumbnail width in columns (default ``60``)."""
     return _get_int("thumbnail_max_cols", "THUMBNAIL_MAX_COLS", 60)
+
+
+# ─── Optional web reader configuration ──────────────────────────────────────
+
+
+def _web_config() -> dict:
+    """Return the ``web`` config section, or an empty dict."""
+    value = _load_config().get("web", {})
+    return value if isinstance(value, dict) else {}
+
+
+def web_enabled() -> bool:
+    """Return whether the optional web reader is enabled (default off)."""
+    value = _web_config().get("enabled", False)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return value is True
+
+
+def web_port() -> int:
+    """Return the web reader port (default ``8080``)."""
+    try:
+        port = int(_web_config().get("port", 8080))
+    except (TypeError, ValueError):
+        return 8080
+    return port if 1 <= port <= 65535 else 8080
+
+
+def web_token() -> str:
+    """Return the web Bearer token from env or the ``web`` config section."""
+    env_token = os.environ.get("SIGNAL_TUI_WEB_TOKEN")
+    if env_token:
+        return env_token
+    value = _web_config().get("token", "")
+    return str(value) if value is not None else ""

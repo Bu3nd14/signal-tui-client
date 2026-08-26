@@ -124,6 +124,13 @@ vengono mostrate nel **browser**, senza emulare alcun terminale.
 - Il token **mai in query-string** (solo header `Authorization: Bearer …`).
 - Login/UI di autenticazione: **opzionale, fase 2**.
 
+La WebSocket API nativa del browser non consente di impostare `Authorization`.
+La SPA invia quindi `signal-tui-bearer` e il token codificato base64url come
+`signal-tui-token.<token>` nell'header `Sec-WebSocket-Protocol` (mai nella
+query-string); il server seleziona il sottoprotocollo neutro, decodifica il token
+e lo valida con lo stesso controllo Bearer a tempo costante. I client non-browser
+possono continuare a usare `Authorization: Bearer`.
+
 ## 9. Lifecycle e robustezza
 
 1. **Start** in `on_mount` (`tui/app.py:262-286`) dietro flag (default **off**).
