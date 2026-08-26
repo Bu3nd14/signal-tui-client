@@ -91,7 +91,7 @@ h2 { font-size: 1.05rem; }
 }
 .list-status:empty { display: none; }
 
-.contact-list { overflow-y: auto; padding: 8px; }
+.contact-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; }
 .contact {
   display: grid;
   width: 100%;
@@ -156,6 +156,7 @@ h2 { font-size: 1.05rem; }
 .message-list {
   display: flex;
   flex: 1;
+  min-height: 0;
   flex-direction: column;
   gap: 8px;
   overflow-y: auto;
