@@ -432,6 +432,7 @@ class TestAppHook:
         written: list[str] = []
         app._native_renderer = KittyRenderer(write=written.append, cell_w=8, cell_h=16)
         app._chat_native_ids = {5, 6}  # chat ids, NOT the modal's id (99)
+        app._native_has_images = True  # images exist → sync must not early-out
 
         main_screen = object()
         modal_screen = object()
