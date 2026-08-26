@@ -569,6 +569,7 @@ class ChatViewMixin:
             widget._pending_native_png = png
             widget._pending_native_path = path
             self._native_pending_count += 1
+            self._native_has_images = True
             return
         self._register_native_thumbnail(widget, path, png)
 
@@ -583,6 +584,7 @@ class ChatViewMixin:
                 path, f"[🖼️ Image: {path.name} — Click Enter to View]"
             )
             return
+        self._native_has_images = True
         image_id = self._next_native_image_id()
         renderer.transmit(image_id, png)
         # Native mode: no textual placeholder — the kitty image covers the area.
@@ -697,6 +699,7 @@ class ChatViewMixin:
             # widget is mounted (bounded: cleared by native_cleanup on unmount).
             widget._pending_quote_png = png
             self._native_pending_count += 1
+            self._native_has_images = True
             return
         self._register_quote_thumbnail(widget, png)
 
@@ -705,6 +708,7 @@ class ChatViewMixin:
         renderer = self._native_renderer
         if renderer is None:
             return
+        self._native_has_images = True
         image_id = self._next_native_image_id()
         renderer.transmit(image_id, png)
         widget.show_native_thumbnail(renderer, image_id, png)

@@ -124,8 +124,12 @@ class SignalTUI(
         self._chat_native_ids: set[int] = set()
         self._screen_stack_cleared = False
         self._native_image_counter = 0
-        # Number of thumbnails stashed (not yet registered) on unmounted widgets;
-        # lets ``_native_sync_tick`` bail out early when nothing is pending.
+        # Set whenever a thumbnail is registered or stashed; cleared only when a
+        # sync pass finds no native images at all.  Lets ``_native_sync_tick``
+        # bail out early (no DOM query) in the common no-images case, without
+        # ever skipping real placements.
+        self._native_has_images = False
+        # Number of thumbnails stashed (not yet registered) on unmounted widgets.
         self._native_pending_count = 0
         # Concurrency gate for attachment path resolution + thumbnail prepare.
         self._image_resolve_semaphore = threading.Semaphore(4)
@@ -351,15 +355,11 @@ class SignalTUI(
         renderer = self._native_renderer
         if self.image_support is not ImageSupport.KITTY or renderer is None:
             return
-        # CPU guard: with no placements and no stashed thumbnails there is
+        # CPU guard: with no native images anywhere (placed or stashed) there is
         # nothing to reconcile — skip the DOM query entirely.  The common
         # (idle chat) case must not pay for ``query("ImageWidget, QuoteWidget")``
         # on every frame / timer tick.
-        if (
-            not self._native_last_key
-            and not self._chat_native_ids
-            and not self._native_pending_count
-        ):
+        if not self._native_has_images:
             return
         # C5 screen-stack gate: while a modal/picker sits on top, the chat
         # placements would bleed over it.  Drop ONLY the chat placements (P3:
@@ -487,6 +487,8 @@ class SignalTUI(
                 )
                 self._native_last_key[image_id] = key
         self._chat_native_ids = chat_ids
+        # Re-arm the CPU guard: no images anywhere → next tick bails out early.
+        self._native_has_images = bool(chat_ids or self._native_pending_count)
 
     def on_resize(self, event) -> None:
         """Re-detect cell size and force delayed re-emissions (kitty remap)."""
