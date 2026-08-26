@@ -324,12 +324,14 @@ document.querySelector("#refresh-contacts").addEventListener("click", () => load
 document.querySelector("#open-token").addEventListener("click", () => requestToken());
 document.querySelector("#back-button").addEventListener("click", () => elements.app.classList.remove("thread-open"));
 document.querySelector("#dismiss-error").addEventListener("click", () => { elements.errorBanner.hidden = true; });
-elements.protocolTabs.addEventListener("click", (event) => {
-  const tab = event.target.closest("[data-protocol]");
-  if (!tab) return;
-  state.protocolFilter = tab.dataset.protocol;
-  renderContacts();
-});
+if (elements.protocolTabs) {
+  elements.protocolTabs.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-protocol]");
+    if (!tab) return;
+    state.protocolFilter = tab.dataset.protocol;
+    renderContacts();
+  });
+}
 elements.cancelToken.addEventListener("click", () => elements.tokenDialog.close());
 document.querySelector("#token-form").addEventListener("submit", (event) => {
   event.preventDefault();
