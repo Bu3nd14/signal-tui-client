@@ -16,7 +16,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backends import config
-from tui.images.detect import ImageSupport, detect_image_support, query_kitty_ok
+from tui.images.detect import (
+    ImageSupport,
+    _is_wezterm,
+    detect_image_support,
+    query_kitty_ok,
+)
 
 
 def _no_catimg(name: str) -> None:
@@ -155,6 +160,105 @@ class TestFalsePositiveTerm:
             query_cb=lambda: calls.append(True) or True,
         )
         assert calls == []
+
+
+class TestWezTermGate:
+    """WezTerm is a native-graphics terminal (paints kitty placements)."""
+
+    def test_wezterm_pane_marker(self):
+        assert (
+            _detect(
+                env={"TERM": "xterm-256color", "WEZTERM_PANE": "1"},
+                which=_has_catimg,
+                query_cb=lambda: True,
+            )
+            is ImageSupport.KITTY
+        )
+
+    def test_wezterm_unix_socket_marker(self):
+        assert (
+            _detect(
+                env={"TERM": "xterm-256color", "WEZTERM_UNIX_SOCKET": "/run/wezterm"},
+                which=_has_catimg,
+                query_cb=lambda: True,
+            )
+            is ImageSupport.KITTY
+        )
+
+    def test_wezterm_term_program(self):
+        assert (
+            _detect(
+                env={"TERM": "xterm-256color", "TERM_PROGRAM": "WezTerm"},
+                which=_has_catimg,
+                query_cb=lambda: True,
+            )
+            is ImageSupport.KITTY
+        )
+
+    def test_term_wezterm(self):
+        assert (
+            _detect(env={"TERM": "wezterm"}, which=_has_catimg, query_cb=lambda: True)
+            is ImageSupport.KITTY
+        )
+
+    def test_query_ko_with_catimg(self):
+        assert (
+            _detect(
+                env={"TERM": "xterm-256color", "WEZTERM_PANE": "1"},
+                which=_has_catimg,
+                query_cb=lambda: False,
+            )
+            is ImageSupport.CATIMG
+        )
+
+    def test_query_ko_without_catimg(self):
+        assert (
+            _detect(
+                env={"TERM": "xterm-256color", "WEZTERM_PANE": "1"},
+                which=_no_catimg,
+                query_cb=lambda: False,
+            )
+            is ImageSupport.OFF
+        )
+
+    def test_tmux_guard_prioritary_never_queries(self):
+        calls: list[bool] = []
+        result = _detect(
+            env={
+                "TMUX": "/tmp/tmux-1000/default,1234,0",
+                "TERM": "xterm-256color",
+                "WEZTERM_PANE": "1",
+            },
+            which=_has_catimg,
+            query_cb=lambda: calls.append(True) or True,
+        )
+        assert result is ImageSupport.CATIMG
+        assert calls == []
+
+    def test_query_called_exactly_once(self):
+        calls: list[bool] = []
+        _detect(
+            env={"TERM": "xterm-256color", "WEZTERM_PANE": "1"},
+            which=_has_catimg,
+            query_cb=lambda: calls.append(True) or True,
+        )
+        assert len(calls) == 1
+
+
+class TestIsWezTerm:
+    """``_is_wezterm`` è una funzione pura, testabile direttamente."""
+
+    def test_markers(self):
+        assert _is_wezterm({"WEZTERM_PANE": "1"}) is True
+        assert _is_wezterm({"WEZTERM_UNIX_SOCKET": "/run/wezterm"}) is True
+        assert _is_wezterm({"TERM_PROGRAM": "WezTerm"}) is True
+        assert _is_wezterm({"TERM": "wezterm"}) is True
+
+    def test_not_wezterm(self):
+        assert _is_wezterm({}) is False
+        assert _is_wezterm({"TERM": "xterm-256color"}) is False
+        assert _is_wezterm({"TERM_PROGRAM": "iTerm.app"}) is False
+        assert _is_wezterm({"WEZTERM_PANE": ""}) is False
 
 
 class TestFallback:
