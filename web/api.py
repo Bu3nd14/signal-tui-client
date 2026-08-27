@@ -5,6 +5,7 @@ import logging
 import mimetypes
 import sqlite3
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -28,6 +29,28 @@ _IMAGE_EXTENSIONS = {
     ".tif",
     ".tiff",
 }
+
+
+@lru_cache(maxsize=1)
+def _emoji_categories() -> list[dict[str, Any]]:
+    import emoji
+
+    from emoji_data import PREDEFINED_CATEGORIES
+
+    aliases = {
+        char: data.get("en", "").strip(":")
+        for char, data in emoji.EMOJI_DATA.items()
+        if data.get("en")
+    }
+    return [
+        {
+            "category": name,
+            "icon": icon,
+            "emojis": list(chars),
+            "aliases": {char: aliases.get(char, "") for char in chars},
+        }
+        for name, icon, chars in PREDEFINED_CATEGORIES
+    ]
 
 
 def _infer_attachment_type(attachment_id: str, content_type: str | None) -> str | None:
@@ -140,9 +163,16 @@ def _allowed_media_root(manager: Any, proto: str) -> Path:
 def create_api_router() -> Any:
     """Build the FastAPI router without making FastAPI a core dependency."""
     from fastapi import APIRouter, HTTPException, Request
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, JSONResponse
 
     router = APIRouter(prefix="/api")
+
+    @router.get("/emoji")
+    def emojis() -> JSONResponse:
+        return JSONResponse(
+            content=_emoji_categories(),
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
 
     @router.post("/send")
     async def send(request: Request) -> dict[str, bool]:

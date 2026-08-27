@@ -18,6 +18,10 @@ const state = {
   sending: false,
   stagedAttachment: null,
   replyTo: null,
+  emojiData: null,
+  emojiRequest: null,
+  emojiFailed: false,
+  emojiCategory: 0,
 };
 
 const elements = {
@@ -36,6 +40,7 @@ const elements = {
   tokenError: document.querySelector("#token-error"),
   cancelToken: document.querySelector("#cancel-token"),
   composer: document.querySelector("#composer"),
+  composerShell: document.querySelector("#composer-shell"),
   messageInput: document.querySelector("#message-input"),
   sendMessage: document.querySelector("#send-message"),
   sendIcon: document.querySelector(".send-icon"),
@@ -48,6 +53,11 @@ const elements = {
   replyAuthor: document.querySelector("#reply-author"),
   replySnippet: document.querySelector("#reply-snippet"),
   cancelReply: document.querySelector("#cancel-reply"),
+  emojiToggle: document.querySelector("#emoji-toggle"),
+  emojiPicker: document.querySelector("#emoji-picker"),
+  emojiTabs: document.querySelector("#emoji-tabs"),
+  emojiSearch: document.querySelector("#emoji-search"),
+  emojiGrid: document.querySelector("#emoji-grid"),
 };
 
 function showError(message) {
@@ -60,6 +70,7 @@ function scrollThreadToBottom() {
 }
 
 function requestToken(invalid = false) {
+  closeEmojiPicker({ focus: false });
   elements.tokenError.hidden = !invalid;
   elements.tokenInput.value = state.token;
   elements.cancelToken.hidden = !state.token;
@@ -398,12 +409,13 @@ async function loadMessages() {
 }
 
 function openThread(contact) {
+  closeEmojiPicker({ focus: false });
   cancelReply();
   state.active = contact;
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
   elements.app.classList.add("thread-open");
-  elements.composer.hidden = false;
+  elements.composerShell.hidden = false;
   state.messages = [];
   renderContacts();
   elements.messages.replaceChildren();
@@ -412,6 +424,139 @@ function openThread(contact) {
   loading.textContent = "Caricamento messaggi…";
   elements.messages.append(loading);
   loadMessages();
+}
+
+function normalizeEmojiSearch(value) {
+  return value.toLocaleLowerCase().replaceAll("_", " ").replaceAll("-", " ").trim();
+}
+
+async function loadEmojiData() {
+  if (state.emojiData) return state.emojiData;
+  if (state.emojiFailed) throw new Error("emoji unavailable");
+  if (!state.emojiRequest) {
+    state.emojiRequest = apiFetch("/api/emoji")
+      .then((response) => response.json())
+      .then((categories) => {
+        if (!Array.isArray(categories) || !categories.length) throw new Error("invalid emoji data");
+        state.emojiData = categories;
+        return categories;
+      })
+      .catch((error) => {
+        state.emojiFailed = true;
+        throw error;
+      })
+      .finally(() => { state.emojiRequest = null; });
+  }
+  return state.emojiRequest;
+}
+
+function emojiCells() {
+  return [...elements.emojiGrid.querySelectorAll(".emoji-cell")];
+}
+
+function setEmojiRovingIndex(index, { focus = false } = {}) {
+  const cells = emojiCells();
+  if (!cells.length) return;
+  const bounded = Math.max(0, Math.min(index, cells.length - 1));
+  cells.forEach((cell, cellIndex) => { cell.tabIndex = cellIndex === bounded ? 0 : -1; });
+  if (focus) cells[bounded].focus();
+}
+
+function insertEmoji(char) {
+  const input = elements.messageInput;
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  input.setRangeText(char, start, end, "end");
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.focus();
+}
+
+function renderEmojiGrid() {
+  elements.emojiGrid.replaceChildren();
+  const query = normalizeEmojiSearch(elements.emojiSearch.value);
+  const categories = state.emojiData || [];
+  const activeCategory = categories[state.emojiCategory];
+  const matches = [];
+  const candidates = query ? categories : (activeCategory ? [activeCategory] : []);
+  for (const category of candidates) {
+    const categoryMatches = normalizeEmojiSearch(category.category).includes(query);
+    for (const char of category.emojis) {
+      const alias = category.aliases?.[char] || "";
+      if (!query || categoryMatches || normalizeEmojiSearch(alias).includes(query)) {
+        matches.push({ char, alias, category: category.category });
+        if (query && matches.length >= 60) break;
+      }
+    }
+    if (query && matches.length >= 60) break;
+  }
+  if (!matches.length) {
+    const empty = document.createElement("p");
+    empty.className = "emoji-empty";
+    empty.textContent = "Nessuna emoji trovata";
+    elements.emojiGrid.append(empty);
+    return;
+  }
+  for (const [index, item] of matches.entries()) {
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "emoji-cell";
+    cell.tabIndex = index === 0 ? 0 : -1;
+    cell.setAttribute("role", "gridcell");
+    cell.setAttribute("aria-label", item.alias || `${item.category}: ${item.char}`);
+    cell.title = item.alias || item.category;
+    cell.textContent = item.char;
+    cell.addEventListener("click", () => insertEmoji(item.char));
+    elements.emojiGrid.append(cell);
+  }
+}
+
+function renderEmojiTabs() {
+  elements.emojiTabs.replaceChildren();
+  for (const [index, category] of state.emojiData.entries()) {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = `emoji-tab${index === state.emojiCategory ? " active" : ""}`;
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(index === state.emojiCategory));
+    tab.setAttribute("aria-label", category.category);
+    tab.title = category.category;
+    tab.textContent = category.icon;
+    tab.addEventListener("click", () => {
+      state.emojiCategory = index;
+      elements.emojiSearch.value = "";
+      renderEmojiTabs();
+      renderEmojiGrid();
+    });
+    elements.emojiTabs.append(tab);
+  }
+}
+
+function closeEmojiPicker({ focus = true } = {}) {
+  if (elements.emojiPicker.hidden) return;
+  elements.emojiPicker.hidden = true;
+  elements.emojiToggle.setAttribute("aria-expanded", "false");
+  elements.emojiToggle.setAttribute("aria-label", "Apri selettore emoji");
+  if (focus) elements.messageInput.focus();
+}
+
+async function toggleEmojiPicker() {
+  if (!elements.emojiPicker.hidden) {
+    closeEmojiPicker();
+    return;
+  }
+  try {
+    await loadEmojiData();
+  } catch (error) {
+    if (error.message !== "unauthorized") showError("Impossibile caricare il selettore emoji.");
+    return;
+  }
+  renderEmojiTabs();
+  renderEmojiGrid();
+  if (elements.tokenDialog.open) elements.tokenDialog.close();
+  elements.emojiPicker.hidden = false;
+  elements.emojiToggle.setAttribute("aria-expanded", "true");
+  elements.emojiToggle.setAttribute("aria-label", "Chiudi selettore emoji");
+  elements.emojiSearch.focus();
 }
 
 function resizeComposer() {
@@ -608,6 +753,42 @@ elements.messageInput.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
   if (!state.sending) submitMessage();
+});
+elements.emojiToggle.addEventListener("click", toggleEmojiPicker);
+elements.emojiSearch.addEventListener("input", renderEmojiGrid);
+elements.emojiSearch.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowDown") return;
+  const cells = emojiCells();
+  if (!cells.length) return;
+  event.preventDefault();
+  setEmojiRovingIndex(0, { focus: true });
+});
+elements.emojiGrid.addEventListener("keydown", (event) => {
+  const cell = event.target.closest(".emoji-cell");
+  if (!cell) return;
+  const cells = emojiCells();
+  const index = cells.indexOf(cell);
+  const offsets = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -8, ArrowDown: 8 };
+  if (Object.hasOwn(offsets, event.key)) {
+    event.preventDefault();
+    setEmojiRovingIndex(index + offsets[event.key], { focus: true });
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    cell.click();
+  }
+});
+elements.emojiPicker.addEventListener("keydown", (event) => {
+  const searchShortcut = event.key === "/" && event.target !== elements.emojiSearch;
+  const findShortcut = event.ctrlKey && event.key.toLocaleLowerCase() === "f";
+  if (searchShortcut || findShortcut) {
+    event.preventDefault();
+    elements.emojiSearch.focus();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || elements.emojiPicker.hidden) return;
+  event.preventDefault();
+  closeEmojiPicker();
 });
 elements.composer.addEventListener("paste", (event) => {
   const item = [...(event.clipboardData?.items || [])]

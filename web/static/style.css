@@ -239,16 +239,25 @@ h2 { font-size: 1.05rem; }
 .message-quote strong, .message-quote span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-quote strong { color: #b8d0ff; }
 
-.composer {
+.composer-shell {
+  position: relative;
   display: flex;
-  flex-wrap: wrap;
   flex: none;
-  align-items: flex-end;
-  gap: 10px;
-  padding: 12px clamp(14px, 5vw, 70px);
+  align-items: stretch;
   border-top: 1px solid var(--line);
   background: #0d141df2;
 }
+.composer-shell[hidden] { display: none; }
+.composer {
+  display: flex;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 12px clamp(14px, 5vw, 70px);
+}
+.composer-controls { display: flex; width: 100%; align-items: flex-end; gap: 9px; }
 .attachment-preview {
   display: grid;
   width: 100%;
@@ -281,9 +290,9 @@ h2 { font-size: 1.05rem; }
 .attachment-preview img { width: 58px; height: 58px; border-radius: 8px; object-fit: cover; }
 .attachment-preview span { overflow: hidden; color: var(--muted); font-size: .8rem; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-preview button { border: 0; background: transparent; color: var(--muted); font-size: 1.25rem; cursor: pointer; }
-.composer[hidden] { display: none; }
 .composer textarea {
-  width: 100%;
+  min-width: 0;
+  flex: 1;
   min-height: 42px;
   max-height: 160px;
   resize: none;
@@ -297,10 +306,34 @@ h2 { font-size: 1.05rem; }
   line-height: 1.35;
 }
 .composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #4f8cff25; }
+.composer-icon-button { display: grid; width: 42px; height: 42px; flex: none; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: var(--panel-raised); cursor: pointer; }
+.composer-icon-button:hover, .composer-icon-button:focus-visible, .composer-icon-button[aria-expanded="true"] { border-color: var(--accent); background: #4f8cff25; }
 .send-button { display: grid; width: 42px; height: 42px; flex: none; place-items: center; border: 0; border-radius: 50%; background: var(--accent); color: white; cursor: pointer; }
 .send-button:disabled { opacity: .45; cursor: default; }
 .send-button .spinner { width: 19px; height: 19px; }
 .send-button [hidden] { display: none; }
+
+.emoji-picker {
+  width: 310px;
+  max-height: 360px;
+  flex: none;
+  padding: 10px;
+  overflow: hidden;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+}
+.emoji-picker[hidden] { display: none; }
+.emoji-tabs { display: flex; gap: 3px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: thin; }
+.emoji-tab { min-width: 32px; height: 32px; flex: 1; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
+.emoji-tab:hover, .emoji-tab:focus-visible { background: var(--panel-raised); color: var(--text); }
+.emoji-tab.active { border-color: var(--accent); background: #4f8cff25; color: var(--text); }
+.emoji-search-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.emoji-search { width: 100%; padding: 8px 9px; border: 1px solid var(--line); border-radius: 8px; outline: none; background: #090f16; color: var(--text); }
+.emoji-search:focus { border-color: var(--accent); }
+.emoji-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); max-height: 268px; margin-top: 8px; overflow-y: auto; align-content: start; scrollbar-width: thin; }
+.emoji-cell { display: grid; min-width: 0; aspect-ratio: 1; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; font-size: 1.25rem; cursor: pointer; }
+.emoji-cell:hover, .emoji-cell:focus-visible { outline: none; background: #4f8cff35; }
+.emoji-empty { grid-column: 1 / -1; padding: 20px 4px; color: var(--muted); font-size: .8rem; text-align: center; }
 
 .attachment { position: relative; min-width: 180px; min-height: 120px; margin-bottom: 7px; overflow: hidden; border-radius: 10px; background: #111820; }
 .attachment img { display: block; width: 100%; max-height: min(68vh, 760px); object-fit: contain; }
@@ -322,6 +355,10 @@ h2 { font-size: 1.05rem; }
 .primary-button, .secondary-button { padding: 9px 14px; border: 1px solid var(--line); border-radius: 9px; cursor: pointer; }
 .primary-button { border-color: var(--accent); background: var(--accent); color: white; }
 .secondary-button { background: transparent; }
+
+@media (max-width: 900px) {
+  .emoji-picker { position: absolute; right: 8px; bottom: calc(100% - 1px); width: min(310px, calc(100vw - 16px)); border: 1px solid var(--line); border-radius: 12px 12px 0 0; box-shadow: 0 -12px 35px #0008; }
+}
 
 @media (max-width: 700px) {
   .app-shell { display: block; height: 100dvh; overflow: hidden; border: 0; }

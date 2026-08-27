@@ -426,6 +426,11 @@ aggiungere il ramo `if (!(options.body instanceof FormData))`.
   correttamente ZWJ e bandiere, quindi il web offre l'insieme completo (flag
   incluse) — divergenza voluta e documentata. Risposta statica:
   `Cache-Control: max-age=3600` + cache in memoria nella SPA.
+- **Decisione implementativa Chunk D**: per mantenere `emojis` come insieme RAW
+  direttamente confrontabile con `PREDEFINED_CATEGORIES`, la risposta usa
+  `[{category, icon, emojis: [char, ...], aliases: {char: alias}}]`. Gli alias
+  sono metadati additivi usati soltanto dalla ricerca; caratteri, ordine e
+  categorie provengono senza sanitizzazione da `emoji_data.py`.
 - **UI**: pannello alla **destra del composer** (non modale full-screen come
   `EmojiPickerScreen`, `emoji_picker.py:164`): tabs categoria con icona,
   input di ricerca (filtro substring su alias, stessa logica di

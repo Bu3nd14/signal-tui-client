@@ -92,6 +92,34 @@ def test_rest_auth_requires_correct_bearer(web_client):
     assert correct.status_code == 200
 
 
+def test_emoji_requires_bearer_token(web_client):
+    client, _, _ = web_client
+
+    response = client.get("/api/emoji")
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
+def test_emoji_uses_raw_predefined_categories(web_client):
+    from emoji_data import PREDEFINED_CATEGORIES
+
+    client, _, _ = web_client
+    response = client.get("/api/emoji", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "public, max-age=3600"
+    categories = response.json()
+    assert len(categories) == len(PREDEFINED_CATEGORIES)
+    for served, (name, icon, chars) in zip(categories, PREDEFINED_CATEGORIES):
+        assert served["category"] == name
+        assert served["icon"] == icon
+        assert served["emojis"] == chars
+        assert chars[0] in served["aliases"]
+    raw_chars = [char for category in categories for char in category["emojis"]]
+    assert any("\u200d" in char for char in raw_chars)
+
+
 def test_send_requires_bearer_token():
     contact = ChatContact("alice", "Alice", "signal")
     manager = FakeManager([contact])
