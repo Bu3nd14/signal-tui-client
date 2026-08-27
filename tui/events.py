@@ -94,6 +94,15 @@ class EventHandlingMixin:
         changed = ingest_result == "changed"
 
         if (added or changed) and getattr(self, "_web_enabled", False):
+            logger.debug(
+                "events: push type=%s added=%s changed=%s protocol=%s contact=%s id=%s",
+                event.type,
+                added,
+                changed,
+                event.protocol,
+                contact.id,
+                event.payload.get("id"),
+            )
             from web.bridge import push_event
 
             push_event(

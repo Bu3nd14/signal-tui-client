@@ -124,6 +124,14 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                     or _infer_attachment_type(attachment_id, None)
                 ),
             }
+            logger.debug(
+                "web messages proto=%s id=%s attachment_id=%s content_type=%s type=%s",
+                row["protocol"],
+                row["msg_id"] or str(row["id"]),
+                attachment_id,
+                row["content_type"],
+                attachment["type"],
+            )
             if row["msg_type"] == "image" or (
                 attachment["type"] or ""
             ).lower().startswith("image/"):
@@ -441,13 +449,32 @@ def create_api_router() -> Any:
     ) -> Any:
         manager = request.app.state.manager
         root = _allowed_media_root(manager, proto)
+        path = None
         try:
             resolved = manager.get_attachment_path(proto, attachment_id)
         except Exception:  # noqa: BLE001
+            logger.warning(
+                "web media 404 proto=%s attachment_id=%s resolved=%s",
+                proto,
+                attachment_id,
+                path,
+            )
             raise HTTPException(status_code=404) from None
         path = Path(resolved).resolve() if resolved else None
         if path is None or not path.is_file() or not path.is_relative_to(root):
+            logger.warning(
+                "web media 404 proto=%s attachment_id=%s resolved=%s",
+                proto,
+                attachment_id,
+                path,
+            )
             raise HTTPException(status_code=404)
+        logger.debug(
+            "web media ok proto=%s attachment_id=%s path=%s",
+            proto,
+            attachment_id,
+            path,
+        )
         return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
 
     return router

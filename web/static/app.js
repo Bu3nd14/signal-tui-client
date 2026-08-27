@@ -244,6 +244,7 @@ async function fetchImage(path, attachmentId, direction) {
     for (let attempt = 0; attempt < maxAttempts && !controller.signal.aborted; attempt += 1) {
       try {
         response = await apiFetch(path, { signal: controller.signal });
+        console.debug("[web] media fetched", { attachment_id: attachmentId, status: response.status });
         break;
       } catch (error) {
         if (error.name === "AbortError") throw error;
@@ -286,6 +287,7 @@ async function loadImage(container, image, path, attachmentId, direction) {
     image.src = url;
   } catch (error) {
     if (error.name !== "AbortError") {
+      console.debug("[web] media failed", { attachment_id: attachmentId });
       container.replaceChildren();
       const fallback = document.createElement("div");
       fallback.className = "attachment-error";
@@ -310,6 +312,7 @@ function imageAttachment(attachment, protocol, direction) {
   image.alt = attachment.name || "Immagine allegata";
   container.append(loading, image);
   const attachmentId = String(attachment.attachment_id);
+  console.debug("[web] media", { attachment_id: attachmentId, cache: state.mediaCache.has(attachmentId) ? "hit" : "miss" });
   const cachedUrl = state.mediaCache.get(attachmentId);
   if (cachedUrl) {
     state.mediaCache.delete(attachmentId);
@@ -402,11 +405,18 @@ function renderMessages(messages, protocol) {
     active?.id,
   );
   state.optimistic = reconciliation.optimistic;
+  console.debug("[web] optimistic pending", state.optimistic.filter((o) => o.protocol === active.protocol && o.contactId === active.id && o.optimistic_id).map((o) => o.optimistic_id));
+  console.debug("[web] reconciled", state.optimistic.filter((o) => o.protocol === active.protocol && o.contactId === active.id && o.confirmed_message_id).map((o) => o.confirmed_message_id));
   for (const item of state.optimistic) {
     if (item.localPreviewUrl && !item.optimistic_id) {
       const idx = messages.findIndex((m, x) =>
         window.SignalTuiReconcile.messageIdentity(m, x) === String(item.confirmed_message_id));
-      if (idx >= 0) messages[idx] = { ...messages[idx], localPreviewUrl: item.localPreviewUrl };
+      if (idx >= 0) {
+        console.debug("[web] deliver blob", { confirmed_message_id: item.confirmed_message_id, idx });
+        messages[idx] = { ...messages[idx], localPreviewUrl: item.localPreviewUrl };
+      } else {
+        console.debug("[web] deliver blob MISS", { confirmed_message_id: item.confirmed_message_id });
+      }
       delete item.localPreviewUrl;
     }
   }
@@ -722,6 +732,7 @@ async function submitMessage() {
     optimistic.attachment = { type: attachment.file.type, name: attachment.filename, attachment_id: attachment.filename };
     optimistic.localPreviewUrl = attachment.previewUrl;
   }
+  console.debug("[web] optimistic", { protocol: active.protocol, optimistic_id: optimistic.optimistic_id, attachment_id: attachment?.filename, hasPreview: !!optimistic.localPreviewUrl });
   state.optimistic.push(optimistic);
   state.sending = true;
   elements.messageInput.value = "";
@@ -815,6 +826,7 @@ function connectSocket() {
     try {
       const update = JSON.parse(event.data);
       if (update.type !== "message" || !update.payload) return;
+      console.debug("[web] ws push", { protocol: update.payload.protocol, contact_id: update.payload.contact_id, id: update.payload?.id });
       loadContacts({ quiet: true });
       if (state.active?.id === String(update.payload.contact_id) && state.active?.protocol === update.payload.protocol) loadMessages();
     } catch {

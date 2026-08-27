@@ -1177,6 +1177,12 @@ class SignalBackend(ChatBackend):
             )
         ):
             return False
+        logger.info(
+            "signal ingest: upgrade att id=%s %s -> %s",
+            message.get("id") or data.get("id"),
+            current_id,
+            incoming_id,
+        )
         message["attachment_id"] = incoming_id
         _update_message_attachment_id(
             PROTOCOL_SIGNAL,
@@ -1269,6 +1275,15 @@ class SignalBackend(ChatBackend):
                     except Exception:
                         logger.exception("Signal: _update_message_id failed")
                     changed = self._upgrade_outgoing_attachment(contact_id, m, data, ts)
+                    if not changed:
+                        logger.info(
+                            "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
+                            mid,
+                            ts,
+                            text,
+                            m.get("attachment_id"),
+                            data.get("attachment_id"),
+                        )
                     return "changed" if changed else False
 
         existing = self._message_already_cached(
@@ -1281,6 +1296,14 @@ class SignalBackend(ChatBackend):
                 )
                 if changed:
                     return "changed"
+                logger.info(
+                    "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
+                    data.get("id"),
+                    ts,
+                    text,
+                    existing.get("attachment_id"),
+                    data.get("attachment_id"),
+                )
             return False
 
         if persist:
@@ -1308,6 +1331,13 @@ class SignalBackend(ChatBackend):
                 "quote_content_type": data.get("quote_content_type"),
             },
         )
+        if is_mine:
+            logger.info(
+                "signal ingest: NEW ROW is_mine id=%s ts=%s att_incoming=%s",
+                data.get("id"),
+                ts,
+                data.get("attachment_id"),
+            )
         return True
 
     def process_receipt(self, envelope: dict) -> list[dict]:

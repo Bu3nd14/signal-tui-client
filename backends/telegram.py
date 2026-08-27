@@ -1362,6 +1362,13 @@ class TelegramBackend(ChatBackend):
                         incoming_path=incoming_attachment,
                     )
                 ):
+                    logger.info(
+                        "telegram ingest: echo is_mine id=%s att_incoming=%s att_existing=%s upgrade=%s",
+                        mid,
+                        incoming_attachment,
+                        entry.get("attachment_id"),
+                        True,
+                    )
                     entry["attachment_id"] = incoming_attachment
                     _update_message_attachment_id(
                         PROTOCOL_TELEGRAM,
@@ -1371,6 +1378,25 @@ class TelegramBackend(ChatBackend):
                         incoming_attachment,
                     )
                     return "changed"
+                if (
+                    entry is not None
+                    and data.get("is_mine")
+                    and entry.get("is_mine")
+                    and incoming_attachment
+                    and (
+                        str(incoming_attachment).startswith(_TGREF_PREFIX)
+                        or str(entry.get("attachment_id") or "").startswith(
+                            _TGREF_PREFIX
+                        )
+                    )
+                ):
+                    logger.info(
+                        "telegram ingest: echo is_mine id=%s att_incoming=%s att_existing=%s upgrade=%s",
+                        mid,
+                        incoming_attachment,
+                        entry.get("attachment_id"),
+                        False,
+                    )
                 return False
             for m in self.cache.get(contact_id, []):
                 if (
