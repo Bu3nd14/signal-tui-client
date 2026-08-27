@@ -33,9 +33,11 @@ def _make_png(width: int = 16, height: int = 32) -> bytes:
     return buf.getvalue()
 
 
-def _children(widget: QuoteWidget) -> tuple[Static, Static]:
+def _children(widget: QuoteWidget) -> tuple[Static, Static | None]:
     """Return ``(text_static, thumb_static)`` from the widget's compose()."""
-    text_static, thumb_static = list(widget.compose())
+    children = list(widget.compose())
+    text_static = children[0]
+    thumb_static = children[1] if len(children) > 1 else None
     return text_static, thumb_static
 
 
@@ -58,19 +60,30 @@ class TestQuoteWidgetLayout:
         widget = QuoteWidget("Che bella!")
         text_static, thumb_static = _children(widget)
         assert isinstance(text_static, Static)
-        assert isinstance(thumb_static, Static)
         assert text_static.content == "▎ Che bella!"
-        assert thumb_static.content == ""
+        assert thumb_static is None
 
     def test_layout_without_caption(self):
         widget = QuoteWidget("🖼️ Immagine")
         text_static, thumb_static = _children(widget)
         assert isinstance(text_static, Static)
-        assert isinstance(thumb_static, Static)
         assert text_static.content == "▎ 🖼️ Immagine"
+        assert thumb_static is None
+
+    def test_layout_with_attachment_has_thumbnail_slot(self):
+        widget = QuoteWidget("🖼️ Immagine", attachment_id="att-1")
+        text_static, thumb_static = _children(widget)
+        assert isinstance(text_static, Static)
+        assert isinstance(thumb_static, Static)
         assert thumb_static.content == ""
-        # Thumbnail slot is a distinct, always-present (empty) Static.
-        assert thumb_static is not text_static
+
+    def test_stale_inline_base64_is_not_rendered_or_used_as_thumbnail(self):
+        inline_image = "/9j/" + "A" * 256
+        widget = QuoteWidget(inline_image, attachment_id=inline_image)
+        text_static, thumb_static = _children(widget)
+        assert text_static.content == "▎ 🖼️ Immagine"
+        assert thumb_static is None
+        assert widget.attachment_id is None
 
     def test_constructor_stores_metadata(self, tmp_path):
         path = tmp_path / "photo.jpg"

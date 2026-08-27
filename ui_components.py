@@ -32,6 +32,7 @@ from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
     PROTOCOL_WHATSAPP,
+    embedded_media_quote_placeholder,
     is_media_quote_placeholder_composite,
     media_quote_placeholder,
     protocol_emoji,
@@ -821,8 +822,8 @@ class QuoteWidget(Horizontal):
     Replaces the plain ``Static(f"▎ {quote_text}")`` quote bubble.  The textual
     content is byte-identical to today (the ``▎ `` prefix is added internally,
     so ``quote_text`` keeps its wire meaning), therefore non-kitty rendering is
-    unchanged.  A small fixed thumbnail area sits beside the text; it is empty
-    unless a native thumbnail is registered via ``show_native_thumbnail``.
+    unchanged.  A small fixed thumbnail area sits beside the text only when
+    quoted-attachment metadata is available.
     """
 
     def __init__(
@@ -836,6 +837,9 @@ class QuoteWidget(Horizontal):
         protocol: str | None = None,
     ) -> None:
         super().__init__()
+        quote_text = embedded_media_quote_placeholder(quote_text) or quote_text
+        if embedded_media_quote_placeholder(attachment_id):
+            attachment_id = None
         self._quote_text = quote_text
         # Raw text (no "▎ " prefix), used to decide whether the native thumbnail
         # must hide a typed placeholder (a real caption stays visible).
@@ -849,6 +853,7 @@ class QuoteWidget(Horizontal):
         self.attachment_id = attachment_id
         self.attachment_path = attachment_path
         self.content_type = content_type
+        self.has_thumbnail_source = bool(attachment_id or attachment_path)
         # Source protocol, used to resolve the quoted attachment lazily (ingresso).
         self.protocol = protocol
 
@@ -870,7 +875,8 @@ class QuoteWidget(Horizontal):
 
     def compose(self):
         yield self._text_static
-        yield Static("", classes="quote-thumb")
+        if self.has_thumbnail_source:
+            yield Static("", classes="quote-thumb")
 
     def thumbnail_region(self):
         """Return the content region of the internal thumbnail slot, or ``None``.

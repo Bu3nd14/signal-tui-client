@@ -961,6 +961,30 @@ class TestMediaReplySend:
         )
         whatsapp.send_message_sync.assert_not_called()
 
+    def test_whatsapp_media_reply_sends_placeholder_and_native_reply_id(self, tmp_db):
+        app = _signal_app()
+        whatsapp = WhatsAppBackend()
+        whatsapp.send_message_sync = MagicMock(return_value="wa-ts")
+        app.manager.register(whatsapp)
+        contact = ChatContact(
+            id="391234567890@c.us", display_name="Pix", protocol=PROTOCOL_WHATSAPP
+        )
+        app.selected_contact = contact
+        _prepare_send(app)
+        app._reply_to = {
+            "text": "🖼️ Immagine",
+            "timestamp": 1234,
+            "message_id": "wa-image-id",
+            "quote_wire_body": None,
+        }
+
+        _send_text(app, "risposta")
+        _run_workers(app)
+
+        kwargs = whatsapp.send_message_sync.call_args.kwargs
+        assert kwargs["quote_message"] == "🖼️ Immagine"
+        assert kwargs["reply_to_message_id"] == "wa-image-id"
+
     def test_telegram_media_reply_guard_unchanged(self, tmp_db):
         """Guardia Telegram: reply media senza id server valido → bloccata."""
         from backends import TelegramBackend

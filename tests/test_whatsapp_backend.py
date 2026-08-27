@@ -311,6 +311,7 @@ class TestWhatsAppRESTClient:
 
         assert captured["payload"]["reply_to"] == "message-id-1"
         assert "quotedMessage" not in captured["payload"]
+        assert "quote_message" not in captured["payload"]
 
     def test_send_message_error_returns_none(self):
         client = WhatsAppRESTClient("http://api.test")
@@ -3021,16 +3022,35 @@ class TestWhatsAppQuoteMedia:
     @pytest.mark.parametrize(
         "quote",
         [
+            {"caption": "testo reale", "imageMessage": {"id": "x"}},
+            {"filename": "testo reale", "type": "image"},
+            {"media": {"filename": "testo reale"}, "mimetype": "image/png"},
+            {"documentMessage": {"description": "testo reale"}},
             {"body": "testo reale", "imageMessage": {"id": "x"}},
             {"text": "testo reale", "type": "image"},
             {"conversation": "testo reale", "mimetype": "image/png"},
-            {"caption": "testo reale", "documentMessage": {"id": "x"}},
         ],
     )
-    def test_wa_quote_body_wins_over_placeholder(self, quote):
-        """Testo/body/caption reale → priorità sul segnaposto (invariato)."""
+    def test_wa_quote_media_uses_explicit_description(self, quote):
+        """I media usano solo filename/caption/description espliciti di WAHA."""
         ev = _msg(self._raw(quote))
         assert ev.payload["quote_text"] == "testo reale"
+
+    def test_waha_reply_to_image_base64_uses_placeholder(self):
+        jpeg_base64 = "/9j/4AAQSkZJRgABAQ" + "A" * 256
+        raw = self._raw({})
+        raw.pop("quotedMessage")
+        raw["replyTo"] = {
+            "id": "quoted-image-id",
+            "body": jpeg_base64,
+            "hasMedia": True,
+            "media": {"mimetype": "image/jpeg", "data": jpeg_base64},
+        }
+
+        ev = _msg(raw)
+
+        assert ev.payload["quote_text"] == "🖼️ Immagine"
+        assert jpeg_base64 not in ev.payload["quote_text"]
 
     def test_wa_quote_unknown_is_none(self):
         """Quote senza segnali media e senza testo → nessuna bolla."""
@@ -3038,7 +3058,7 @@ class TestWhatsAppQuoteMedia:
         assert ev.payload["quote_text"] is None
 
 
-def test_waha_reply_to_echo_preserves_text_quote_metadata():
+def test_waha_reply_to_echo_normalizes_text_quote_metadata():
     event = _raw(
         {
             "event": "message.any",
@@ -3050,8 +3070,8 @@ def test_waha_reply_to_echo_preserves_text_quote_metadata():
                 "timestamp": 1700000001,
                 "replyTo": {
                     "id": "false_391234567890@c.us_ORIGINAL",
-                    "participant": "391234567890@c.us",
-                    "body": "domanda",
+                    "participant": " 391234567890@c.us\n",
+                    "body": " \ndomanda su\npiù righe\n ",
                     "timestamp": 1700000000,
                     "hasMedia": False,
                 },
@@ -3059,7 +3079,7 @@ def test_waha_reply_to_echo_preserves_text_quote_metadata():
         }
     )
 
-    assert event.payload["quote_text"] == "domanda"
+    assert event.payload["quote_text"] == "domanda su\npiù righe"
     assert event.payload["quote_timestamp"] == 1700000000000
     assert event.payload["quote_author"] == "391234567890@c.us"
     assert event.payload["reply_to_message_id"] == ("false_391234567890@c.us_ORIGINAL")

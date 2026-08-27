@@ -164,6 +164,29 @@ def test_send_routes_reply_metadata_according_to_protocol():
             assert kwargs["reply_to_message_id"] == reply_to_message_id
 
 
+def test_whatsapp_text_reply_strips_boundary_whitespace_from_quote_metadata():
+    contact = ChatContact("alice", "Alice", "whatsapp")
+    manager = FakeManager([contact])
+    payload = {
+        "protocol": "whatsapp",
+        "contact_id": "alice",
+        "text": "Risposta",
+        "quote_timestamp": 123456,
+        "quote_author": "  alice\n",
+        "quote_message": " \nDomanda su\npiù righe\n ",
+        "reply_to_message_id": " message-1\n",
+    }
+
+    with TestClient(make_app(manager)) as client:
+        response = client.post("/api/send", json=payload, headers=AUTH)
+
+    assert response.status_code == 200
+    kwargs = manager.send_calls[0][3]
+    assert kwargs["quote_author"] == "alice"
+    assert kwargs["quote_message"] == "Domanda su\npiù righe"
+    assert kwargs["reply_to_message_id"] == "message-1"
+
+
 def test_send_rejects_empty_text():
     contact = ChatContact("alice", "Alice", "signal")
     manager = FakeManager([contact])

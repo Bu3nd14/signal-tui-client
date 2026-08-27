@@ -14,6 +14,7 @@ import re
 from models import (
     PROTOCOL_WHATSAPP,
     ChatEvent,
+    embedded_media_quote_placeholder,
     media_quote_placeholder,
 )
 
@@ -63,6 +64,13 @@ _WA_QUOTE_MEDIA_TYPES = (
     ("stickerMessage", "sticker"),
 )
 
+_WA_IMAGE_BASE64_PREFIXES = ("/9j/", "iVBORw0KGgo", "R0lGOD", "UklGR")
+
+
+def _looks_like_embedded_media(value: object) -> bool:
+    """Return whether *value* is an inline data URL or media-looking base64."""
+    return embedded_media_quote_placeholder(value) is not None
+
 
 def _wa_quote_media_type(quote: dict) -> str | None:
     """Return the neutral ``msg_type`` of a quoted WhatsApp media, or ``None``.
@@ -100,30 +108,86 @@ def _wa_quote_media_type(quote: dict) -> str | None:
         return "audio"
     if mime:
         return "attachment"
+    for field in ("body", "text", "conversation", "caption"):
+        value = quote.get(field)
+        if isinstance(value, str) and (
+            value.strip().startswith(_WA_IMAGE_BASE64_PREFIXES)
+            or value.strip().lower().startswith("data:image/")
+        ):
+            return "image"
+    if quote.get("hasMedia"):
+        return "attachment"
+    return None
+
+
+def _wa_quote_media_detail(quote: dict) -> str | None:
+    """Return WAHA's human-readable media metadata, never its inline data.
+
+    WAHA overloads ``replyTo.body`` with a base64 thumbnail for some media.
+    Explicit filename/caption/description metadata from the quote, its
+    ``media`` object, or a nested ``*Message`` object takes priority.  A short
+    non-media ``body`` remains a valid WAHA caption/description fallback.
+    """
+    containers: list[dict] = [quote]
+    for container in (quote.get("media"), quote.get("message")):
+        if isinstance(container, dict):
+            containers.append(container)
+    for container in tuple(containers):
+        for media_key, _msg_type in _WA_QUOTE_MEDIA_TYPES:
+            media = container.get(media_key)
+            if isinstance(media, dict):
+                containers.append(media)
+
+    for key in ("filename", "fileName", "caption", "description"):
+        for container in containers:
+            value = container.get(key)
+            if (
+                isinstance(value, str)
+                and value.strip()
+                and not _looks_like_embedded_media(value)
+            ):
+                return value.strip()
+    for container in containers[1:]:
+        value = container.get("name")
+        if (
+            isinstance(value, str)
+            and value.strip()
+            and not _looks_like_embedded_media(value)
+        ):
+            return value.strip()
+    for key in ("body", "text", "conversation"):
+        value = quote.get(key)
+        if (
+            isinstance(value, str)
+            and value.strip()
+            and not _looks_like_embedded_media(value)
+        ):
+            return value.strip()
     return None
 
 
 def _wa_quote_text(quote) -> str | None:
     """Resolve the ``quote_text`` for a WhatsApp quoted message.
 
-    Real text (``text``/``body``/``conversation``/``caption``) wins; otherwise
-    a media quote resolves to a typed placeholder via ``_wa_quote_media_type``.
+    Media quotes use human-readable metadata or a typed placeholder; WAHA's
+    overloaded ``body`` is accepted only when it is not inline media.  Text
+    replies keep using ``text``/``body``/``conversation``/``caption``.
     Returns ``None`` for a non-dict/unknown quote (no bubble, as before).
     """
     if not isinstance(quote, dict):
         return None
+    msg_type = _wa_quote_media_type(quote)
+    if msg_type is not None:
+        return media_quote_placeholder(msg_type, _wa_quote_media_detail(quote))
     text = (
         quote.get("text")
         or quote.get("body")
         or quote.get("conversation")
         or quote.get("caption")
     )
-    if text:
-        return str(text)
-    msg_type = _wa_quote_media_type(quote)
-    if msg_type is None:
-        return None
-    return media_quote_placeholder(msg_type)
+    if text and not _looks_like_embedded_media(text):
+        return str(text).strip() or None
+    return None
 
 
 def _jid_string(value) -> str | None:
@@ -322,6 +386,8 @@ def _event_from_message(
         or str(raw.get("body") or raw.get("text") or "").strip()
         or ""
     )
+    if _looks_like_embedded_media(caption):
+        caption = ""
 
     # ── Attachment extraction ──────────────────────────────────────────
     # WAHA can deliver media in three shapes:
@@ -459,6 +525,8 @@ def _event_from_message(
         quote_author = _jid_string(
             quote.get("participant") or quote.get("author") or quote.get("from")
         )
+        if quote_author is not None:
+            quote_author = quote_author.strip() or None
         quoted_id = quote.get("id") or quote.get("messageId")
         if quoted_id is not None:
             reply_to_message_id = str(quoted_id)

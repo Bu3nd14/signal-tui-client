@@ -243,6 +243,12 @@ def create_api_router() -> Any:
                     raise HTTPException(
                         status_code=400, detail="Invalid request"
                     ) from None
+        if isinstance(quote_author, str):
+            quote_author = quote_author.strip() or None
+        if isinstance(quote_message, str):
+            quote_message = quote_message.strip() or None
+        if isinstance(reply_to_message_id, str):
+            reply_to_message_id = reply_to_message_id.strip() or None
         if isinstance(quote_timestamp, bool) or (
             quote_timestamp is not None and not isinstance(quote_timestamp, int)
         ):

@@ -123,7 +123,7 @@ h2 { font-size: 1.05rem; }
 .contact {
   display: grid;
   width: 100%;
-  grid-template-columns: 42px minmax(0, 1fr) auto;
+  grid-template-columns: 42px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 11px;
   padding: 11px;
@@ -149,10 +149,13 @@ h2 { font-size: 1.05rem; }
 .contact-main .contact-name { flex: 1; }
 .contact-name { overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .protocol-icon { display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+.contact > .protocol-icon { grid-column: 4; align-self: center; }
 .protocol-icon svg { width: 15px; height: 15px; fill: currentColor; }
 .thread-heading p .protocol-icon svg { width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; }
 .thread-proto-name { text-transform: capitalize; }
 .unread-badge {
+  grid-column: 3;
+  align-self: center;
   min-width: 22px;
   padding: 3px 6px;
   border-radius: 999px;

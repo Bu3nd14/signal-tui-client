@@ -305,7 +305,11 @@ class SendMixin:
         # the wire uses that body (caption or "") — never the display placeholder
         # and never omitted.  Text replies never set the key, so their text is
         # used unchanged.  WA/TG ignore ``quote_message`` anyway.
-        if reply_data is not None and "quote_wire_body" in reply_data:
+        if (
+            reply_data is not None
+            and "quote_wire_body" in reply_data
+            and protocol == PROTOCOL_SIGNAL
+        ):
             quote_message = reply_data["quote_wire_body"] or ""
 
         # Signal media reply → build the ``quoteAttachments`` descriptor so the

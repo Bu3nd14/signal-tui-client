@@ -132,7 +132,8 @@ function renderContacts() {
   const contacts = state.protocolFilter === "all"
     ? sortedContacts
     : sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
-  if (state.active && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
+  const activeMatchesFilter = state.protocolFilter === "all" || state.active?.protocol === state.protocolFilter;
+  if (state.active && activeMatchesFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
     contacts.unshift(state.active);
   }
   for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
@@ -161,7 +162,7 @@ function renderContacts() {
     icon.className = "protocol-icon";
     icon.title = contact.protocol;
     icon.innerHTML = protocolIcon(contact.protocol);
-    main.append(name, icon);
+    main.append(name);
     copy.append(main);
     button.append(avatar, copy);
     if (Number(contact.unread) > 0) {
@@ -170,6 +171,7 @@ function renderContacts() {
       unread.textContent = Number(contact.unread) > 99 ? "99+" : String(contact.unread);
       button.append(unread);
     }
+    button.append(icon);
     button.addEventListener("click", () => openThread(contact));
     elements.contacts.append(button);
   }
@@ -804,7 +806,15 @@ if (elements.protocolTabs) {
   elements.protocolTabs.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-protocol]");
     if (!tab) return;
-    state.protocolFilter = tab.dataset.protocol;
+    const protocol = tab.dataset.protocol;
+    state.protocolFilter = protocol;
+    if (protocol !== "all" && state.active?.protocol !== protocol) {
+      const firstContact = state.contacts.find((contact) => contact.protocol === protocol);
+      if (firstContact) {
+        openThread(firstContact);
+        return;
+      }
+    }
     renderContacts();
   });
 }
