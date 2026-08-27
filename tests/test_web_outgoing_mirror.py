@@ -9,6 +9,7 @@ from backends.manager import BackendManager
 from backends.signal import SignalBackend
 from backends.telegram import TelegramBackend
 from backends.whatsapp import WhatsAppBackend
+from models import media_quote_placeholder
 
 
 def _backend(protocol: str):
@@ -79,6 +80,10 @@ def test_facade_send_attachment_enqueues_event_with_media_data(
         monkeypatch.setattr(
             "backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
         )
+    else:
+        monkeypatch.setattr(
+            "backends.telegram._media_dir", lambda: tmp_path / "tg-media"
+        )
 
     backend = _backend(protocol)
     backend.send_attachment_sync = MagicMock(
@@ -105,6 +110,42 @@ def test_facade_send_attachment_enqueues_event_with_media_data(
     assert cached["msg_type"] == "image"
     assert cached["attachment_info"] == "from web"
     assert cached["attachment_id"]
+    if protocol == "telegram":
+        attachment.unlink()
+        resolved = backend.get_attachment_path(cached["attachment_id"])
+        assert resolved is not None and resolved.read_bytes() == b"image-data"
+
+
+@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
+def test_web_image_mirror_uses_placeholder_not_temporary_upload_name(
+    protocol, tmp_path, monkeypatch
+):
+    attachment = tmp_path / "upload-random.png"
+    attachment.write_bytes(b"image-data")
+    if protocol == "signal":
+        monkeypatch.setattr(
+            "backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
+        )
+    elif protocol == "telegram":
+        monkeypatch.setattr(
+            "backends.telegram._media_dir", lambda: tmp_path / "tg-media"
+        )
+
+    backend = _backend(protocol)
+    backend.send_attachment_sync = MagicMock(
+        return_value=backend.send_message_sync.return_value
+    )
+    manager = BackendManager()
+    manager.register(backend)
+
+    manager.send_attachment_sync(
+        protocol, "42", attachment, caption=None, mime_type="image/png"
+    )
+    event = backend.poll_once()[0]
+
+    assert event.payload["text"] == media_quote_placeholder("image")
+    assert event.payload["attachment_info"] == media_quote_placeholder("image")
+    assert "upload-" not in event.payload["text"]
 
 
 @pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])

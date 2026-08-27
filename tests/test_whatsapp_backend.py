@@ -1123,6 +1123,46 @@ class TestWhatsAppBackend:
         with pytest.raises(RuntimeError):
             backend.send_message_sync("wa:1@s.whatsapp.net", "x")
 
+    def test_send_attachment_sync_sends_named_base64_image(self, tmp_path):
+        backend = _make_backend()
+        image = tmp_path / "photo.png"
+        image.write_bytes(b"png-data")
+        with patch.object(
+            backend._rest, "_request", return_value={"id": "image-id"}
+        ) as request:
+            message_id = backend.send_attachment_sync(
+                "1@c.us", image, mime_type="image/png"
+            )
+
+        assert message_id == "image-id"
+        payload = request.call_args.args[2]
+        assert payload["file"] == {
+            "mimetype": "image/png",
+            "filename": "photo.png",
+            "data": "cG5nLWRhdGE=",
+        }
+
+    def test_send_attachment_sync_reports_waha_error(self, tmp_path, caplog):
+        import urllib.error
+
+        backend = _make_backend()
+        image = tmp_path / "photo.png"
+        image.write_bytes(b"png-data")
+        error = urllib.error.HTTPError(
+            "http://api.test/api/sendImage",
+            500,
+            "Internal Server Error",
+            {},
+            MagicMock(read=MagicMock(return_value=b'{"message":"WEBJS error t"}')),
+        )
+        with (
+            patch("urllib.request.urlopen", side_effect=error),
+            pytest.raises(RuntimeError, match="status=500.*WEBJS error t"),
+        ):
+            backend.send_attachment_sync("1@c.us", image, mime_type="image/png")
+
+        assert "path=/api/sendImage status=500 detail=WEBJS error t" in caplog.text
+
     def test_needs_pairing(self):
         backend = _make_backend()
         with patch.object(

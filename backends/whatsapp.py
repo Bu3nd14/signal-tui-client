@@ -26,6 +26,7 @@ from models import (
     PROTOCOL_WHATSAPP,
     ChatContact,
     ChatEvent,
+    media_quote_placeholder,
 )
 
 from .base import ChatBackend
@@ -1249,7 +1250,11 @@ class WhatsAppBackend(ChatBackend):
             reply_to_message_id=reply_to_message_id,
         )
         if result is None:
-            raise RuntimeError("WhatsApp API send failed / unreachable")
+            status = self._rest.last_status
+            detail = self._rest.last_error or "unreachable"
+            raise RuntimeError(
+                f"WhatsApp API sendText failed (status={status}): {detail}"
+            )
         return self._extract_message_id(result)
 
     def send_attachment_sync(
@@ -1274,7 +1279,11 @@ class WhatsAppBackend(ChatBackend):
             mime_type=mime_type,
         )
         if result is None:
-            raise RuntimeError("WhatsApp API send failed / unreachable")
+            status = self._rest.last_status
+            detail = self._rest.last_error or "unreachable"
+            raise RuntimeError(
+                f"WhatsApp API sendImage failed (status={status}): {detail}"
+            )
         return self._extract_message_id(result)
 
     def enqueue_sent_message(
@@ -1291,6 +1300,16 @@ class WhatsAppBackend(ChatBackend):
         mime_type: str | None = None,
     ) -> None:
         is_attachment = attachment_path is not None
+        msg_type = (
+            "image"
+            if is_attachment and (mime_type or "").startswith("image/")
+            else "attachment"
+            if is_attachment
+            else "text"
+        )
+        media_text = text
+        if is_attachment and not media_text:
+            media_text = media_quote_placeholder(msg_type)
         self._enqueue_event(
             ChatEvent(
                 type="message",
@@ -1298,7 +1317,7 @@ class WhatsAppBackend(ChatBackend):
                 contact_id=contact_id,
                 payload={
                     "id": message_id,
-                    "text": text,
+                    "text": media_text,
                     "is_mine": True,
                     "sender": "You",
                     "timestamp": int(time.time() * 1000),
@@ -1306,16 +1325,8 @@ class WhatsAppBackend(ChatBackend):
                     "quote_timestamp": quote_timestamp,
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
-                    "msg_type": (
-                        "image"
-                        if is_attachment and (mime_type or "").startswith("image/")
-                        else "attachment"
-                        if is_attachment
-                        else "text"
-                    ),
-                    "attachment_info": (
-                        text or attachment_path.name if attachment_path else None
-                    ),
+                    "msg_type": msg_type,
+                    "attachment_info": media_text if is_attachment else None,
                     "attachment_id": None,
                     "content_type": mime_type,
                 },

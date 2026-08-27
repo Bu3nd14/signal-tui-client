@@ -354,7 +354,8 @@ function renderMessages(messages, protocol) {
         bubble.append(imageAttachment(item.attachment, protocol));
       }
     }
-    const displayText = item.text || (item.attachment && !isImage ? attachmentName(item) : "");
+    const safeText = window.SignalTuiReconcile.messageDisplayText(item);
+    const displayText = safeText || (item.attachment && !isImage ? attachmentName(item) : "");
     if (displayText) {
       const text = document.createElement("div");
       text.className = "message-text";

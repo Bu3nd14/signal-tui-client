@@ -33,6 +33,22 @@ class WhatsAppRESTClient:
         self.api_key = _wa.get_whatsapp_api_key()
         # HTTP status of the most recent _request (0 if never attempted).
         self.last_status: int = 0
+        self.last_error: str | None = None
+
+    @staticmethod
+    def _response_error(raw: bytes) -> str:
+        text = raw.decode("utf-8", errors="replace").strip()
+        try:
+            body = json.loads(text)
+        except json.JSONDecodeError:
+            return text[:500] or "empty response"
+        if isinstance(body, dict):
+            detail = body.get("message") or body.get("error") or body.get("detail")
+            if isinstance(detail, (str, int, float)):
+                return str(detail)[:500]
+            if isinstance(detail, list):
+                return "; ".join(str(item) for item in detail)[:500]
+        return text[:500] or "empty response"
 
     def _request(
         self, method: str, path: str, payload: dict | None = None, timeout: int = 30
@@ -60,15 +76,31 @@ class WhatsAppRESTClient:
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 self.last_status = getattr(resp, "status", 200)
+                self.last_error = None
                 raw = resp.read().decode("utf-8")
                 if not raw:
                     return {}
                 return json.loads(raw)
         except urllib.error.HTTPError as err:
             self.last_status = err.code
+            self.last_error = self._response_error(err.read())
+            logger.error(
+                "WAHA request failed: method=%s path=%s status=%s detail=%s",
+                method,
+                path,
+                self.last_status,
+                self.last_error,
+            )
             return None
-        except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
             self.last_status = 0
+            self.last_error = str(exc)[:500]
+            logger.error(
+                "WAHA request failed: method=%s path=%s status=0 detail=%s",
+                method,
+                path,
+                self.last_error,
+            )
             return None
 
     def _request_raw(self, method: str, path: str, timeout: int = 30) -> bytes | None:
@@ -362,6 +394,7 @@ class WhatsAppRESTClient:
             "chatId": chat_id,
             "file": {
                 "mimetype": detected_type,
+                "filename": path.name,
                 "data": base64.b64encode(path.read_bytes()).decode("ascii"),
             },
             "caption": caption or "",

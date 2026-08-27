@@ -353,6 +353,23 @@ assert.equal(optimistic.quote_message, "Photo");
 assert.equal(echo.quote_text, "🖼️ Immagine");
 assert.equal(result.visible.length, 0);
 assert.equal(result.optimistic[0].confirmed_message_id, "11");
+    """)
+
+
+def test_optimistic_image_reconciles_media_placeholder_and_legacy_upload_echo():
+    _run_reconciliation_node("""
+const optimistic = { optimistic_id: "image", protocol: "telegram", contactId: "alice", direction: "out", text: "", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", attachment: { type: "image/png", name: "clipboard.png", attachment_id: "clipboard.png" } };
+const echo = { id: "11", direction: "out", text: "🖼️ Immagine", timestamp: 2001, attachment: { type: "image/png", name: "🖼️ Immagine", attachment_id: "tgref:alice:11" } };
+const result = reconcileOptimisticMessages([echo], [optimistic], "telegram", "alice");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "11");
+
+const legacyEcho = { ...echo, id: "12", text: "upload-a1b2c3.png" };
+const legacyOptimistic = { ...optimistic, optimistic_id: "legacy" };
+const legacy = reconcileOptimisticMessages([legacyEcho], [legacyOptimistic], "telegram", "alice");
+assert.equal(legacy.visible.length, 0);
+assert.equal(legacy.optimistic[0].confirmed_message_id, "12");
+assert.equal(require("./web/static/reconcile.js").messageDisplayText(legacyEcho), "");
 """)
 
 

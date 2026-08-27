@@ -31,40 +31,78 @@ function quoteSignatureValue(message) {
   return mediaType ? `media:${mediaType}` : quoteValue(message, "quote_message", "quoteMessage", "quote_text");
 }
 
+const MEDIA_PLACEHOLDERS = new Map([
+  ["🖼️ Immagine", "image"],
+  ["🎬 Video", "video"],
+  ["🎵 Audio", "audio"],
+  ["🎨 Sticker", "sticker"],
+  ["📎 File", "attachment"],
+]);
+
+function isTemporaryUploadName(value) {
+  return typeof value === "string" && /(?:^|[\\/])upload-[^\\/]+$/i.test(value.trim());
+}
+
+function messageMediaType(message) {
+  if (!message.attachment) return null;
+  const explicit = message.msg_type ?? message.msgType;
+  if (explicit && explicit !== "text") return String(explicit).toLowerCase();
+  const mimeType = message.attachment.type;
+  if (typeof mimeType === "string") {
+    const category = mimeType.toLowerCase().split("/", 1)[0];
+    if (["image", "video", "audio"].includes(category)) return category;
+  }
+  return "attachment";
+}
+
+function signatureText(message) {
+  const mediaType = messageMediaType(message);
+  const text = message.text ?? "";
+  if (mediaType && (!text || MEDIA_PLACEHOLDERS.has(text) || isTemporaryUploadName(text))) {
+    return `media:${mediaType}`;
+  }
+  return text;
+}
+
+function messageDisplayText(message) {
+  return message.attachment && isTemporaryUploadName(message.text) ? "" : (message.text || "");
+}
+
 function messageSignature(message) {
   return JSON.stringify([
     message.direction,
-    message.text,
+    signatureText(message),
     quoteValue(message, "quote_timestamp", "quoteTimestamp"),
     quoteValue(message, "quote_author", "quoteAuthor"),
     quoteSignatureValue(message),
     quoteValue(message, "reply_to_message_id", "replyToMessageId"),
-    Boolean(message.attachment),
+    messageMediaType(message),
   ]);
 }
 
 function messageLooseSignature(message) {
   return JSON.stringify([
     message.direction,
-    message.text,
+    signatureText(message),
     quoteSignatureValue(message),
-    Boolean(message.attachment),
+    messageMediaType(message),
   ]);
 }
 
 function messageQuoteAgnosticSignature(message) {
   return JSON.stringify([
     message.direction,
-    message.text,
-    Boolean(message.attachment),
+    signatureText(message),
+    messageMediaType(message),
   ]);
 }
 
 function replyQuoteMessage(message) {
-  if (message.text) return message.text;
+  const displayText = messageDisplayText(message);
+  if (displayText) return displayText;
   if (!message.attachment) return "";
   const attachmentId = message.attachment.attachment_id || "";
-  return message.attachment.name
+  return (isTemporaryUploadName(message.attachment.name) ? "" : message.attachment.name)
     || attachmentId.split("?", 1)[0].split("/").filter(Boolean).pop()
     || "Allegato";
 }
@@ -129,6 +167,7 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
 
 const SignalTuiReconcile = {
   messageIdentity,
+  messageDisplayText,
   reconcileOptimisticMessages,
   replyQuoteMessage,
 };

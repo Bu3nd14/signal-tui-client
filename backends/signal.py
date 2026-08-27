@@ -635,7 +635,7 @@ class SignalBackend(ChatBackend):
             msg_type = (
                 "image" if (mime_type or "").startswith("image/") else "attachment"
             )
-            attachment_info = text or attachment_path.name
+            attachment_info = text or media_quote_placeholder(msg_type)
             SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
             attachment_id = f"sent-{uuid.uuid4().hex}{attachment_path.suffix.lower()}"
             shutil.copy2(attachment_path, SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id)

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import shutil
 import tempfile
 import threading
 import time
@@ -817,6 +818,24 @@ class TelegramBackend(ChatBackend):
         mime_type: str | None = None,
     ) -> None:
         is_attachment = attachment_path is not None
+        msg_type = (
+            "image"
+            if is_attachment and (mime_type or "").startswith("image/")
+            else "attachment"
+            if is_attachment
+            else "text"
+        )
+        media_text = text
+        if is_attachment and not media_text:
+            media_text = media_quote_placeholder(msg_type)
+        attachment_id = None
+        if attachment_path is not None:
+            media_dir = _media_dir()
+            media_dir.mkdir(parents=True, exist_ok=True)
+            suffix = attachment_path.suffix.lower()
+            persisted = media_dir / f"{int(contact_id)}-{int(message_id)}-sent{suffix}"
+            shutil.copy2(attachment_path, persisted)
+            attachment_id = str(persisted)
         self._events.put(
             ChatEvent(
                 type="message",
@@ -824,7 +843,7 @@ class TelegramBackend(ChatBackend):
                 contact_id=contact_id,
                 payload={
                     "id": str(message_id),
-                    "text": text,
+                    "text": media_text,
                     "is_mine": True,
                     "sender": "You",
                     "timestamp": int(time.time() * 1000),
@@ -832,21 +851,9 @@ class TelegramBackend(ChatBackend):
                     "quote_timestamp": quote_timestamp,
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
-                    "msg_type": (
-                        "image"
-                        if is_attachment and (mime_type or "").startswith("image/")
-                        else "attachment"
-                        if is_attachment
-                        else "text"
-                    ),
-                    "attachment_info": (
-                        text or attachment_path.name if attachment_path else None
-                    ),
-                    "attachment_id": (
-                        self._media_ref(contact_id, int(message_id))
-                        if is_attachment
-                        else None
-                    ),
+                    "msg_type": msg_type,
+                    "attachment_info": media_text if is_attachment else None,
+                    "attachment_id": attachment_id,
                     "content_type": mime_type,
                 },
             )
