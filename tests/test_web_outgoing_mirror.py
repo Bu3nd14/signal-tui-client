@@ -191,6 +191,27 @@ def test_signal_attachment_rpc_and_echo_reuse_persistent_file(tmp_path, monkeypa
     assert list(media_dir.iterdir()) == [persistent]
 
 
+def test_signal_attachment_forwards_quote_attachments(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
+    )
+    upload = tmp_path / "upload.png"
+    upload.write_bytes(b"image-data")
+    backend = SignalBackend()
+    backend._send_message_sync = MagicMock(return_value="1787250931234")
+
+    backend.send_attachment_sync(
+        "+391234567890",
+        upload,
+        mime_type="image/png",
+        quote_attachments=["image/jpeg:quoted.jpg:/tmp/quoted.jpg"],
+    )
+
+    assert backend._send_message_sync.call_args.kwargs["quote_attachments"] == [
+        "image/jpeg:quoted.jpg:/tmp/quoted.jpg"
+    ]
+
+
 @pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
 def test_facade_send_echo_upgrades_optimistic_without_duplicate(protocol):
     backend = _backend(protocol)

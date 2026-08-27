@@ -288,7 +288,10 @@ function startReply(item) {
     author: replyAuthor(item),
     quoteAuthor: state.active.id,
     quoteMessage: window.SignalTuiReconcile.replyQuoteMessage(item),
+    isMedia: Boolean(item.attachment),
     isImage: Boolean(item.attachment?.type?.toLowerCase().startsWith("image/")),
+    contentType: item.attachment?.type,
+    attachmentId: item.attachment?.attachment_id,
   };
   updateReplyBanner();
   elements.messageInput.focus();
@@ -647,8 +650,13 @@ async function submitMessage() {
     const quotePayload = reply ? {
       quote_timestamp: reply.timestamp,
       quote_author: reply.quoteAuthor,
-      quote_message: reply.quoteMessage,
-      ...(active.protocol === "signal" ? {} : { reply_to_message_id: reply.id }),
+      quote_message: active.protocol === "signal" && reply.isMedia ? "" : reply.quoteMessage,
+      ...(active.protocol === "signal"
+        ? {
+          ...(reply.contentType ? { quote_content_type: reply.contentType } : {}),
+          ...(reply.attachmentId ? { quote_attachment_id: reply.attachmentId } : {}),
+        }
+        : { reply_to_message_id: reply.id }),
     } : {};
     if (attachment) {
       const body = new FormData();

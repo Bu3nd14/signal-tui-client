@@ -143,6 +143,7 @@ class BackendManager:
         quote_author: str | None = None,
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
     ) -> str:
         """Send through *protocol* from a worker thread."""
         backend = self._get_or_raise(protocol)
@@ -153,6 +154,8 @@ class BackendManager:
         }
         if reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
+        if quote_attachments is not None:
+            kwargs["quote_attachments"] = quote_attachments
         message_id = backend.send_message_sync(contact_id, text, **kwargs)
         self._enqueue_sent_message(
             backend,
@@ -178,6 +181,7 @@ class BackendManager:
         quote_author: str | None = None,
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
     ) -> str:
         """Send an image through *protocol* from a worker thread."""
         backend = self._get_or_raise(protocol)
@@ -190,6 +194,8 @@ class BackendManager:
         }
         if reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
+        if quote_attachments is not None:
+            kwargs["quote_attachments"] = quote_attachments
         message_id = backend.send_attachment_sync(contact_id, file_path, **kwargs)
         self._enqueue_sent_message(
             backend,

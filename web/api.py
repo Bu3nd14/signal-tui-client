@@ -234,10 +234,17 @@ def create_api_router() -> Any:
         quote_author = payload.get("quote_author")
         quote_message = payload.get("quote_message")
         reply_to_message_id = payload.get("reply_to_message_id")
+        quote_content_type = (
+            payload.get("quote_content_type") if protocol == "signal" else None
+        )
+        quote_attachment_id = (
+            payload.get("quote_attachment_id") if protocol == "signal" else None
+        )
         if is_multipart:
             quote_author = quote_author or None
-            quote_message = quote_message or None
             reply_to_message_id = reply_to_message_id or None
+            quote_content_type = quote_content_type or None
+            quote_attachment_id = quote_attachment_id or None
             if quote_timestamp == "":
                 quote_timestamp = None
             elif quote_timestamp is not None:
@@ -249,8 +256,17 @@ def create_api_router() -> Any:
                     ) from None
         if isinstance(quote_author, str):
             quote_author = quote_author.strip() or None
+        if isinstance(quote_content_type, str):
+            quote_content_type = quote_content_type.strip() or None
+        if isinstance(quote_attachment_id, str):
+            quote_attachment_id = quote_attachment_id.strip() or None
         if isinstance(quote_message, str):
-            quote_message = quote_message.strip() or None
+            stripped_quote_message = quote_message.strip()
+            quote_message = (
+                stripped_quote_message
+                if stripped_quote_message or quote_content_type
+                else None
+            )
         if isinstance(reply_to_message_id, str):
             reply_to_message_id = reply_to_message_id.strip() or None
         if isinstance(quote_timestamp, bool) or (
@@ -259,7 +275,13 @@ def create_api_router() -> Any:
             raise HTTPException(status_code=400, detail="Invalid request")
         if any(
             value is not None and not isinstance(value, str)
-            for value in (quote_author, quote_message, reply_to_message_id)
+            for value in (
+                quote_author,
+                quote_message,
+                reply_to_message_id,
+                quote_content_type,
+                quote_attachment_id,
+            )
         ):
             raise HTTPException(status_code=400, detail="Invalid request")
         is_reply = any(
@@ -269,6 +291,8 @@ def create_api_router() -> Any:
                 quote_author,
                 quote_message,
                 reply_to_message_id,
+                quote_content_type,
+                quote_attachment_id,
             )
         )
         if protocol == "telegram" and is_reply:
@@ -291,11 +315,33 @@ def create_api_router() -> Any:
         if not known_contact:
             raise HTTPException(status_code=404, detail="Not Found")
 
+        quote_attachments = None
+        if protocol == "signal" and quote_attachment_id is not None:
+            contact_attachment_ids = {
+                message["attachment"]["attachment_id"]
+                for message in _messages(protocol, contact_id)
+                if message["attachment"] is not None
+            }
+            if quote_attachment_id not in contact_attachment_ids:
+                raise HTTPException(status_code=400, detail="Invalid request")
+        if protocol == "signal" and quote_content_type is not None:
+            if quote_attachment_id is None:
+                raise HTTPException(status_code=400, detail="Invalid request")
+            resolved = manager.get_attachment_path(protocol, quote_attachment_id)
+            path = Path(resolved) if resolved else None
+            quote_attachments = (
+                [f"{quote_content_type}:{path.name}:{path}"]
+                if path
+                else [quote_content_type]
+            )
+
         kwargs = {
             "quote_timestamp": quote_timestamp,
             "quote_author": quote_author,
             "quote_message": quote_message,
         }
+        if protocol == "signal" and quote_attachments is not None:
+            kwargs["quote_attachments"] = quote_attachments
         if protocol in {"whatsapp", "telegram"} and reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
         upload = None

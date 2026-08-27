@@ -31,6 +31,13 @@ function quoteSignatureValue(message) {
   return mediaType ? `media:${mediaType}` : quoteValue(message, "quote_message", "quoteMessage", "quote_text");
 }
 
+function quoteIdentityValue(message) {
+  const timestamp = quoteValue(message, "quote_timestamp", "quoteTimestamp");
+  if (timestamp != null) return `ts:${timestamp}`;
+  if (quoteMediaType(message)) return "media:*";
+  return quoteValue(message, "quote_message", "quoteMessage", "quote_text");
+}
+
 const MEDIA_PLACEHOLDERS = new Map([
   ["🖼️ Immagine", "image"],
   ["🎬 Video", "video"],
@@ -74,7 +81,7 @@ function messageSignature(message) {
     signatureText(message),
     quoteValue(message, "quote_timestamp", "quoteTimestamp"),
     quoteValue(message, "quote_author", "quoteAuthor"),
-    quoteSignatureValue(message),
+    quoteIdentityValue(message),
     quoteValue(message, "reply_to_message_id", "replyToMessageId"),
     messageMediaType(message),
   ]);
@@ -84,7 +91,7 @@ function messageLooseSignature(message) {
   return JSON.stringify([
     message.direction,
     signatureText(message),
-    quoteSignatureValue(message),
+    quoteIdentityValue(message),
     messageMediaType(message),
   ]);
 }

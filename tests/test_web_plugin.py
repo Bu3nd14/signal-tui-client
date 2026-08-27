@@ -150,6 +150,11 @@ def test_send_routes_reply_metadata_according_to_protocol():
             "quote_message": "Prima",
             "reply_to_message_id": reply_to_message_id,
         }
+        if protocol != "signal":
+            payload.update(
+                quote_content_type={"ignored": True},
+                quote_attachment_id=["ignored"],
+            )
         with TestClient(make_app(manager)) as client:
             response = client.post("/api/send", json=payload, headers=AUTH)
 
@@ -294,7 +299,7 @@ assert.equal(result.optimistic[0].optimistic_id, "failed");
 def test_optimistic_reply_reconciles_echo_with_partial_quote_metadata():
     _run_reconciliation_node("""
 const optimistic = { optimistic_id: "reply", protocol: "whatsapp", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: 1000, quote_author: "alice", quote_message: "photo.png" };
-const echo = { id: "wa-1", direction: "out", text: "answer", timestamp: 2001, quote_text: "photo.png" };
+const echo = { id: "wa-1", direction: "out", text: "answer", timestamp: 2001, quote_timestamp: 1000, quote_text: "photo.png" };
 const result = reconcileOptimisticMessages([echo], [optimistic], "whatsapp", "alice");
 assert.equal(result.visible.length, 0);
 assert.equal(result.optimistic[0].confirmed_message_id, "wa-1");
@@ -315,10 +320,24 @@ assert.equal(result.optimistic[0].confirmed_message_id, "wa-echo");
 def test_optimistic_image_reply_reconciles_waha_media_placeholder_echo():
     _run_reconciliation_node("""
 const optimistic = { optimistic_id: "image-reply", protocol: "whatsapp", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: 1000, quote_author: "alice", quote_message: "photo.jpg", quote_media_type: "image" };
-const echo = { id: "wa-image-1", direction: "out", text: "answer", timestamp: 2001, quote_text: "🖼️ Immagine" };
+const echo = { id: "wa-image-1", direction: "out", text: "answer", timestamp: 2001, quote_timestamp: 1000, quote_text: "🖼️ Immagine" };
 const result = reconcileOptimisticMessages([echo], [optimistic], "whatsapp", "alice");
 assert.equal(result.visible.length, 0);
 assert.equal(result.optimistic[0].confirmed_message_id, "wa-image-1");
+""")
+
+
+@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
+@pytest.mark.parametrize(
+    "echo_quote", ["Photo", "🖼️ Immagine", "photo.jpg — 🖼️ Immagine"]
+)
+def test_optimistic_media_reply_reconciles_quote_forms(protocol, echo_quote):
+    _run_reconciliation_node(f"""
+const optimistic = {{ optimistic_id: "media-reply", protocol: {json.dumps(protocol)}, contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: 1000, quote_author: "alice", quote_message: "photo.jpg", quote_media_type: "image" }};
+const echo = {{ id: "echo-1", direction: "out", text: "answer", timestamp: 2001, quote_timestamp: 1000, quote_text: {json.dumps(echo_quote)} }};
+const result = reconcileOptimisticMessages([echo], [optimistic], {json.dumps(protocol)}, "alice");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "echo-1");
 """)
 
 
@@ -329,7 +348,7 @@ def test_optimistic_signal_image_reply_reconciles_forwarded_quote_echo():
     _run_reconciliation_node(f"""
 const target = {{ id: "1000", direction: "in", text: "", timestamp: 1000, attachment: {{ type: "image/jpeg", name: "Image: photo.jpg", attachment_id: "signal-att" }} }};
 const optimistic = {{ optimistic_id: "signal-image-reply", protocol: "signal", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: target.timestamp, quote_author: "alice", quote_message: replyQuoteMessage(target) }};
-const echo = {{ id: "2001", direction: "out", text: "answer", timestamp: 2001, quote_text: {json.dumps(echo_quote)} }};
+const echo = {{ id: "2001", direction: "out", text: "answer", timestamp: 2001, quote_timestamp: target.timestamp, quote_text: {json.dumps(echo_quote)} }};
 const result = reconcileOptimisticMessages([echo], [optimistic], "signal", "alice");
 assert.equal(optimistic.quote_message, "Image: photo.jpg");
 assert.equal(echo.quote_text, optimistic.quote_message);
@@ -347,7 +366,7 @@ def test_optimistic_telegram_image_reply_reconciles_media_echo():
     _run_reconciliation_node(f"""
 const target = {{ id: "10", direction: "in", text: "", timestamp: 1000, attachment: {{ type: "image/jpeg", name: "Photo", attachment_id: "tgref:alice:10" }} }};
 const optimistic = {{ optimistic_id: "telegram-image-reply", protocol: "telegram", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: target.timestamp, quote_author: "alice", quote_message: replyQuoteMessage(target), reply_to_message_id: target.id, quote_media_type: "image" }};
-const echo = {{ id: "11", direction: "out", text: "answer", timestamp: 2001, quote_text: {json.dumps(echo_quote)} }};
+const echo = {{ id: "11", direction: "out", text: "answer", timestamp: 2001, quote_timestamp: target.timestamp, quote_text: {json.dumps(echo_quote)} }};
 const result = reconcileOptimisticMessages([echo], [optimistic], "telegram", "alice");
 assert.equal(optimistic.quote_message, "Photo");
 assert.equal(echo.quote_text, "🖼️ Immagine");
@@ -389,6 +408,7 @@ def test_backend_manager_send_message_sync_routes_to_backend():
         quote_author="alice",
         quote_message="Prima",
         reply_to_message_id="reply-id",
+        quote_attachments=["image/png"],
     )
 
     assert result == "message-id"
@@ -399,6 +419,7 @@ def test_backend_manager_send_message_sync_routes_to_backend():
         quote_author="alice",
         quote_message="Prima",
         reply_to_message_id="reply-id",
+        quote_attachments=["image/png"],
     )
 
 
@@ -421,6 +442,7 @@ def test_backend_manager_send_attachment_sync_routes_to_backend(tmp_path):
         quote_author="alice",
         quote_message="Prima",
         reply_to_message_id="reply-id",
+        quote_attachments=["image/png"],
     )
 
     assert result == "message-id"
@@ -433,6 +455,7 @@ def test_backend_manager_send_attachment_sync_routes_to_backend(tmp_path):
         quote_author="alice",
         quote_message="Prima",
         reply_to_message_id="reply-id",
+        quote_attachments=["image/png"],
     )
 
 
@@ -460,6 +483,78 @@ def test_send_multipart_image_routes_and_cleans_temporary_file(web_client):
     assert kwargs["caption"] == "caption"
     assert kwargs["mime_type"] == "image/png"
     assert not Path(path).exists()
+
+
+@pytest.mark.parametrize("multipart", [False, True])
+def test_send_signal_media_reply_builds_quote_attachment_descriptor(
+    web_client, multipart
+):
+    from backend.db import _add_message_to_cache
+
+    client, manager, db_file = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    quoted = db_file.parent / "quoted.jpg"
+    quoted.write_bytes(b"quoted-image")
+    manager.paths[("signal", "quoted-id")] = quoted
+    _add_message_to_cache(
+        "alice",
+        "",
+        False,
+        "alice",
+        123456,
+        msg_type="image",
+        attachment_info="quoted.jpg",
+        attachment_id="quoted-id",
+        content_type="image/jpeg",
+    )
+    payload = {
+        "protocol": "signal",
+        "contact_id": "alice",
+        "text": "Risposta",
+        "quote_timestamp": "123456" if multipart else 123456,
+        "quote_author": "alice",
+        "quote_message": "",
+        "quote_content_type": "image/jpeg",
+        "quote_attachment_id": "quoted-id",
+    }
+
+    if multipart:
+        response = client.post(
+            "/api/send",
+            data=payload,
+            files={"file": ("reply.png", _PNG_1X1, "image/png")},
+            headers=AUTH,
+        )
+        kwargs = manager.attachment_calls[0][3]
+    else:
+        response = client.post("/api/send", json=payload, headers=AUTH)
+        kwargs = manager.send_calls[0][3]
+
+    assert response.status_code == 200
+    assert kwargs["quote_message"] == ""
+    assert kwargs["quote_attachments"] == [f"image/jpeg:{quoted.name}:{quoted}"]
+
+
+def test_send_signal_media_reply_rejects_unknown_attachment(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        json={
+            "protocol": "signal",
+            "contact_id": "alice",
+            "text": "Risposta",
+            "quote_timestamp": 123456,
+            "quote_message": "",
+            "quote_content_type": "image/jpeg",
+            "quote_attachment_id": "unknown",
+        },
+        headers=AUTH,
+    )
+
+    assert response.status_code == 400
+    assert manager.send_calls == []
 
 
 def test_send_multipart_whatsapp_lid_uses_resolved_chat_id(tmp_path):

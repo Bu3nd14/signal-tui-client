@@ -601,6 +601,7 @@ class SignalBackend(ChatBackend):
         quote_author: str | None = None,
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
     ) -> str:
         SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
         attachment_id = f"sent-{uuid.uuid4().hex}{file_path.suffix.lower()}"
@@ -615,6 +616,7 @@ class SignalBackend(ChatBackend):
                 quote_author=quote_author,
                 quote_message=quote_message,
                 reply_to_message_id=reply_to_message_id,
+                quote_attachments=quote_attachments,
                 attachments=[str(persistent_path)],
             )
         except Exception:
