@@ -15,6 +15,7 @@ from backends.config import thumbnail_max_cols, thumbnail_max_lines
 from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
+    is_media_quote_placeholder,
 )
 from tui.images.detect import ImageSupport
 from ui_components import (
@@ -44,7 +45,9 @@ def _media_display_text(text: str, attachment_info: str | None, msg_type: str) -
     return text
 
 
-_TECHNICAL_LABELS = frozenset({"🖼️ Image", "🖼️ Photo", "Media", "Image", "Photo"})
+_TECHNICAL_LABELS = frozenset(
+    {"🖼️ Image", "🖼️ Photo", "🖼️ Immagine", "Media", "Image", "Photo", "Immagine"}
+)
 _TECHNICAL_PREFIXES = ("Image: ", "Video: ", "Audio: ")
 _MIME_RE = re.compile(r"^[\w.-]+/[\w.+-]+$")
 _MEDIA_KEY_RE = re.compile(r"^(image|video|audio|document|sticker)Message( \(.+\))?$")
@@ -107,6 +110,10 @@ def _image_caption(
     """
     t = (text or "").strip()
     info = (attachment_info or "").strip()
+    if is_media_quote_placeholder(t) or t == "Immagine":
+        t = ""
+    if is_media_quote_placeholder(info) or info == "Immagine":
+        info = ""
     if protocol == PROTOCOL_TELEGRAM:
         return t or None
     if (

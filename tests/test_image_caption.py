@@ -120,6 +120,9 @@ class TestImageCaptionResolver:
             _image_caption("🖼️ Image: att-1", "🖼️ Image", "att-1", PROTOCOL_SIGNAL)
             is None
         )
+        for protocol in (PROTOCOL_SIGNAL, PROTOCOL_TELEGRAM, PROTOCOL_WHATSAPP):
+            assert _image_caption("🖼️ Immagine", "🖼️ Immagine", "att-1", protocol) is None
+            assert _image_caption("Immagine", "Immagine", "att-1", protocol) is None
 
     def test_signal_per_attachment_caption(self):
         assert _image_caption("nice: att-1", "nice", "att-1", PROTOCOL_SIGNAL) == "nice"
@@ -201,21 +204,28 @@ class TestCaptionBubbleLive:
         assert children[1].has_class("msg-right")
 
     def test_live_image_without_caption_shows_no_bubble(self):
-        app = _make_app()
-        app._chat_log = _FakeChatLog()
-
-        app._add_message(
-            text="Media: https://x",
-            msg_type="image",
-            attachment_info="image/jpeg",
-            attachment_id="u",
-            is_mine=False,
-            protocol=PROTOCOL_WHATSAPP,
+        cases = (
+            (PROTOCOL_WHATSAPP, "Media: https://x", "image/jpeg"),
+            (PROTOCOL_WHATSAPP, "🖼️ Immagine", "🖼️ Immagine"),
+            (PROTOCOL_SIGNAL, "🖼️ Immagine", "🖼️ Immagine"),
+            (PROTOCOL_TELEGRAM, "🖼️ Immagine", "🖼️ Immagine"),
         )
+        for protocol, text, attachment_info in cases:
+            app = _make_app()
+            app._chat_log = _FakeChatLog()
 
-        children = app._chat_log.children
-        assert len(children) == 1
-        assert isinstance(children[0], ImageWidget)
+            app._add_message(
+                text=text,
+                msg_type="image",
+                attachment_info=attachment_info,
+                attachment_id="u",
+                is_mine=False,
+                protocol=protocol,
+            )
+
+            children = app._chat_log.children
+            assert len(children) == 1
+            assert isinstance(children[0], ImageWidget)
 
     def test_live_telegram_photo_caption_in_text(self):
         app = _make_app()
@@ -259,14 +269,21 @@ class TestCaptionBubbleCache:
 
     def test_cached_image_without_caption_single_widget(self):
         app = SignalTUI()
-        widgets = app._build_message_widgets(
-            PROTOCOL_WHATSAPP,
-            False,
-            _image_message(text="Media: https://x", attachment_info="photo.jpg"),
+        cases = (
+            (PROTOCOL_WHATSAPP, "Media: https://x", "photo.jpg"),
+            (PROTOCOL_WHATSAPP, "🖼️ Immagine", "🖼️ Immagine"),
+            (PROTOCOL_SIGNAL, "🖼️ Immagine", "🖼️ Immagine"),
+            (PROTOCOL_TELEGRAM, "🖼️ Immagine", "🖼️ Immagine"),
         )
+        for protocol, text, attachment_info in cases:
+            widgets = app._build_message_widgets(
+                protocol,
+                False,
+                _image_message(text=text, attachment_info=attachment_info),
+            )
 
-        assert len(widgets) == 1
-        assert isinstance(widgets[0], ImageWidget)
+            assert len(widgets) == 1
+            assert isinstance(widgets[0], ImageWidget)
 
     @pytest.mark.parametrize("info", ["Photo", "🖼️ Photo"])
     def test_cached_telegram_photo_no_double_emoji(self, info):

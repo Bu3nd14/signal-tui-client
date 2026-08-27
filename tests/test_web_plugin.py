@@ -852,10 +852,16 @@ def test_messages_exposes_persisted_quote_fields(web_client):
     }
 
 
-def test_reply_ui_has_static_cancel_and_image_filename_fallback():
+def test_web_ui_static_contracts():
     source = Path("web/static/app.js").read_text()
     assert 'elements.cancelReply.addEventListener("click", cancelReply)' in source
     assert "state.replyTo = null" in source
+
+    css = Path("web/static/style.css").read_text()
+    assert ".contact-copy { min-width: 0; overflow: hidden; }" in css
+    assert ".contact-main .contact-name { min-width: 0; flex: 1 1 auto; }" in css
+    assert "grid-template-columns: 42px minmax(0, 1fr) auto auto;" in css
+    assert "white-space: nowrap;" in css
 
     _run_reconciliation_node("""
 const image = { text: "", attachment: { name: "photo.png", type: "image/png" } };
