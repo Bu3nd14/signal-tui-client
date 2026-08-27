@@ -39,6 +39,44 @@ def test_facade_send_enqueues_outgoing_event_that_is_ingested(protocol):
 
 
 @pytest.mark.parametrize("protocol", ["signal", "telegram"])
+def test_facade_send_attachment_enqueues_event_with_media_data(
+    protocol, tmp_path, monkeypatch
+):
+    attachment = tmp_path / "photo.png"
+    attachment.write_bytes(b"image-data")
+    if protocol == "signal":
+        monkeypatch.setattr(
+            "backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
+        )
+
+    backend = _backend(protocol)
+    backend.send_attachment_sync = MagicMock(
+        return_value=backend.send_message_sync.return_value
+    )
+    manager = BackendManager()
+    manager.register(backend)
+
+    result = manager.send_attachment_sync(
+        protocol,
+        "42",
+        attachment,
+        caption="from web",
+        mime_type="image/png",
+    )
+    event = backend.poll_once()[0]
+    added = backend.ingest_message(
+        event.contact_id, event.payload, event.payload["timestamp"], persist=False
+    )
+
+    cached = backend.cache["42"][0]
+    assert result == backend.send_attachment_sync.return_value
+    assert added is True
+    assert cached["msg_type"] == "image"
+    assert cached["attachment_info"] == "from web"
+    assert cached["attachment_id"]
+
+
+@pytest.mark.parametrize("protocol", ["signal", "telegram"])
 def test_facade_send_echo_upgrades_optimistic_without_duplicate(protocol):
     backend = _backend(protocol)
     manager = BackendManager()
