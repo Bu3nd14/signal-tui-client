@@ -24,6 +24,7 @@ import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 from PIL import Image
 
@@ -34,7 +35,7 @@ from models import (
     media_quote_placeholder,
 )
 
-from .base import ChatBackend, should_upgrade_outgoing_attachment
+from .base import ChatBackend
 from .config import get_address_book_ttl_s
 
 logger = logging.getLogger(__name__)
@@ -1146,24 +1147,8 @@ class SignalBackend(ChatBackend):
             if msg.get("text") != text:
                 continue
             cached_attachment_id = msg.get("attachment_id")
-            if attachment_id and cached_attachment_id != attachment_id:
-                cached_path = (
-                    self.get_attachment_path(cached_attachment_id)
-                    if cached_attachment_id
-                    else None
-                )
-                incoming_path = self.get_attachment_path(attachment_id)
-                incoming_is_sent = Path(attachment_id).name.startswith("sent-")
-                can_upgrade = incoming_is_sent and should_upgrade_outgoing_attachment(
-                    is_mine=is_mine,
-                    existing_path=cached_path,
-                    incoming_path=incoming_path,
-                )
-                keep_local = (
-                    is_mine and cached_path is not None and incoming_path is None
-                )
-                if not can_upgrade and not keep_local:
-                    continue
+            if not is_mine and attachment_id and cached_attachment_id != attachment_id:
+                continue
             if not is_mine:
                 if abs(msg.get("timestamp", 0) - ts) <= _INCOMING_DEDUP_WINDOW_MS:
                     return msg
@@ -1173,21 +1158,25 @@ class SignalBackend(ChatBackend):
 
     def _upgrade_outgoing_attachment(
         self, contact_id: str, message: dict, data: dict, ts: int
-    ) -> None:
+    ) -> bool:
         current_id = message.get("attachment_id")
         incoming_id = data.get("attachment_id")
         current_path = self.get_attachment_path(current_id) if current_id else None
         incoming_path = self.get_attachment_path(incoming_id) if incoming_id else None
+        current_is_sent = bool(current_id and Path(current_id).name.startswith("sent-"))
         if (
             not incoming_id
             or not Path(incoming_id).name.startswith("sent-")
-            or not should_upgrade_outgoing_attachment(
-                is_mine=bool(data.get("is_mine")),
-                existing_path=current_path,
-                incoming_path=incoming_path,
+            or not data.get("is_mine")
+            or incoming_path is None
+            or not Path(incoming_path).is_file()
+            or (
+                current_is_sent
+                and current_path is not None
+                and Path(current_path).is_file()
             )
         ):
-            return
+            return False
         message["attachment_id"] = incoming_id
         _update_message_attachment_id(
             PROTOCOL_SIGNAL,
@@ -1196,6 +1185,7 @@ class SignalBackend(ChatBackend):
             int(message.get("timestamp", ts)),
             incoming_id,
         )
+        return True
 
     def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
         """Persist a message to the SQLite cache (Signal protocol).
@@ -1227,7 +1217,7 @@ class SignalBackend(ChatBackend):
 
     def ingest_message(
         self, contact_id: str, data: dict, ts: int, persist: bool = True
-    ) -> bool:
+    ) -> bool | Literal["changed"]:
         """Save an incoming/outgoing message to cache and DB.
 
         Idempotent per message identity: if the same message was already
@@ -1238,13 +1228,18 @@ class SignalBackend(ChatBackend):
         keeps working on the UI thread) but the SQLite write is skipped;
         the caller is responsible for calling ``_persist_message`` later.
 
-        Returns ``True`` if the message was newly added, ``False`` if it was a
-        duplicate (already present).
+        Returns ``True`` when added, ``"changed"`` for an attachment upgrade,
+        and ``False`` for an unchanged duplicate.
         """
         if data.get("msg_type") == "image":
             data = {**data, "text": ""}
         text = data["text"]
         is_mine = data["is_mine"]
+        attachment_id = data.get("attachment_id")
+        if is_mine and attachment_id:
+            attachment_path = self.get_attachment_path(attachment_id)
+            if attachment_path is None or not Path(attachment_path).is_file():
+                data = {**data, "attachment_id": None}
 
         # Upgrade branch: an outgoing echo carrying the real server id attaches
         # it to the optimistic twin (matched by text + dedup window) WITHOUT
@@ -1254,12 +1249,13 @@ class SignalBackend(ChatBackend):
         mid = data.get("id")
         if mid and is_mine:
             for m in self.cache.get(contact_id, []):
-                if (
-                    m.get("is_mine")
-                    and not m.get("id")
+                id_matches_timestamp = str(m.get("id")) == str(ts)
+                optimistic_match = (
+                    not m.get("id")
                     and m.get("text") == text
                     and abs(int(m.get("timestamp", 0)) - ts) <= _SEND_DEDUP_WINDOW_MS
-                ):
+                )
+                if m.get("is_mine") and (id_matches_timestamp or optimistic_match):
                     m["id"] = str(mid)  # ts entry INVARIATO (ottimistico)
                     try:
                         _update_message_id(
@@ -1272,15 +1268,19 @@ class SignalBackend(ChatBackend):
                         )
                     except Exception:
                         logger.exception("Signal: _update_message_id failed")
-                    self._upgrade_outgoing_attachment(contact_id, m, data, ts)
-                    return False
+                    changed = self._upgrade_outgoing_attachment(contact_id, m, data, ts)
+                    return "changed" if changed else False
 
         existing = self._message_already_cached(
             contact_id, ts, is_mine, text, data.get("attachment_id")
         )
         if existing is not None:
             if is_mine:
-                self._upgrade_outgoing_attachment(contact_id, existing, data, ts)
+                changed = self._upgrade_outgoing_attachment(
+                    contact_id, existing, data, ts
+                )
+                if changed:
+                    return "changed"
             return False
 
         if persist:

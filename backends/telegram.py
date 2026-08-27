@@ -22,7 +22,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from models import (
     PROTOCOL_TELEGRAM,
@@ -1300,6 +1300,7 @@ class TelegramBackend(ChatBackend):
             msg_type=data.get("msg_type", "text"),
             attachment_info=data.get("attachment_info"),
             attachment_id=data.get("attachment_id"),
+            content_type=data.get("content_type"),
             protocol=PROTOCOL_TELEGRAM,
             msg_id=data.get("id"),
             status=data.get("status"),
@@ -1313,14 +1314,15 @@ class TelegramBackend(ChatBackend):
 
     def ingest_message(
         self, contact_id: str, data: dict, ts: int, persist: bool = True
-    ) -> bool:
+    ) -> bool | Literal["changed"]:
         """Add a message to the in-memory cache AND SQLite with dedup.
 
         When ``persist=False`` the in-memory cache is still seeded (dedup
         keeps working on the UI thread) but the SQLite write is skipped;
         the caller is responsible for calling ``_persist_message`` later.
 
-        Returns True if the message was newly added, False if duplicate.
+        Returns True when added, ``"changed"`` for an attachment upgrade,
+        and False for an unchanged duplicate.
         """
         from backend import _update_message_attachment_id, _update_message_id
 
@@ -1368,6 +1370,7 @@ class TelegramBackend(ChatBackend):
                         int(entry.get("timestamp", ts)),
                         incoming_attachment,
                     )
+                    return "changed"
                 return False
             for m in self.cache.get(contact_id, []):
                 if (
@@ -1424,6 +1427,7 @@ class TelegramBackend(ChatBackend):
                 "msg_type": data.get("msg_type", "text"),
                 "attachment_info": data.get("attachment_info"),
                 "attachment_id": data.get("attachment_id"),
+                "content_type": data.get("content_type"),
                 "read": data.get("is_mine", False),  # incoming = unread
                 "status": data.get("status", "sent" if data.get("is_mine") else "read"),
                 "quote_timestamp": data.get("quote_timestamp"),

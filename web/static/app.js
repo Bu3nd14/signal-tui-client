@@ -226,26 +226,29 @@ function clearMedia() {
   state.mediaRequests.clear();
   state.mediaLoads.clear();
   const cachedUrls = new Set(state.mediaCache.values());
+  const optimisticUrls = new Set(state.optimistic.map((item) => item.localPreviewUrl).filter(Boolean));
   for (const url of state.objectUrls) {
-    if (cachedUrls.has(url)) continue;
+    if (cachedUrls.has(url) || optimisticUrls.has(url)) continue;
     URL.revokeObjectURL(url);
     state.objectUrls.delete(url);
   }
 }
 
-async function fetchImage(path, attachmentId) {
+async function fetchImage(path, attachmentId, direction) {
   const controller = new AbortController();
   state.mediaRequests.add(controller);
   const retryDelays = [3000, 6000];
   try {
     let response;
-    for (let attempt = 0; attempt < 3 && !controller.signal.aborted; attempt += 1) {
+    const maxAttempts = direction === "in" ? 3 : 1;
+    for (let attempt = 0; attempt < maxAttempts && !controller.signal.aborted; attempt += 1) {
       try {
         response = await apiFetch(path, { signal: controller.signal });
         break;
       } catch (error) {
         if (error.name === "AbortError") throw error;
-        if (attempt === 2) throw error;
+        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        if (attempt === maxAttempts - 1) throw error;
         await new Promise((resolve, reject) => {
           const timer = window.setTimeout(resolve, retryDelays[attempt]);
           controller.signal.addEventListener("abort", () => {
@@ -266,11 +269,11 @@ async function fetchImage(path, attachmentId) {
   }
 }
 
-async function loadImage(container, image, path, attachmentId) {
+async function loadImage(container, image, path, attachmentId, direction) {
   const key = String(attachmentId);
   let request = state.mediaLoads.get(key);
   if (!request) {
-    request = fetchImage(path, key);
+    request = fetchImage(path, key, direction);
     state.mediaLoads.set(key, request);
   }
   try {
@@ -294,7 +297,7 @@ async function loadImage(container, image, path, attachmentId) {
   }
 }
 
-function imageAttachment(attachment, protocol) {
+function imageAttachment(attachment, protocol, direction) {
   const container = document.createElement("div");
   container.className = "attachment";
   const loading = document.createElement("div");
@@ -319,7 +322,7 @@ function imageAttachment(attachment, protocol) {
     return container;
   }
   const path = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
-  loadImage(container, image, path, attachmentId);
+  loadImage(container, image, path, attachmentId, direction);
   return container;
 }
 
@@ -401,9 +404,9 @@ function renderMessages(messages, protocol) {
   state.optimistic = reconciliation.optimistic;
   for (const item of state.optimistic) {
     if (item.localPreviewUrl && !item.optimistic_id) {
-      const confirmed = messages.find((message, index) =>
-        window.SignalTuiReconcile.messageIdentity(message, index) === String(item.confirmed_message_id));
-      cacheMedia(confirmed?.attachment?.attachment_id, item.localPreviewUrl);
+      const idx = messages.findIndex((m, x) =>
+        window.SignalTuiReconcile.messageIdentity(m, x) === String(item.confirmed_message_id));
+      if (idx >= 0) messages[idx] = { ...messages[idx], localPreviewUrl: item.localPreviewUrl };
       delete item.localPreviewUrl;
     }
   }
@@ -434,7 +437,7 @@ function renderMessages(messages, protocol) {
         preview.append(image);
         bubble.append(preview);
       } else {
-        bubble.append(imageAttachment(item.attachment, protocol));
+        bubble.append(imageAttachment(item.attachment, protocol, item.direction));
       }
     }
     const safeText = window.SignalTuiReconcile.messageDisplayText(item);

@@ -118,7 +118,11 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             attachment = {
                 "attachment_id": attachment_id,
                 "name": row["attachment_info"] or Path(attachment_path).name,
-                "type": _infer_attachment_type(attachment_id, row["content_type"]),
+                "type": (
+                    row["content_type"]
+                    or ("image/*" if row["msg_type"] == "image" else None)
+                    or _infer_attachment_type(attachment_id, None)
+                ),
             }
             if row["msg_type"] == "image" or (
                 attachment["type"] or ""

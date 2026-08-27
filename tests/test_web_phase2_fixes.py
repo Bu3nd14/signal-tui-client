@@ -3,12 +3,16 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import backend as backend_mod
 from backends.signal import SignalBackend
 from backends.telegram import TelegramBackend
 from backends.whatsapp import WhatsAppBackend
+from models import ChatContact, ChatEvent
+from tui.events import EventHandlingMixin
+from web.api import _messages
 
 
 def _db(monkeypatch, tmp_path: Path) -> Path:
@@ -46,7 +50,8 @@ def test_telegram_attachment_upgrade_works_in_both_event_orders(monkeypatch, tmp
         db_file.unlink(missing_ok=True)
         backend = TelegramBackend()
         assert backend.ingest_message("42", _media_data(first), 1000)
-        assert not backend.ingest_message("42", _media_data(second), 1001)
+        result = backend.ingest_message("42", _media_data(second), 1001)
+        assert result == ("changed" if first.startswith("tgref:") else False)
         assert len(backend.cache["42"]) == 1
         assert backend.cache["42"][0]["attachment_id"] == str(mirrored)
         with sqlite3.connect(db_file) as connection:
@@ -78,13 +83,105 @@ def test_signal_unresolved_echo_is_upgraded_to_sent_attachment(monkeypatch, tmp_
     backend = SignalBackend()
 
     assert backend.ingest_message("42", _media_data("signal-cli-id"), 1000)
-    assert not backend.ingest_message("42", _media_data(mirrored.name), 1001)
+    assert backend.ingest_message("42", _media_data(mirrored.name), 1001) == "changed"
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["attachment_id"] == mirrored.name
     with sqlite3.connect(db_file) as connection:
         assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (
             mirrored.name,
         )
+
+
+def test_signal_echo_never_adds_row_and_keeps_mirrored_file(monkeypatch, tmp_path):
+    db_file = _db(monkeypatch, tmp_path)
+    media_dir = tmp_path / "signal-media"
+    media_dir.mkdir()
+    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    mirrored = media_dir / "sent-local.png"
+    remote = media_dir / "remote-signal-id"
+    mirrored.write_bytes(b"mirror")
+    remote.write_bytes(b"remote")
+    backend = SignalBackend()
+    echo_ts = 13_000
+    mirror = {**_media_data(mirrored.name), "id": str(echo_ts)}
+    echo = {**_media_data(remote.name), "id": str(echo_ts)}
+
+    assert backend.ingest_message("42", mirror, 1_000)
+    assert backend.ingest_message("42", echo, echo_ts) is False
+    assert len(backend.cache["42"]) == 1
+    assert backend.cache["42"][0]["attachment_id"] == mirrored.name
+    with sqlite3.connect(db_file) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*), attachment_id FROM messages"
+        ).fetchone() == (1, mirrored.name)
+
+
+def test_signal_outgoing_attachment_is_resolvable_or_null(monkeypatch, tmp_path):
+    db_file = _db(monkeypatch, tmp_path)
+    media_dir = tmp_path / "signal-media"
+    media_dir.mkdir()
+    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    backend = SignalBackend()
+    unresolved = {**_media_data("remote-missing"), "id": "77"}
+
+    assert backend.ingest_message("42", unresolved, 77)
+    assert backend.cache["42"][0]["attachment_id"] is None
+    with sqlite3.connect(db_file) as connection:
+        assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (
+            None,
+        )
+
+
+def test_telegram_persists_content_type_and_api_marks_tgref_as_image(
+    monkeypatch, tmp_path
+):
+    db_file = _db(monkeypatch, tmp_path)
+    backend = TelegramBackend()
+    data = {**_media_data("tgref:42:77"), "content_type": "image/png"}
+
+    assert backend.ingest_message("42", data, 1_000)
+    with sqlite3.connect(db_file) as connection:
+        assert connection.execute("SELECT content_type FROM messages").fetchone() == (
+            "image/png",
+        )
+    assert _messages("telegram", "42")[0]["attachment"]["type"] == "image/png"
+
+    with sqlite3.connect(db_file) as connection:
+        connection.execute("UPDATE messages SET content_type = NULL")
+        connection.commit()
+    assert _messages("telegram", "42")[0]["attachment"]["type"] == "image/*"
+
+
+def test_push_on_attachment_upgrade():
+    contact = ChatContact(id="42", display_name="Test", protocol="telegram")
+    backend = SimpleNamespace(ingest_message=MagicMock(return_value="changed"))
+    app = SimpleNamespace(
+        manager=SimpleNamespace(get=lambda _protocol: backend),
+        contacts=[contact],
+        selected_contact=None,
+        _contact_list_dirty=False,
+        _dirty_contact_keys=set(),
+        _cache={},
+        _typing_contacts={},
+        _typing_mumbling={},
+        _web_enabled=True,
+    )
+    event = ChatEvent(
+        type="message",
+        protocol="telegram",
+        contact_id="42",
+        payload={
+            **_media_data("/tmp/42-77-sent.png"),
+            "contact": contact,
+            "timestamp": 1_001,
+        },
+    )
+
+    with patch("web.bridge.push_event") as push_event:
+        assert EventHandlingMixin._handle_message_event(app, event)
+
+    push_event.assert_called_once()
+    assert app._cache == {}
 
 
 def test_whatsapp_echo_first_is_upgraded_to_sent_attachment(monkeypatch, tmp_path):
@@ -186,7 +283,7 @@ const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const clearStart = app.indexOf("const MEDIA_CACHE_LIMIT");
 const loadEnd = app.indexOf("\nfunction imageAttachment", clearStart);
-globalThis.state = { mediaRequests: new Set(), mediaLoads: new Map(), objectUrls: new Set(), mediaCache: new Map() };
+globalThis.state = { mediaRequests: new Set(), mediaLoads: new Map(), objectUrls: new Set(), mediaCache: new Map(), optimistic: [] };
 globalThis.scrollThreadToBottom = () => {};
 globalThis.DOMException = globalThis.DOMException || class extends Error { constructor(message, name) { super(message); this.name = name; } };
 let now = 0;
@@ -233,7 +330,7 @@ vm.runInThisContext(app.slice(clearStart, loadEnd));
     return { blob: async () => ({}) };
   };
   let target = view();
-  await loadImage(target.container, target.image, "/media", "sent-image");
+    await loadImage(target.container, target.image, "/media", "sent-image", "in");
   assert.equal(calls, 3);
   assert.equal(target.image.loaded, true);
   assert.equal(target.loading.removed, true);
@@ -243,9 +340,14 @@ vm.runInThisContext(app.slice(clearStart, loadEnd));
   now = 0;
   globalThis.apiFetch = async () => { calls += 1; throw new Error("HTTP 404"); };
   target = view();
-  await loadImage(target.container, target.image, "/media", "missing-image");
+  await loadImage(target.container, target.image, "/media", "missing-image", "in");
   assert.equal(target.container.children[0].textContent, "▧  Immagine non disponibile");
   assert.equal(calls, 3);
+
+  calls = 0;
+  target = view();
+  await loadImage(target.container, target.image, "/media", "missing-outgoing", "out");
+  assert.equal(calls, 1);
 
   calls = 0;
   now = 0;
@@ -263,19 +365,25 @@ vm.runInThisContext(app.slice(clearStart, loadEnd));
     assert completed.returncode == 0, completed.stderr
 
 
-def test_web_reconcile_transfers_preview_to_media_cache_without_revoking():
+def test_web_reconcile_transfers_preview_to_confirmed_row_without_fetching():
     source = r"""
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
+const reconcile = fs.readFileSync("./web/static/reconcile.js", "utf8");
 const mediaStart = app.indexOf("const MEDIA_CACHE_LIMIT");
 const mediaEnd = app.indexOf("\nfunction attachmentName", mediaStart);
 const renderStart = app.indexOf("function renderMessages(");
 const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
 globalThis.state = {
-  mediaRequests: new Set(), mediaLoads: new Map(), objectUrls: new Set(), mediaCache: new Map(),
-  optimistic: [], active: { protocol: "whatsapp", id: "42" },
+  mediaRequests: new Set(), mediaLoads: new Map(), objectUrls: new Set(["blob:preview"]), mediaCache: new Map(),
+  optimistic: [{
+    optimistic_id: "local-1", localPreviewUrl: "blob:preview", known_message_ids: [],
+    protocol: "signal", contactId: "42", direction: "out", text: "", timestamp: 1,
+    attachment: { type: "image/png", attachment_id: "upload-local.png", name: "photo.png" },
+  }],
+  active: { protocol: "signal", id: "42" },
 };
 const revoked = [];
 globalThis.URL = { createObjectURL: () => "blob:fetched", revokeObjectURL: (url) => revoked.push(url) };
@@ -288,17 +396,15 @@ function node() { return { className: "", append() {}, addEventListener() {}, se
 globalThis.document = { createElement: node };
 globalThis.elements = { messages: { replaceChildren() {}, append() {}, scrollTop: 0, scrollHeight: 0 } };
 const real = { id: "wa-1", direction: "out", text: "", timestamp: 2, attachment: { type: "image/png", attachment_id: "sent-real.png" } };
-const confirmed = { confirmed_message_id: "wa-1", localPreviewUrl: "blob:preview", protocol: "whatsapp", contactId: "42", direction: "out", timestamp: 1 };
-globalThis.window = { SignalTuiReconcile: {
-  reconcileOptimisticMessages: () => ({ optimistic: [confirmed], visible: [] }),
-  messageIdentity: (message) => String(message.id),
-  messageDisplayText: () => "",
-} };
+const messages = [real];
+globalThis.window = {};
+vm.runInThisContext(reconcile);
 vm.runInThisContext(app.slice(mediaStart, mediaEnd));
 vm.runInThisContext(app.slice(renderStart, renderEnd));
-renderMessages([real], "whatsapp");
-assert.equal(state.mediaCache.get("sent-real.png"), "blob:preview");
-assert.equal(confirmed.localPreviewUrl, undefined);
+renderMessages(messages, "signal");
+assert.equal(messages[0].localPreviewUrl, "blob:preview");
+assert.equal(state.mediaCache.get("sent-real.png"), undefined);
+assert.equal(state.optimistic[0].localPreviewUrl, undefined);
 assert.deepEqual(revoked, []);
 """
     completed = subprocess.run(
