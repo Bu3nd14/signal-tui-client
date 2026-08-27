@@ -23,6 +23,21 @@ from pathlib import Path
 from models import ChatContact, ChatEvent
 
 
+def should_upgrade_outgoing_attachment(
+    *,
+    is_mine: bool,
+    existing_path: str | Path | None,
+    incoming_path: str | Path | None,
+) -> bool:
+    """Allow an outgoing attachment upgrade only toward a local file."""
+    return bool(
+        is_mine
+        and (existing_path is None or not Path(existing_path).is_file())
+        and incoming_path is not None
+        and Path(incoming_path).is_file()
+    )
+
+
 class ChatBackend(ABC):
     """Abstract interface implemented by every chat protocol backend.
 

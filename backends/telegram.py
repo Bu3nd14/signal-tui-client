@@ -31,7 +31,7 @@ from models import (
     media_quote_placeholder,
 )
 
-from .base import ChatBackend
+from .base import ChatBackend, should_upgrade_outgoing_attachment
 from .config import (
     get_address_book_ttl_s,
     get_telegram_api_hash,
@@ -1354,7 +1354,11 @@ class TelegramBackend(ChatBackend):
                     and entry.get("is_mine")
                     and str(entry.get("attachment_id") or "").startswith(_TGREF_PREFIX)
                     and incoming_attachment
-                    and Path(incoming_attachment).is_file()
+                    and should_upgrade_outgoing_attachment(
+                        is_mine=True,
+                        existing_path=entry.get("attachment_id"),
+                        incoming_path=incoming_attachment,
+                    )
                 ):
                     entry["attachment_id"] = incoming_attachment
                     _update_message_attachment_id(

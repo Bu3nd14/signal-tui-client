@@ -30,7 +30,7 @@ from models import (
     ChatEvent,
 )
 
-from .base import ChatBackend
+from .base import ChatBackend, should_upgrade_outgoing_attachment
 from .config import (
     get_address_book_ttl_s,
     get_wa_lid_cache_ttl_days,
@@ -1617,6 +1617,35 @@ class WhatsAppBackend(ChatBackend):
             quote_content_type=data.get("quote_content_type"),
         )
 
+    def _upgrade_outgoing_attachment(
+        self, contact_id: str, message: dict, data: dict, ts: int
+    ) -> None:
+        from backend import _update_message_attachment_id
+
+        current_id = message.get("attachment_id")
+        incoming_id = data.get("attachment_id")
+        media_dir = self._ensure_media_dir()
+        current_path = media_dir / Path(current_id).name if current_id else None
+        incoming_path = media_dir / Path(incoming_id).name if incoming_id else None
+        if (
+            not incoming_id
+            or not Path(incoming_id).name.startswith("sent-")
+            or not should_upgrade_outgoing_attachment(
+                is_mine=bool(data.get("is_mine")),
+                existing_path=current_path,
+                incoming_path=incoming_path,
+            )
+        ):
+            return
+        message["attachment_id"] = incoming_id
+        _update_message_attachment_id(
+            PROTOCOL_WHATSAPP,
+            contact_id,
+            message.get("id") or data.get("id"),
+            int(message.get("timestamp", ts)),
+            incoming_id,
+        )
+
     def _reuse_failed_db_row(
         self, contact_id: str, data: dict, text: str, msg_id: str, ts: int
     ) -> bool:
@@ -1770,6 +1799,7 @@ class WhatsAppBackend(ChatBackend):
                     quote_author=data.get("quote_author"),
                     reply_to_message_id=data.get("reply_to_message_id"),
                 )
+            self._upgrade_outgoing_attachment(contact_id, existing, data, ts)
             return False
 
         # Fallback DB post-send (bug #44): un messaggio failed può avere la sua

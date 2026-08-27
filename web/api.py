@@ -444,6 +444,6 @@ def create_api_router() -> Any:
         path = Path(resolved).resolve() if resolved else None
         if path is None or not path.is_file() or not path.is_relative_to(root):
             raise HTTPException(status_code=404)
-        return FileResponse(path)
+        return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
 
     return router

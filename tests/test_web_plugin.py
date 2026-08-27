@@ -785,7 +785,9 @@ def test_media_whatsapp_accepts_full_waha_url_and_masks_download_failure(tmp_pat
 
     assert success.status_code == 200
     assert success.content == b"whatsapp-image"
+    assert success.headers["cache-control"] == "private, max-age=86400"
     _assert_uniform_not_found(failure, failed_url, root)
+    assert "cache-control" not in failure.headers
     assert manager.get_attachment_path.call_args_list == [
         (("whatsapp", success_url),),
         (("whatsapp", failed_url),),

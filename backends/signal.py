@@ -34,7 +34,7 @@ from models import (
     media_quote_placeholder,
 )
 
-from .base import ChatBackend
+from .base import ChatBackend, should_upgrade_outgoing_attachment
 from .config import get_address_book_ttl_s
 
 logger = logging.getLogger(__name__)
@@ -1154,11 +1154,10 @@ class SignalBackend(ChatBackend):
                 )
                 incoming_path = self.get_attachment_path(attachment_id)
                 incoming_is_sent = Path(attachment_id).name.startswith("sent-")
-                can_upgrade = (
-                    is_mine
-                    and cached_path is None
-                    and incoming_is_sent
-                    and incoming_path is not None
+                can_upgrade = incoming_is_sent and should_upgrade_outgoing_attachment(
+                    is_mine=is_mine,
+                    existing_path=cached_path,
+                    incoming_path=incoming_path,
                 )
                 keep_local = (
                     is_mine and cached_path is not None and incoming_path is None
@@ -1177,11 +1176,16 @@ class SignalBackend(ChatBackend):
     ) -> None:
         current_id = message.get("attachment_id")
         incoming_id = data.get("attachment_id")
+        current_path = self.get_attachment_path(current_id) if current_id else None
+        incoming_path = self.get_attachment_path(incoming_id) if incoming_id else None
         if (
             not incoming_id
             or not Path(incoming_id).name.startswith("sent-")
-            or self.get_attachment_path(incoming_id) is None
-            or (current_id and self.get_attachment_path(current_id) is not None)
+            or not should_upgrade_outgoing_attachment(
+                is_mine=bool(data.get("is_mine")),
+                existing_path=current_path,
+                incoming_path=incoming_path,
+            )
         ):
             return
         message["attachment_id"] = incoming_id

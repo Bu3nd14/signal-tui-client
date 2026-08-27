@@ -87,6 +87,47 @@ def test_signal_unresolved_echo_is_upgraded_to_sent_attachment(monkeypatch, tmp_
         )
 
 
+def test_whatsapp_echo_first_is_upgraded_to_sent_attachment(monkeypatch, tmp_path):
+    db_file = _db(monkeypatch, tmp_path)
+    media_dir = tmp_path / "whatsapp-media"
+    media_dir.mkdir()
+    mirrored = media_dir / "sent-local.png"
+    mirrored.write_bytes(b"image")
+    backend = WhatsAppBackend()
+    backend.media_dir = str(media_dir)
+
+    assert backend.ingest_message("42", _media_data("waha-media-id"), 1000)
+    assert not backend.ingest_message("42", _media_data(mirrored.name), 1001)
+    assert backend.cache["42"][0]["attachment_id"] == mirrored.name
+    with sqlite3.connect(db_file) as connection:
+        assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (
+            mirrored.name,
+        )
+
+
+def test_signal_and_whatsapp_never_downgrade_sent_attachment(monkeypatch, tmp_path):
+    _db(monkeypatch, tmp_path)
+    signal_dir = tmp_path / "signal-media"
+    signal_dir.mkdir()
+    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", signal_dir)
+    signal_file = signal_dir / "sent-signal.png"
+    signal_file.write_bytes(b"image")
+    signal = SignalBackend()
+    assert signal.ingest_message("42", _media_data(signal_file.name), 1000)
+    assert not signal.ingest_message("42", _media_data("signal-cli-id"), 1001)
+    assert signal.cache["42"][0]["attachment_id"] == signal_file.name
+
+    whatsapp_dir = tmp_path / "whatsapp-media"
+    whatsapp_dir.mkdir()
+    whatsapp_file = whatsapp_dir / "sent-whatsapp.png"
+    whatsapp_file.write_bytes(b"image")
+    whatsapp = WhatsAppBackend()
+    whatsapp.media_dir = str(whatsapp_dir)
+    assert whatsapp.ingest_message("43", _media_data(whatsapp_file.name), 2000)
+    assert not whatsapp.ingest_message("43", _media_data("waha-media-id"), 2001)
+    assert whatsapp.cache["43"][0]["attachment_id"] == whatsapp_file.name
+
+
 def test_whatsapp_dedup_fills_missing_quote_fields(monkeypatch, tmp_path):
     db_file = _db(monkeypatch, tmp_path)
     backend = WhatsAppBackend()
@@ -143,9 +184,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
-const clearStart = app.indexOf("function clearMedia() {");
+const clearStart = app.indexOf("const MEDIA_CACHE_LIMIT");
 const loadEnd = app.indexOf("\nfunction imageAttachment", clearStart);
-globalThis.state = { mediaRequests: new Set(), objectUrls: new Set() };
+globalThis.state = { mediaRequests: new Set(), mediaLoads: new Map(), objectUrls: new Set(), mediaCache: new Map() };
 globalThis.scrollThreadToBottom = () => {};
 globalThis.DOMException = globalThis.DOMException || class extends Error { constructor(message, name) { super(message); this.name = name; } };
 let now = 0;
@@ -174,33 +215,91 @@ function view() {
 vm.runInThisContext(app.slice(clearStart, loadEnd));
 (async () => {
   let calls = 0;
+  globalThis.apiFetch = async () => { calls += 1; return { blob: async () => ({}) }; };
+  let first = view();
+  let second = view();
+  await Promise.all([
+    loadImage(first.container, first.image, "/media", "shared-image"),
+    loadImage(second.container, second.image, "/media", "shared-image"),
+  ]);
+  assert.equal(calls, 1);
+  assert.equal(first.image.loaded, true);
+  assert.equal(second.image.loaded, true);
+
+  calls = 0;
   globalThis.apiFetch = async () => {
     calls += 1;
-    if (calls < 4) throw new Error("HTTP 404");
+    if (calls < 3) throw new Error("HTTP 404");
     return { blob: async () => ({}) };
   };
   let target = view();
-  await loadImage(target.container, target.image, "/media");
-  assert.equal(calls, 4);
+  await loadImage(target.container, target.image, "/media", "sent-image");
+  assert.equal(calls, 3);
   assert.equal(target.image.loaded, true);
   assert.equal(target.loading.removed, true);
+  assert.equal(state.mediaCache.get("sent-image"), "blob:image");
 
   calls = 0;
   now = 0;
   globalThis.apiFetch = async () => { calls += 1; throw new Error("HTTP 404"); };
   target = view();
-  await loadImage(target.container, target.image, "/media");
+  await loadImage(target.container, target.image, "/media", "missing-image");
   assert.equal(target.container.children[0].textContent, "▧  Immagine non disponibile");
-  assert.ok(calls > 6);
+  assert.equal(calls, 3);
 
   calls = 0;
   now = 0;
   globalThis.apiFetch = async () => { calls += 1; queueMicrotask(clearMedia); throw new Error("HTTP 404"); };
   target = view();
-  await loadImage(target.container, target.image, "/media");
+  await loadImage(target.container, target.image, "/media", "aborted-image");
   assert.equal(calls, 1);
   assert.equal(target.container.children.length, 0);
+  assert.equal(state.mediaCache.get("sent-image"), "blob:image");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_web_reconcile_transfers_preview_to_media_cache_without_revoking():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const mediaStart = app.indexOf("const MEDIA_CACHE_LIMIT");
+const mediaEnd = app.indexOf("\nfunction attachmentName", mediaStart);
+const renderStart = app.indexOf("function renderMessages(");
+const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
+globalThis.state = {
+  mediaRequests: new Set(), mediaLoads: new Map(), objectUrls: new Set(), mediaCache: new Map(),
+  optimistic: [], active: { protocol: "whatsapp", id: "42" },
+};
+const revoked = [];
+globalThis.URL = { createObjectURL: () => "blob:fetched", revokeObjectURL: (url) => revoked.push(url) };
+globalThis.scrollThreadToBottom = () => {};
+globalThis.requestAnimationFrame = () => {};
+globalThis.timestampMilliseconds = (value) => Number(value);
+globalThis.formatTimestamp = () => "";
+globalThis.appendRenderedQuote = () => {};
+function node() { return { className: "", append() {}, addEventListener() {}, setAttribute() {}, classList: { add() {} } }; }
+globalThis.document = { createElement: node };
+globalThis.elements = { messages: { replaceChildren() {}, append() {}, scrollTop: 0, scrollHeight: 0 } };
+const real = { id: "wa-1", direction: "out", text: "", timestamp: 2, attachment: { type: "image/png", attachment_id: "sent-real.png" } };
+const confirmed = { confirmed_message_id: "wa-1", localPreviewUrl: "blob:preview", protocol: "whatsapp", contactId: "42", direction: "out", timestamp: 1 };
+globalThis.window = { SignalTuiReconcile: {
+  reconcileOptimisticMessages: () => ({ optimistic: [confirmed], visible: [] }),
+  messageIdentity: (message) => String(message.id),
+  messageDisplayText: () => "",
+} };
+vm.runInThisContext(app.slice(mediaStart, mediaEnd));
+vm.runInThisContext(app.slice(renderStart, renderEnd));
+renderMessages([real], "whatsapp");
+assert.equal(state.mediaCache.get("sent-real.png"), "blob:preview");
+assert.equal(confirmed.localPreviewUrl, undefined);
+assert.deepEqual(revoked, []);
 """
     completed = subprocess.run(
         ["node", "-e", source], capture_output=True, text=True, check=False

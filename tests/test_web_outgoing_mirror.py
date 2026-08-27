@@ -160,6 +160,34 @@ def test_web_image_mirror_has_empty_text_and_resolvable_attachment(
     assert "upload-" not in event.payload["text"]
 
 
+def test_mirror_copy_failure_warns_and_enqueues_without_attachment(
+    tmp_path, monkeypatch, caplog
+):
+    attachment = tmp_path / "photo.png"
+    attachment.write_bytes(b"image-data")
+    backend = _backend("whatsapp")
+    backend.media_dir = str(tmp_path / "wa-media")
+    backend.send_attachment_sync = MagicMock(return_value="wa-77")
+    manager = BackendManager()
+    manager.register(backend)
+    monkeypatch.setattr(
+        "backends.whatsapp.shutil.copy2",
+        MagicMock(side_effect=OSError("copy failed")),
+    )
+
+    manager.send_attachment_sync(
+        "whatsapp", "42", attachment, caption=None, mime_type="image/png"
+    )
+    event = backend.poll_once()[0]
+    backend.ingest_message(
+        event.contact_id, event.payload, event.payload["timestamp"], persist=False
+    )
+
+    assert event.payload["attachment_id"] is None
+    assert backend.cache["42"][0]["attachment_id"] is None
+    assert "Unable to copy sent attachment while mirroring" in caplog.text
+
+
 def test_signal_attachment_rpc_and_echo_reuse_persistent_file(tmp_path, monkeypatch):
     media_dir = tmp_path / "signal-media"
     monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)

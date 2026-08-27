@@ -221,6 +221,22 @@ class BackendManager:
     ) -> None:
         try:
             backend.enqueue_sent_message(contact_id, message_id, text, **kwargs)
+        except OSError:
+            logger.warning(
+                "Unable to copy sent attachment while mirroring: protocol=%s contact=%s",
+                backend.protocol,
+                contact_id,
+                exc_info=True,
+            )
+            fallback = {**kwargs, "attachment_path": None}
+            try:
+                backend.enqueue_sent_message(contact_id, message_id, text, **fallback)
+            except Exception:
+                logger.exception(
+                    "Unable to mirror sent message without attachment: protocol=%s contact=%s",
+                    backend.protocol,
+                    contact_id,
+                )
         except Exception:
             logger.exception(
                 "Unable to mirror sent message: protocol=%s contact=%s",
