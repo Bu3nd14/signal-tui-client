@@ -17,6 +17,7 @@ const state = {
   optimisticSequence: 0,
   sending: false,
   stagedAttachment: null,
+  replyTo: null,
 };
 
 const elements = {
@@ -43,6 +44,10 @@ const elements = {
   attachmentPreviewImage: document.querySelector("#attachment-preview-image"),
   attachmentPreviewName: document.querySelector("#attachment-preview-name"),
   removeAttachment: document.querySelector("#remove-attachment"),
+  replyBanner: document.querySelector("#reply-banner"),
+  replyAuthor: document.querySelector("#reply-author"),
+  replySnippet: document.querySelector("#reply-snippet"),
+  cancelReply: document.querySelector("#cancel-reply"),
 };
 
 function showError(message) {
@@ -227,6 +232,68 @@ function imageAttachment(attachment, protocol) {
   return container;
 }
 
+function attachmentName(item) {
+  const attachmentId = item.attachment?.attachment_id || "";
+  return item.attachment?.name || attachmentId.split("?", 1)[0].split("/").filter(Boolean).pop() || "Allegato";
+}
+
+function replyAuthor(item) {
+  return item.direction === "out" ? "Tu" : (state.active?.display_name || state.active?.id || "Contatto");
+}
+
+function updateReplyBanner() {
+  const reply = state.replyTo;
+  elements.replyBanner.hidden = !reply;
+  if (!reply) {
+    elements.replyAuthor.textContent = "";
+    elements.replySnippet.textContent = "";
+    elements.messageInput.placeholder = "Scrivi un messaggio";
+    return;
+  }
+  elements.replyAuthor.textContent = reply.author;
+  const imageMark = reply.isImage ? "🖼️ " : "";
+  const snippet = reply.quoteMessage || "Messaggio";
+  elements.replySnippet.textContent = `${imageMark}${snippet.length > 80 ? `${snippet.slice(0, 79)}…` : snippet}`;
+  elements.messageInput.placeholder = `Rispondendo a ${reply.author}`;
+}
+
+function cancelReply() {
+  state.replyTo = null;
+  updateReplyBanner();
+}
+
+function startReply(item) {
+  if (!state.active || item.optimistic_id) return;
+  const timestamp = timestampMilliseconds(item.timestamp);
+  const id = item.id === null || item.id === undefined ? null : String(item.id);
+  if (!Number.isFinite(timestamp)) return;
+  if (state.active.protocol === "telegram" && (!id || !/^\d+$/.test(id) || Number(id) <= 0)) return;
+  if (state.active.protocol === "whatsapp" && !id) return;
+  state.replyTo = {
+    id,
+    timestamp,
+    author: replyAuthor(item),
+    quoteAuthor: state.active.id,
+    quoteMessage: window.SignalTuiReconcile.replyQuoteMessage(item),
+    isImage: Boolean(item.attachment?.type?.toLowerCase().startsWith("image/")),
+  };
+  updateReplyBanner();
+  elements.messageInput.focus();
+}
+
+function appendRenderedQuote(bubble, item) {
+  const quoteText = item.quote_text ?? item.quote_message;
+  if (quoteText == null && item.quote_timestamp == null && item.quote_author == null) return;
+  const quote = document.createElement("div");
+  quote.className = "message-quote";
+  const author = document.createElement("strong");
+  author.textContent = item.quote_author || "Messaggio citato";
+  const text = document.createElement("span");
+  text.textContent = quoteText || "Messaggio";
+  quote.append(author, text);
+  bubble.append(quote);
+}
+
 function renderMessages(messages, protocol) {
   clearMedia();
   elements.messages.replaceChildren();
@@ -259,6 +326,7 @@ function renderMessages(messages, protocol) {
     message.className = `message ${item.direction === "out" ? "out" : "in"}`;
     const bubble = document.createElement("div");
     bubble.className = "bubble";
+    appendRenderedQuote(bubble, item);
     const isImage = item.attachment?.type?.toLowerCase().startsWith("image/");
     if (isImage) {
       if (item.localPreviewUrl) {
@@ -273,9 +341,7 @@ function renderMessages(messages, protocol) {
         bubble.append(imageAttachment(item.attachment, protocol));
       }
     }
-    const attachmentId = item.attachment?.attachment_id || "";
-    const attachmentName = item.attachment?.name || attachmentId.split("?", 1)[0].split("/").filter(Boolean).pop() || "Allegato";
-    const displayText = item.text || (item.attachment && !isImage ? attachmentName : "");
+    const displayText = item.text || (item.attachment && !isImage ? attachmentName(item) : "");
     if (displayText) {
       const text = document.createElement("div");
       text.className = "message-text";
@@ -293,6 +359,16 @@ function renderMessages(messages, protocol) {
     }
     bubble.append(time);
     message.append(bubble);
+    if (!item.optimistic_id) {
+      const reply = document.createElement("button");
+      reply.type = "button";
+      reply.className = "message-reply";
+      reply.textContent = "↩";
+      reply.setAttribute("aria-label", "Rispondi al messaggio");
+      reply.title = "Rispondi";
+      reply.addEventListener("click", () => startReply(item));
+      message.append(reply);
+    }
     elements.messages.append(message);
   }
   scrollThreadToBottom();
@@ -322,6 +398,7 @@ async function loadMessages() {
 }
 
 function openThread(contact) {
+  cancelReply();
   state.active = contact;
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
@@ -346,6 +423,7 @@ function updateComposer() {
   elements.sendMessage.disabled = state.sending || (!elements.messageInput.value.trim() && !state.stagedAttachment);
   elements.messageInput.disabled = state.sending;
   elements.removeAttachment.disabled = state.sending;
+  elements.cancelReply.disabled = state.sending;
   elements.sendIcon.hidden = state.sending;
   elements.sendSpinner.hidden = !state.sending;
 }
@@ -385,6 +463,7 @@ async function submitMessage() {
   if (state.sending || !state.active) return;
   const text = elements.messageInput.value;
   const attachment = state.stagedAttachment;
+  const reply = state.replyTo ? { ...state.replyTo } : null;
   if (!text.trim() && !attachment) return;
   const active = { ...state.active };
   const timestamp = Date.now();
@@ -398,6 +477,12 @@ async function submitMessage() {
     optimisticStatus: "sending",
     known_message_ids: state.messages.map(window.SignalTuiReconcile.messageIdentity),
   };
+  if (reply) {
+    optimistic.quote_timestamp = reply.timestamp;
+    optimistic.quote_author = reply.quoteAuthor;
+    optimistic.quote_message = reply.quoteMessage;
+    optimistic.quote_text = reply.quoteMessage;
+  }
   if (attachment) {
     optimistic.attachment = { type: attachment.file.type, name: attachment.filename, attachment_id: attachment.filename };
     optimistic.localPreviewUrl = attachment.previewUrl;
@@ -410,21 +495,29 @@ async function submitMessage() {
   updateComposer();
   if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
   try {
+    const quotePayload = reply ? {
+      quote_timestamp: reply.timestamp,
+      quote_author: reply.quoteAuthor,
+      quote_message: reply.quoteMessage,
+      ...(active.protocol === "signal" ? {} : { reply_to_message_id: reply.id }),
+    } : {};
     if (attachment) {
       const body = new FormData();
       body.set("protocol", active.protocol);
       body.set("contact_id", active.id);
       body.set("text", text);
+      for (const [key, value] of Object.entries(quotePayload)) body.set(key, String(value));
       body.set("file", attachment.file, attachment.filename);
       await apiFetch("/api/send", { method: "POST", body });
     } else {
       await apiFetch("/api/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text }),
+        body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text, ...quotePayload }),
       });
     }
     optimistic.optimisticStatus = "sent";
+    if (state.replyTo && reply && state.replyTo.timestamp === reply.timestamp) cancelReply();
   } catch (error) {
     optimistic.optimisticStatus = "failed";
     if (error.message !== "unauthorized") showError("Impossibile inviare il messaggio.");
@@ -524,6 +617,7 @@ elements.composer.addEventListener("paste", (event) => {
   stageAttachment(item.getAsFile());
 });
 elements.removeAttachment.addEventListener("click", () => clearStagedAttachment());
+elements.cancelReply.addEventListener("click", cancelReply);
 if (elements.protocolTabs) {
   elements.protocolTabs.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-protocol]");

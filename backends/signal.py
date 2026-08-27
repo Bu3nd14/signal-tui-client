@@ -17,9 +17,11 @@ import io
 import logging
 import queue
 import re
+import shutil
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
@@ -45,6 +47,7 @@ logger.setLevel(logging.DEBUG)
 from backend import (
     CACHE_DIR,
     DAEMON_HTTP_PORT,
+    SIGNAL_CLI_ATTACHMENTS_DIR,
     USER_NUMBER,
     Contact,
     SignalRPCClient,
@@ -605,6 +608,59 @@ class SignalBackend(ChatBackend):
             quote_message=quote_message,
             reply_to_message_id=reply_to_message_id,
             attachments=[str(file_path)],
+        )
+
+    def enqueue_sent_message(
+        self,
+        contact_id: str,
+        message_id: str,
+        text: str,
+        *,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        attachment_path: Path | None = None,
+        mime_type: str | None = None,
+    ) -> None:
+        try:
+            ts = int(message_id)
+        except (TypeError, ValueError):
+            ts = int(time.time() * 1000)
+
+        attachment_id = None
+        attachment_info = None
+        msg_type = "text"
+        if attachment_path is not None:
+            msg_type = (
+                "image" if (mime_type or "").startswith("image/") else "attachment"
+            )
+            attachment_info = text or attachment_path.name
+            SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+            attachment_id = f"sent-{uuid.uuid4().hex}{attachment_path.suffix.lower()}"
+            shutil.copy2(attachment_path, SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id)
+
+        self._event_queue.put(
+            ChatEvent(
+                type="message",
+                protocol=self.protocol,
+                contact_id=contact_id,
+                payload={
+                    "id": str(message_id),
+                    "text": text or attachment_info or "",
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": ts,
+                    "quote_text": quote_message,
+                    "quote_timestamp": quote_timestamp,
+                    "quote_author": quote_author,
+                    "reply_to_message_id": reply_to_message_id,
+                    "msg_type": msg_type,
+                    "attachment_info": attachment_info,
+                    "attachment_id": attachment_id,
+                    "content_type": mime_type,
+                },
+            )
         )
 
     def edit_message_sync(

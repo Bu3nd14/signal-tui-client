@@ -74,7 +74,8 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             try:
                 rows = connection.execute(
                     "SELECT id, msg_id, text, is_mine, timestamp, "
-                    "attachment_id, attachment_info, content_type, protocol "
+                    "attachment_id, attachment_info, content_type, protocol, "
+                    "quote_text, quote_timestamp, quote_author "
                     "FROM messages WHERE protocol = ? AND contact_number = ? "
                     "ORDER BY timestamp, id",
                     (protocol, contact_id),
@@ -108,6 +109,9 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 "direction": "out" if row["is_mine"] else "in",
                 "timestamp": row["timestamp"],
                 "attachment": attachment,
+                "quote_text": row["quote_text"],
+                "quote_timestamp": row["quote_timestamp"],
+                "quote_author": row["quote_author"],
             }
         )
     return messages
@@ -251,8 +255,9 @@ def create_api_router() -> Any:
             "quote_timestamp": quote_timestamp,
             "quote_author": quote_author,
             "quote_message": quote_message,
-            "reply_to_message_id": reply_to_message_id,
         }
+        if protocol in {"whatsapp", "telegram"} and reply_to_message_id is not None:
+            kwargs["reply_to_message_id"] = reply_to_message_id
         upload = None
         try:
             if upload_file is not None:

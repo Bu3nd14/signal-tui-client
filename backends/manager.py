@@ -153,7 +153,18 @@ class BackendManager:
         }
         if reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
-        return backend.send_message_sync(contact_id, text, **kwargs)
+        message_id = backend.send_message_sync(contact_id, text, **kwargs)
+        self._enqueue_sent_message(
+            backend,
+            contact_id,
+            message_id,
+            text,
+            quote_timestamp=quote_timestamp,
+            quote_author=quote_author,
+            quote_message=quote_message,
+            reply_to_message_id=reply_to_message_id,
+        )
+        return message_id
 
     def send_attachment_sync(
         self,
@@ -179,7 +190,37 @@ class BackendManager:
         }
         if reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
-        return backend.send_attachment_sync(contact_id, file_path, **kwargs)
+        message_id = backend.send_attachment_sync(contact_id, file_path, **kwargs)
+        self._enqueue_sent_message(
+            backend,
+            contact_id,
+            message_id,
+            caption or "",
+            quote_timestamp=quote_timestamp,
+            quote_author=quote_author,
+            quote_message=quote_message,
+            reply_to_message_id=reply_to_message_id,
+            attachment_path=file_path,
+            mime_type=mime_type,
+        )
+        return message_id
+
+    @staticmethod
+    def _enqueue_sent_message(
+        backend: ChatBackend,
+        contact_id: str,
+        message_id: str,
+        text: str,
+        **kwargs,
+    ) -> None:
+        try:
+            backend.enqueue_sent_message(contact_id, message_id, text, **kwargs)
+        except Exception:
+            logger.exception(
+                "Unable to mirror sent message: protocol=%s contact=%s",
+                backend.protocol,
+                contact_id,
+            )
 
     async def mark_read(self, protocol: str, contact_id: str) -> None:
         """Mark messages read via the backend for *protocol*."""

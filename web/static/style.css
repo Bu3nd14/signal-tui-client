@@ -202,11 +202,42 @@ h2 { font-size: 1.05rem; }
 
 .message { display: flex; flex-direction: column; max-width: min(76%, 680px); align-self: flex-start; }
 .message.out { align-self: flex-end; align-items: flex-end; }
+.message { position: relative; }
 .bubble { min-width: 90px; padding: 9px 11px 7px; border-radius: 6px 16px 16px; background: var(--incoming); box-shadow: 0 2px 8px #0003; }
 .message.out .bubble { border-radius: 16px 6px 16px 16px; background: var(--outgoing); }
 .message-text { line-height: 1.42; overflow-wrap: anywhere; white-space: pre-wrap; }
 .message-time { display: block; margin-top: 5px; color: #c3cedaaa; font-size: .66rem; text-align: right; }
 .message-status.failed { color: var(--danger); }
+.message-reply {
+  position: absolute;
+  top: 50%;
+  right: -38px;
+  width: 30px;
+  height: 30px;
+  translate: 0 -50%;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--panel-raised);
+  color: var(--muted);
+  opacity: 0;
+  cursor: pointer;
+}
+.message.out .message-reply { right: auto; left: -38px; }
+.message:hover .message-reply, .message:focus-within .message-reply, .message-reply:focus-visible { opacity: 1; }
+.message-quote {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 7px;
+  padding: 5px 8px;
+  overflow: hidden;
+  border-left: 3px solid #8db5ff;
+  border-radius: 4px;
+  background: #08111f4d;
+  font-size: .78rem;
+}
+.message-quote strong, .message-quote span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.message-quote strong { color: #b8d0ff; }
 
 .composer {
   display: flex;
@@ -229,6 +260,23 @@ h2 { font-size: 1.05rem; }
   border-radius: 12px;
   background: var(--panel-raised);
 }
+.reply-banner {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 28px minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--panel-raised);
+}
+.reply-banner[hidden] { display: none; }
+.reply-mark { color: var(--accent); font-size: 1.15rem; }
+.reply-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.reply-copy strong { color: #b8d0ff; font-size: .78rem; }
+.reply-copy span { overflow: hidden; color: var(--muted); font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }
+.reply-banner button { border: 0; background: transparent; color: var(--muted); font-size: 1.25rem; cursor: pointer; }
 .attachment-preview[hidden] { display: none; }
 .attachment-preview img { width: 58px; height: 58px; border-radius: 8px; object-fit: cover; }
 .attachment-preview span { overflow: hidden; color: var(--muted); font-size: .8rem; text-overflow: ellipsis; white-space: nowrap; }

@@ -104,36 +104,35 @@ def test_send_requires_bearer_token():
     assert manager.send_calls == []
 
 
-def test_send_routes_text_and_quote_to_sync_manager():
-    contact = ChatContact("alice", "Alice", "signal")
-    manager = FakeManager([contact])
-    payload = {
-        "protocol": "signal",
-        "contact_id": "alice",
-        "text": "Ciao",
-        "quote_timestamp": 123456,
-        "quote_author": "alice",
-        "quote_message": "Prima",
-        "reply_to_message_id": "message-1",
-    }
-    with TestClient(make_app(manager)) as client:
-        response = client.post("/api/send", json=payload, headers=AUTH)
+def test_send_routes_reply_metadata_according_to_protocol():
+    for protocol, reply_to_message_id in (
+        ("signal", "message-1"),
+        ("whatsapp", "message-1"),
+        ("telegram", "123"),
+    ):
+        contact = ChatContact("alice", "Alice", protocol)
+        manager = FakeManager([contact])
+        payload = {
+            "protocol": protocol,
+            "contact_id": "alice",
+            "text": "Ciao",
+            "quote_timestamp": 123456,
+            "quote_author": "alice",
+            "quote_message": "Prima",
+            "reply_to_message_id": reply_to_message_id,
+        }
+        with TestClient(make_app(manager)) as client:
+            response = client.post("/api/send", json=payload, headers=AUTH)
 
-    assert response.status_code == 200
-    assert response.json() == {"ok": True}
-    assert manager.send_calls == [
-        (
-            "signal",
-            "alice",
-            "Ciao",
-            {
-                "quote_timestamp": 123456,
-                "quote_author": "alice",
-                "quote_message": "Prima",
-                "reply_to_message_id": "message-1",
-            },
-        )
-    ]
+        assert response.status_code == 200
+        kwargs = manager.send_calls[0][3]
+        assert kwargs["quote_timestamp"] == 123456
+        assert kwargs["quote_author"] == "alice"
+        assert kwargs["quote_message"] == "Prima"
+        if protocol == "signal":
+            assert "reply_to_message_id" not in kwargs
+        else:
+            assert kwargs["reply_to_message_id"] == reply_to_message_id
 
 
 def test_send_rejects_empty_text():
@@ -195,7 +194,7 @@ def test_send_internal_timeout_waits_for_worker_and_returns_generic_502():
 def _run_reconciliation_node(source):
     script = f"""
 const assert = require("node:assert/strict");
-const {{ reconcileOptimisticMessages }} = require("./web/static/reconcile.js");
+const {{ reconcileOptimisticMessages, replyQuoteMessage }} = require("./web/static/reconcile.js");
 {source}
 """
     completed = subprocess.run(
@@ -237,6 +236,16 @@ const result = reconcileOptimisticMessages([], [failed], "signal", "alice");
 assert.equal(result.visible.length, 1);
 assert.equal(result.visible[0].optimisticStatus, "failed");
 assert.equal(result.optimistic[0].optimistic_id, "failed");
+""")
+
+
+def test_optimistic_reply_reconciles_echo_with_partial_quote_metadata():
+    _run_reconciliation_node("""
+const optimistic = { optimistic_id: "reply", protocol: "whatsapp", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: 1000, quote_author: "alice", quote_message: "photo.png" };
+const echo = { id: "wa-1", direction: "out", text: "answer", timestamp: 2001, quote_text: "photo.png" };
+const result = reconcileOptimisticMessages([echo], [optimistic], "whatsapp", "alice");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "wa-1");
 """)
 
 
@@ -327,6 +336,36 @@ def test_send_multipart_image_routes_and_cleans_temporary_file(web_client):
     assert kwargs["caption"] == "caption"
     assert kwargs["mime_type"] == "image/png"
     assert not Path(path).exists()
+
+
+def test_send_multipart_image_routes_quote(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "whatsapp")]
+
+    response = client.post(
+        "/api/send",
+        data={
+            "protocol": "whatsapp",
+            "contact_id": "alice",
+            "text": "",
+            "quote_timestamp": "123456",
+            "quote_author": "alice",
+            "quote_message": "photo.png",
+            "reply_to_message_id": "wa-message-1",
+        },
+        files={"file": ("reply.png", _PNG_1X1, "image/png")},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert manager.attachment_calls[0][3] == {
+        "caption": None,
+        "mime_type": "image/png",
+        "quote_timestamp": 123456,
+        "quote_author": "alice",
+        "quote_message": "photo.png",
+        "reply_to_message_id": "wa-message-1",
+    }
 
 
 def test_send_multipart_rejects_image_over_20_mib(web_client):
@@ -638,7 +677,17 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
     body = response.json()
     assert [item["text"] for item in body] == ["first tie", "second tie", "later"]
     assert all(
-        set(item) == {"id", "text", "direction", "timestamp", "attachment"}
+        set(item)
+        == {
+            "id",
+            "text",
+            "direction",
+            "timestamp",
+            "attachment",
+            "quote_text",
+            "quote_timestamp",
+            "quote_author",
+        }
         for item in body
     )
     assert body[0]["attachment"] == {
@@ -648,6 +697,46 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
     }
     assert body[1]["id"].isdigit()
     assert body[2]["direction"] == "out"
+
+
+def test_messages_exposes_persisted_quote_fields(web_client):
+    client, _, db_file = web_client
+    import sqlite3
+
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            "INSERT INTO messages(protocol, contact_number, text, is_mine, "
+            "timestamp, quote_text, quote_timestamp, quote_author) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("signal", "alice", "reply", 0, 20, "quoted", 10, "alice"),
+        )
+
+    response = client.get(
+        "/api/messages",
+        params={"proto": "signal", "contact_id": "alice"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    message = response.json()[0]
+    assert {
+        key: message[key] for key in ("quote_text", "quote_timestamp", "quote_author")
+    } == {
+        "quote_text": "quoted",
+        "quote_timestamp": 10,
+        "quote_author": "alice",
+    }
+
+
+def test_reply_ui_has_static_cancel_and_image_filename_fallback():
+    source = Path("web/static/app.js").read_text()
+    assert 'elements.cancelReply.addEventListener("click", cancelReply)' in source
+    assert "state.replyTo = null" in source
+
+    _run_reconciliation_node("""
+const image = { text: "", attachment: { name: "photo.png", type: "image/png" } };
+assert.equal(replyQuoteMessage(image), "photo.png");
+""")
 
 
 def test_messages_infers_missing_image_content_type(web_client):

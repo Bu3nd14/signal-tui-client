@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Signal TUI Reader</title>
-  <link rel="stylesheet" href="/style.css?v=7">
+  <link rel="stylesheet" href="/style.css?v=8">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -51,6 +51,14 @@
         </div>
       </section>
       <form id="composer" class="composer" hidden>
+        <div id="reply-banner" class="reply-banner" hidden>
+          <span class="reply-mark" aria-hidden="true">↩</span>
+          <span class="reply-copy">
+            <strong id="reply-author"></strong>
+            <span id="reply-snippet"></span>
+          </span>
+          <button id="cancel-reply" type="button" aria-label="Annulla risposta" title="Annulla risposta">×</button>
+        </div>
         <div id="attachment-preview" class="attachment-preview" hidden>
           <img id="attachment-preview-image" alt="Anteprima immagine da inviare">
           <span id="attachment-preview-name"></span>
@@ -80,7 +88,7 @@
     </form>
   </dialog>
 
-  <script src="/reconcile.js?v=1" defer></script>
-  <script src="/app.js?v=8" defer></script>
+  <script src="/reconcile.js?v=2" defer></script>
+  <script src="/app.js?v=9" defer></script>
 </body>
 </html>
