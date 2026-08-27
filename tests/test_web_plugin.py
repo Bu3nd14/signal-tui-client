@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
@@ -274,6 +275,50 @@ const echo = { id: "wa-1", direction: "out", text: "answer", timestamp: 2001, qu
 const result = reconcileOptimisticMessages([echo], [optimistic], "whatsapp", "alice");
 assert.equal(result.visible.length, 0);
 assert.equal(result.optimistic[0].confirmed_message_id, "wa-1");
+""")
+
+
+def test_optimistic_image_reply_reconciles_waha_media_placeholder_echo():
+    _run_reconciliation_node("""
+const optimistic = { optimistic_id: "image-reply", protocol: "whatsapp", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: 1000, quote_author: "alice", quote_message: "photo.jpg", quote_media_type: "image" };
+const echo = { id: "wa-image-1", direction: "out", text: "answer", timestamp: 2001, quote_text: "🖼️ Immagine" };
+const result = reconcileOptimisticMessages([echo], [optimistic], "whatsapp", "alice");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "wa-image-1");
+""")
+
+
+def test_optimistic_signal_image_reply_reconciles_forwarded_quote_echo():
+    from backends.signal import _signal_quote_text
+
+    echo_quote = _signal_quote_text({"text": "Image: photo.jpg: signal-att"})
+    _run_reconciliation_node(f"""
+const target = {{ id: "1000", direction: "in", text: "Image: photo.jpg: signal-att", timestamp: 1000, attachment: {{ type: "image/jpeg", name: "Image: photo.jpg", attachment_id: "signal-att" }} }};
+const optimistic = {{ optimistic_id: "signal-image-reply", protocol: "signal", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: target.timestamp, quote_author: "alice", quote_message: replyQuoteMessage(target) }};
+const echo = {{ id: "2001", direction: "out", text: "answer", timestamp: 2001, quote_text: {json.dumps(echo_quote)} }};
+const result = reconcileOptimisticMessages([echo], [optimistic], "signal", "alice");
+assert.equal(optimistic.quote_message, "Image: photo.jpg: signal-att");
+assert.equal(echo.quote_text, optimistic.quote_message);
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "2001");
+""")
+
+
+def test_optimistic_telegram_image_reply_reconciles_media_echo():
+    from backends.telegram import _tg_quote_text_from_cached
+
+    echo_quote = _tg_quote_text_from_cached(
+        {"id": "10", "text": "", "msg_type": "image", "attachment_info": "Photo"}
+    )
+    _run_reconciliation_node(f"""
+const target = {{ id: "10", direction: "in", text: "", timestamp: 1000, attachment: {{ type: "image/jpeg", name: "Photo", attachment_id: "tgref:alice:10" }} }};
+const optimistic = {{ optimistic_id: "telegram-image-reply", protocol: "telegram", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: target.timestamp, quote_author: "alice", quote_message: replyQuoteMessage(target), reply_to_message_id: target.id, quote_media_type: "image" }};
+const echo = {{ id: "11", direction: "out", text: "answer", timestamp: 2001, quote_text: {json.dumps(echo_quote)} }};
+const result = reconcileOptimisticMessages([echo], [optimistic], "telegram", "alice");
+assert.equal(optimistic.quote_message, "Photo");
+assert.equal(echo.quote_text, "🖼️ Immagine");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "11");
 """)
 
 

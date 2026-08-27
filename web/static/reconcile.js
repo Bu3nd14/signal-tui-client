@@ -9,13 +9,35 @@ function quoteValue(message, snakeName, camelName, fallbackName = null) {
   return message[snakeName] ?? message[camelName] ?? (fallbackName ? message[fallbackName] : null) ?? null;
 }
 
+function quoteMediaType(message) {
+  const explicit = quoteValue(message, "quote_media_type", "quoteMediaType");
+  if (explicit) return String(explicit).toLowerCase();
+  const text = quoteValue(message, "quote_message", "quoteMessage", "quote_text");
+  if (typeof text !== "string") return null;
+  const placeholders = [
+    ["🖼️ Immagine", "image"],
+    ["🎬 Video", "video"],
+    ["🎵 Audio", "audio"],
+    ["🎨 Sticker", "sticker"],
+    ["📎 File", "attachment"],
+  ];
+  const match = placeholders.find(([placeholder]) => text === placeholder || text.endsWith(` — ${placeholder}`));
+  if (match) return match[1];
+  return null;
+}
+
+function quoteSignatureValue(message) {
+  const mediaType = quoteMediaType(message);
+  return mediaType ? `media:${mediaType}` : quoteValue(message, "quote_message", "quoteMessage", "quote_text");
+}
+
 function messageSignature(message) {
   return JSON.stringify([
     message.direction,
     message.text,
     quoteValue(message, "quote_timestamp", "quoteTimestamp"),
     quoteValue(message, "quote_author", "quoteAuthor"),
-    quoteValue(message, "quote_message", "quoteMessage", "quote_text"),
+    quoteSignatureValue(message),
     quoteValue(message, "reply_to_message_id", "replyToMessageId"),
     Boolean(message.attachment),
   ]);
@@ -25,7 +47,7 @@ function messageLooseSignature(message) {
   return JSON.stringify([
     message.direction,
     message.text,
-    quoteValue(message, "quote_message", "quoteMessage", "quote_text"),
+    quoteSignatureValue(message),
     Boolean(message.attachment),
   ]);
 }
