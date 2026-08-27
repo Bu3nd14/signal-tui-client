@@ -585,6 +585,33 @@ class TestTelegramTyping:
 
 
 class TestTelegramBackendOperations:
+    def test_attachment_send_timeout_is_120_and_configurable(
+        self, monkeypatch, tmp_path
+    ):
+        backend = _backend()
+        backend._loop = MagicMock()
+        backend._client = MagicMock()
+        future = MagicMock()
+        future.result.return_value = "77"
+
+        def schedule(coro, _loop):
+            coro.close()
+            return future
+
+        monkeypatch.setattr(
+            "backends.telegram.asyncio.run_coroutine_threadsafe", schedule
+        )
+        backend.send_attachment_sync(
+            "42", tmp_path / "photo.png", mime_type="image/png"
+        )
+        future.result.assert_called_once_with(timeout=120)
+
+        backend.attachment_send_timeout = 45
+        backend.send_attachment_sync(
+            "42", tmp_path / "photo.png", mime_type="image/png"
+        )
+        assert future.result.call_args_list[-1].kwargs == {"timeout": 45}
+
     def test_load_cache_mark_read_and_pairing(self, monkeypatch, tmp_path):
         backend = _backend()
         monkeypatch.setattr("backend._load_cache", MagicMock(return_value={"1": []}))

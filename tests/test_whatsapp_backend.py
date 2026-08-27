@@ -1093,6 +1093,28 @@ class TestWhatsAppBackend:
         )
         assert msg_id == "m"
 
+    def test_resolve_send_chat_id_uses_cached_lid_phone(self):
+        backend = _make_backend()
+        backend._lid_map = {
+            "139153@lid": {"phone": "393331234567", "resolved_at": 9999999999}
+        }
+        with patch.object(backend, "_lid_resolve_remote") as resolve_remote:
+            assert backend._resolve_send_chat_id("139153@lid") == "393331234567@c.us"
+        resolve_remote.assert_not_called()
+
+    def test_unresolved_lid_never_reaches_send_request(self, tmp_path):
+        backend = _make_backend()
+        image = tmp_path / "photo.png"
+        image.write_bytes(b"png-data")
+        with (
+            patch.object(backend, "_lid_lookup", return_value=None),
+            patch.object(backend, "_lid_resolve_remote", return_value=None),
+            patch.object(backend._rest, "_request") as request,
+            pytest.raises(RuntimeError, match="non risolvibile a numero"),
+        ):
+            backend.send_attachment_sync("139153@lid", image, mime_type="image/png")
+        request.assert_not_called()
+
     def test_send_message_forwards_reply_to_message_id(self):
         backend = _make_backend()
         with patch.object(backend, "send_message_sync", return_value="1") as mock_send:
@@ -1120,13 +1142,16 @@ class TestWhatsAppBackend:
 
     def test_send_attachment_sync_sends_waha_file_object(self, tmp_path):
         backend = _make_backend()
+        backend._lid_map = {
+            "139153@lid": {"phone": "393331234567", "resolved_at": 9999999999}
+        }
         image = tmp_path / "photo.png"
         image.write_bytes(b"png-data")
         with patch.object(
             backend._rest, "_request", return_value={"id": "image-id"}
         ) as request:
             message_id = backend.send_attachment_sync(
-                "1@c.us", image, mime_type="image/png"
+                "139153@lid", image, mime_type="image/png"
             )
 
         assert message_id == "image-id"
@@ -1135,7 +1160,7 @@ class TestWhatsAppBackend:
             "/api/sendImage",
             {
                 "session": backend._rest.session_name,
-                "chatId": "1@c.us",
+                "chatId": "393331234567@c.us",
                 "file": {
                     "mimetype": "image/png",
                     "filename": "photo.png",

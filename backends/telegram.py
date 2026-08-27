@@ -110,6 +110,7 @@ class TelegramBackend(ChatBackend):
     """Telegram backend using Telethon with a dedicated asyncio event loop."""
 
     protocol = PROTOCOL_TELEGRAM
+    attachment_send_timeout = 120
 
     def __init__(self) -> None:
         self._api_id = get_telegram_api_id()
@@ -802,7 +803,7 @@ class TelegramBackend(ChatBackend):
             return str(msg.id)
 
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
-        return future.result(timeout=30)
+        return future.result(timeout=self.attachment_send_timeout)
 
     def enqueue_sent_message(
         self,

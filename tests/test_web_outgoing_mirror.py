@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import stat
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -156,6 +158,37 @@ def test_web_image_mirror_has_empty_text_and_resolvable_attachment(
     assert not event.payload["attachment_info"]
     assert backend.get_attachment_path(event.payload["attachment_id"]).is_file()
     assert "upload-" not in event.payload["text"]
+
+
+def test_signal_attachment_rpc_and_echo_reuse_persistent_file(tmp_path, monkeypatch):
+    media_dir = tmp_path / "signal-media"
+    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    upload = tmp_path / "upload.png"
+    upload.write_bytes(b"image-data")
+    backend = SignalBackend()
+    backend._use_daemon = True
+    backend._rpc.send_message = MagicMock(
+        return_value={"result": {"timestamp": 1787250931234}}
+    )
+
+    message_id = backend.send_attachment_sync(
+        "+391234567890", upload, caption=None, mime_type="image/png"
+    )
+    persistent = Path(backend._rpc.send_message.call_args.kwargs["attachments"][0])
+    assert persistent.is_file()
+    assert persistent.parent == media_dir
+    assert stat.S_IMODE(persistent.stat().st_mode) == 0o644
+
+    backend.enqueue_sent_message(
+        "+391234567890",
+        str(message_id),
+        "",
+        attachment_path=upload,
+        mime_type="image/png",
+    )
+    event = backend.poll_once()[0]
+    assert event.payload["attachment_id"] == persistent.name
+    assert list(media_dir.iterdir()) == [persistent]
 
 
 @pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])

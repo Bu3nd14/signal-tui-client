@@ -246,6 +246,8 @@ class SignalBackend(ChatBackend):
         # SSE real-time delivery
         self._event_queue: queue.Queue[ChatEvent] = queue.Queue()
         self._sse_thread: threading.Thread | None = None
+        self._sent_attachment_paths: dict[str, Path] = {}
+        self._sent_attachment_paths_lock = threading.Lock()
 
         # Normalized contact list
         self.contacts: list[ChatContact] = []
@@ -600,15 +602,27 @@ class SignalBackend(ChatBackend):
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
     ) -> str:
-        return self._send_message_sync(
-            contact_id,
-            caption or "",
-            quote_timestamp=quote_timestamp,
-            quote_author=quote_author,
-            quote_message=quote_message,
-            reply_to_message_id=reply_to_message_id,
-            attachments=[str(file_path)],
-        )
+        SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        attachment_id = f"sent-{uuid.uuid4().hex}{file_path.suffix.lower()}"
+        persistent_path = SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id
+        shutil.copy2(file_path, persistent_path)
+        persistent_path.chmod(0o644)
+        try:
+            message_id = self._send_message_sync(
+                contact_id,
+                caption or "",
+                quote_timestamp=quote_timestamp,
+                quote_author=quote_author,
+                quote_message=quote_message,
+                reply_to_message_id=reply_to_message_id,
+                attachments=[str(persistent_path)],
+            )
+        except Exception:
+            persistent_path.unlink(missing_ok=True)
+            raise
+        with self._sent_attachment_paths_lock:
+            self._sent_attachment_paths[str(file_path.resolve())] = persistent_path
+        return message_id
 
     def enqueue_sent_message(
         self,
@@ -636,9 +650,20 @@ class SignalBackend(ChatBackend):
                 "image" if (mime_type or "").startswith("image/") else "attachment"
             )
             attachment_info = text or None
-            SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
-            attachment_id = f"sent-{uuid.uuid4().hex}{attachment_path.suffix.lower()}"
-            shutil.copy2(attachment_path, SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id)
+            with self._sent_attachment_paths_lock:
+                persistent_path = self._sent_attachment_paths.pop(
+                    str(attachment_path.resolve()), None
+                )
+            if persistent_path is not None:
+                attachment_id = persistent_path.name
+            else:
+                SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+                attachment_id = (
+                    f"sent-{uuid.uuid4().hex}{attachment_path.suffix.lower()}"
+                )
+                persistent_path = SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id
+                shutil.copy2(attachment_path, persistent_path)
+                persistent_path.chmod(0o644)
 
         event_text = "" if msg_type == "image" else text or attachment_info or ""
 

@@ -1163,6 +1163,16 @@ class WhatsAppBackend(ChatBackend):
 
     # ─── Messaging ────────────────────────────────────────────────────
 
+    def _resolve_send_chat_id(self, cid: str) -> str:
+        if not cid.endswith("@lid"):
+            return cid
+        phone = self._lid_lookup(cid) or self._lid_resolve_remote(cid)
+        if not phone:
+            raise RuntimeError(
+                f"WhatsApp: chat {cid} non risolvibile a numero — impossibile inviare"
+            )
+        return f"{phone}@c.us"
+
     async def send_message(
         self,
         contact_id: str,
@@ -1247,8 +1257,9 @@ class WhatsAppBackend(ChatBackend):
         """
         if not self._rest:
             raise RuntimeError("WhatsApp API is not configured")
+        send_chat_id = self._resolve_send_chat_id(contact_id)
         result = self._rest.send_message(
-            contact_id,
+            send_chat_id,
             text,
             quote_timestamp=quote_timestamp,
             quote_author=quote_author,
@@ -1277,8 +1288,9 @@ class WhatsAppBackend(ChatBackend):
     ) -> str | None:
         if not self._rest:
             raise RuntimeError("WhatsApp API is not configured")
+        send_chat_id = self._resolve_send_chat_id(contact_id)
         result = self._rest.send_image(
-            contact_id,
+            send_chat_id,
             file_path,
             caption=caption,
             reply_to_message_id=reply_to_message_id,

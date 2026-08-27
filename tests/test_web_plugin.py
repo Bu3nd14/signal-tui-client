@@ -462,6 +462,63 @@ def test_send_multipart_image_routes_and_cleans_temporary_file(web_client):
     assert not Path(path).exists()
 
 
+def test_send_multipart_whatsapp_lid_uses_resolved_chat_id(tmp_path):
+    from backends.manager import BackendManager
+    from backends.whatsapp import WhatsAppBackend
+
+    backend = WhatsAppBackend(api_url="http://api.test", media_dir=str(tmp_path))
+    backend.contacts = [ChatContact("139153@lid", "Bob", "whatsapp")]
+    backend._lid_map = {
+        "139153@lid": {"phone": "393331234567", "resolved_at": 9999999999}
+    }
+    backend._rest._request = MagicMock(return_value={"id": "image-id"})
+    manager = BackendManager()
+    manager.register(backend)
+
+    with TestClient(make_app(manager)) as client:
+        response = client.post(
+            "/api/send",
+            data={
+                "protocol": "whatsapp",
+                "contact_id": "139153@lid",
+                "text": "",
+            },
+            files={"file": ("clipboard.png", _PNG_1X1, "image/png")},
+            headers=AUTH,
+        )
+
+    assert response.status_code == 200
+    assert backend._rest._request.call_args.args[2]["chatId"] == "393331234567@c.us"
+
+
+def test_send_multipart_whatsapp_unresolved_lid_returns_502(tmp_path):
+    from backends.manager import BackendManager
+    from backends.whatsapp import WhatsAppBackend
+
+    backend = WhatsAppBackend(api_url="http://api.test", media_dir=str(tmp_path))
+    backend.contacts = [ChatContact("139153@lid", "Bob", "whatsapp")]
+    backend._lid_lookup = MagicMock(return_value=None)
+    backend._lid_resolve_remote = MagicMock(return_value=None)
+    backend._rest._request = MagicMock()
+    manager = BackendManager()
+    manager.register(backend)
+
+    with TestClient(make_app(manager)) as client:
+        response = client.post(
+            "/api/send",
+            data={
+                "protocol": "whatsapp",
+                "contact_id": "139153@lid",
+                "text": "",
+            },
+            files={"file": ("clipboard.png", _PNG_1X1, "image/png")},
+            headers=AUTH,
+        )
+
+    assert response.status_code == 502
+    backend._rest._request.assert_not_called()
+
+
 def test_send_multipart_image_routes_quote(web_client):
     client, manager, _ = web_client
     manager.contacts = [ChatContact("alice", "Alice", "whatsapp")]
