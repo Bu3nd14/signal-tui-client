@@ -361,6 +361,85 @@ def _update_message_id(
             conn.close()
 
 
+def _update_message_attachment_id(
+    protocol: str,
+    contact_number: str,
+    msg_id: str | None,
+    timestamp: int,
+    attachment_id: str,
+) -> bool:
+    if not msg_id:
+        return False
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
+                "AND msg_id = ? ORDER BY ABS(timestamp - ?) ASC, rowid ASC LIMIT 1",
+                (protocol, contact_number, str(msg_id), timestamp),
+            ).fetchone()
+            if row is None:
+                return False
+            cursor = conn.execute(
+                "UPDATE messages SET attachment_id = ? WHERE id = ?",
+                (attachment_id, row[0]),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+def _fill_message_quote_fields(
+    protocol: str,
+    contact_number: str,
+    msg_id: str | None,
+    timestamp: int,
+    *,
+    quote_text: str | None = None,
+    quote_timestamp: int | None = None,
+    quote_author: str | None = None,
+    reply_to_message_id: str | None = None,
+) -> bool:
+    if not msg_id:
+        return False
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
+                "AND msg_id = ? ORDER BY ABS(timestamp - ?) ASC, rowid ASC LIMIT 1",
+                (protocol, contact_number, str(msg_id), timestamp),
+            ).fetchone()
+            if row is None:
+                return False
+            cursor = conn.execute(
+                "UPDATE messages SET "
+                "quote_text = CASE WHEN quote_text IS NULL OR quote_text = '' "
+                "THEN ? ELSE quote_text END, "
+                "quote_timestamp = CASE WHEN quote_timestamp IS NULL "
+                "THEN ? ELSE quote_timestamp END, "
+                "quote_author = CASE WHEN quote_author IS NULL OR quote_author = '' "
+                "THEN ? ELSE quote_author END, "
+                "reply_to_message_id = CASE "
+                "WHEN reply_to_message_id IS NULL OR reply_to_message_id = '' "
+                "THEN ? ELSE reply_to_message_id END WHERE id = ?",
+                (
+                    quote_text,
+                    quote_timestamp,
+                    quote_author,
+                    reply_to_message_id,
+                    row[0],
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
 def _prune_cache():
     """Remove messages older than CACHE_RETENTION_DAYS and limit to 200 per contact."""
 

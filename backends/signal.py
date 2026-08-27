@@ -60,6 +60,7 @@ from backend import (
     _require_user_number,
     _run_subprocess,
     _send_subprocess,
+    _update_message_attachment_id,
     _update_message_id,
     _update_message_status,
     find_signal_cli,
@@ -1126,8 +1127,8 @@ class SignalBackend(ChatBackend):
         is_mine: bool,
         text: str,
         attachment_id: str | None = None,
-    ) -> bool:
-        """Return True if a message with the same identity is already cached.
+    ) -> dict | None:
+        """Return the cached message with the same identity, if present.
 
         For outgoing messages (``is_mine=True``) the optimistic save on send
         and the later sync sent-envelope can carry different timestamps but are
@@ -1144,14 +1145,53 @@ class SignalBackend(ChatBackend):
                 continue
             if msg.get("text") != text:
                 continue
-            if attachment_id and msg.get("attachment_id") != attachment_id:
-                continue
+            cached_attachment_id = msg.get("attachment_id")
+            if attachment_id and cached_attachment_id != attachment_id:
+                cached_path = (
+                    self.get_attachment_path(cached_attachment_id)
+                    if cached_attachment_id
+                    else None
+                )
+                incoming_path = self.get_attachment_path(attachment_id)
+                incoming_is_sent = Path(attachment_id).name.startswith("sent-")
+                can_upgrade = (
+                    is_mine
+                    and cached_path is None
+                    and incoming_is_sent
+                    and incoming_path is not None
+                )
+                keep_local = (
+                    is_mine and cached_path is not None and incoming_path is None
+                )
+                if not can_upgrade and not keep_local:
+                    continue
             if not is_mine:
                 if abs(msg.get("timestamp", 0) - ts) <= _INCOMING_DEDUP_WINDOW_MS:
-                    return True
+                    return msg
             elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:
-                return True
-        return False
+                return msg
+        return None
+
+    def _upgrade_outgoing_attachment(
+        self, contact_id: str, message: dict, data: dict, ts: int
+    ) -> None:
+        current_id = message.get("attachment_id")
+        incoming_id = data.get("attachment_id")
+        if (
+            not incoming_id
+            or not Path(incoming_id).name.startswith("sent-")
+            or self.get_attachment_path(incoming_id) is None
+            or (current_id and self.get_attachment_path(current_id) is not None)
+        ):
+            return
+        message["attachment_id"] = incoming_id
+        _update_message_attachment_id(
+            PROTOCOL_SIGNAL,
+            contact_id,
+            message.get("id") or data.get("id"),
+            int(message.get("timestamp", ts)),
+            incoming_id,
+        )
 
     def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
         """Persist a message to the SQLite cache (Signal protocol).
@@ -1228,11 +1268,15 @@ class SignalBackend(ChatBackend):
                         )
                     except Exception:
                         logger.exception("Signal: _update_message_id failed")
+                    self._upgrade_outgoing_attachment(contact_id, m, data, ts)
                     return False
 
-        if self._message_already_cached(
+        existing = self._message_already_cached(
             contact_id, ts, is_mine, text, data.get("attachment_id")
-        ):
+        )
+        if existing is not None:
+            if is_mine:
+                self._upgrade_outgoing_attachment(contact_id, existing, data, ts)
             return False
 
         if persist:

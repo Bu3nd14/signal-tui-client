@@ -116,6 +116,17 @@ function messageMediaQuoteSignature(message) {
   ]);
 }
 
+function messageTextQuoteSignature(message) {
+  const quoteText = quoteSignatureValue(message);
+  if (quoteText == null || quoteMediaType(message)) return null;
+  return JSON.stringify([
+    message.direction,
+    signatureText(message),
+    quoteText,
+    messageMediaType(message),
+  ]);
+}
+
 function messageQuoteAgnosticSignature(message) {
   return JSON.stringify([
     message.direction,
@@ -138,6 +149,8 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
   const realBySignature = new Map();
   const realByLooseSignature = new Map();
   const realByMediaQuoteSignature = new Map();
+  const realByTextQuoteSignature = new Map();
+  const realByQuoteAgnosticSignature = new Map();
   const quoteLessWhatsAppEchoes = new Map();
   messages.forEach((message, index) => {
     const identity = messageIdentity(message, index);
@@ -154,6 +167,18 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
       const mediaQuoteMatches = realByMediaQuoteSignature.get(mediaQuoteSignature) || [];
       mediaQuoteMatches.push(identity);
       realByMediaQuoteSignature.set(mediaQuoteSignature, mediaQuoteMatches);
+    }
+    const textQuoteSignature = messageTextQuoteSignature(message);
+    if (textQuoteSignature != null) {
+      const textQuoteMatches = realByTextQuoteSignature.get(textQuoteSignature) || [];
+      textQuoteMatches.push(identity);
+      realByTextQuoteSignature.set(textQuoteSignature, textQuoteMatches);
+    }
+    if (protocol === "whatsapp") {
+      const quoteAgnosticSignature = messageQuoteAgnosticSignature(message);
+      const agnosticMatches = realByQuoteAgnosticSignature.get(quoteAgnosticSignature) || [];
+      agnosticMatches.push(identity);
+      realByQuoteAgnosticSignature.set(quoteAgnosticSignature, agnosticMatches);
     }
     if (protocol === "whatsapp" && quoteSignatureValue(message) == null) {
       const quoteAgnosticSignature = messageQuoteAgnosticSignature(message);
@@ -180,14 +205,28 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
     const mediaQuoteMatches = mediaQuoteSignature == null
       ? []
       : realByMediaQuoteSignature.get(mediaQuoteSignature) || [];
+    const textQuoteSignature = messageTextQuoteSignature(item);
+    const textQuoteMatches = textQuoteSignature == null
+      ? []
+      : realByTextQuoteSignature.get(textQuoteSignature) || [];
     const quoteLessMatches = protocol === "whatsapp" && quoteSignatureValue(item) != null
       ? quoteLessWhatsAppEchoes.get(messageQuoteAgnosticSignature(item)) || []
       : [];
     const available = (id) => !known.has(id) && !consumed.has(id);
-    const realId = exactMatches.find(available)
-      ?? looseMatches.find(available)
-      ?? mediaQuoteMatches.find(available)
-      ?? quoteLessMatches.find(available);
+    const uniqueAvailable = (matches) => {
+      const availableMatches = matches.filter(available);
+      return availableMatches.length === 1 ? availableMatches[0] : undefined;
+    };
+    const textQuoteMatch = uniqueAvailable(textQuoteMatches);
+    const textQuoteFallback = protocol === "whatsapp" && textQuoteSignature != null
+      ? uniqueAvailable(realByQuoteAgnosticSignature.get(messageQuoteAgnosticSignature(item)) || [])
+      : undefined;
+    const realId = protocol === "whatsapp" && textQuoteSignature != null
+      ? textQuoteMatch ?? textQuoteFallback
+      : exactMatches.find(available)
+        ?? looseMatches.find(available)
+        ?? mediaQuoteMatches.find(available)
+        ?? uniqueAvailable(quoteLessMatches);
     if (realId === undefined) continue;
     const { optimistic_id: ignored, ...confirmed } = item;
     void ignored;

@@ -178,6 +178,17 @@ class TelegramBackend(ChatBackend):
         except (ValueError, TypeError):
             return None
 
+        mirrored = next(
+            (
+                candidate
+                for candidate in _media_dir().glob(f"{chat_id}-{msg_id}-sent*")
+                if candidate.is_file()
+            ),
+            None,
+        )
+        if mirrored is not None:
+            return mirrored
+
         return self._download_media_by_ref(chat_id, msg_id)
 
     def _download_media_by_ref(self, chat_id: int, msg_id: int) -> Path | None:
@@ -1311,7 +1322,7 @@ class TelegramBackend(ChatBackend):
 
         Returns True if the message was newly added, False if duplicate.
         """
-        from backend import _update_message_id
+        from backend import _update_message_attachment_id, _update_message_id
 
         if data.get("msg_type") == "image":
             data = {**data, "text": ""}
@@ -1336,6 +1347,23 @@ class TelegramBackend(ChatBackend):
                     and text
                 ):
                     self.apply_edit(contact_id, str(mid), text)
+                incoming_attachment = data.get("attachment_id")
+                if (
+                    entry is not None
+                    and data.get("is_mine")
+                    and entry.get("is_mine")
+                    and str(entry.get("attachment_id") or "").startswith(_TGREF_PREFIX)
+                    and incoming_attachment
+                    and Path(incoming_attachment).is_file()
+                ):
+                    entry["attachment_id"] = incoming_attachment
+                    _update_message_attachment_id(
+                        PROTOCOL_TELEGRAM,
+                        contact_id,
+                        str(mid),
+                        int(entry.get("timestamp", ts)),
+                        incoming_attachment,
+                    )
                 return False
             for m in self.cache.get(contact_id, []):
                 if (

@@ -206,8 +206,31 @@ function clearMedia() {
 async function loadImage(container, image, path) {
   const controller = new AbortController();
   state.mediaRequests.add(controller);
+  const retryDelays = [1000, 2000, 4000, 8000, 15000, 30000];
+  const retryBudget = 300000;
+  const startedAt = Date.now();
+  let retry = 0;
   try {
-    const response = await apiFetch(path, { signal: controller.signal });
+    let response;
+    while (!controller.signal.aborted) {
+      try {
+        response = await apiFetch(path, { signal: controller.signal });
+        break;
+      } catch (error) {
+        if (error.name === "AbortError") throw error;
+        const delay = retryDelays[Math.min(retry, retryDelays.length - 1)];
+        retry += 1;
+        if (Date.now() - startedAt + delay > retryBudget) throw error;
+        await new Promise((resolve, reject) => {
+          const timer = window.setTimeout(resolve, delay);
+          controller.signal.addEventListener("abort", () => {
+            window.clearTimeout(timer);
+            reject(new DOMException("Aborted", "AbortError"));
+          }, { once: true });
+        });
+      }
+    }
+    if (!response) return;
     const url = URL.createObjectURL(await response.blob());
     state.objectUrls.add(url);
     image.addEventListener("load", () => {

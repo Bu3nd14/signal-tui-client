@@ -1715,7 +1715,7 @@ class WhatsAppBackend(ChatBackend):
 
         Returns ``True`` if newly added, ``False`` if it was a duplicate.
         """
-        from backend import _update_message_id
+        from backend import _fill_message_quote_fields, _update_message_id
 
         if data.get("msg_type") == "image":
             data = {**data, "text": ""}
@@ -1746,6 +1746,29 @@ class WhatsAppBackend(ChatBackend):
                     ts if is_mine else existing["timestamp"],
                     msg_id,
                     protocol=PROTOCOL_WHATSAPP,
+                )
+            quote_fields = (
+                "quote_text",
+                "quote_timestamp",
+                "quote_author",
+                "reply_to_message_id",
+            )
+            changed = False
+            for field in quote_fields:
+                value = data.get(field)
+                if existing.get(field) in (None, "") and value not in (None, ""):
+                    existing[field] = value
+                    changed = True
+            if changed:
+                _fill_message_quote_fields(
+                    PROTOCOL_WHATSAPP,
+                    contact_id,
+                    existing.get("id") or msg_id,
+                    int(existing.get("timestamp", ts)),
+                    quote_text=data.get("quote_text"),
+                    quote_timestamp=data.get("quote_timestamp"),
+                    quote_author=data.get("quote_author"),
+                    reply_to_message_id=data.get("reply_to_message_id"),
                 )
             return False
 
