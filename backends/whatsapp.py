@@ -1252,6 +1252,31 @@ class WhatsAppBackend(ChatBackend):
             raise RuntimeError("WhatsApp API send failed / unreachable")
         return self._extract_message_id(result)
 
+    def send_attachment_sync(
+        self,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+    ) -> str | None:
+        if not self._rest:
+            raise RuntimeError("WhatsApp API is not configured")
+        result = self._rest.send_image(
+            contact_id,
+            file_path,
+            caption=caption,
+            reply_to_message_id=reply_to_message_id,
+            mime_type=mime_type,
+        )
+        if result is None:
+            raise RuntimeError("WhatsApp API send failed / unreachable")
+        return self._extract_message_id(result)
+
     def edit_message_sync(
         self, contact_id: str, message_id: str, new_text: str
     ) -> bool:

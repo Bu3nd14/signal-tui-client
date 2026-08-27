@@ -149,8 +149,32 @@ def create_api_router() -> Any:
             if not origin_host or origin_host != request_host:
                 raise HTTPException(status_code=403, detail="Forbidden")
 
+        is_multipart = (
+            request.headers.get("content-type", "")
+            .lower()
+            .startswith("multipart/form-data")
+        )
+        upload_file = None
         try:
-            payload = await request.json()
+            if is_multipart:
+                from web.uploads import MAX_UPLOAD_BYTES
+
+                content_length = request.headers.get("content-length")
+                if (
+                    content_length
+                    and int(content_length) > MAX_UPLOAD_BYTES + 1024 * 1024
+                ):
+                    raise HTTPException(status_code=413, detail="Upload too large")
+                form = await request.form()
+                payload = dict(form)
+                upload_file = form.get("file")
+                if upload_file is None or not hasattr(upload_file, "read"):
+                    raise HTTPException(status_code=400, detail="Invalid request")
+                payload.pop("file", None)
+            else:
+                payload = await request.json()
+        except HTTPException:
+            raise
         except Exception:  # noqa: BLE001
             raise HTTPException(status_code=400, detail="Invalid request") from None
         if not isinstance(payload, dict):
@@ -163,17 +187,28 @@ def create_api_router() -> Any:
             raise HTTPException(status_code=400, detail="Invalid request")
         if not isinstance(contact_id, str) or not contact_id.strip():
             raise HTTPException(status_code=400, detail="Invalid request")
-        if (
-            not isinstance(text, str)
-            or not text.strip()
-            or len(text) > _MAX_TEXT_LENGTH
-        ):
+        if not isinstance(text, str) or len(text) > _MAX_TEXT_LENGTH:
+            raise HTTPException(status_code=400, detail="Invalid request")
+        if not text.strip() and upload_file is None:
             raise HTTPException(status_code=400, detail="Invalid request")
 
         quote_timestamp = payload.get("quote_timestamp")
         quote_author = payload.get("quote_author")
         quote_message = payload.get("quote_message")
         reply_to_message_id = payload.get("reply_to_message_id")
+        if is_multipart:
+            quote_author = quote_author or None
+            quote_message = quote_message or None
+            reply_to_message_id = reply_to_message_id or None
+            if quote_timestamp == "":
+                quote_timestamp = None
+            elif quote_timestamp is not None:
+                try:
+                    quote_timestamp = int(quote_timestamp)
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400, detail="Invalid request"
+                    ) from None
         if isinstance(quote_timestamp, bool) or (
             quote_timestamp is not None and not isinstance(quote_timestamp, int)
         ):
@@ -218,19 +253,58 @@ def create_api_router() -> Any:
             "quote_message": quote_message,
             "reply_to_message_id": reply_to_message_id,
         }
+        upload = None
         try:
-            await asyncio.to_thread(
-                manager.send_message_sync,
-                protocol,
-                contact_id,
-                text,
-                **kwargs,
+            if upload_file is not None:
+                from web.uploads import UploadValidationError, store_upload
+
+                try:
+                    upload = await store_upload(upload_file)
+                except UploadValidationError as exc:
+                    detail = (
+                        "Upload too large"
+                        if exc.status_code == 413
+                        else "Invalid image"
+                    )
+                    raise HTTPException(
+                        status_code=exc.status_code, detail=detail
+                    ) from None
+                await asyncio.to_thread(
+                    manager.send_attachment_sync,
+                    protocol,
+                    contact_id,
+                    upload.path,
+                    caption=text or None,
+                    mime_type=upload.mime_type,
+                    **kwargs,
+                )
+            else:
+                await asyncio.to_thread(
+                    manager.send_message_sync,
+                    protocol,
+                    contact_id,
+                    text,
+                    **kwargs,
+                )
+        except HTTPException:
+            raise
+        except NotImplementedError:
+            if upload_file is not None:
+                raise HTTPException(
+                    status_code=501, detail="Attachment send not supported"
+                ) from None
+            logger.exception(
+                "Web send failed: protocol=%s contact=%s", protocol, contact_id
             )
+            raise HTTPException(status_code=502, detail="Message send failed") from None
         except Exception:
             logger.exception(
                 "Web send failed: protocol=%s contact=%s", protocol, contact_id
             )
             raise HTTPException(status_code=502, detail="Message send failed") from None
+        finally:
+            if upload is not None:
+                upload.cleanup()
 
         push_event(
             {

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from models import ChatContact
 
@@ -153,6 +154,32 @@ class BackendManager:
         if reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
         return backend.send_message_sync(contact_id, text, **kwargs)
+
+    def send_attachment_sync(
+        self,
+        protocol: str,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        """Send an image through *protocol* from a worker thread."""
+        backend = self._get_or_raise(protocol)
+        kwargs = {
+            "caption": caption,
+            "mime_type": mime_type,
+            "quote_timestamp": quote_timestamp,
+            "quote_author": quote_author,
+            "quote_message": quote_message,
+        }
+        if reply_to_message_id is not None:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        return backend.send_attachment_sync(contact_id, file_path, **kwargs)
 
     async def mark_read(self, protocol: str, contact_id: str) -> None:
         """Mark messages read via the backend for *protocol*."""

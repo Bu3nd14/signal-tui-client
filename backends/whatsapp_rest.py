@@ -13,6 +13,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import backends.whatsapp as _wa
 
@@ -341,6 +342,33 @@ class WhatsAppRESTClient:
         if reply_to_message_id is not None:
             payload["reply_to"] = reply_to_message_id
         return self._request("POST", "/api/sendText", payload)
+
+    def send_image(
+        self,
+        chat_id: str,
+        file_path: Path,
+        caption: str | None = None,
+        reply_to_message_id: str | None = None,
+        mime_type: str | None = None,
+    ) -> dict | None:
+        """Send a local image via WAHA ``/api/sendImage``."""
+        import base64
+        import mimetypes
+
+        path = Path(file_path)
+        detected_type = mime_type or mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        payload = {
+            "session": self.session_name,
+            "chatId": chat_id,
+            "file": {
+                "mimetype": detected_type,
+                "data": base64.b64encode(path.read_bytes()).decode("ascii"),
+            },
+            "caption": caption or "",
+        }
+        if reply_to_message_id is not None:
+            payload["reply_to"] = reply_to_message_id
+        return self._request("POST", "/api/sendImage", payload)
 
     def edit_message(self, chat_id: str, message_id: str, text: str) -> dict | None:
         """WAHA ``PUT /api/{session}/chats/{chatId}/messages/{messageId}``.

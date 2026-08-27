@@ -517,6 +517,7 @@ class SignalBackend(ChatBackend):
         quote_message: str | None,
         reply_to_message_id: str | None = None,
         quote_attachments: list[str] | None = None,
+        attachments: list[str] | None = None,
     ) -> str:
         """Send *text* and return the real server timestamp (ms) when available.
 
@@ -527,6 +528,9 @@ class SignalBackend(ChatBackend):
         optimistic ``ts`` (still used as the entry/DB identity).
         """
         ts = int(time.time() * 1000)
+        attachment_kwargs = (
+            {"attachments": attachments} if attachments is not None else {}
+        )
         if self._use_daemon and self._rpc:
             result = self._rpc.send_message(
                 text,
@@ -536,6 +540,7 @@ class SignalBackend(ChatBackend):
                 quote_author=quote_author,
                 quote_message=quote_message,
                 quote_attachments=quote_attachments,
+                **attachment_kwargs,
             )
             if "error" in result:
                 raise RuntimeError(result["error"])
@@ -550,6 +555,7 @@ class SignalBackend(ChatBackend):
             quote_author=quote_author,
             quote_message=quote_message,
             quote_attachments=quote_attachments,
+            **attachment_kwargs,
         )
         try:
             return int(stdout.strip())
@@ -577,6 +583,28 @@ class SignalBackend(ChatBackend):
             quote_author=quote_author,
             quote_message=quote_message,
             quote_attachments=quote_attachments,
+        )
+
+    def send_attachment_sync(
+        self,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        return self._send_message_sync(
+            contact_id,
+            caption or "",
+            quote_timestamp=quote_timestamp,
+            quote_author=quote_author,
+            quote_message=quote_message,
+            reply_to_message_id=reply_to_message_id,
+            attachments=[str(file_path)],
         )
 
     def edit_message_sync(

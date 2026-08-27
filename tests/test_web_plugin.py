@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
 import time
+from base64 import b64decode
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib.parse import quote
@@ -25,6 +28,7 @@ class FakeManager:
         self.contacts = list(contacts)
         self.paths = dict(paths or {})
         self.send_calls = []
+        self.attachment_calls = []
 
     def list_contacts(self):
         return list(self.contacts)
@@ -38,6 +42,13 @@ class FakeManager:
     def send_message_sync(self, protocol, contact_id, text, **kwargs):
         self.send_calls.append((protocol, contact_id, text, kwargs))
         return "sent-id"
+
+    def send_attachment_sync(self, protocol, contact_id, file_path, **kwargs):
+        path = str(file_path)
+        self.attachment_calls.append(
+            (protocol, contact_id, path, kwargs, Path(path).exists())
+        )
+        return "attachment-id"
 
 
 def make_app(manager):
@@ -256,6 +267,135 @@ def test_backend_manager_send_message_sync_routes_to_backend():
         quote_message="Prima",
         reply_to_message_id="reply-id",
     )
+
+
+def test_backend_manager_send_attachment_sync_routes_to_backend(tmp_path):
+    from backends.manager import BackendManager
+
+    image = tmp_path / "image.png"
+    backend = MagicMock(protocol="signal")
+    backend.send_attachment_sync.return_value = "message-id"
+    manager = BackendManager()
+    manager.register(backend)
+
+    result = manager.send_attachment_sync(
+        "signal",
+        "alice",
+        image,
+        caption="Ciao",
+        mime_type="image/png",
+        quote_timestamp=123,
+        quote_author="alice",
+        quote_message="Prima",
+        reply_to_message_id="reply-id",
+    )
+
+    assert result == "message-id"
+    backend.send_attachment_sync.assert_called_once_with(
+        "alice",
+        image,
+        caption="Ciao",
+        mime_type="image/png",
+        quote_timestamp=123,
+        quote_author="alice",
+        quote_message="Prima",
+        reply_to_message_id="reply-id",
+    )
+
+
+_PNG_1X1 = b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+def test_send_multipart_image_routes_and_cleans_temporary_file(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": "caption"},
+        files={"file": ("clipboard.png", _PNG_1X1, "image/png")},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    protocol, contact_id, path, kwargs, existed_during_send = manager.attachment_calls[
+        0
+    ]
+    assert (protocol, contact_id, existed_during_send) == ("signal", "alice", True)
+    assert kwargs["caption"] == "caption"
+    assert kwargs["mime_type"] == "image/png"
+    assert not Path(path).exists()
+
+
+def test_send_multipart_rejects_image_over_20_mib(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    oversized = b"\x89PNG\r\n\x1a\n" + b"x" * (20 * 1024 * 1024)
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": ""},
+        files={"file": ("large.png", oversized, "image/png")},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 413
+    assert manager.attachment_calls == []
+
+
+def test_send_multipart_rejects_non_image_magic(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": ""},
+        files={"file": ("renamed.png", b"not an image", "image/png")},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 400
+    assert manager.attachment_calls == []
+
+
+@pytest.mark.parametrize(
+    "exception,status", [(RuntimeError("down"), 502), (NotImplementedError(), 501)]
+)
+def test_send_multipart_maps_backend_errors(web_client, exception, status):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    manager.send_attachment_sync = MagicMock(side_effect=exception)
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": ""},
+        files={"file": ("clipboard.png", _PNG_1X1, "image/png")},
+        headers=AUTH,
+    )
+
+    assert response.status_code == status
+
+
+def test_upload_janitor_removes_only_files_older_than_one_hour(tmp_path):
+    import backend
+    from web.uploads import prepare_upload_directory
+
+    upload_dir = tmp_path / "web-uploads"
+    upload_dir.mkdir()
+    old = upload_dir / "old.png"
+    recent = upload_dir / "recent.png"
+    old.write_bytes(_PNG_1X1)
+    recent.write_bytes(_PNG_1X1)
+    now = time.time()
+    os.utime(old, (now - 3601, now - 3601))
+
+    with patch.object(backend, "CACHE_DIR", tmp_path):
+        prepare_upload_directory(now=now)
+
+    assert not old.exists()
+    assert recent.exists()
 
 
 def test_websocket_rejects_missing_token(web_client):

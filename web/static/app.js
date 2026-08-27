@@ -16,6 +16,7 @@ const state = {
   optimistic: [],
   optimisticSequence: 0,
   sending: false,
+  stagedAttachment: null,
 };
 
 const elements = {
@@ -38,6 +39,10 @@ const elements = {
   sendMessage: document.querySelector("#send-message"),
   sendIcon: document.querySelector(".send-icon"),
   sendSpinner: document.querySelector(".send-spinner"),
+  attachmentPreview: document.querySelector("#attachment-preview"),
+  attachmentPreviewImage: document.querySelector("#attachment-preview-image"),
+  attachmentPreviewName: document.querySelector("#attachment-preview-name"),
+  removeAttachment: document.querySelector("#remove-attachment"),
 };
 
 function showError(message) {
@@ -64,6 +69,7 @@ function handleUnauthorized() {
 
 async function apiFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
+  if (options.body instanceof FormData) headers.delete("Content-Type");
   headers.set("Authorization", `Bearer ${state.token}`);
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401) {
@@ -232,6 +238,12 @@ function renderMessages(messages, protocol) {
     active?.id,
   );
   state.optimistic = reconciliation.optimistic;
+  for (const item of state.optimistic) {
+    if (item.localPreviewUrl && !item.optimistic_id) {
+      URL.revokeObjectURL(item.localPreviewUrl);
+      delete item.localPreviewUrl;
+    }
+  }
   const displayed = [...messages, ...reconciliation.visible].sort((a, b) => timestampMilliseconds(a.timestamp) - timestampMilliseconds(b.timestamp));
   if (!displayed.length) {
     const empty = document.createElement("div");
@@ -249,7 +261,17 @@ function renderMessages(messages, protocol) {
     bubble.className = "bubble";
     const isImage = item.attachment?.type?.toLowerCase().startsWith("image/");
     if (isImage) {
-      bubble.append(imageAttachment(item.attachment, protocol));
+      if (item.localPreviewUrl) {
+        const preview = document.createElement("div");
+        preview.className = "attachment local-preview";
+        const image = document.createElement("img");
+        image.src = item.localPreviewUrl;
+        image.alt = item.attachment.name || "Immagine allegata";
+        preview.append(image);
+        bubble.append(preview);
+      } else {
+        bubble.append(imageAttachment(item.attachment, protocol));
+      }
     }
     const attachmentId = item.attachment?.attachment_id || "";
     const attachmentName = item.attachment?.name || attachmentId.split("?", 1)[0].split("/").filter(Boolean).pop() || "Allegato";
@@ -321,16 +343,49 @@ function resizeComposer() {
 }
 
 function updateComposer() {
-  elements.sendMessage.disabled = state.sending || !elements.messageInput.value.trim();
+  elements.sendMessage.disabled = state.sending || (!elements.messageInput.value.trim() && !state.stagedAttachment);
   elements.messageInput.disabled = state.sending;
+  elements.removeAttachment.disabled = state.sending;
   elements.sendIcon.hidden = state.sending;
   elements.sendSpinner.hidden = !state.sending;
+}
+
+function clearStagedAttachment({ revoke = true } = {}) {
+  if (state.stagedAttachment && revoke) URL.revokeObjectURL(state.stagedAttachment.previewUrl);
+  state.stagedAttachment = null;
+  elements.attachmentPreview.hidden = true;
+  elements.attachmentPreviewImage.removeAttribute("src");
+  elements.attachmentPreviewName.textContent = "";
+  updateComposer();
+}
+
+function stageAttachment(file) {
+  if (!file || !file.type.startsWith("image/") || state.sending) return;
+  if (file.size > 20 * 1024 * 1024) {
+    showError("L'immagine supera il limite di 20 MiB.");
+    return;
+  }
+  clearStagedAttachment();
+  const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+  const extension = extensions[file.type];
+  if (!extension) {
+    showError("Formato immagine non supportato.");
+    return;
+  }
+  const filename = `clipboard-${Date.now()}.${extension}`;
+  const previewUrl = URL.createObjectURL(file);
+  state.stagedAttachment = { file, filename, previewUrl };
+  elements.attachmentPreviewImage.src = previewUrl;
+  elements.attachmentPreviewName.textContent = filename;
+  elements.attachmentPreview.hidden = false;
+  updateComposer();
 }
 
 async function submitMessage() {
   if (state.sending || !state.active) return;
   const text = elements.messageInput.value;
-  if (!text.trim()) return;
+  const attachment = state.stagedAttachment;
+  if (!text.trim() && !attachment) return;
   const active = { ...state.active };
   const timestamp = Date.now();
   const optimistic = {
@@ -343,18 +398,32 @@ async function submitMessage() {
     optimisticStatus: "sending",
     known_message_ids: state.messages.map(window.SignalTuiReconcile.messageIdentity),
   };
+  if (attachment) {
+    optimistic.attachment = { type: attachment.file.type, name: attachment.filename, attachment_id: attachment.filename };
+    optimistic.localPreviewUrl = attachment.previewUrl;
+  }
   state.optimistic.push(optimistic);
   state.sending = true;
   elements.messageInput.value = "";
+  if (attachment) clearStagedAttachment({ revoke: false });
   resizeComposer();
   updateComposer();
   if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
   try {
-    await apiFetch("/api/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text }),
-    });
+    if (attachment) {
+      const body = new FormData();
+      body.set("protocol", active.protocol);
+      body.set("contact_id", active.id);
+      body.set("text", text);
+      body.set("file", attachment.file, attachment.filename);
+      await apiFetch("/api/send", { method: "POST", body });
+    } else {
+      await apiFetch("/api/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text }),
+      });
+    }
     optimistic.optimisticStatus = "sent";
   } catch (error) {
     optimistic.optimisticStatus = "failed";
@@ -447,6 +516,14 @@ elements.messageInput.addEventListener("keydown", (event) => {
   event.preventDefault();
   if (!state.sending) submitMessage();
 });
+elements.composer.addEventListener("paste", (event) => {
+  const item = [...(event.clipboardData?.items || [])]
+    .find((candidate) => candidate.type.startsWith("image/"));
+  if (!item) return;
+  event.preventDefault();
+  stageAttachment(item.getAsFile());
+});
+elements.removeAttachment.addEventListener("click", () => clearStagedAttachment());
 if (elements.protocolTabs) {
   elements.protocolTabs.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-protocol]");
@@ -471,6 +548,10 @@ document.querySelector("#token-form").addEventListener("submit", (event) => {
 window.addEventListener("beforeunload", () => {
   disconnectSocket();
   clearMedia();
+  clearStagedAttachment();
+  for (const item of state.optimistic) {
+    if (item.localPreviewUrl) URL.revokeObjectURL(item.localPreviewUrl);
+  }
 });
 
 if (state.token) {

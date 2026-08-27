@@ -358,6 +358,13 @@ backend). Un solo formato evita tre adattatori.
 
 ### 8.3 `web/uploads.py` — validazione e lifecycle
 
+**Decisione di implementazione Chunk B.** Il sottoinsieme accettato è
+PNG/JPEG/GIF/WebP (BMP resta rinviato perché il requisito del chunk limita la
+whitelist a questi quattro formati). Magic bytes assenti o incoerenza fra magic
+ed estensione producono un `400` generico. Il janitor, eseguito una sola volta
+all'avvio e senza timer, elimina gli orfani più vecchi di un'ora; un'ora riduce
+il consumo disco dopo un crash senza introdurre lavoro periodico a riposo.
+
 - **Cap dimensione**: default **20 MiB** (config `web.max_upload_mb`), check
   anticipato su `Content-Length` → 413 senza leggere il body; poi conteggio
   reale durante lo spool (difesa da header mentito).

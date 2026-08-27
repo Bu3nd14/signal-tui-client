@@ -17,6 +17,7 @@ function messageSignature(message) {
     quoteValue(message, "quote_author", "quoteAuthor"),
     quoteValue(message, "quote_message", "quoteMessage"),
     quoteValue(message, "reply_to_message_id", "replyToMessageId"),
+    Boolean(message.attachment),
   ]);
 }
 

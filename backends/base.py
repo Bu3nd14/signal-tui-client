@@ -79,6 +79,21 @@ class ChatBackend(ABC):
         """Blocking message send for callers running in a worker thread."""
         raise NotImplementedError
 
+    def send_attachment_sync(
+        self,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        """Blocking image send for callers running in a worker thread."""
+        raise NotImplementedError
+
     @abstractmethod
     async def mark_read(self, contact_id: str) -> None:
         """Mark all messages for *contact_id* as read."""

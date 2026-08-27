@@ -142,6 +142,7 @@ def _send_subprocess(
     quote_message: str | None = None,
     edit_timestamp: int | None = None,
     quote_attachments: list[str] | None = None,
+    attachments: list[str] | None = None,
 ) -> str:
     """Send a message via subprocess, optionally with a quote/reply or edit."""
     args = ["send", "-m", message, recipient]
@@ -155,6 +156,8 @@ def _send_subprocess(
         args.extend(["--edit-timestamp", str(edit_timestamp)])
     for qa in quote_attachments or []:
         args.extend(["--quote-attachment", qa])
+    for attachment in attachments or []:
+        args.extend(["--attachment", attachment])
     return _backend._run_subprocess(args)
 
 
@@ -351,6 +354,7 @@ class SignalRPCClient:
         quote_message: str | None = None,
         edit_timestamp: int | None = None,
         quote_attachments: list[str] | None = None,
+        attachments: list[str] | None = None,
     ) -> dict:
         """Send a message to a recipient, optionally with a quote/reply.
 
@@ -397,6 +401,8 @@ class SignalRPCClient:
             params["editTimestamp"] = edit_timestamp
         if quote_attachments is not None:
             params["quoteAttachments"] = quote_attachments
+        if attachments is not None:
+            params["attachments"] = attachments
         return self._call("send", params)
 
     def receive(self) -> list[dict]:

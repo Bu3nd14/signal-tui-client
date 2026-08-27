@@ -769,6 +769,40 @@ class TelegramBackend(ChatBackend):
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
         return future.result(timeout=30)
 
+    def send_attachment_sync(
+        self,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        if self._loop is None or self._client is None:
+            raise RuntimeError("Telegram backend not connected")
+
+        async def _send() -> str:
+            try:
+                eid = int(contact_id)
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid Telegram contact id: {contact_id}")
+            reply_to = self._validated_reply_to_message_id(reply_to_message_id)
+            entity = await self._resolve_input_entity(eid)
+            msg = await self._client.send_file(
+                entity,
+                str(file_path),
+                caption=caption or None,
+                reply_to=reply_to,
+                force_document=False,
+            )
+            return str(msg.id)
+
+        future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
+        return future.result(timeout=30)
+
     def edit_message_sync(
         self, contact_id: str, message_id: str, new_text: str
     ) -> bool:
