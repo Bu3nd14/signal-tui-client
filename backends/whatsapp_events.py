@@ -89,6 +89,9 @@ def _wa_quote_media_type(quote: dict) -> str | None:
     if flat in ("document", "file"):
         return "attachment"
     mime = str(quote.get("mimetype") or "").lower()
+    media = quote.get("media")
+    if not mime and isinstance(media, dict):
+        mime = str(media.get("mimetype") or "").lower()
     if mime.startswith("image/"):
         return "image"
     if mime.startswith("video/"):
@@ -439,8 +442,26 @@ def _event_from_message(
     # al nome del contatto tramite la rubrica caricata dal backend.
     sender = _resolve_sender_name(sender, contacts_by_jid)
 
-    quote = raw.get("quote") or raw.get("quotedMessage")
+    quote = raw.get("replyTo") or raw.get("quote") or raw.get("quotedMessage")
     quote_text = _wa_quote_text(quote)
+    quote_timestamp = None
+    quote_author = None
+    reply_to_message_id = None
+    if isinstance(quote, dict):
+        quote_ts = quote.get("timestamp")
+        if isinstance(quote_ts, (int, float)):
+            quote_timestamp = (
+                int(quote_ts * 1000) if quote_ts < 10**12 else int(quote_ts)
+            )
+        elif isinstance(quote_ts, str) and quote_ts.isdigit():
+            value = int(quote_ts)
+            quote_timestamp = value * 1000 if value < 10**12 else value
+        quote_author = _jid_string(
+            quote.get("participant") or quote.get("author") or quote.get("from")
+        )
+        quoted_id = quote.get("id") or quote.get("messageId")
+        if quoted_id is not None:
+            reply_to_message_id = str(quoted_id)
 
     # ── Build events ───────────────────────────────────────────────────
     ack_val = _ack_value(raw)
@@ -462,6 +483,9 @@ def _event_from_message(
                         "is_group": is_group,
                         "timestamp": ts_ms,
                         "quote_text": quote_text,
+                        "quote_timestamp": quote_timestamp,
+                        "quote_author": quote_author,
+                        "reply_to_message_id": reply_to_message_id,
                         "msg_type": att_type,
                         "attachment_info": att_info,
                         "attachment_id": att_id,
@@ -486,6 +510,9 @@ def _event_from_message(
                 "is_group": is_group,
                 "timestamp": ts_ms,
                 "quote_text": quote_text,
+                "quote_timestamp": quote_timestamp,
+                "quote_author": quote_author,
+                "reply_to_message_id": reply_to_message_id,
                 "msg_type": msg_type,
                 "attachment_info": None,
                 "attachment_id": None,

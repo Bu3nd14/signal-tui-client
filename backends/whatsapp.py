@@ -1277,6 +1277,51 @@ class WhatsAppBackend(ChatBackend):
             raise RuntimeError("WhatsApp API send failed / unreachable")
         return self._extract_message_id(result)
 
+    def enqueue_sent_message(
+        self,
+        contact_id: str,
+        message_id: str,
+        text: str,
+        *,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        attachment_path: Path | None = None,
+        mime_type: str | None = None,
+    ) -> None:
+        is_attachment = attachment_path is not None
+        self._enqueue_event(
+            ChatEvent(
+                type="message",
+                protocol=self.protocol,
+                contact_id=contact_id,
+                payload={
+                    "id": message_id,
+                    "text": text,
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": int(time.time() * 1000),
+                    "quote_text": quote_message,
+                    "quote_timestamp": quote_timestamp,
+                    "quote_author": quote_author,
+                    "reply_to_message_id": reply_to_message_id,
+                    "msg_type": (
+                        "image"
+                        if is_attachment and (mime_type or "").startswith("image/")
+                        else "attachment"
+                        if is_attachment
+                        else "text"
+                    ),
+                    "attachment_info": (
+                        text or attachment_path.name if attachment_path else None
+                    ),
+                    "attachment_id": None,
+                    "content_type": mime_type,
+                },
+            )
+        )
+
     def edit_message_sync(
         self, contact_id: str, message_id: str, new_text: str
     ) -> bool:

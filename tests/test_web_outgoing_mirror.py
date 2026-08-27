@@ -8,19 +8,23 @@ import pytest
 from backends.manager import BackendManager
 from backends.signal import SignalBackend
 from backends.telegram import TelegramBackend
+from backends.whatsapp import WhatsAppBackend
 
 
 def _backend(protocol: str):
     if protocol == "signal":
         backend = SignalBackend()
         backend.send_message_sync = MagicMock(return_value=str(int(time.time() * 1000)))
-    else:
+    elif protocol == "telegram":
         backend = TelegramBackend()
         backend.send_message_sync = MagicMock(return_value="77")
+    else:
+        backend = WhatsAppBackend()
+        backend.send_message_sync = MagicMock(return_value="wa-77")
     return backend
 
 
-@pytest.mark.parametrize("protocol", ["signal", "telegram"])
+@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
 def test_facade_send_enqueues_outgoing_event_that_is_ingested(protocol):
     backend = _backend(protocol)
     manager = BackendManager()
@@ -36,6 +40,33 @@ def test_facade_send_enqueues_outgoing_event_that_is_ingested(protocol):
     assert added is True
     assert backend.cache["42"][0]["text"] == "from web"
     assert backend.cache["42"][0]["is_mine"] is True
+
+
+@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
+def test_facade_reply_mirrors_complete_quote_into_tui_ingest(protocol):
+    backend = _backend(protocol)
+    manager = BackendManager()
+    manager.register(backend)
+
+    manager.send_message_sync(
+        protocol,
+        "42",
+        "answer",
+        quote_timestamp=123000,
+        quote_author="42",
+        quote_message="question",
+        reply_to_message_id="11",
+    )
+    event = backend.poll_once()[0]
+    backend.ingest_message(
+        event.contact_id, event.payload, event.payload["timestamp"], persist=False
+    )
+
+    cached = backend.cache["42"][0]
+    assert cached["quote_text"] == "question"
+    assert cached["quote_timestamp"] == 123000
+    assert cached["quote_author"] == "42"
+    assert cached["reply_to_message_id"] == "11"
 
 
 @pytest.mark.parametrize("protocol", ["signal", "telegram"])
@@ -76,7 +107,7 @@ def test_facade_send_attachment_enqueues_event_with_media_data(
     assert cached["attachment_id"]
 
 
-@pytest.mark.parametrize("protocol", ["signal", "telegram"])
+@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
 def test_facade_send_echo_upgrades_optimistic_without_duplicate(protocol):
     backend = _backend(protocol)
     manager = BackendManager()

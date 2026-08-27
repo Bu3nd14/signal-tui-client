@@ -52,6 +52,14 @@ function messageLooseSignature(message) {
   ]);
 }
 
+function messageQuoteAgnosticSignature(message) {
+  return JSON.stringify([
+    message.direction,
+    message.text,
+    Boolean(message.attachment),
+  ]);
+}
+
 function replyQuoteMessage(message) {
   if (message.text) return message.text;
   if (!message.attachment) return "";
@@ -64,6 +72,7 @@ function replyQuoteMessage(message) {
 function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) {
   const realBySignature = new Map();
   const realByLooseSignature = new Map();
+  const quoteLessWhatsAppEchoes = new Map();
   messages.forEach((message, index) => {
     const identity = messageIdentity(message, index);
     const signature = messageSignature(message);
@@ -74,6 +83,12 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
     const looseMatches = realByLooseSignature.get(looseSignature) || [];
     looseMatches.push(identity);
     realByLooseSignature.set(looseSignature, looseMatches);
+    if (protocol === "whatsapp" && quoteSignatureValue(message) == null) {
+      const quoteAgnosticSignature = messageQuoteAgnosticSignature(message);
+      const quoteLessMatches = quoteLessWhatsAppEchoes.get(quoteAgnosticSignature) || [];
+      quoteLessMatches.push(identity);
+      quoteLessWhatsAppEchoes.set(quoteAgnosticSignature, quoteLessMatches);
+    }
   });
 
   const local = optimistic.filter((item) => item.protocol === protocol && item.contactId === contactId);
@@ -89,8 +104,13 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
     const known = new Set(item.known_message_ids || []);
     const exactMatches = realBySignature.get(messageSignature(item)) || [];
     const looseMatches = realByLooseSignature.get(messageLooseSignature(item)) || [];
+    const quoteLessMatches = protocol === "whatsapp" && quoteSignatureValue(item) != null
+      ? quoteLessWhatsAppEchoes.get(messageQuoteAgnosticSignature(item)) || []
+      : [];
     const available = (id) => !known.has(id) && !consumed.has(id);
-    const realId = exactMatches.find(available) ?? looseMatches.find(available);
+    const realId = exactMatches.find(available)
+      ?? looseMatches.find(available)
+      ?? quoteLessMatches.find(available);
     if (realId === undefined) continue;
     const { optimistic_id: ignored, ...confirmed } = item;
     void ignored;

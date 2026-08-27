@@ -3036,3 +3036,62 @@ class TestWhatsAppQuoteMedia:
         """Quote senza segnali media e senza testo → nessuna bolla."""
         ev = _msg(self._raw({"id": "quoted-id"}))
         assert ev.payload["quote_text"] is None
+
+
+def test_waha_reply_to_echo_preserves_text_quote_metadata():
+    event = _raw(
+        {
+            "event": "message.any",
+            "payload": {
+                "id": "true_391234567890@c.us_ECHO",
+                "chatId": "391234567890@c.us",
+                "fromMe": True,
+                "body": "risposta",
+                "timestamp": 1700000001,
+                "replyTo": {
+                    "id": "false_391234567890@c.us_ORIGINAL",
+                    "participant": "391234567890@c.us",
+                    "body": "domanda",
+                    "timestamp": 1700000000,
+                    "hasMedia": False,
+                },
+            },
+        }
+    )
+
+    assert event.payload["quote_text"] == "domanda"
+    assert event.payload["quote_timestamp"] == 1700000000000
+    assert event.payload["quote_author"] == "391234567890@c.us"
+    assert event.payload["reply_to_message_id"] == ("false_391234567890@c.us_ORIGINAL")
+
+
+def test_tui_optimistic_reply_is_upgraded_by_waha_echo_without_quote_loss():
+    backend = _make_backend()
+    optimistic = {
+        "text": "risposta",
+        "is_mine": True,
+        "sender": "You",
+        "quote_text": "domanda",
+        "quote_timestamp": 1700000000000,
+        "quote_author": "391234567890@c.us",
+        "msg_type": "text",
+    }
+    assert backend.ingest_message(
+        "391234567890@c.us", optimistic, 1700000001000, persist=False
+    )
+    echo = _msg(
+        {
+            "id": "true_391234567890@c.us_ECHO",
+            "chatId": "391234567890@c.us",
+            "fromMe": True,
+            "body": "risposta",
+            "timestamp": 1700000002,
+            "replyTo": {"body": "domanda"},
+        }
+    )
+
+    assert not backend.ingest_message(
+        echo.contact_id, echo.payload, echo.payload["timestamp"], persist=False
+    )
+    assert len(backend.cache[echo.contact_id]) == 1
+    assert backend.cache[echo.contact_id][0]["quote_text"] == "domanda"

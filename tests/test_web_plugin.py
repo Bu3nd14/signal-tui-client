@@ -275,6 +275,17 @@ const echo = { id: "wa-1", direction: "out", text: "answer", timestamp: 2001, qu
 const result = reconcileOptimisticMessages([echo], [optimistic], "whatsapp", "alice");
 assert.equal(result.visible.length, 0);
 assert.equal(result.optimistic[0].confirmed_message_id, "wa-1");
+    """)
+
+
+def test_whatsapp_optimistic_reply_reconciles_echo_without_quote():
+    _run_reconciliation_node("""
+const old = { id: "old", direction: "out", text: "answer", timestamp: 1000 };
+const optimistic = { optimistic_id: "reply", protocol: "whatsapp", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: ["old"], optimisticStatus: "sent", quote_timestamp: 1500, quote_author: "alice", quote_message: "question" };
+const echo = { id: "wa-echo", direction: "out", text: "answer", timestamp: 2001 };
+const result = reconcileOptimisticMessages([old, echo], [optimistic], "whatsapp", "alice");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "wa-echo");
 """)
 
 
