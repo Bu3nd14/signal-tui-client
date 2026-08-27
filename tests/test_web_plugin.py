@@ -327,14 +327,29 @@ assert.equal(result.optimistic[0].confirmed_message_id, "wa-image-1");
 """)
 
 
-@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
+@pytest.mark.parametrize("protocol", ["telegram", "whatsapp"])
 @pytest.mark.parametrize(
-    "echo_quote", ["Photo", "🖼️ Immagine", "photo.jpg — 🖼️ Immagine"]
+    ("optimistic_has_timestamp", "echo_has_timestamp"),
+    [(True, True), (True, False), (False, True), (False, False)],
 )
-def test_optimistic_media_reply_reconciles_quote_forms(protocol, echo_quote):
+@pytest.mark.parametrize(
+    "echo_quote",
+    [
+        "Photo",
+        "photo.jpg",
+        "🖼️ Immagine",
+        "photo.jpg — 🖼️ Immagine",
+        "upload-a1b2c3.png",
+    ],
+)
+def test_optimistic_media_reply_reconciles_quote_forms(
+    protocol, optimistic_has_timestamp, echo_has_timestamp, echo_quote
+):
+    optimistic_timestamp = ", quote_timestamp: 1000" if optimistic_has_timestamp else ""
+    echo_timestamp = ", quote_timestamp: 1000" if echo_has_timestamp else ""
     _run_reconciliation_node(f"""
-const optimistic = {{ optimistic_id: "media-reply", protocol: {json.dumps(protocol)}, contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: 1000, quote_author: "alice", quote_message: "photo.jpg", quote_media_type: "image" }};
-const echo = {{ id: "echo-1", direction: "out", text: "answer", timestamp: 2001, quote_timestamp: 1000, quote_text: {json.dumps(echo_quote)} }};
+const optimistic = {{ optimistic_id: "media-reply", protocol: {json.dumps(protocol)}, contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_author: "alice", quote_message: "photo.jpg", quote_media_type: "image"{optimistic_timestamp} }};
+const echo = {{ id: "echo-1", direction: "out", text: "answer", timestamp: 2001, quote_text: {json.dumps(echo_quote)}{echo_timestamp} }};
 const result = reconcileOptimisticMessages([echo], [optimistic], {json.dumps(protocol)}, "alice");
 assert.equal(result.visible.length, 0);
 assert.equal(result.optimistic[0].confirmed_message_id, "echo-1");

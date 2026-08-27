@@ -9,21 +9,43 @@ function quoteValue(message, snakeName, camelName, fallbackName = null) {
   return message[snakeName] ?? message[camelName] ?? (fallbackName ? message[fallbackName] : null) ?? null;
 }
 
+const MEDIA_PLACEHOLDERS = new Map([
+  ["🖼️ Immagine", "image"],
+  ["🎬 Video", "video"],
+  ["🎵 Audio", "audio"],
+  ["🎨 Sticker", "sticker"],
+  ["📎 File", "attachment"],
+]);
+
+const MEDIA_LABELS = new Map([
+  ["photo", "image"],
+  ["🎤 voice", "audio"],
+  ["📎 document", "attachment"],
+]);
+
+function isTemporaryUploadName(value) {
+  return typeof value === "string" && /(?:^|[\\/])upload-[^\\/]+$/i.test(value.trim());
+}
+
+function mediaTypeFromFilename(value) {
+  if (typeof value !== "string" || /\s/.test(value.trim())) return null;
+  const extension = value.trim().toLowerCase().match(/\.([a-z0-9]+)(?:[?#].*)?$/)?.[1];
+  if (["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif"].includes(extension)) return "image";
+  if (["mp4", "mov", "mkv", "webm", "avi"].includes(extension)) return "video";
+  if (["mp3", "ogg", "opus", "aac", "m4a", "wav"].includes(extension)) return "audio";
+  if (extension || isTemporaryUploadName(value)) return "attachment";
+  return null;
+}
+
 function quoteMediaType(message) {
   const explicit = quoteValue(message, "quote_media_type", "quoteMediaType");
   if (explicit) return String(explicit).toLowerCase();
   const text = quoteValue(message, "quote_message", "quoteMessage", "quote_text");
   if (typeof text !== "string") return null;
-  const placeholders = [
-    ["🖼️ Immagine", "image"],
-    ["🎬 Video", "video"],
-    ["🎵 Audio", "audio"],
-    ["🎨 Sticker", "sticker"],
-    ["📎 File", "attachment"],
-  ];
-  const match = placeholders.find(([placeholder]) => text === placeholder || text.endsWith(` — ${placeholder}`));
-  if (match) return match[1];
-  return null;
+  const normalized = text.trim();
+  const placeholder = [...MEDIA_PLACEHOLDERS].find(([label]) => normalized === label || normalized.endsWith(` — ${label}`));
+  if (placeholder) return placeholder[1];
+  return MEDIA_LABELS.get(normalized.toLowerCase()) || mediaTypeFromFilename(normalized);
 }
 
 function quoteSignatureValue(message) {
@@ -36,18 +58,6 @@ function quoteIdentityValue(message) {
   if (timestamp != null) return `ts:${timestamp}`;
   if (quoteMediaType(message)) return "media:*";
   return quoteValue(message, "quote_message", "quoteMessage", "quote_text");
-}
-
-const MEDIA_PLACEHOLDERS = new Map([
-  ["🖼️ Immagine", "image"],
-  ["🎬 Video", "video"],
-  ["🎵 Audio", "audio"],
-  ["🎨 Sticker", "sticker"],
-  ["📎 File", "attachment"],
-]);
-
-function isTemporaryUploadName(value) {
-  return typeof value === "string" && /(?:^|[\\/])upload-[^\\/]+$/i.test(value.trim());
 }
 
 function messageMediaType(message) {
@@ -96,6 +106,16 @@ function messageLooseSignature(message) {
   ]);
 }
 
+function messageMediaQuoteSignature(message) {
+  if (!quoteMediaType(message)) return null;
+  return JSON.stringify([
+    message.direction,
+    signatureText(message),
+    "media:*",
+    messageMediaType(message),
+  ]);
+}
+
 function messageQuoteAgnosticSignature(message) {
   return JSON.stringify([
     message.direction,
@@ -117,6 +137,7 @@ function replyQuoteMessage(message) {
 function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) {
   const realBySignature = new Map();
   const realByLooseSignature = new Map();
+  const realByMediaQuoteSignature = new Map();
   const quoteLessWhatsAppEchoes = new Map();
   messages.forEach((message, index) => {
     const identity = messageIdentity(message, index);
@@ -128,6 +149,12 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
     const looseMatches = realByLooseSignature.get(looseSignature) || [];
     looseMatches.push(identity);
     realByLooseSignature.set(looseSignature, looseMatches);
+    const mediaQuoteSignature = messageMediaQuoteSignature(message);
+    if (mediaQuoteSignature != null) {
+      const mediaQuoteMatches = realByMediaQuoteSignature.get(mediaQuoteSignature) || [];
+      mediaQuoteMatches.push(identity);
+      realByMediaQuoteSignature.set(mediaQuoteSignature, mediaQuoteMatches);
+    }
     if (protocol === "whatsapp" && quoteSignatureValue(message) == null) {
       const quoteAgnosticSignature = messageQuoteAgnosticSignature(message);
       const quoteLessMatches = quoteLessWhatsAppEchoes.get(quoteAgnosticSignature) || [];
@@ -149,12 +176,17 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
     const known = new Set(item.known_message_ids || []);
     const exactMatches = realBySignature.get(messageSignature(item)) || [];
     const looseMatches = realByLooseSignature.get(messageLooseSignature(item)) || [];
+    const mediaQuoteSignature = messageMediaQuoteSignature(item);
+    const mediaQuoteMatches = mediaQuoteSignature == null
+      ? []
+      : realByMediaQuoteSignature.get(mediaQuoteSignature) || [];
     const quoteLessMatches = protocol === "whatsapp" && quoteSignatureValue(item) != null
       ? quoteLessWhatsAppEchoes.get(messageQuoteAgnosticSignature(item)) || []
       : [];
     const available = (id) => !known.has(id) && !consumed.has(id);
     const realId = exactMatches.find(available)
       ?? looseMatches.find(available)
+      ?? mediaQuoteMatches.find(available)
       ?? quoteLessMatches.find(available);
     if (realId === undefined) continue;
     const { optimistic_id: ignored, ...confirmed } = item;
