@@ -24,6 +24,7 @@ class FakeManager:
     def __init__(self, contacts=(), paths=None):
         self.contacts = list(contacts)
         self.paths = dict(paths or {})
+        self.send_calls = []
 
     def list_contacts(self):
         return list(self.contacts)
@@ -33,6 +34,10 @@ class FakeManager:
 
     def get(self, proto):
         return SimpleNamespace(media_dir=None)
+
+    def send_message_sync(self, protocol, contact_id, text, **kwargs):
+        self.send_calls.append((protocol, contact_id, text, kwargs))
+        return "sent-id"
 
 
 def make_app(manager):
@@ -74,6 +79,183 @@ def test_rest_auth_requires_correct_bearer(web_client):
     assert missing.headers["www-authenticate"] == "Bearer"
     assert wrong.status_code == 401
     assert correct.status_code == 200
+
+
+def test_send_requires_bearer_token():
+    contact = ChatContact("alice", "Alice", "signal")
+    manager = FakeManager([contact])
+    with TestClient(make_app(manager)) as client:
+        response = client.post(
+            "/api/send",
+            json={"protocol": "signal", "contact_id": "alice", "text": "Ciao"},
+        )
+    assert response.status_code == 401
+    assert manager.send_calls == []
+
+
+def test_send_routes_text_and_quote_to_sync_manager():
+    contact = ChatContact("alice", "Alice", "signal")
+    manager = FakeManager([contact])
+    payload = {
+        "protocol": "signal",
+        "contact_id": "alice",
+        "text": "Ciao",
+        "quote_timestamp": 123456,
+        "quote_author": "alice",
+        "quote_message": "Prima",
+        "reply_to_message_id": "message-1",
+    }
+    with TestClient(make_app(manager)) as client:
+        response = client.post("/api/send", json=payload, headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert manager.send_calls == [
+        (
+            "signal",
+            "alice",
+            "Ciao",
+            {
+                "quote_timestamp": 123456,
+                "quote_author": "alice",
+                "quote_message": "Prima",
+                "reply_to_message_id": "message-1",
+            },
+        )
+    ]
+
+
+def test_send_rejects_empty_text():
+    contact = ChatContact("alice", "Alice", "signal")
+    manager = FakeManager([contact])
+    with TestClient(make_app(manager)) as client:
+        response = client.post(
+            "/api/send",
+            json={"protocol": "signal", "contact_id": "alice", "text": "  \n"},
+            headers=AUTH,
+        )
+    assert response.status_code == 400
+    assert manager.send_calls == []
+
+
+def test_send_internal_timeout_waits_for_worker_and_returns_generic_502():
+    from web import api
+
+    contact = ChatContact("alice", "Alice", "signal")
+    manager = FakeManager([contact])
+    active_jobs = 0
+    pending_pool_jobs = 0
+    calls = 0
+    original_to_thread = api.asyncio.to_thread
+
+    async def tracked_to_thread(*args, **kwargs):
+        nonlocal pending_pool_jobs
+        pending_pool_jobs += 1
+        try:
+            return await original_to_thread(*args, **kwargs)
+        finally:
+            pending_pool_jobs -= 1
+
+    def timed_out_send(*args, **kwargs):
+        nonlocal active_jobs, calls
+        calls += 1
+        active_jobs += 1
+        time.sleep(0.05)
+        active_jobs -= 1
+        raise TimeoutError("backend timeout")
+
+    manager.send_message_sync = timed_out_send
+    with (
+        patch.object(api.asyncio, "to_thread", tracked_to_thread),
+        TestClient(make_app(manager)) as client,
+    ):
+        response = client.post(
+            "/api/send",
+            json={"protocol": "signal", "contact_id": "alice", "text": "Ciao"},
+            headers=AUTH,
+        )
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Message send failed"}
+    assert calls == 1
+    assert active_jobs == 0
+    assert pending_pool_jobs == 0
+
+
+def _run_reconciliation_node(source):
+    script = f"""
+const assert = require("node:assert/strict");
+const {{ reconcileOptimisticMessages }} = require("./web/static/reconcile.js");
+{source}
+"""
+    completed = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_optimistic_dedup_two_identical_messages_is_one_to_one():
+    _run_reconciliation_node("""
+const old = { id: "old", direction: "out", text: "same", timestamp: 1000 };
+const first = { optimistic_id: "local-1", protocol: "signal", contactId: "alice", direction: "out", text: "same", timestamp: 2000, known_message_ids: ["old"], optimisticStatus: "sent" };
+const second = { optimistic_id: "local-2", protocol: "signal", contactId: "alice", direction: "out", text: "same", timestamp: 2001, known_message_ids: ["old"], optimisticStatus: "sent" };
+const oneEcho = { id: "echo-1", direction: "out", text: "same", timestamp: 2002 };
+const firstPass = reconcileOptimisticMessages([old, oneEcho], [first, second], "signal", "alice");
+assert.deepEqual(firstPass.visible.map((item) => item.optimistic_id), ["local-1"]);
+assert.equal(firstPass.optimistic.filter((item) => item.confirmed_message_id === "echo-1").length, 1);
+const secondEcho = { id: "echo-2", direction: "out", text: "same", timestamp: 2003 };
+const secondPass = reconcileOptimisticMessages([old, oneEcho, secondEcho], firstPass.optimistic, "signal", "alice");
+assert.equal(secondPass.visible.length, 0);
+assert.equal(new Set(secondPass.optimistic.map((item) => item.confirmed_message_id)).size, 2);
+""")
+
+
+def test_optimistic_dedup_accepts_echo_after_120_seconds():
+    _run_reconciliation_node("""
+const optimistic = { optimistic_id: "late", protocol: "signal", contactId: "alice", direction: "out", text: "late echo", timestamp: 1000, known_message_ids: [], optimisticStatus: "sent" };
+const echo = { id: "echo-late", direction: "out", text: "late echo", timestamp: 122000 };
+const result = reconcileOptimisticMessages([echo], [optimistic], "signal", "alice");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "echo-late");
+""")
+
+
+def test_optimistic_failed_message_remains_without_echo():
+    _run_reconciliation_node("""
+const failed = { optimistic_id: "failed", protocol: "signal", contactId: "alice", direction: "out", text: "not sent", timestamp: 1000, known_message_ids: [], optimisticStatus: "failed" };
+const result = reconcileOptimisticMessages([], [failed], "signal", "alice");
+assert.equal(result.visible.length, 1);
+assert.equal(result.visible[0].optimisticStatus, "failed");
+assert.equal(result.optimistic[0].optimistic_id, "failed");
+""")
+
+
+def test_backend_manager_send_message_sync_routes_to_backend():
+    from backends.manager import BackendManager
+
+    backend = MagicMock(protocol="signal")
+    backend.send_message_sync.return_value = "message-id"
+    manager = BackendManager()
+    manager.register(backend)
+
+    result = manager.send_message_sync(
+        "signal",
+        "alice",
+        "Ciao",
+        quote_timestamp=123,
+        quote_author="alice",
+        quote_message="Prima",
+        reply_to_message_id="reply-id",
+    )
+
+    assert result == "message-id"
+    backend.send_message_sync.assert_called_once_with(
+        "alice",
+        "Ciao",
+        quote_timestamp=123,
+        quote_author="alice",
+        quote_message="Prima",
+        reply_to_message_id="reply-id",
+    )
 
 
 def test_websocket_rejects_missing_token(web_client):

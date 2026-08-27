@@ -24,7 +24,7 @@ body {
   color: var(--text);
 }
 
-button, input { font: inherit; }
+button, input, textarea { font: inherit; }
 button { color: inherit; }
 
 .app-shell {
@@ -206,6 +206,37 @@ h2 { font-size: 1.05rem; }
 .message.out .bubble { border-radius: 16px 6px 16px 16px; background: var(--outgoing); }
 .message-text { line-height: 1.42; overflow-wrap: anywhere; white-space: pre-wrap; }
 .message-time { display: block; margin-top: 5px; color: #c3cedaaa; font-size: .66rem; text-align: right; }
+.message-status.failed { color: var(--danger); }
+
+.composer {
+  display: flex;
+  flex: none;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 12px clamp(14px, 5vw, 70px);
+  border-top: 1px solid var(--line);
+  background: #0d141df2;
+}
+.composer[hidden] { display: none; }
+.composer textarea {
+  width: 100%;
+  min-height: 42px;
+  max-height: 160px;
+  resize: none;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  outline: none;
+  background: var(--panel-raised);
+  color: var(--text);
+  line-height: 1.35;
+}
+.composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #4f8cff25; }
+.send-button { display: grid; width: 42px; height: 42px; flex: none; place-items: center; border: 0; border-radius: 50%; background: var(--accent); color: white; cursor: pointer; }
+.send-button:disabled { opacity: .45; cursor: default; }
+.send-button .spinner { width: 19px; height: 19px; }
+.send-button [hidden] { display: none; }
 
 .attachment { position: relative; min-width: 180px; min-height: 120px; margin-bottom: 7px; overflow: hidden; border-radius: 10px; background: #111820; }
 .attachment img { display: block; width: 100%; max-height: min(68vh, 760px); object-fit: contain; }

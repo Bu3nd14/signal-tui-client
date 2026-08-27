@@ -12,6 +12,10 @@ const state = {
   messageRequest: null,
   mediaRequests: new Set(),
   objectUrls: new Set(),
+  messages: [],
+  optimistic: [],
+  optimisticSequence: 0,
+  sending: false,
 };
 
 const elements = {
@@ -29,6 +33,11 @@ const elements = {
   tokenInput: document.querySelector("#token-input"),
   tokenError: document.querySelector("#token-error"),
   cancelToken: document.querySelector("#cancel-token"),
+  composer: document.querySelector("#composer"),
+  messageInput: document.querySelector("#message-input"),
+  sendMessage: document.querySelector("#send-message"),
+  sendIcon: document.querySelector(".send-icon"),
+  sendSpinner: document.querySelector(".send-spinner"),
 };
 
 function showError(message) {
@@ -75,6 +84,11 @@ function formatTimestamp(value, includeDate = true) {
   return new Intl.DateTimeFormat(undefined, includeDate
     ? { dateStyle: "medium", timeStyle: "short" }
     : { hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+function timestampMilliseconds(value) {
+  const numeric = Number(value);
+  return numeric < 100000000000 ? numeric * 1000 : numeric;
 }
 
 function contactInitial(contact) {
@@ -210,7 +224,16 @@ function imageAttachment(attachment, protocol) {
 function renderMessages(messages, protocol) {
   clearMedia();
   elements.messages.replaceChildren();
-  if (!messages.length) {
+  const active = state.active;
+  const reconciliation = window.SignalTuiReconcile.reconcileOptimisticMessages(
+    messages,
+    state.optimistic,
+    active?.protocol,
+    active?.id,
+  );
+  state.optimistic = reconciliation.optimistic;
+  const displayed = [...messages, ...reconciliation.visible].sort((a, b) => timestampMilliseconds(a.timestamp) - timestampMilliseconds(b.timestamp));
+  if (!displayed.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = "Nessun messaggio archiviato in questa conversazione.";
@@ -219,7 +242,7 @@ function renderMessages(messages, protocol) {
     requestAnimationFrame(scrollThreadToBottom);
     return;
   }
-  for (const item of messages) {
+  for (const item of displayed) {
     const message = document.createElement("article");
     message.className = `message ${item.direction === "out" ? "out" : "in"}`;
     const bubble = document.createElement("div");
@@ -240,6 +263,12 @@ function renderMessages(messages, protocol) {
     const time = document.createElement("time");
     time.className = "message-time";
     time.textContent = formatTimestamp(item.timestamp);
+    if (item.optimisticStatus) {
+      const status = document.createElement("span");
+      status.className = `message-status ${item.optimisticStatus}`;
+      status.textContent = item.optimisticStatus === "failed" ? " · fallito" : item.optimisticStatus === "sent" ? " · inviato" : " · invio…";
+      time.append(status);
+    }
     bubble.append(time);
     message.append(bubble);
     elements.messages.append(message);
@@ -259,6 +288,7 @@ async function loadMessages() {
     const response = await apiFetch(`/api/messages?${query}`, { signal: controller.signal });
     const messages = await response.json();
     if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
+      state.messages = messages;
       renderMessages(messages, active.protocol);
       scrollThreadToBottom();
     }
@@ -272,8 +302,10 @@ async function loadMessages() {
 function openThread(contact) {
   state.active = contact;
   elements.threadName.textContent = contact.display_name || contact.id;
-  elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span> · sola lettura`;
+  elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
   elements.app.classList.add("thread-open");
+  elements.composer.hidden = false;
+  state.messages = [];
   renderContacts();
   elements.messages.replaceChildren();
   const loading = document.createElement("div");
@@ -281,6 +313,58 @@ function openThread(contact) {
   loading.textContent = "Caricamento messaggi…";
   elements.messages.append(loading);
   loadMessages();
+}
+
+function resizeComposer() {
+  elements.messageInput.style.height = "auto";
+  elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, 160)}px`;
+}
+
+function updateComposer() {
+  elements.sendMessage.disabled = state.sending || !elements.messageInput.value.trim();
+  elements.messageInput.disabled = state.sending;
+  elements.sendIcon.hidden = state.sending;
+  elements.sendSpinner.hidden = !state.sending;
+}
+
+async function submitMessage() {
+  if (state.sending || !state.active) return;
+  const text = elements.messageInput.value;
+  if (!text.trim()) return;
+  const active = { ...state.active };
+  const timestamp = Date.now();
+  const optimistic = {
+    optimistic_id: `${timestamp}-${++state.optimisticSequence}`,
+    protocol: active.protocol,
+    contactId: active.id,
+    text,
+    direction: "out",
+    timestamp,
+    optimisticStatus: "sending",
+    known_message_ids: state.messages.map(window.SignalTuiReconcile.messageIdentity),
+  };
+  state.optimistic.push(optimistic);
+  state.sending = true;
+  elements.messageInput.value = "";
+  resizeComposer();
+  updateComposer();
+  if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
+  try {
+    await apiFetch("/api/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text }),
+    });
+    optimistic.optimisticStatus = "sent";
+  } catch (error) {
+    optimistic.optimisticStatus = "failed";
+    if (error.message !== "unauthorized") showError("Impossibile inviare il messaggio.");
+  } finally {
+    state.sending = false;
+    updateComposer();
+    if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
+    elements.messageInput.focus();
+  }
 }
 
 function encodeToken(token) {
@@ -350,6 +434,19 @@ document.querySelector("#refresh-contacts").addEventListener("click", () => load
 document.querySelector("#open-token").addEventListener("click", () => requestToken());
 document.querySelector("#back-button").addEventListener("click", () => elements.app.classList.remove("thread-open"));
 document.querySelector("#dismiss-error").addEventListener("click", () => { elements.errorBanner.hidden = true; });
+elements.composer.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitMessage();
+});
+elements.messageInput.addEventListener("input", () => {
+  resizeComposer();
+  updateComposer();
+});
+elements.messageInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey) return;
+  event.preventDefault();
+  if (!state.sending) submitMessage();
+});
 if (elements.protocolTabs) {
   elements.protocolTabs.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-protocol]");

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Signal TUI Reader</title>
-  <link rel="stylesheet" href="/style.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=6">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -50,6 +50,13 @@
           <p>Scegli una chat per consultarne i messaggi e gli allegati.</p>
         </div>
       </section>
+      <form id="composer" class="composer" hidden>
+        <textarea id="message-input" rows="1" maxlength="65536" placeholder="Scrivi un messaggio" aria-label="Messaggio"></textarea>
+        <button id="send-message" class="send-button" type="submit" disabled aria-label="Invia messaggio">
+          <span class="send-icon" aria-hidden="true">➤</span>
+          <span class="send-spinner spinner" aria-label="Invio in corso" hidden></span>
+        </button>
+      </form>
     </main>
   </div>
 
@@ -68,6 +75,7 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=5" defer></script>
+  <script src="/reconcile.js?v=1" defer></script>
+  <script src="/app.js?v=7" defer></script>
 </body>
 </html>
