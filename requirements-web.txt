@@ -1,5 +1,6 @@
 fastapi
 uvicorn>=0.20
+python-multipart
 websockets>=10.4
 # TestClient (starlette.testclient) richiede httpx2 nelle versioni recenti.
 httpx2

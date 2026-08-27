@@ -183,8 +183,8 @@ Screen {
     width: 1fr;
 }
 
-/* QuoteWidget (native quote bubble): the container must not expand to 1fr
-   (Textual Horizontal default) and the thumbnail slot keeps a fixed ~6×3 area. */
+/* QuoteWidget (native quote bubble): the container must not expand to 1fr.
+   Quotes with attachment metadata add a fixed ~6×3 thumbnail slot. */
 QuoteWidget {
     height: auto;
 }

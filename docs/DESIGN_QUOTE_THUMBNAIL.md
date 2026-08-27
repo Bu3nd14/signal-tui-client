@@ -70,7 +70,7 @@ Modello additivo `quote_attachment_id`/`quote_attachment_path`/`quote_content_ty
 
 - **Signal**: `_extract_quote_thumbnail` legge `quote.attachments[0].thumbnail`/`thumbnailData` (base64 o bytes), valida con Pillow (decode completo: scarta dati troncati/corrotti) e salva in `CACHE_DIR/quote-thumbs/<sha1>.<ext>` — best-effort, mai raises. In aggiunta, `quote_attachment_id` da `attachments[].id`/`attachmentId` abilita il **fallback lazy** via `get_attachment_path` quando la thumbnail incorporata è assente o stale.
 - **Telegram**: la quote risolve il target dalla cache; il target cached fornisce `attachment_id` (tgref) → risoluzione lazy via `get_attachment_path` (download on-demand); il path risolto è **persistito**.
-- **WhatsApp**: ingresso **solo testo per design** (l'evento WA non espone riferimenti al file quotato); in uscita tutto funziona via path noto.
+- **WhatsApp**: ingresso **solo testo per design** (l'evento WA non espone riferimenti al file quotato); questo include gli echo di reply create da un altro client, come il web. In uscita dalla TUI tutto funziona via path/id noto.
 
 ### 3.6 Race mount e stabilità
 
@@ -102,6 +102,7 @@ Le instabilità emerse nei PR #70-#74 sono tutte risolte:
 | **kitty** — ingresso **Signal** | Thumbnail se l'envelope porta la thumbnail incorporata oppure l'attachment id è risolvibile (fallback lazy); altrimenti testo (**verifica V20 residua**) |
 | **kitty** — ingresso **Telegram** | Thumbnail se il target cached è risolvibile (tgref → download lazy); altrimenti testo |
 | **kitty** — ingresso **WhatsApp** | Nessuna thumbnail (per design): bolla testuale |
+| **Web** — quote media | `/api/messages` non espone `quote_attachment_*`: la quote resta testuale; thumbnail web fuori scope |
 | **Ghostty / iTerm2 / Windows Terminal / xterm** | Testo invariato "▎ 🖼️ Immagine"/caption — **senza Pillow**, byte-identico al passato |
 | **tmux / screen** | Testo invariato (detection → CATIMG, nessuna thumbnail) |
 | **Non-tty / CI** | Testo invariato |

@@ -67,6 +67,48 @@ class ChatBackend(ABC):
         """
         raise NotImplementedError
 
+    def send_message_sync(
+        self,
+        contact_id: str,
+        text: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        """Blocking message send for callers running in a worker thread."""
+        raise NotImplementedError
+
+    def send_attachment_sync(
+        self,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        """Blocking image send for callers running in a worker thread."""
+        raise NotImplementedError
+
+    def enqueue_sent_message(
+        self,
+        contact_id: str,
+        message_id: str,
+        text: str,
+        *,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        attachment_path: Path | None = None,
+        mime_type: str | None = None,
+    ) -> None:
+        """Publish a successful facade send through the normal receive queue."""
+
     @abstractmethod
     async def mark_read(self, contact_id: str) -> None:
         """Mark all messages for *contact_id* as read."""

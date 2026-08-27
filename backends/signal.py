@@ -17,9 +17,11 @@ import io
 import logging
 import queue
 import re
+import shutil
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
@@ -45,6 +47,7 @@ logger.setLevel(logging.DEBUG)
 from backend import (
     CACHE_DIR,
     DAEMON_HTTP_PORT,
+    SIGNAL_CLI_ATTACHMENTS_DIR,
     USER_NUMBER,
     Contact,
     SignalRPCClient,
@@ -243,6 +246,8 @@ class SignalBackend(ChatBackend):
         # SSE real-time delivery
         self._event_queue: queue.Queue[ChatEvent] = queue.Queue()
         self._sse_thread: threading.Thread | None = None
+        self._sent_attachment_paths: dict[str, Path] = {}
+        self._sent_attachment_paths_lock = threading.Lock()
 
         # Normalized contact list
         self.contacts: list[ChatContact] = []
@@ -517,6 +522,7 @@ class SignalBackend(ChatBackend):
         quote_message: str | None,
         reply_to_message_id: str | None = None,
         quote_attachments: list[str] | None = None,
+        attachments: list[str] | None = None,
     ) -> str:
         """Send *text* and return the real server timestamp (ms) when available.
 
@@ -527,6 +533,9 @@ class SignalBackend(ChatBackend):
         optimistic ``ts`` (still used as the entry/DB identity).
         """
         ts = int(time.time() * 1000)
+        attachment_kwargs = (
+            {"attachments": attachments} if attachments is not None else {}
+        )
         if self._use_daemon and self._rpc:
             result = self._rpc.send_message(
                 text,
@@ -536,6 +545,7 @@ class SignalBackend(ChatBackend):
                 quote_author=quote_author,
                 quote_message=quote_message,
                 quote_attachments=quote_attachments,
+                **attachment_kwargs,
             )
             if "error" in result:
                 raise RuntimeError(result["error"])
@@ -550,6 +560,7 @@ class SignalBackend(ChatBackend):
             quote_author=quote_author,
             quote_message=quote_message,
             quote_attachments=quote_attachments,
+            **attachment_kwargs,
         )
         try:
             return int(stdout.strip())
@@ -579,6 +590,108 @@ class SignalBackend(ChatBackend):
             quote_attachments=quote_attachments,
         )
 
+    def send_attachment_sync(
+        self,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> str:
+        SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        attachment_id = f"sent-{uuid.uuid4().hex}{file_path.suffix.lower()}"
+        persistent_path = SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id
+        shutil.copy2(file_path, persistent_path)
+        persistent_path.chmod(0o644)
+        try:
+            message_id = self._send_message_sync(
+                contact_id,
+                caption or "",
+                quote_timestamp=quote_timestamp,
+                quote_author=quote_author,
+                quote_message=quote_message,
+                reply_to_message_id=reply_to_message_id,
+                quote_attachments=quote_attachments,
+                attachments=[str(persistent_path)],
+            )
+        except Exception:
+            persistent_path.unlink(missing_ok=True)
+            raise
+        with self._sent_attachment_paths_lock:
+            self._sent_attachment_paths[str(file_path.resolve())] = persistent_path
+        return message_id
+
+    def enqueue_sent_message(
+        self,
+        contact_id: str,
+        message_id: str,
+        text: str,
+        *,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        attachment_path: Path | None = None,
+        mime_type: str | None = None,
+    ) -> None:
+        try:
+            ts = int(message_id)
+        except (TypeError, ValueError):
+            ts = int(time.time() * 1000)
+
+        attachment_id = None
+        attachment_info = None
+        msg_type = "text"
+        if attachment_path is not None:
+            msg_type = (
+                "image" if (mime_type or "").startswith("image/") else "attachment"
+            )
+            attachment_info = text or None
+            with self._sent_attachment_paths_lock:
+                persistent_path = self._sent_attachment_paths.pop(
+                    str(attachment_path.resolve()), None
+                )
+            if persistent_path is not None:
+                attachment_id = persistent_path.name
+            else:
+                SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+                attachment_id = (
+                    f"sent-{uuid.uuid4().hex}{attachment_path.suffix.lower()}"
+                )
+                persistent_path = SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id
+                shutil.copy2(attachment_path, persistent_path)
+                persistent_path.chmod(0o644)
+
+        event_text = "" if msg_type == "image" else text or attachment_info or ""
+
+        self._event_queue.put(
+            ChatEvent(
+                type="message",
+                protocol=self.protocol,
+                contact_id=contact_id,
+                payload={
+                    "id": str(message_id),
+                    "text": event_text,
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": ts,
+                    "quote_text": quote_message,
+                    "quote_timestamp": quote_timestamp,
+                    "quote_author": quote_author,
+                    "reply_to_message_id": reply_to_message_id,
+                    "msg_type": msg_type,
+                    "attachment_info": attachment_info,
+                    "attachment_id": attachment_id,
+                    "content_type": mime_type,
+                },
+            )
+        )
+
     def edit_message_sync(
         self, contact_id: str, message_id: str, new_text: str
     ) -> bool:
@@ -605,6 +718,9 @@ class SignalBackend(ChatBackend):
         _mark_as_read(contact_id)
 
     def get_attachment_path(self, attachment_id: str):
+        candidate = SIGNAL_CLI_ATTACHMENTS_DIR / Path(attachment_id).name
+        if candidate.is_file():
+            return candidate
         return get_attachment_path(attachment_id)
 
     # ─── Envelope parsing → normalized events ─────────────────────────
@@ -707,6 +823,8 @@ class SignalBackend(ChatBackend):
                 for i, (msg_type, att_info, att_id, content_type) in enumerate(
                     classified
                 ):
+                    if i == 0 and text and msg_type == "image":
+                        att_info = text
                     if i == 0 and text:
                         msg_text = text
                     else:
@@ -1002,7 +1120,12 @@ class SignalBackend(ChatBackend):
     # ─── Incoming message ingestion ───────────────────────────────────
 
     def _message_already_cached(
-        self, contact_id: str, ts: int, is_mine: bool, text: str
+        self,
+        contact_id: str,
+        ts: int,
+        is_mine: bool,
+        text: str,
+        attachment_id: str | None = None,
     ) -> bool:
         """Return True if a message with the same identity is already cached.
 
@@ -1020,6 +1143,8 @@ class SignalBackend(ChatBackend):
             if msg.get("is_mine") != is_mine:
                 continue
             if msg.get("text") != text:
+                continue
+            if attachment_id and msg.get("attachment_id") != attachment_id:
                 continue
             if not is_mine:
                 if abs(msg.get("timestamp", 0) - ts) <= _INCOMING_DEDUP_WINDOW_MS:
@@ -1072,6 +1197,8 @@ class SignalBackend(ChatBackend):
         Returns ``True`` if the message was newly added, ``False`` if it was a
         duplicate (already present).
         """
+        if data.get("msg_type") == "image":
+            data = {**data, "text": ""}
         text = data["text"]
         is_mine = data["is_mine"]
 
@@ -1103,7 +1230,9 @@ class SignalBackend(ChatBackend):
                         logger.exception("Signal: _update_message_id failed")
                     return False
 
-        if self._message_already_cached(contact_id, ts, is_mine, text):
+        if self._message_already_cached(
+            contact_id, ts, is_mine, text, data.get("attachment_id")
+        ):
             return False
 
         if persist:

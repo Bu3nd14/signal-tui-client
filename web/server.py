@@ -69,6 +69,7 @@ def start_web_server(
     from web.api import create_api_router
     from web.auth import install_auth
     from web.bridge import init_bridge
+    from web.uploads import prepare_upload_directory
     from web.ws import install_websocket
 
     init_bridge()
@@ -101,6 +102,7 @@ def start_web_server(
     def run() -> None:
         monitor: asyncio.Task | None = None
         try:
+            prepare_upload_directory()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             handle.loop = loop

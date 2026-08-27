@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from models import ChatContact
 
@@ -132,6 +133,100 @@ class BackendManager:
         if reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
         return await backend.send_message(contact_id, text, **kwargs)
+
+    def send_message_sync(
+        self,
+        protocol: str,
+        contact_id: str,
+        text: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> str:
+        """Send through *protocol* from a worker thread."""
+        backend = self._get_or_raise(protocol)
+        kwargs = {
+            "quote_timestamp": quote_timestamp,
+            "quote_author": quote_author,
+            "quote_message": quote_message,
+        }
+        if reply_to_message_id is not None:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        if quote_attachments is not None:
+            kwargs["quote_attachments"] = quote_attachments
+        message_id = backend.send_message_sync(contact_id, text, **kwargs)
+        self._enqueue_sent_message(
+            backend,
+            contact_id,
+            message_id,
+            text,
+            quote_timestamp=quote_timestamp,
+            quote_author=quote_author,
+            quote_message=quote_message,
+            reply_to_message_id=reply_to_message_id,
+        )
+        return message_id
+
+    def send_attachment_sync(
+        self,
+        protocol: str,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> str:
+        """Send an image through *protocol* from a worker thread."""
+        backend = self._get_or_raise(protocol)
+        kwargs = {
+            "caption": caption,
+            "mime_type": mime_type,
+            "quote_timestamp": quote_timestamp,
+            "quote_author": quote_author,
+            "quote_message": quote_message,
+        }
+        if reply_to_message_id is not None:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        if quote_attachments is not None:
+            kwargs["quote_attachments"] = quote_attachments
+        message_id = backend.send_attachment_sync(contact_id, file_path, **kwargs)
+        self._enqueue_sent_message(
+            backend,
+            contact_id,
+            message_id,
+            caption or "",
+            quote_timestamp=quote_timestamp,
+            quote_author=quote_author,
+            quote_message=quote_message,
+            reply_to_message_id=reply_to_message_id,
+            attachment_path=file_path,
+            mime_type=mime_type,
+        )
+        return message_id
+
+    @staticmethod
+    def _enqueue_sent_message(
+        backend: ChatBackend,
+        contact_id: str,
+        message_id: str,
+        text: str,
+        **kwargs,
+    ) -> None:
+        try:
+            backend.enqueue_sent_message(contact_id, message_id, text, **kwargs)
+        except Exception:
+            logger.exception(
+                "Unable to mirror sent message: protocol=%s contact=%s",
+                backend.protocol,
+                contact_id,
+            )
 
     async def mark_read(self, protocol: str, contact_id: str) -> None:
         """Mark messages read via the backend for *protocol*."""

@@ -1,10 +1,21 @@
-"""Read-only REST API for contacts, persisted messages, and media."""
+"""REST API for contacts, persisted messages, media, and message sending."""
 
+import asyncio
+import logging
 import mimetypes
 import sqlite3
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
+
+from web.bridge import push_event
+
+logger = logging.getLogger(__name__)
+
+_PROTOCOLS = {"signal", "whatsapp", "telegram"}
+_MAX_TEXT_LENGTH = 64 * 1024
 
 _IMAGE_EXTENSIONS = {
     ".jpg",
@@ -18,6 +29,28 @@ _IMAGE_EXTENSIONS = {
     ".tif",
     ".tiff",
 }
+
+
+@lru_cache(maxsize=1)
+def _emoji_categories() -> list[dict[str, Any]]:
+    import emoji
+
+    from emoji_data import PREDEFINED_CATEGORIES
+
+    aliases = {
+        char: data.get("en", "").strip(":")
+        for char, data in emoji.EMOJI_DATA.items()
+        if data.get("en")
+    }
+    return [
+        {
+            "category": name,
+            "icon": icon,
+            "emojis": list(chars),
+            "aliases": {char: aliases.get(char, "") for char in chars},
+        }
+        for name, icon, chars in PREDEFINED_CATEGORIES
+    ]
 
 
 def _infer_attachment_type(attachment_id: str, content_type: str | None) -> str | None:
@@ -64,7 +97,8 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             try:
                 rows = connection.execute(
                     "SELECT id, msg_id, text, is_mine, timestamp, "
-                    "attachment_id, attachment_info, content_type, protocol "
+                    "attachment_id, attachment_info, content_type, protocol, msg_type, "
+                    "quote_text, quote_timestamp, quote_author "
                     "FROM messages WHERE protocol = ? AND contact_number = ? "
                     "ORDER BY timestamp, id",
                     (protocol, contact_id),
@@ -86,6 +120,10 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 "name": row["attachment_info"] or Path(attachment_path).name,
                 "type": _infer_attachment_type(attachment_id, row["content_type"]),
             }
+            if row["msg_type"] == "image" or (
+                attachment["type"] or ""
+            ).lower().startswith("image/"):
+                text = ""
             # WhatsApp stores the WAHA media URL as message text
             # ("Media: http://..."); drop it for WA only, never for
             # legitimate captions of other protocols.
@@ -98,6 +136,9 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 "direction": "out" if row["is_mine"] else "in",
                 "timestamp": row["timestamp"],
                 "attachment": attachment,
+                "quote_text": row["quote_text"],
+                "quote_timestamp": row["quote_timestamp"],
+                "quote_author": row["quote_author"],
             }
         )
     return messages
@@ -126,9 +167,243 @@ def _allowed_media_root(manager: Any, proto: str) -> Path:
 def create_api_router() -> Any:
     """Build the FastAPI router without making FastAPI a core dependency."""
     from fastapi import APIRouter, HTTPException, Request
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, JSONResponse
 
     router = APIRouter(prefix="/api")
+
+    @router.get("/emoji")
+    def emojis() -> JSONResponse:
+        return JSONResponse(
+            content=_emoji_categories(),
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+    @router.post("/send")
+    async def send(request: Request) -> dict[str, bool]:
+        origin = request.headers.get("origin")
+        if origin:
+            origin_host = urlsplit(origin).netloc.lower()
+            request_host = request.headers.get("host", "").lower()
+            if not origin_host or origin_host != request_host:
+                raise HTTPException(status_code=403, detail="Forbidden")
+
+        is_multipart = (
+            request.headers.get("content-type", "")
+            .lower()
+            .startswith("multipart/form-data")
+        )
+        upload_file = None
+        try:
+            if is_multipart:
+                from web.uploads import MAX_UPLOAD_BYTES
+
+                content_length = request.headers.get("content-length")
+                if (
+                    content_length
+                    and int(content_length) > MAX_UPLOAD_BYTES + 1024 * 1024
+                ):
+                    raise HTTPException(status_code=413, detail="Upload too large")
+                form = await request.form()
+                payload = dict(form)
+                upload_file = form.get("file")
+                if upload_file is None or not hasattr(upload_file, "read"):
+                    raise HTTPException(status_code=400, detail="Invalid request")
+                payload.pop("file", None)
+            else:
+                payload = await request.json()
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail="Invalid request") from None
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="Invalid request")
+
+        protocol = payload.get("protocol")
+        contact_id = payload.get("contact_id")
+        text = payload.get("text")
+        if protocol not in _PROTOCOLS:
+            raise HTTPException(status_code=400, detail="Invalid request")
+        if not isinstance(contact_id, str) or not contact_id.strip():
+            raise HTTPException(status_code=400, detail="Invalid request")
+        if not isinstance(text, str) or len(text) > _MAX_TEXT_LENGTH:
+            raise HTTPException(status_code=400, detail="Invalid request")
+        if not text.strip() and upload_file is None:
+            raise HTTPException(status_code=400, detail="Invalid request")
+
+        quote_timestamp = payload.get("quote_timestamp")
+        quote_author = payload.get("quote_author")
+        quote_message = payload.get("quote_message")
+        reply_to_message_id = payload.get("reply_to_message_id")
+        quote_content_type = (
+            payload.get("quote_content_type") if protocol == "signal" else None
+        )
+        quote_attachment_id = (
+            payload.get("quote_attachment_id") if protocol == "signal" else None
+        )
+        if is_multipart:
+            quote_author = quote_author or None
+            reply_to_message_id = reply_to_message_id or None
+            quote_content_type = quote_content_type or None
+            quote_attachment_id = quote_attachment_id or None
+            if quote_timestamp == "":
+                quote_timestamp = None
+            elif quote_timestamp is not None:
+                try:
+                    quote_timestamp = int(quote_timestamp)
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400, detail="Invalid request"
+                    ) from None
+        if isinstance(quote_author, str):
+            quote_author = quote_author.strip() or None
+        if isinstance(quote_content_type, str):
+            quote_content_type = quote_content_type.strip() or None
+        if isinstance(quote_attachment_id, str):
+            quote_attachment_id = quote_attachment_id.strip() or None
+        if isinstance(quote_message, str):
+            stripped_quote_message = quote_message.strip()
+            quote_message = (
+                stripped_quote_message
+                if stripped_quote_message or quote_content_type
+                else None
+            )
+        if isinstance(reply_to_message_id, str):
+            reply_to_message_id = reply_to_message_id.strip() or None
+        if isinstance(quote_timestamp, bool) or (
+            quote_timestamp is not None and not isinstance(quote_timestamp, int)
+        ):
+            raise HTTPException(status_code=400, detail="Invalid request")
+        if any(
+            value is not None and not isinstance(value, str)
+            for value in (
+                quote_author,
+                quote_message,
+                reply_to_message_id,
+                quote_content_type,
+                quote_attachment_id,
+            )
+        ):
+            raise HTTPException(status_code=400, detail="Invalid request")
+        is_reply = any(
+            value is not None
+            for value in (
+                quote_timestamp,
+                quote_author,
+                quote_message,
+                reply_to_message_id,
+                quote_content_type,
+                quote_attachment_id,
+            )
+        )
+        if protocol == "telegram" and is_reply:
+            try:
+                if int(reply_to_message_id) <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Invalid request") from None
+        if protocol == "whatsapp" and is_reply and not reply_to_message_id:
+            raise HTTPException(status_code=400, detail="Invalid request")
+
+        manager = request.app.state.manager
+        backend = manager.get(protocol)
+        if backend is None:
+            raise HTTPException(status_code=404, detail="Not Found")
+        known_contact = any(
+            str(contact.id) == contact_id and str(contact.protocol) == protocol
+            for contact in manager.list_contacts()
+        )
+        if not known_contact:
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        quote_attachments = None
+        if protocol == "signal" and quote_attachment_id is not None:
+            contact_attachment_ids = {
+                message["attachment"]["attachment_id"]
+                for message in _messages(protocol, contact_id)
+                if message["attachment"] is not None
+            }
+            if quote_attachment_id not in contact_attachment_ids:
+                raise HTTPException(status_code=400, detail="Invalid request")
+        if protocol == "signal" and quote_content_type is not None:
+            if quote_attachment_id is None:
+                raise HTTPException(status_code=400, detail="Invalid request")
+            resolved = manager.get_attachment_path(protocol, quote_attachment_id)
+            path = Path(resolved) if resolved else None
+            quote_attachments = (
+                [f"{quote_content_type}:{path.name}:{path}"]
+                if path
+                else [quote_content_type]
+            )
+
+        kwargs = {
+            "quote_timestamp": quote_timestamp,
+            "quote_author": quote_author,
+            "quote_message": quote_message,
+        }
+        if protocol == "signal" and quote_attachments is not None:
+            kwargs["quote_attachments"] = quote_attachments
+        if protocol in {"whatsapp", "telegram"} and reply_to_message_id is not None:
+            kwargs["reply_to_message_id"] = reply_to_message_id
+        upload = None
+        try:
+            if upload_file is not None:
+                from web.uploads import UploadValidationError, store_upload
+
+                try:
+                    upload = await store_upload(upload_file)
+                except UploadValidationError as exc:
+                    detail = (
+                        "Upload too large"
+                        if exc.status_code == 413
+                        else "Invalid image"
+                    )
+                    raise HTTPException(
+                        status_code=exc.status_code, detail=detail
+                    ) from None
+                await asyncio.to_thread(
+                    manager.send_attachment_sync,
+                    protocol,
+                    contact_id,
+                    upload.path,
+                    caption=text or None,
+                    mime_type=upload.mime_type,
+                    **kwargs,
+                )
+            else:
+                await asyncio.to_thread(
+                    manager.send_message_sync,
+                    protocol,
+                    contact_id,
+                    text,
+                    **kwargs,
+                )
+        except HTTPException:
+            raise
+        except NotImplementedError:
+            if upload_file is not None:
+                raise HTTPException(
+                    status_code=501, detail="Attachment send not supported"
+                ) from None
+            logger.exception(
+                "Web send failed: protocol=%s contact=%s", protocol, contact_id
+            )
+            raise HTTPException(status_code=502, detail="Message send failed") from None
+        except Exception:
+            logger.exception(
+                "Web send failed: protocol=%s contact=%s", protocol, contact_id
+            )
+            raise HTTPException(status_code=502, detail="Message send failed") from None
+        finally:
+            if upload is not None:
+                upload.cleanup()
+
+        push_event(
+            {
+                "type": "message",
+                "payload": {"protocol": protocol, "contact_id": contact_id},
+            }
+        )
+        return {"ok": True}
 
     @router.get("/contacts")
     def contacts(request: Request) -> list[dict[str, Any]]:

@@ -211,7 +211,7 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
         cache[contact].append(
             {
                 "id": row["msg_id"],
-                "text": row["text"],
+                "text": "" if row["msg_type"] == "image" else row["text"],
                 "is_mine": bool(row["is_mine"]),
                 "sender": row["sender"],
                 "timestamp": row["timestamp"],
@@ -601,15 +601,13 @@ def _update_message_text(
 
 
 def _dedup_messages_by_id() -> int:
-    """Remove duplicate rows with the same ``(protocol, contact_number, msg_id, text)``.
+    """Remove rows with the same message and attachment identity.
 
     When duplicate rows exist (e.g. an optimistic client-side row plus the
     server-echo row fetched at startup), keep the one with the highest status
     rank so a ``read`` receipt is never lost in favour of a ``sent`` duplicate.
-    ``text`` is part of the dedup key because some protocols (WhatsApp) split a
-    single incoming message into multiple cached rows (one per attachment) that
-    share the same ``msg_id`` but have different text.  Idempotent: running it
-    twice removes no additional rows.
+    ``attachment_id`` is part of the key because some protocols split one
+    incoming message into multiple rows. Idempotent across repeated runs.
 
     Defensive guard: a partition whose timestamps span more than
     ``_ECHO_MATCH_WINDOW_MS`` is a signal that one id was (erroneously) attached
@@ -628,10 +626,11 @@ def _dedup_messages_by_id() -> int:
             # window — an id assigned to two distinct messages.  These must never
             # be merged, otherwise a legitimate row would be deleted at boot.
             divergent = conn.execute(
-                "SELECT protocol, contact_number, msg_id, text, COUNT(*) AS cnt, "
+                "SELECT protocol, contact_number, msg_id, text, attachment_id, "
+                "COUNT(*) AS cnt, "
                 "MIN(timestamp) AS min_ts, MAX(timestamp) AS max_ts "
                 "FROM messages WHERE msg_id IS NOT NULL AND msg_id != '' "
-                "GROUP BY protocol, contact_number, msg_id, text "
+                "GROUP BY protocol, contact_number, msg_id, text, attachment_id "
                 "HAVING MAX(timestamp) - MIN(timestamp) > ?",
                 (_ECHO_MATCH_WINDOW_MS,),
             ).fetchall()
@@ -640,6 +639,7 @@ def _dedup_messages_by_id() -> int:
                 contact_number,
                 msg_id,
                 text,
+                attachment_id,
                 cnt,
                 min_ts,
                 max_ts,
@@ -647,11 +647,13 @@ def _dedup_messages_by_id() -> int:
                 logger.warning(
                     "dedup skipped partition with divergent timestamps "
                     "(protocol=%r, contact_number=%r, msg_id=%r, text=%r, "
+                    "attachment_id=%r, "
                     "rows=%d, min_ts=%d, max_ts=%d)",
                     protocol,
                     contact_number,
                     msg_id,
                     text,
+                    attachment_id,
                     cnt,
                     min_ts,
                     max_ts,
@@ -666,7 +668,8 @@ def _dedup_messages_by_id() -> int:
                     SELECT
                         rowid,
                         ROW_NUMBER() OVER (
-                            PARTITION BY protocol, contact_number, msg_id, text
+                            PARTITION BY protocol, contact_number, msg_id, text,
+                                attachment_id
                             ORDER BY
                                 CASE status
                                 WHEN 'pending' THEN 0 WHEN 'failed' THEN 0
@@ -676,10 +679,12 @@ def _dedup_messages_by_id() -> int:
                                 rowid ASC
                         ) AS rn,
                         MIN(timestamp) OVER (
-                            PARTITION BY protocol, contact_number, msg_id, text
+                            PARTITION BY protocol, contact_number, msg_id, text,
+                                attachment_id
                         ) AS min_ts,
                         MAX(timestamp) OVER (
-                            PARTITION BY protocol, contact_number, msg_id, text
+                            PARTITION BY protocol, contact_number, msg_id, text,
+                                attachment_id
                         ) AS max_ts
                     FROM messages
                     WHERE msg_id IS NOT NULL AND msg_id != ''

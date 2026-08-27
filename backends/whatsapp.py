@@ -15,9 +15,11 @@ import json
 import logging
 import os
 import queue
+import shutil
 import sqlite3
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -159,7 +161,7 @@ class WhatsAppBackend(ChatBackend):
         #: Dedup guard per i webhook: WAHA può ritrasmettere lo stesso evento in
         #: caso di retry, quindi teniamo gli id già visti per non accodare in
         #: doppio un messaggio (il dedup definitivo avviene in ``ingest_message``).
-        self._seen_message_keys: set[tuple[str, str, str]] = set()
+        self._seen_message_keys: set[tuple[str, ...]] = set()
 
         # ── Address book (rubrica completa) ────────────────────────────
         self._address_book: list[ChatContact] | None = None
@@ -244,6 +246,7 @@ class WhatsAppBackend(ChatBackend):
                             ack_contact,
                             str(ack_id),
                             " ".join(str(ack_text).split()),
+                            "",
                         )
                         if ack_key not in self._seen_message_keys:
                             self._seen_message_keys.add(ack_key)
@@ -309,9 +312,12 @@ class WhatsAppBackend(ChatBackend):
                             ack_contact,
                             str(ack_id),
                             " ".join(str(ack_text).split()),
+                            str(ack_attachment_id or ""),
                         )
                         if ack_id and ack_key not in self._seen_message_keys:
                             self._seen_message_keys.add(ack_key)
+                            if ack_msg_type == "image":
+                                ack_text = ""
                             ack_msg_event = ChatEvent(
                                 type="message",
                                 protocol=PROTOCOL_WHATSAPP,
@@ -385,6 +391,7 @@ class WhatsAppBackend(ChatBackend):
                     event.contact_id,
                     str(mid),
                     " ".join(str(event.payload.get("text") or "").split()),
+                    str(event.payload.get("attachment_id") or ""),
                 )
                 if mid and key in self._seen_message_keys:
                     continue  # retry già processato
@@ -1156,6 +1163,16 @@ class WhatsAppBackend(ChatBackend):
 
     # ─── Messaging ────────────────────────────────────────────────────
 
+    def _resolve_send_chat_id(self, cid: str) -> str:
+        if not cid.endswith("@lid"):
+            return cid
+        phone = self._lid_lookup(cid) or self._lid_resolve_remote(cid)
+        if not phone:
+            raise RuntimeError(
+                f"WhatsApp: chat {cid} non risolvibile a numero — impossibile inviare"
+            )
+        return f"{phone}@c.us"
+
     async def send_message(
         self,
         contact_id: str,
@@ -1240,8 +1257,9 @@ class WhatsAppBackend(ChatBackend):
         """
         if not self._rest:
             raise RuntimeError("WhatsApp API is not configured")
+        send_chat_id = self._resolve_send_chat_id(contact_id)
         result = self._rest.send_message(
-            contact_id,
+            send_chat_id,
             text,
             quote_timestamp=quote_timestamp,
             quote_author=quote_author,
@@ -1249,8 +1267,92 @@ class WhatsAppBackend(ChatBackend):
             reply_to_message_id=reply_to_message_id,
         )
         if result is None:
-            raise RuntimeError("WhatsApp API send failed / unreachable")
+            status = self._rest.last_status
+            detail = self._rest.last_error or "unreachable"
+            raise RuntimeError(
+                f"WhatsApp API sendText failed (status={status}): {detail}"
+            )
         return self._extract_message_id(result)
+
+    def send_attachment_sync(
+        self,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+    ) -> str | None:
+        if not self._rest:
+            raise RuntimeError("WhatsApp API is not configured")
+        send_chat_id = self._resolve_send_chat_id(contact_id)
+        result = self._rest.send_image(
+            send_chat_id,
+            file_path,
+            caption=caption,
+            reply_to_message_id=reply_to_message_id,
+            mime_type=mime_type,
+        )
+        if result is None:
+            status = self._rest.last_status
+            detail = self._rest.last_error or "unreachable"
+            raise RuntimeError(
+                f"WhatsApp API sendImage failed (status={status}): {detail}"
+            )
+        return self._extract_message_id(result)
+
+    def enqueue_sent_message(
+        self,
+        contact_id: str,
+        message_id: str,
+        text: str,
+        *,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        attachment_path: Path | None = None,
+        mime_type: str | None = None,
+    ) -> None:
+        is_attachment = attachment_path is not None
+        msg_type = (
+            "image"
+            if is_attachment and (mime_type or "").startswith("image/")
+            else "attachment"
+            if is_attachment
+            else "text"
+        )
+        media_text = "" if msg_type == "image" else text
+        attachment_id = None
+        if attachment_path is not None:
+            suffix = attachment_path.suffix.lower()
+            attachment_id = f"sent-{uuid.uuid4().hex}{suffix}"
+            shutil.copy2(attachment_path, self._ensure_media_dir() / attachment_id)
+        self._enqueue_event(
+            ChatEvent(
+                type="message",
+                protocol=self.protocol,
+                contact_id=contact_id,
+                payload={
+                    "id": message_id,
+                    "text": media_text,
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": int(time.time() * 1000),
+                    "quote_text": quote_message,
+                    "quote_timestamp": quote_timestamp,
+                    "quote_author": quote_author,
+                    "reply_to_message_id": reply_to_message_id,
+                    "msg_type": msg_type,
+                    "attachment_info": text or None if is_attachment else None,
+                    "attachment_id": attachment_id,
+                    "content_type": mime_type,
+                },
+            )
+        )
 
     def edit_message_sync(
         self, contact_id: str, message_id: str, new_text: str
@@ -1307,7 +1409,7 @@ class WhatsAppBackend(ChatBackend):
         This mirrors the Signal backend's behaviour where signal-cli
         auto-downloads attachments, but with explicit lazy-fetch for WAHA.
         """
-        if not attachment_id or not self._rest:
+        if not attachment_id:
             return None
 
         base = self._ensure_media_dir()
@@ -1319,6 +1421,8 @@ class WhatsAppBackend(ChatBackend):
             return candidate
 
         # Lazy download from WAHA.
+        if not self._rest:
+            return None
         raw = self._rest.download_media(attachment_id)
         if not raw:
             return None
@@ -1435,6 +1539,7 @@ class WhatsAppBackend(ChatBackend):
         is_mine: bool,
         text: str,
         msg_id: str | None = None,
+        attachment_id: str | None = None,
     ) -> dict | None:
         """Return the cached message matching the same identity, or ``None``.
 
@@ -1453,13 +1558,27 @@ class WhatsAppBackend(ChatBackend):
             # body=caption condivide il msg_id del messaggio media reale, ma text
             # diverso).  Il match per id DEVE precedere quello sul testo, altrimenti
             # l'evento ack sintetico viene ingerito come nuovo messaggio di testo.
-            if is_mine and msg_id and msg.get("id") and msg.get("id") == msg_id:
+            cached_attachment_id = msg.get("attachment_id")
+            same_attachment = (
+                not attachment_id
+                or not cached_attachment_id
+                or cached_attachment_id == attachment_id
+            )
+            if (
+                is_mine
+                and msg_id
+                and msg.get("id")
+                and msg.get("id") == msg_id
+                and same_attachment
+            ):
                 return msg
             if msg.get("text") != text:
                 continue
             if not is_mine:
-                if msg_id and msg.get("id") == msg_id:
+                if msg_id and msg.get("id") == msg_id and same_attachment:
                     return msg
+                if attachment_id and cached_attachment_id != attachment_id:
+                    continue
                 # Text + fuzzy timestamp — unica identità stabile webhook/REST.
                 if abs(msg.get("timestamp", 0) - ts) <= 5000:
                     return msg
@@ -1598,11 +1717,15 @@ class WhatsAppBackend(ChatBackend):
         """
         from backend import _update_message_id
 
+        if data.get("msg_type") == "image":
+            data = {**data, "text": ""}
         text = data["text"]
         is_mine = data["is_mine"]
         msg_id = data.get("id")
 
-        existing = self._message_already_cached(contact_id, ts, is_mine, text, msg_id)
+        existing = self._message_already_cached(
+            contact_id, ts, is_mine, text, msg_id, data.get("attachment_id")
+        )
         if existing is not None:
             # Upgrade an existing entry that lacks an id (legacy / optimistic send).
             # This applies to both outgoing (optimistic send echo) and incoming

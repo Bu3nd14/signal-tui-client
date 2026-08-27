@@ -946,15 +946,10 @@ class TestIngestDedup:
                 f"DB attachment IDs mismatch: {db_ids} != {expected_ids}"
             )
 
-            # Step 5: verifica che il testo sia solo sul primo messaggio
+            # Step 5: le immagini non usano mai il campo text
             texts = [m["text"] for m in cached]
-            assert texts[0] == "Ecco le foto!", (
-                f"First message should have the text, got {texts[0]!r}"
-            )
-            for i in range(1, 6):
-                assert "Ecco le foto!" not in texts[i], (
-                    f"Message {i} should NOT contain the original text"
-                )
+            assert texts == [""] * 6
+            assert cached[0]["attachment_info"] == "Ecco le foto!"
 
         # Il tmp_path viene pulito automaticamente da pytest
 

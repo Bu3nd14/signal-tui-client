@@ -11,6 +11,7 @@ No Textual dependency.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -69,6 +70,30 @@ MEDIA_QUOTE_PLACEHOLDERS: dict[str, str] = {
     "audio": "🎵 Audio",
     "video": "🎬 Video",
 }
+
+_IMAGE_BASE64_PREFIXES = ("/9j/", "iVBORw0KGgo", "R0lGOD", "UklGR")
+
+
+def embedded_media_quote_placeholder(value: object) -> str | None:
+    """Return a safe placeholder when *value* contains inline media data."""
+    if not isinstance(value, str):
+        return None
+    compact = "".join(value.split())
+    lower = compact.lower()
+    if lower.startswith("data:") and ";base64," in lower[:128]:
+        mime = lower[5:].split(";", 1)[0]
+        if mime.startswith("image/"):
+            return MEDIA_QUOTE_PLACEHOLDERS["image"]
+        if mime.startswith("video/"):
+            return MEDIA_QUOTE_PLACEHOLDERS["video"]
+        if mime.startswith("audio/"):
+            return MEDIA_QUOTE_PLACEHOLDERS["audio"]
+        return MEDIA_QUOTE_PLACEHOLDERS["attachment"]
+    if compact.startswith(_IMAGE_BASE64_PREFIXES):
+        return MEDIA_QUOTE_PLACEHOLDERS["image"]
+    if len(compact) >= 128 and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", compact):
+        return MEDIA_QUOTE_PLACEHOLDERS["attachment"]
+    return None
 
 
 def media_quote_placeholder(msg_type: str, detail: str | None = None) -> str:

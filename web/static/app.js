@@ -12,6 +12,16 @@ const state = {
   messageRequest: null,
   mediaRequests: new Set(),
   objectUrls: new Set(),
+  messages: [],
+  optimistic: [],
+  optimisticSequence: 0,
+  sending: false,
+  stagedAttachment: null,
+  replyTo: null,
+  emojiData: null,
+  emojiRequest: null,
+  emojiFailed: false,
+  emojiCategory: 0,
 };
 
 const elements = {
@@ -29,6 +39,25 @@ const elements = {
   tokenInput: document.querySelector("#token-input"),
   tokenError: document.querySelector("#token-error"),
   cancelToken: document.querySelector("#cancel-token"),
+  composer: document.querySelector("#composer"),
+  composerShell: document.querySelector("#composer-shell"),
+  messageInput: document.querySelector("#message-input"),
+  sendMessage: document.querySelector("#send-message"),
+  sendIcon: document.querySelector(".send-icon"),
+  sendSpinner: document.querySelector(".send-spinner"),
+  attachmentPreview: document.querySelector("#attachment-preview"),
+  attachmentPreviewImage: document.querySelector("#attachment-preview-image"),
+  attachmentPreviewName: document.querySelector("#attachment-preview-name"),
+  removeAttachment: document.querySelector("#remove-attachment"),
+  replyBanner: document.querySelector("#reply-banner"),
+  replyAuthor: document.querySelector("#reply-author"),
+  replySnippet: document.querySelector("#reply-snippet"),
+  cancelReply: document.querySelector("#cancel-reply"),
+  emojiToggle: document.querySelector("#emoji-toggle"),
+  emojiPicker: document.querySelector("#emoji-picker"),
+  emojiTabs: document.querySelector("#emoji-tabs"),
+  emojiSearch: document.querySelector("#emoji-search"),
+  emojiGrid: document.querySelector("#emoji-grid"),
 };
 
 function showError(message) {
@@ -41,6 +70,7 @@ function scrollThreadToBottom() {
 }
 
 function requestToken(invalid = false) {
+  closeEmojiPicker({ focus: false });
   elements.tokenError.hidden = !invalid;
   elements.tokenInput.value = state.token;
   elements.cancelToken.hidden = !state.token;
@@ -55,6 +85,7 @@ function handleUnauthorized() {
 
 async function apiFetch(path, options = {}) {
   const headers = new Headers(options.headers || {});
+  if (options.body instanceof FormData) headers.delete("Content-Type");
   headers.set("Authorization", `Bearer ${state.token}`);
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401) {
@@ -77,6 +108,11 @@ function formatTimestamp(value, includeDate = true) {
     : { hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
+function timestampMilliseconds(value) {
+  const numeric = Number(value);
+  return numeric < 100000000000 ? numeric * 1000 : numeric;
+}
+
 function contactInitial(contact) {
   return (contact.display_name || contact.id || "?").trim().charAt(0).toUpperCase();
 }
@@ -96,7 +132,8 @@ function renderContacts() {
   const contacts = state.protocolFilter === "all"
     ? sortedContacts
     : sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
-  if (state.active && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
+  const activeMatchesFilter = state.protocolFilter === "all" || state.active?.protocol === state.protocolFilter;
+  if (state.active && activeMatchesFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
     contacts.unshift(state.active);
   }
   for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
@@ -125,7 +162,7 @@ function renderContacts() {
     icon.className = "protocol-icon";
     icon.title = contact.protocol;
     icon.innerHTML = protocolIcon(contact.protocol);
-    main.append(name, icon);
+    main.append(name);
     copy.append(main);
     button.append(avatar, copy);
     if (Number(contact.unread) > 0) {
@@ -134,6 +171,7 @@ function renderContacts() {
       unread.textContent = Number(contact.unread) > 99 ? "99+" : String(contact.unread);
       button.append(unread);
     }
+    button.append(icon);
     button.addEventListener("click", () => openThread(contact));
     elements.contacts.append(button);
   }
@@ -207,10 +245,90 @@ function imageAttachment(attachment, protocol) {
   return container;
 }
 
+function attachmentName(item) {
+  const attachmentId = item.attachment?.attachment_id || "";
+  return item.attachment?.name || attachmentId.split("?", 1)[0].split("/").filter(Boolean).pop() || "Allegato";
+}
+
+function replyAuthor(item) {
+  return item.direction === "out" ? "Tu" : (state.active?.display_name || state.active?.id || "Contatto");
+}
+
+function updateReplyBanner() {
+  const reply = state.replyTo;
+  elements.replyBanner.hidden = !reply;
+  if (!reply) {
+    elements.replyAuthor.textContent = "";
+    elements.replySnippet.textContent = "";
+    elements.messageInput.placeholder = "Scrivi un messaggio";
+    return;
+  }
+  elements.replyAuthor.textContent = reply.author;
+  const imageMark = reply.isImage ? "🖼️ " : "";
+  const snippet = reply.quoteMessage || "Messaggio";
+  elements.replySnippet.textContent = `${imageMark}${snippet.length > 80 ? `${snippet.slice(0, 79)}…` : snippet}`;
+  elements.messageInput.placeholder = `Rispondendo a ${reply.author}`;
+}
+
+function cancelReply() {
+  state.replyTo = null;
+  updateReplyBanner();
+}
+
+function startReply(item) {
+  if (!state.active || item.optimistic_id) return;
+  const timestamp = timestampMilliseconds(item.timestamp);
+  const id = item.id === null || item.id === undefined ? null : String(item.id);
+  if (!Number.isFinite(timestamp)) return;
+  if (state.active.protocol === "telegram" && (!id || !/^\d+$/.test(id) || Number(id) <= 0)) return;
+  if (state.active.protocol === "whatsapp" && !id) return;
+  state.replyTo = {
+    id,
+    timestamp,
+    author: replyAuthor(item),
+    quoteAuthor: state.active.id,
+    quoteMessage: window.SignalTuiReconcile.replyQuoteMessage(item),
+    isMedia: Boolean(item.attachment),
+    isImage: Boolean(item.attachment?.type?.toLowerCase().startsWith("image/")),
+    contentType: item.attachment?.type,
+    attachmentId: item.attachment?.attachment_id,
+  };
+  updateReplyBanner();
+  elements.messageInput.focus();
+}
+
+function appendRenderedQuote(bubble, item) {
+  const quoteText = item.quote_text ?? item.quote_message;
+  if (quoteText == null && item.quote_timestamp == null && item.quote_author == null) return;
+  const quote = document.createElement("div");
+  quote.className = "message-quote";
+  const author = document.createElement("strong");
+  author.textContent = item.quote_author || "Messaggio citato";
+  const text = document.createElement("span");
+  text.textContent = quoteText || "Messaggio";
+  quote.append(author, text);
+  bubble.append(quote);
+}
+
 function renderMessages(messages, protocol) {
   clearMedia();
   elements.messages.replaceChildren();
-  if (!messages.length) {
+  const active = state.active;
+  const reconciliation = window.SignalTuiReconcile.reconcileOptimisticMessages(
+    messages,
+    state.optimistic,
+    active?.protocol,
+    active?.id,
+  );
+  state.optimistic = reconciliation.optimistic;
+  for (const item of state.optimistic) {
+    if (item.localPreviewUrl && !item.optimistic_id) {
+      URL.revokeObjectURL(item.localPreviewUrl);
+      delete item.localPreviewUrl;
+    }
+  }
+  const displayed = [...messages, ...reconciliation.visible].sort((a, b) => timestampMilliseconds(a.timestamp) - timestampMilliseconds(b.timestamp));
+  if (!displayed.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = "Nessun messaggio archiviato in questa conversazione.";
@@ -219,18 +337,28 @@ function renderMessages(messages, protocol) {
     requestAnimationFrame(scrollThreadToBottom);
     return;
   }
-  for (const item of messages) {
+  for (const item of displayed) {
     const message = document.createElement("article");
     message.className = `message ${item.direction === "out" ? "out" : "in"}`;
     const bubble = document.createElement("div");
     bubble.className = "bubble";
+    appendRenderedQuote(bubble, item);
     const isImage = item.attachment?.type?.toLowerCase().startsWith("image/");
     if (isImage) {
-      bubble.append(imageAttachment(item.attachment, protocol));
+      if (item.localPreviewUrl) {
+        const preview = document.createElement("div");
+        preview.className = "attachment local-preview";
+        const image = document.createElement("img");
+        image.src = item.localPreviewUrl;
+        image.alt = item.attachment.name || "Immagine allegata";
+        preview.append(image);
+        bubble.append(preview);
+      } else {
+        bubble.append(imageAttachment(item.attachment, protocol));
+      }
     }
-    const attachmentId = item.attachment?.attachment_id || "";
-    const attachmentName = item.attachment?.name || attachmentId.split("?", 1)[0].split("/").filter(Boolean).pop() || "Allegato";
-    const displayText = item.text || (item.attachment && !isImage ? attachmentName : "");
+    const safeText = window.SignalTuiReconcile.messageDisplayText(item);
+    const displayText = safeText || (item.attachment && !isImage ? attachmentName(item) : "");
     if (displayText) {
       const text = document.createElement("div");
       text.className = "message-text";
@@ -240,8 +368,24 @@ function renderMessages(messages, protocol) {
     const time = document.createElement("time");
     time.className = "message-time";
     time.textContent = formatTimestamp(item.timestamp);
+    if (item.optimisticStatus) {
+      const status = document.createElement("span");
+      status.className = `message-status ${item.optimisticStatus}`;
+      status.textContent = item.optimisticStatus === "failed" ? " · fallito" : item.optimisticStatus === "sent" ? " · inviato" : " · invio…";
+      time.append(status);
+    }
     bubble.append(time);
     message.append(bubble);
+    if (!item.optimistic_id) {
+      const reply = document.createElement("button");
+      reply.type = "button";
+      reply.className = "message-reply";
+      reply.textContent = "↩";
+      reply.setAttribute("aria-label", "Rispondi al messaggio");
+      reply.title = "Rispondi";
+      reply.addEventListener("click", () => startReply(item));
+      message.append(reply);
+    }
     elements.messages.append(message);
   }
   scrollThreadToBottom();
@@ -259,6 +403,7 @@ async function loadMessages() {
     const response = await apiFetch(`/api/messages?${query}`, { signal: controller.signal });
     const messages = await response.json();
     if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
+      state.messages = messages;
       renderMessages(messages, active.protocol);
       scrollThreadToBottom();
     }
@@ -270,10 +415,14 @@ async function loadMessages() {
 }
 
 function openThread(contact) {
+  closeEmojiPicker({ focus: false });
+  cancelReply();
   state.active = contact;
   elements.threadName.textContent = contact.display_name || contact.id;
-  elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span> · sola lettura`;
+  elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
   elements.app.classList.add("thread-open");
+  elements.composerShell.hidden = false;
+  state.messages = [];
   renderContacts();
   elements.messages.replaceChildren();
   const loading = document.createElement("div");
@@ -281,6 +430,260 @@ function openThread(contact) {
   loading.textContent = "Caricamento messaggi…";
   elements.messages.append(loading);
   loadMessages();
+}
+
+function normalizeEmojiSearch(value) {
+  return value.toLocaleLowerCase().replaceAll("_", " ").replaceAll("-", " ").trim();
+}
+
+async function loadEmojiData() {
+  if (state.emojiData) return state.emojiData;
+  if (state.emojiFailed) throw new Error("emoji unavailable");
+  if (!state.emojiRequest) {
+    state.emojiRequest = apiFetch("/api/emoji")
+      .then((response) => response.json())
+      .then((categories) => {
+        if (!Array.isArray(categories) || !categories.length) throw new Error("invalid emoji data");
+        state.emojiData = categories;
+        return categories;
+      })
+      .catch((error) => {
+        state.emojiFailed = true;
+        throw error;
+      })
+      .finally(() => { state.emojiRequest = null; });
+  }
+  return state.emojiRequest;
+}
+
+function emojiCells() {
+  return [...elements.emojiGrid.querySelectorAll(".emoji-cell")];
+}
+
+function setEmojiRovingIndex(index, { focus = false } = {}) {
+  const cells = emojiCells();
+  if (!cells.length) return;
+  const bounded = Math.max(0, Math.min(index, cells.length - 1));
+  cells.forEach((cell, cellIndex) => { cell.tabIndex = cellIndex === bounded ? 0 : -1; });
+  if (focus) cells[bounded].focus();
+}
+
+function insertEmoji(char) {
+  const input = elements.messageInput;
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  input.setRangeText(char, start, end, "end");
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.focus();
+}
+
+function renderEmojiGrid() {
+  elements.emojiGrid.replaceChildren();
+  const query = normalizeEmojiSearch(elements.emojiSearch.value);
+  const categories = state.emojiData || [];
+  const activeCategory = categories[state.emojiCategory];
+  const matches = [];
+  const candidates = query ? categories : (activeCategory ? [activeCategory] : []);
+  for (const category of candidates) {
+    const categoryMatches = normalizeEmojiSearch(category.category).includes(query);
+    for (const char of category.emojis) {
+      const alias = category.aliases?.[char] || "";
+      if (!query || categoryMatches || normalizeEmojiSearch(alias).includes(query)) {
+        matches.push({ char, alias, category: category.category });
+        if (query && matches.length >= 60) break;
+      }
+    }
+    if (query && matches.length >= 60) break;
+  }
+  if (!matches.length) {
+    const empty = document.createElement("p");
+    empty.className = "emoji-empty";
+    empty.textContent = "Nessuna emoji trovata";
+    elements.emojiGrid.append(empty);
+    return;
+  }
+  for (const [index, item] of matches.entries()) {
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "emoji-cell";
+    cell.tabIndex = index === 0 ? 0 : -1;
+    cell.setAttribute("role", "gridcell");
+    cell.setAttribute("aria-label", item.alias || `${item.category}: ${item.char}`);
+    cell.title = item.alias || item.category;
+    cell.textContent = item.char;
+    cell.addEventListener("click", () => insertEmoji(item.char));
+    elements.emojiGrid.append(cell);
+  }
+}
+
+function renderEmojiTabs() {
+  elements.emojiTabs.replaceChildren();
+  for (const [index, category] of state.emojiData.entries()) {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = `emoji-tab${index === state.emojiCategory ? " active" : ""}`;
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(index === state.emojiCategory));
+    tab.setAttribute("aria-label", category.category);
+    tab.title = category.category;
+    tab.textContent = category.icon;
+    tab.addEventListener("click", () => {
+      state.emojiCategory = index;
+      elements.emojiSearch.value = "";
+      renderEmojiTabs();
+      renderEmojiGrid();
+    });
+    elements.emojiTabs.append(tab);
+  }
+}
+
+function closeEmojiPicker({ focus = true } = {}) {
+  if (elements.emojiPicker.hidden) return;
+  elements.emojiPicker.hidden = true;
+  elements.emojiToggle.setAttribute("aria-expanded", "false");
+  elements.emojiToggle.setAttribute("aria-label", "Apri selettore emoji");
+  if (focus) elements.messageInput.focus();
+}
+
+async function toggleEmojiPicker() {
+  if (!elements.emojiPicker.hidden) {
+    closeEmojiPicker();
+    return;
+  }
+  try {
+    await loadEmojiData();
+  } catch (error) {
+    if (error.message !== "unauthorized") showError("Impossibile caricare il selettore emoji.");
+    return;
+  }
+  renderEmojiTabs();
+  renderEmojiGrid();
+  if (elements.tokenDialog.open) elements.tokenDialog.close();
+  elements.emojiPicker.hidden = false;
+  elements.emojiToggle.setAttribute("aria-expanded", "true");
+  elements.emojiToggle.setAttribute("aria-label", "Chiudi selettore emoji");
+  elements.emojiSearch.focus();
+}
+
+function resizeComposer() {
+  elements.messageInput.style.height = "auto";
+  elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, 160)}px`;
+}
+
+function updateComposer() {
+  elements.sendMessage.disabled = state.sending || (!elements.messageInput.value.trim() && !state.stagedAttachment);
+  elements.messageInput.disabled = state.sending;
+  elements.removeAttachment.disabled = state.sending;
+  elements.cancelReply.disabled = state.sending;
+  elements.sendIcon.hidden = state.sending;
+  elements.sendSpinner.hidden = !state.sending;
+}
+
+function clearStagedAttachment({ revoke = true } = {}) {
+  if (state.stagedAttachment && revoke) URL.revokeObjectURL(state.stagedAttachment.previewUrl);
+  state.stagedAttachment = null;
+  elements.attachmentPreview.hidden = true;
+  elements.attachmentPreviewImage.removeAttribute("src");
+  elements.attachmentPreviewName.textContent = "";
+  updateComposer();
+}
+
+function stageAttachment(file) {
+  if (!file || !file.type.startsWith("image/") || state.sending) return;
+  if (file.size > 20 * 1024 * 1024) {
+    showError("L'immagine supera il limite di 20 MiB.");
+    return;
+  }
+  clearStagedAttachment();
+  const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+  const extension = extensions[file.type];
+  if (!extension) {
+    showError("Formato immagine non supportato.");
+    return;
+  }
+  const filename = `clipboard-${Date.now()}.${extension}`;
+  const previewUrl = URL.createObjectURL(file);
+  state.stagedAttachment = { file, filename, previewUrl };
+  elements.attachmentPreviewImage.src = previewUrl;
+  elements.attachmentPreviewName.textContent = filename;
+  elements.attachmentPreview.hidden = false;
+  updateComposer();
+}
+
+async function submitMessage() {
+  if (state.sending || !state.active) return;
+  const text = elements.messageInput.value;
+  const attachment = state.stagedAttachment;
+  const reply = state.replyTo ? { ...state.replyTo } : null;
+  if (!text.trim() && !attachment) return;
+  const active = { ...state.active };
+  const timestamp = Date.now();
+  const optimistic = {
+    optimistic_id: `${timestamp}-${++state.optimisticSequence}`,
+    protocol: active.protocol,
+    contactId: active.id,
+    text: attachment ? "" : text,
+    direction: "out",
+    timestamp,
+    optimisticStatus: "sending",
+    known_message_ids: state.messages.map(window.SignalTuiReconcile.messageIdentity),
+  };
+  if (reply) {
+    optimistic.quote_timestamp = reply.timestamp;
+    optimistic.quote_author = reply.quoteAuthor;
+    optimistic.quote_message = reply.quoteMessage;
+    optimistic.quote_text = reply.quoteMessage;
+    if (reply.isImage && active.protocol !== "signal") optimistic.quote_media_type = "image";
+  }
+  if (attachment) {
+    optimistic.attachment = { type: attachment.file.type, name: attachment.filename, attachment_id: attachment.filename };
+    optimistic.localPreviewUrl = attachment.previewUrl;
+  }
+  state.optimistic.push(optimistic);
+  state.sending = true;
+  elements.messageInput.value = "";
+  if (attachment) clearStagedAttachment({ revoke: false });
+  resizeComposer();
+  updateComposer();
+  if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
+  try {
+    const quotePayload = reply ? {
+      quote_timestamp: reply.timestamp,
+      quote_author: reply.quoteAuthor,
+      quote_message: active.protocol === "signal" && reply.isMedia ? "" : reply.quoteMessage,
+      ...(active.protocol === "signal"
+        ? {
+          ...(reply.contentType ? { quote_content_type: reply.contentType } : {}),
+          ...(reply.attachmentId ? { quote_attachment_id: reply.attachmentId } : {}),
+        }
+        : { reply_to_message_id: reply.id }),
+    } : {};
+    if (attachment) {
+      const body = new FormData();
+      body.set("protocol", active.protocol);
+      body.set("contact_id", active.id);
+      body.set("text", text);
+      for (const [key, value] of Object.entries(quotePayload)) body.set(key, String(value));
+      body.set("file", attachment.file, attachment.filename);
+      await apiFetch("/api/send", { method: "POST", body });
+    } else {
+      await apiFetch("/api/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text, ...quotePayload }),
+      });
+    }
+    optimistic.optimisticStatus = "sent";
+    if (state.replyTo && reply && state.replyTo.timestamp === reply.timestamp) cancelReply();
+  } catch (error) {
+    optimistic.optimisticStatus = "failed";
+    if (error.message !== "unauthorized") showError("Impossibile inviare il messaggio.");
+  } finally {
+    state.sending = false;
+    updateComposer();
+    if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
+    elements.messageInput.focus();
+  }
 }
 
 function encodeToken(token) {
@@ -350,11 +753,77 @@ document.querySelector("#refresh-contacts").addEventListener("click", () => load
 document.querySelector("#open-token").addEventListener("click", () => requestToken());
 document.querySelector("#back-button").addEventListener("click", () => elements.app.classList.remove("thread-open"));
 document.querySelector("#dismiss-error").addEventListener("click", () => { elements.errorBanner.hidden = true; });
+elements.composer.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitMessage();
+});
+elements.messageInput.addEventListener("input", () => {
+  resizeComposer();
+  updateComposer();
+});
+elements.messageInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || event.shiftKey) return;
+  event.preventDefault();
+  if (!state.sending) submitMessage();
+});
+elements.emojiToggle.addEventListener("click", toggleEmojiPicker);
+elements.emojiSearch.addEventListener("input", renderEmojiGrid);
+elements.emojiSearch.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowDown") return;
+  const cells = emojiCells();
+  if (!cells.length) return;
+  event.preventDefault();
+  setEmojiRovingIndex(0, { focus: true });
+});
+elements.emojiGrid.addEventListener("keydown", (event) => {
+  const cell = event.target.closest(".emoji-cell");
+  if (!cell) return;
+  const cells = emojiCells();
+  const index = cells.indexOf(cell);
+  const offsets = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -8, ArrowDown: 8 };
+  if (Object.hasOwn(offsets, event.key)) {
+    event.preventDefault();
+    setEmojiRovingIndex(index + offsets[event.key], { focus: true });
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    cell.click();
+  }
+});
+elements.emojiPicker.addEventListener("keydown", (event) => {
+  const searchShortcut = event.key === "/" && event.target !== elements.emojiSearch;
+  const findShortcut = event.ctrlKey && event.key.toLocaleLowerCase() === "f";
+  if (searchShortcut || findShortcut) {
+    event.preventDefault();
+    elements.emojiSearch.focus();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || elements.emojiPicker.hidden) return;
+  event.preventDefault();
+  closeEmojiPicker();
+});
+elements.composer.addEventListener("paste", (event) => {
+  const item = [...(event.clipboardData?.items || [])]
+    .find((candidate) => candidate.type.startsWith("image/"));
+  if (!item) return;
+  event.preventDefault();
+  stageAttachment(item.getAsFile());
+});
+elements.removeAttachment.addEventListener("click", () => clearStagedAttachment());
+elements.cancelReply.addEventListener("click", cancelReply);
 if (elements.protocolTabs) {
   elements.protocolTabs.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-protocol]");
     if (!tab) return;
-    state.protocolFilter = tab.dataset.protocol;
+    const protocol = tab.dataset.protocol;
+    state.protocolFilter = protocol;
+    if (protocol !== "all" && state.active?.protocol !== protocol) {
+      const firstContact = state.contacts.find((contact) => contact.protocol === protocol);
+      if (firstContact) {
+        openThread(firstContact);
+        return;
+      }
+    }
     renderContacts();
   });
 }
@@ -374,6 +843,10 @@ document.querySelector("#token-form").addEventListener("submit", (event) => {
 window.addEventListener("beforeunload", () => {
   disconnectSocket();
   clearMedia();
+  clearStagedAttachment();
+  for (const item of state.optimistic) {
+    if (item.localPreviewUrl) URL.revokeObjectURL(item.localPreviewUrl);
+  }
 });
 
 if (state.token) {

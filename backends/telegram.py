@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import queue
+import shutil
 import tempfile
 import threading
 import time
@@ -109,6 +110,7 @@ class TelegramBackend(ChatBackend):
     """Telegram backend using Telethon with a dedicated asyncio event loop."""
 
     protocol = PROTOCOL_TELEGRAM
+    attachment_send_timeout = 120
 
     def __init__(self) -> None:
         self._api_id = get_telegram_api_id()
@@ -769,6 +771,93 @@ class TelegramBackend(ChatBackend):
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
         return future.result(timeout=30)
 
+    def send_attachment_sync(
+        self,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        if self._loop is None or self._client is None:
+            raise RuntimeError("Telegram backend not connected")
+
+        async def _send() -> str:
+            try:
+                eid = int(contact_id)
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid Telegram contact id: {contact_id}")
+            reply_to = self._validated_reply_to_message_id(reply_to_message_id)
+            entity = await self._resolve_input_entity(eid)
+            msg = await self._client.send_file(
+                entity,
+                str(file_path),
+                caption=caption or None,
+                reply_to=reply_to,
+                force_document=False,
+            )
+            return str(msg.id)
+
+        future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
+        return future.result(timeout=self.attachment_send_timeout)
+
+    def enqueue_sent_message(
+        self,
+        contact_id: str,
+        message_id: str,
+        text: str,
+        *,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        attachment_path: Path | None = None,
+        mime_type: str | None = None,
+    ) -> None:
+        is_attachment = attachment_path is not None
+        msg_type = (
+            "image"
+            if is_attachment and (mime_type or "").startswith("image/")
+            else "attachment"
+            if is_attachment
+            else "text"
+        )
+        media_text = "" if msg_type == "image" else text
+        attachment_id = None
+        if attachment_path is not None:
+            media_dir = _media_dir()
+            media_dir.mkdir(parents=True, exist_ok=True)
+            suffix = attachment_path.suffix.lower()
+            persisted = media_dir / f"{int(contact_id)}-{int(message_id)}-sent{suffix}"
+            shutil.copy2(attachment_path, persisted)
+            attachment_id = str(persisted)
+        self._events.put(
+            ChatEvent(
+                type="message",
+                protocol=self.protocol,
+                contact_id=contact_id,
+                payload={
+                    "id": str(message_id),
+                    "text": media_text,
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": int(time.time() * 1000),
+                    "quote_text": quote_message,
+                    "quote_timestamp": quote_timestamp,
+                    "quote_author": quote_author,
+                    "reply_to_message_id": reply_to_message_id,
+                    "msg_type": msg_type,
+                    "attachment_info": text or None if is_attachment else None,
+                    "attachment_id": attachment_id,
+                    "content_type": mime_type,
+                },
+            )
+        )
+
     def edit_message_sync(
         self, contact_id: str, message_id: str, new_text: str
     ) -> bool:
@@ -927,6 +1016,7 @@ class TelegramBackend(ChatBackend):
         if msg.photo:
             msg_type = "image"
             attachment_info = text or "Photo"
+            text = ""
         elif msg.document:
             msg_type = "attachment"
             attachment_info = "📎 Document"
@@ -1223,6 +1313,8 @@ class TelegramBackend(ChatBackend):
         """
         from backend import _update_message_id
 
+        if data.get("msg_type") == "image":
+            data = {**data, "text": ""}
         mid = data.get("id")
         text = data.get("text", "")
 

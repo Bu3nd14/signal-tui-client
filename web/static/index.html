@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Signal TUI Reader</title>
-  <link rel="stylesheet" href="/style.css?v=5">
+  <link rel="stylesheet" href="/style.css?v=9">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -50,6 +50,37 @@
           <p>Scegli una chat per consultarne i messaggi e gli allegati.</p>
         </div>
       </section>
+      <div id="composer-shell" class="composer-shell" hidden>
+      <form id="composer" class="composer">
+        <div id="reply-banner" class="reply-banner" hidden>
+          <span class="reply-mark" aria-hidden="true">↩</span>
+          <span class="reply-copy">
+            <strong id="reply-author"></strong>
+            <span id="reply-snippet"></span>
+          </span>
+          <button id="cancel-reply" type="button" aria-label="Annulla risposta" title="Annulla risposta">×</button>
+        </div>
+        <div id="attachment-preview" class="attachment-preview" hidden>
+          <img id="attachment-preview-image" alt="Anteprima immagine da inviare">
+          <span id="attachment-preview-name"></span>
+          <button id="remove-attachment" type="button" aria-label="Rimuovi immagine">×</button>
+        </div>
+        <div class="composer-controls">
+          <textarea id="message-input" rows="1" maxlength="65536" placeholder="Scrivi un messaggio" aria-label="Messaggio"></textarea>
+          <button id="emoji-toggle" class="composer-icon-button" type="button" aria-label="Apri selettore emoji" aria-expanded="false" aria-controls="emoji-picker" title="Emoji">😀</button>
+          <button id="send-message" class="send-button" type="submit" disabled aria-label="Invia messaggio">
+            <span class="send-icon" aria-hidden="true">➤</span>
+            <span class="send-spinner spinner" aria-label="Invio in corso" hidden></span>
+          </button>
+        </div>
+      </form>
+      <aside id="emoji-picker" class="emoji-picker" aria-label="Selettore emoji" hidden>
+        <div id="emoji-tabs" class="emoji-tabs" role="tablist" aria-label="Categorie emoji"></div>
+        <label class="emoji-search-label" for="emoji-search">Cerca emoji</label>
+        <input id="emoji-search" class="emoji-search" type="search" autocomplete="off" placeholder="Cerca per nome o categoria">
+        <div id="emoji-grid" class="emoji-grid" role="grid" aria-label="Emoji"></div>
+      </aside>
+      </div>
     </main>
   </div>
 
@@ -68,6 +99,7 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=5" defer></script>
+  <script src="/reconcile.js?v=3" defer></script>
+  <script src="/app.js?v=11" defer></script>
 </body>
 </html>

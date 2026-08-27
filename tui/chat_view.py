@@ -14,7 +14,7 @@ from backends import (
 from backends.config import thumbnail_max_cols, thumbnail_max_lines
 from models import (
     PROTOCOL_SIGNAL,
-    PROTOCOL_TELEGRAM,
+    is_media_quote_placeholder,
 )
 from tui.images.detect import ImageSupport
 from ui_components import (
@@ -44,8 +44,19 @@ def _media_display_text(text: str, attachment_info: str | None, msg_type: str) -
     return text
 
 
-_TECHNICAL_LABELS = frozenset({"🖼️ Image", "🖼️ Photo", "Media", "Image", "Photo"})
-_TECHNICAL_PREFIXES = ("Image: ", "Video: ", "Audio: ")
+_TECHNICAL_LABELS = frozenset(
+    {"🖼️ Image", "🖼️ Photo", "🖼️ Immagine", "Media", "Image", "Photo", "Immagine"}
+)
+_TECHNICAL_PREFIXES = (
+    "Image: ",
+    "Photo: ",
+    "Immagine: ",
+    "🖼️ Image",
+    "🖼️ Photo",
+    "🖼️ Immagine",
+    "Video: ",
+    "Audio: ",
+)
 _MIME_RE = re.compile(r"^[\w.-]+/[\w.+-]+$")
 _MEDIA_KEY_RE = re.compile(r"^(image|video|audio|document|sticker)Message( \(.+\))?$")
 _MEDIA_EXT_RE = re.compile(
@@ -68,6 +79,8 @@ def _is_technical_media_label(label: str) -> bool:
     if _MEDIA_KEY_RE.match(s):
         return True
     if s.startswith(("http://", "https://")):
+        return True
+    if s.lower().startswith("upload-"):
         return True
     return bool(" " not in s and _MEDIA_EXT_RE.search(s))
 
@@ -107,13 +120,11 @@ def _image_caption(
     """
     t = (text or "").strip()
     info = (attachment_info or "").strip()
-    if protocol == PROTOCOL_TELEGRAM:
-        return t or None
-    if (
-        protocol == PROTOCOL_SIGNAL
-        and t
-        and not _is_synthetic_media_text(text, attachment_info, attachment_id)
-    ):
+    if is_media_quote_placeholder(t) or _is_technical_media_label(t):
+        t = ""
+    if is_media_quote_placeholder(info) or _is_technical_media_label(info):
+        info = ""
+    if t and not _is_synthetic_media_text(text, attachment_info, attachment_id):
         return t
     if info and not _is_technical_media_label(info):
         return info

@@ -311,6 +311,7 @@ class TestWhatsAppRESTClient:
 
         assert captured["payload"]["reply_to"] == "message-id-1"
         assert "quotedMessage" not in captured["payload"]
+        assert "quote_message" not in captured["payload"]
 
     def test_send_message_error_returns_none(self):
         client = WhatsAppRESTClient("http://api.test")
@@ -843,10 +844,7 @@ class TestWhatsAppEvents:
             }
         )
 
-        assert [event.payload["text"] for event in events] == [
-            "Media: https://wa.to/media/one",
-            "Media: parent-media:2",
-        ]
+        assert [event.payload["text"] for event in events] == ["", ""]
         assert [event.payload["attachment_info"] for event in events] == [
             "one.jpg",
             "two.jpg",
@@ -884,9 +882,7 @@ class TestWhatsAppEvents:
 
         events = [_msg(payload) for payload in payloads]
 
-        assert [event.payload["text"] for event in events] == [
-            "Media: parent-media:1",
-        ] * len(payloads)
+        assert [event.payload["text"] for event in events] == [""] * len(payloads)
         assert [event.payload["attachment_id"] for event in events] == [None] * len(
             payloads
         )
@@ -938,7 +934,7 @@ class TestWhatsAppEvents:
         )
         assert ev.payload["attachment_id"] == "https://wa.to/img/no-text-photo.jpg"
         assert ev.payload["attachment_info"] == "Senza testo!"
-        assert ev.payload["text"] == "Media: https://wa.to/img/no-text-photo.jpg"
+        assert ev.payload["text"] == ""
 
     def test_event_from_raw_fallback_recognizes_hasMedia_without_text_key(self):
         """_event_from_raw fallback riconosce hasMedia anche senza key 'text'.
@@ -1097,6 +1093,28 @@ class TestWhatsAppBackend:
         )
         assert msg_id == "m"
 
+    def test_resolve_send_chat_id_uses_cached_lid_phone(self):
+        backend = _make_backend()
+        backend._lid_map = {
+            "139153@lid": {"phone": "393331234567", "resolved_at": 9999999999}
+        }
+        with patch.object(backend, "_lid_resolve_remote") as resolve_remote:
+            assert backend._resolve_send_chat_id("139153@lid") == "393331234567@c.us"
+        resolve_remote.assert_not_called()
+
+    def test_unresolved_lid_never_reaches_send_request(self, tmp_path):
+        backend = _make_backend()
+        image = tmp_path / "photo.png"
+        image.write_bytes(b"png-data")
+        with (
+            patch.object(backend, "_lid_lookup", return_value=None),
+            patch.object(backend, "_lid_resolve_remote", return_value=None),
+            patch.object(backend._rest, "_request") as request,
+            pytest.raises(RuntimeError, match="non risolvibile a numero"),
+        ):
+            backend.send_attachment_sync("139153@lid", image, mime_type="image/png")
+        request.assert_not_called()
+
     def test_send_message_forwards_reply_to_message_id(self):
         backend = _make_backend()
         with patch.object(backend, "send_message_sync", return_value="1") as mock_send:
@@ -1121,6 +1139,82 @@ class TestWhatsAppBackend:
         backend._rest.send_message = MagicMock(return_value=None)
         with pytest.raises(RuntimeError):
             backend.send_message_sync("wa:1@s.whatsapp.net", "x")
+
+    def test_send_attachment_sync_sends_waha_file_object(self, tmp_path):
+        backend = _make_backend()
+        backend._lid_map = {
+            "139153@lid": {"phone": "393331234567", "resolved_at": 9999999999}
+        }
+        image = tmp_path / "photo.png"
+        image.write_bytes(b"png-data")
+        with patch.object(
+            backend._rest, "_request", return_value={"id": "image-id"}
+        ) as request:
+            message_id = backend.send_attachment_sync(
+                "139153@lid", image, mime_type="image/png"
+            )
+
+        assert message_id == "image-id"
+        request.assert_called_once_with(
+            "POST",
+            "/api/sendImage",
+            {
+                "session": backend._rest.session_name,
+                "chatId": "393331234567@c.us",
+                "file": {
+                    "mimetype": "image/png",
+                    "filename": "photo.png",
+                    "data": "cG5nLWRhdGE=",
+                },
+                "caption": "",
+            },
+        )
+
+    def test_send_attachment_sync_reports_waha_error(self, tmp_path, caplog):
+        import urllib.error
+
+        backend = _make_backend()
+        image = tmp_path / "photo.png"
+        image.write_bytes(b"png-data")
+        error = urllib.error.HTTPError(
+            "http://api.test/api/sendImage",
+            500,
+            "Internal Server Error",
+            {},
+            MagicMock(read=MagicMock(return_value=b'{"message":"WEBJS error t"}')),
+        )
+        with (
+            patch("urllib.request.urlopen", side_effect=error),
+            pytest.raises(RuntimeError, match="status=500.*WEBJS error t"),
+        ):
+            backend.send_attachment_sync("1@c.us", image, mime_type="image/png")
+
+        assert "path=/api/sendImage status=500 detail=WEBJS error t" in caplog.text
+
+    def test_waha_error_redacts_data_url(self, caplog):
+        import urllib.error
+
+        client = WhatsAppRESTClient("http://api.test")
+        error = urllib.error.HTTPError(
+            "http://api.test/api/sendImage",
+            500,
+            "Internal Server Error",
+            {},
+            MagicMock(
+                read=MagicMock(
+                    return_value=(
+                        b'{"exception":{"message":"bad data:image/png;base64,'
+                        b'c2VjcmV0"}}'
+                    )
+                )
+            ),
+        )
+
+        with patch("urllib.request.urlopen", side_effect=error):
+            assert client._request("POST", "/api/sendImage", {"file": {}}) is None
+
+        assert client.last_error == "bad [redacted data URL]"
+        assert "c2VjcmV0" not in caplog.text
 
     def test_needs_pairing(self):
         backend = _make_backend()
@@ -1523,10 +1617,7 @@ class TestWhatsAppWebhook:
         assert backend.handle_webhook(envelope) is True
         assert backend.handle_webhook(envelope) is True
         events = backend.poll_once()
-        assert [event.payload["text"] for event in events] == [
-            "Media: media-a",
-            "Media: media-b",
-        ]
+        assert [event.payload["text"] for event in events] == ["", ""]
 
         payload["attachments"].reverse()
         assert backend.handle_webhook(envelope) is True
@@ -2108,7 +2199,7 @@ class TestWAHAContract:
         assert msg["msg_type"] == "image"
         assert msg["attachment_id"] == "https://wa.to/media/abc123.jpg"
         assert msg["attachment_info"] == "Guarda questa foto!"
-        assert msg["text"] == "Media: https://wa.to/media/abc123.jpg"
+        assert msg["text"] == ""
 
     def test_webhook_image_via_message_any_end_to_end(self):
         """Stessa catena ma con event=message.any (WAHA Core può usarlo)."""
@@ -2312,10 +2403,7 @@ class TestSeedCacheFromDB:
 
         restarted = _make_backend()
         restarted.cache = restarted._load_protocol_cache()
-        assert [message["text"] for message in restarted.cache["1@c.us"]] == [
-            "Media: media-1",
-            "Media: media-2",
-        ]
+        assert [message["text"] for message in restarted.cache["1@c.us"]] == ["", ""]
         assert [message["id"] for message in restarted.cache["1@c.us"]] == [
             "parent-persisted",
             "parent-persisted",
@@ -2381,7 +2469,7 @@ class TestSeedCacheFromDB:
             assert backend.ingest_message(
                 event.contact_id, event.payload, event.payload["timestamp"]
             )
-            assert event.payload["text"] == "Media: stable-media-id"
+            assert event.payload["text"] == ""
 
         assert backend.handle_webhook(nested_form)
         assert backend.poll_once() == []
@@ -2744,7 +2832,7 @@ class TestSeedCacheFromDB:
         assert events[0].payload["id"] == "wa-echo-nested"
         assert events[0].payload["is_mine"] is True
         # La chiave effimera include id padre e testo (non ri-processato su retry).
-        assert (cid, "wa-echo-nested", "ciao") in backend._seen_message_keys
+        assert (cid, "wa-echo-nested", "ciao", "") in backend._seen_message_keys
         # Prima: entry ottimistica senza id, poi ingest dello stesso echo:
         # il dedup per id in ingest_message NON deve creare un duplicato.
         backend.cache[cid] = [
@@ -3021,18 +3109,96 @@ class TestWhatsAppQuoteMedia:
     @pytest.mark.parametrize(
         "quote",
         [
+            {"caption": "testo reale", "imageMessage": {"id": "x"}},
+            {"filename": "testo reale", "type": "image"},
+            {"media": {"filename": "testo reale"}, "mimetype": "image/png"},
+            {"documentMessage": {"description": "testo reale"}},
             {"body": "testo reale", "imageMessage": {"id": "x"}},
             {"text": "testo reale", "type": "image"},
             {"conversation": "testo reale", "mimetype": "image/png"},
-            {"caption": "testo reale", "documentMessage": {"id": "x"}},
         ],
     )
-    def test_wa_quote_body_wins_over_placeholder(self, quote):
-        """Testo/body/caption reale → priorità sul segnaposto (invariato)."""
+    def test_wa_quote_media_uses_explicit_description(self, quote):
+        """I media usano solo filename/caption/description espliciti di WAHA."""
         ev = _msg(self._raw(quote))
         assert ev.payload["quote_text"] == "testo reale"
+
+    def test_waha_reply_to_image_base64_uses_placeholder(self):
+        jpeg_base64 = "/9j/4AAQSkZJRgABAQ" + "A" * 256
+        raw = self._raw({})
+        raw.pop("quotedMessage")
+        raw["replyTo"] = {
+            "id": "quoted-image-id",
+            "body": jpeg_base64,
+            "hasMedia": True,
+            "media": {"mimetype": "image/jpeg", "data": jpeg_base64},
+        }
+
+        ev = _msg(raw)
+
+        assert ev.payload["quote_text"] == "🖼️ Immagine"
+        assert jpeg_base64 not in ev.payload["quote_text"]
 
     def test_wa_quote_unknown_is_none(self):
         """Quote senza segnali media e senza testo → nessuna bolla."""
         ev = _msg(self._raw({"id": "quoted-id"}))
         assert ev.payload["quote_text"] is None
+
+
+def test_waha_reply_to_echo_normalizes_text_quote_metadata():
+    event = _raw(
+        {
+            "event": "message.any",
+            "payload": {
+                "id": "true_391234567890@c.us_ECHO",
+                "chatId": "391234567890@c.us",
+                "fromMe": True,
+                "body": "risposta",
+                "timestamp": 1700000001,
+                "replyTo": {
+                    "id": "false_391234567890@c.us_ORIGINAL",
+                    "participant": " 391234567890@c.us\n",
+                    "body": " \ndomanda su\npiù righe\n ",
+                    "timestamp": 1700000000,
+                    "hasMedia": False,
+                },
+            },
+        }
+    )
+
+    assert event.payload["quote_text"] == "domanda su\npiù righe"
+    assert event.payload["quote_timestamp"] == 1700000000000
+    assert event.payload["quote_author"] == "391234567890@c.us"
+    assert event.payload["reply_to_message_id"] == ("false_391234567890@c.us_ORIGINAL")
+
+
+def test_tui_optimistic_reply_is_upgraded_by_waha_echo_without_quote_loss():
+    backend = _make_backend()
+    optimistic = {
+        "text": "risposta",
+        "is_mine": True,
+        "sender": "You",
+        "quote_text": "domanda",
+        "quote_timestamp": 1700000000000,
+        "quote_author": "391234567890@c.us",
+        "msg_type": "text",
+    }
+    assert backend.ingest_message(
+        "391234567890@c.us", optimistic, 1700000001000, persist=False
+    )
+    echo = _msg(
+        {
+            "id": "true_391234567890@c.us_ECHO",
+            "chatId": "391234567890@c.us",
+            "fromMe": True,
+            "body": "risposta",
+            "timestamp": 1700000002,
+            "replyTo": {"body": "domanda"},
+        }
+    )
+
+    assert not backend.ingest_message(
+        echo.contact_id, echo.payload, echo.payload["timestamp"], persist=False
+    )
+    assert len(backend.cache[echo.contact_id]) == 1
+    assert backend.cache[echo.contact_id][0]["quote_text"] == "domanda"
