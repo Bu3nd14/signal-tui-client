@@ -1118,7 +1118,7 @@ class TestWhatsAppBackend:
         with pytest.raises(RuntimeError):
             backend.send_message_sync("wa:1@s.whatsapp.net", "x")
 
-    def test_send_attachment_sync_sends_named_base64_image(self, tmp_path):
+    def test_send_attachment_sync_sends_waha_file_object(self, tmp_path):
         backend = _make_backend()
         image = tmp_path / "photo.png"
         image.write_bytes(b"png-data")
@@ -1130,12 +1130,20 @@ class TestWhatsAppBackend:
             )
 
         assert message_id == "image-id"
-        payload = request.call_args.args[2]
-        assert payload["file"] == {
-            "mimetype": "image/png",
-            "filename": "photo.png",
-            "data": "cG5nLWRhdGE=",
-        }
+        request.assert_called_once_with(
+            "POST",
+            "/api/sendImage",
+            {
+                "session": backend._rest.session_name,
+                "chatId": "1@c.us",
+                "file": {
+                    "mimetype": "image/png",
+                    "filename": "photo.png",
+                    "data": "cG5nLWRhdGE=",
+                },
+                "caption": "",
+            },
+        )
 
     def test_send_attachment_sync_reports_waha_error(self, tmp_path, caplog):
         import urllib.error
@@ -1157,6 +1165,31 @@ class TestWhatsAppBackend:
             backend.send_attachment_sync("1@c.us", image, mime_type="image/png")
 
         assert "path=/api/sendImage status=500 detail=WEBJS error t" in caplog.text
+
+    def test_waha_error_redacts_data_url(self, caplog):
+        import urllib.error
+
+        client = WhatsAppRESTClient("http://api.test")
+        error = urllib.error.HTTPError(
+            "http://api.test/api/sendImage",
+            500,
+            "Internal Server Error",
+            {},
+            MagicMock(
+                read=MagicMock(
+                    return_value=(
+                        b'{"exception":{"message":"bad data:image/png;base64,'
+                        b'c2VjcmV0"}}'
+                    )
+                )
+            ),
+        )
+
+        with patch("urllib.request.urlopen", side_effect=error):
+            assert client._request("POST", "/api/sendImage", {"file": {}}) is None
+
+        assert client.last_error == "bad [redacted data URL]"
+        assert "c2VjcmV0" not in caplog.text
 
     def test_needs_pairing(self):
         backend = _make_backend()

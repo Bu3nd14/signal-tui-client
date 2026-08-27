@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -18,6 +19,8 @@ from pathlib import Path
 import backends.whatsapp as _wa
 
 logger = logging.getLogger(__name__)
+
+_DATA_URL_RE = re.compile(r"data:[^;,\s]+;base64,[A-Za-z0-9+/=_-]+", re.IGNORECASE)
 
 
 class WhatsAppRESTClient:
@@ -38,12 +41,15 @@ class WhatsAppRESTClient:
     @staticmethod
     def _response_error(raw: bytes) -> str:
         text = raw.decode("utf-8", errors="replace").strip()
+        text = _DATA_URL_RE.sub("[redacted data URL]", text)
         try:
             body = json.loads(text)
         except json.JSONDecodeError:
             return text[:500] or "empty response"
         if isinstance(body, dict):
             detail = body.get("message") or body.get("error") or body.get("detail")
+            if detail is None and isinstance(body.get("exception"), dict):
+                detail = body["exception"].get("message")
             if isinstance(detail, (str, int, float)):
                 return str(detail)[:500]
             if isinstance(detail, list):
