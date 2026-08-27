@@ -9,6 +9,7 @@ Pure helpers (``_msg_type``, ``_jid_string``, ``_resolve_sender_name``) plus the
 from __future__ import annotations
 
 import logging
+import mimetypes
 import re
 
 from models import (
@@ -402,7 +403,13 @@ def _event_from_message(
     if isinstance(attachments, list) and attachments:
         for att in attachments:
             att_id = att.get("id") or att.get("url")
-            mime = att.get("mimetype") or ""
+            mime = (
+                att.get("mimetype")
+                or mimetypes.guess_type(
+                    str(att.get("filename") or att.get("url") or "")
+                )[0]
+                or ""
+            )
             if mime.startswith("image/"):
                 att_type = "image"
             elif mime.startswith(("video/", "audio/", "application/")):
@@ -537,7 +544,7 @@ def _event_from_message(
         events: list[ChatEvent] = []
         for i, (att_id, att_info, att_type) in enumerate(media_items):
             media_identity = att_id or f"{msg_id}:{i + 1}"
-            msg_text = f"Media: {media_identity}"
+            msg_text = "" if att_type == "image" else f"Media: {media_identity}"
             events.append(
                 ChatEvent(
                     type="message",

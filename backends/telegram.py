@@ -825,9 +825,7 @@ class TelegramBackend(ChatBackend):
             if is_attachment
             else "text"
         )
-        media_text = text
-        if is_attachment and not media_text:
-            media_text = media_quote_placeholder(msg_type)
+        media_text = "" if msg_type == "image" else text
         attachment_id = None
         if attachment_path is not None:
             media_dir = _media_dir()
@@ -852,7 +850,7 @@ class TelegramBackend(ChatBackend):
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
                     "msg_type": msg_type,
-                    "attachment_info": media_text if is_attachment else None,
+                    "attachment_info": text or None if is_attachment else None,
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
                 },
@@ -1017,6 +1015,7 @@ class TelegramBackend(ChatBackend):
         if msg.photo:
             msg_type = "image"
             attachment_info = text or "Photo"
+            text = ""
         elif msg.document:
             msg_type = "attachment"
             attachment_info = "📎 Document"
@@ -1313,6 +1312,8 @@ class TelegramBackend(ChatBackend):
         """
         from backend import _update_message_id
 
+        if data.get("msg_type") == "image":
+            data = {**data, "text": ""}
         mid = data.get("id")
         text = data.get("text", "")
 

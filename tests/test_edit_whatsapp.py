@@ -283,7 +283,7 @@ class TestHandleWebhookEdit:
         events = backend.poll_once()
         assert len(events) == 1
         assert events[0].type == "message_edit"
-        assert (_CID, "m1", "nuovo") in backend._seen_message_keys
+        assert (_CID, "m1", "nuovo", "") in backend._seen_message_keys
 
     def test_own_edit_echo_is_absorbed_by_dedup(self):
         """fromMe con testo già nuovo in cache → ``message`` normale, nessuna
@@ -338,7 +338,7 @@ class TestHandleWebhookEdit:
         assert ev.payload["edit_message_id"] == "m1"
         assert ev.payload["text"] == "nuovo"
         assert ev.payload["is_mine"] is True
-        assert (_CID, "m1", "nuovo") in backend._seen_message_keys
+        assert (_CID, "m1", "nuovo", "") in backend._seen_message_keys
 
 
 # ─── fetch_history ────────────────────────────────────────────────────────────

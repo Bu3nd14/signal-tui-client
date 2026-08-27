@@ -123,6 +123,15 @@ class TestImageCaptionResolver:
         for protocol in (PROTOCOL_SIGNAL, PROTOCOL_TELEGRAM, PROTOCOL_WHATSAPP):
             assert _image_caption("🖼️ Immagine", "🖼️ Immagine", "att-1", protocol) is None
             assert _image_caption("Immagine", "Immagine", "att-1", protocol) is None
+            assert (
+                _image_caption(
+                    "Immagine: upload-random.png",
+                    "upload-random.png",
+                    "att-1",
+                    protocol,
+                )
+                is None
+            )
 
     def test_signal_per_attachment_caption(self):
         assert _image_caption("nice: att-1", "nice", "att-1", PROTOCOL_SIGNAL) == "nice"

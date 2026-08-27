@@ -325,13 +325,13 @@ assert.equal(result.optimistic[0].confirmed_message_id, "wa-image-1");
 def test_optimistic_signal_image_reply_reconciles_forwarded_quote_echo():
     from backends.signal import _signal_quote_text
 
-    echo_quote = _signal_quote_text({"text": "Image: photo.jpg: signal-att"})
+    echo_quote = _signal_quote_text({"text": "Image: photo.jpg"})
     _run_reconciliation_node(f"""
-const target = {{ id: "1000", direction: "in", text: "Image: photo.jpg: signal-att", timestamp: 1000, attachment: {{ type: "image/jpeg", name: "Image: photo.jpg", attachment_id: "signal-att" }} }};
+const target = {{ id: "1000", direction: "in", text: "", timestamp: 1000, attachment: {{ type: "image/jpeg", name: "Image: photo.jpg", attachment_id: "signal-att" }} }};
 const optimistic = {{ optimistic_id: "signal-image-reply", protocol: "signal", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: target.timestamp, quote_author: "alice", quote_message: replyQuoteMessage(target) }};
 const echo = {{ id: "2001", direction: "out", text: "answer", timestamp: 2001, quote_text: {json.dumps(echo_quote)} }};
 const result = reconcileOptimisticMessages([echo], [optimistic], "signal", "alice");
-assert.equal(optimistic.quote_message, "Image: photo.jpg: signal-att");
+assert.equal(optimistic.quote_message, "Image: photo.jpg");
 assert.equal(echo.quote_text, optimistic.quote_message);
 assert.equal(result.visible.length, 0);
 assert.equal(result.optimistic[0].confirmed_message_id, "2001");
@@ -799,7 +799,7 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
     )
     assert response.status_code == 200
     body = response.json()
-    assert [item["text"] for item in body] == ["first tie", "second tie", "later"]
+    assert [item["text"] for item in body] == ["", "second tie", "later"]
     assert all(
         set(item)
         == {
@@ -850,6 +850,40 @@ def test_messages_exposes_persisted_quote_fields(web_client):
         "quote_timestamp": 10,
         "quote_author": "alice",
     }
+
+
+@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
+def test_messages_never_serializes_image_placeholder_text(web_client, protocol):
+    client, _, db_file = web_client
+    import sqlite3
+
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            "INSERT INTO messages(protocol, contact_number, text, is_mine, "
+            "timestamp, msg_type, attachment_id, attachment_info, content_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                protocol,
+                "alice",
+                "Immagine: upload-random.png",
+                1,
+                1,
+                "image",
+                "photo.png",
+                "upload-random.png",
+                "image/png",
+            ),
+        )
+
+    response = client.get(
+        "/api/messages",
+        params={"proto": protocol, "contact_id": "alice"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["text"] == ""
+    assert response.json()[0]["attachment"]["type"] == "image/png"
 
 
 def test_web_ui_static_contracts():

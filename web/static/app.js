@@ -619,7 +619,7 @@ async function submitMessage() {
     optimistic_id: `${timestamp}-${++state.optimisticSequence}`,
     protocol: active.protocol,
     contactId: active.id,
-    text,
+    text: attachment ? "" : text,
     direction: "out",
     timestamp,
     optimisticStatus: "sending",

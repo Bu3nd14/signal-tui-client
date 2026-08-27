@@ -635,10 +635,12 @@ class SignalBackend(ChatBackend):
             msg_type = (
                 "image" if (mime_type or "").startswith("image/") else "attachment"
             )
-            attachment_info = text or media_quote_placeholder(msg_type)
+            attachment_info = text or None
             SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
             attachment_id = f"sent-{uuid.uuid4().hex}{attachment_path.suffix.lower()}"
             shutil.copy2(attachment_path, SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id)
+
+        event_text = "" if msg_type == "image" else text or attachment_info or ""
 
         self._event_queue.put(
             ChatEvent(
@@ -647,7 +649,7 @@ class SignalBackend(ChatBackend):
                 contact_id=contact_id,
                 payload={
                     "id": str(message_id),
-                    "text": text or attachment_info or "",
+                    "text": event_text,
                     "is_mine": True,
                     "sender": "You",
                     "timestamp": ts,
@@ -689,6 +691,9 @@ class SignalBackend(ChatBackend):
         _mark_as_read(contact_id)
 
     def get_attachment_path(self, attachment_id: str):
+        candidate = SIGNAL_CLI_ATTACHMENTS_DIR / Path(attachment_id).name
+        if candidate.is_file():
+            return candidate
         return get_attachment_path(attachment_id)
 
     # ─── Envelope parsing → normalized events ─────────────────────────
@@ -791,6 +796,8 @@ class SignalBackend(ChatBackend):
                 for i, (msg_type, att_info, att_id, content_type) in enumerate(
                     classified
                 ):
+                    if i == 0 and text and msg_type == "image":
+                        att_info = text
                     if i == 0 and text:
                         msg_text = text
                     else:
@@ -1086,7 +1093,12 @@ class SignalBackend(ChatBackend):
     # ─── Incoming message ingestion ───────────────────────────────────
 
     def _message_already_cached(
-        self, contact_id: str, ts: int, is_mine: bool, text: str
+        self,
+        contact_id: str,
+        ts: int,
+        is_mine: bool,
+        text: str,
+        attachment_id: str | None = None,
     ) -> bool:
         """Return True if a message with the same identity is already cached.
 
@@ -1104,6 +1116,8 @@ class SignalBackend(ChatBackend):
             if msg.get("is_mine") != is_mine:
                 continue
             if msg.get("text") != text:
+                continue
+            if attachment_id and msg.get("attachment_id") != attachment_id:
                 continue
             if not is_mine:
                 if abs(msg.get("timestamp", 0) - ts) <= _INCOMING_DEDUP_WINDOW_MS:
@@ -1156,6 +1170,8 @@ class SignalBackend(ChatBackend):
         Returns ``True`` if the message was newly added, ``False`` if it was a
         duplicate (already present).
         """
+        if data.get("msg_type") == "image":
+            data = {**data, "text": ""}
         text = data["text"]
         is_mine = data["is_mine"]
 
@@ -1187,7 +1203,9 @@ class SignalBackend(ChatBackend):
                         logger.exception("Signal: _update_message_id failed")
                     return False
 
-        if self._message_already_cached(contact_id, ts, is_mine, text):
+        if self._message_already_cached(
+            contact_id, ts, is_mine, text, data.get("attachment_id")
+        ):
             return False
 
         if persist:

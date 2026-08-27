@@ -97,7 +97,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             try:
                 rows = connection.execute(
                     "SELECT id, msg_id, text, is_mine, timestamp, "
-                    "attachment_id, attachment_info, content_type, protocol, "
+                    "attachment_id, attachment_info, content_type, protocol, msg_type, "
                     "quote_text, quote_timestamp, quote_author "
                     "FROM messages WHERE protocol = ? AND contact_number = ? "
                     "ORDER BY timestamp, id",
@@ -120,6 +120,10 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 "name": row["attachment_info"] or Path(attachment_path).name,
                 "type": _infer_attachment_type(attachment_id, row["content_type"]),
             }
+            if row["msg_type"] == "image" or (
+                attachment["type"] or ""
+            ).lower().startswith("image/"):
+                text = ""
             # WhatsApp stores the WAHA media URL as message text
             # ("Media: http://..."); drop it for WA only, never for
             # legitimate captions of other protocols.

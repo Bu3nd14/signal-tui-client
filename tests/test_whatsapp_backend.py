@@ -844,10 +844,7 @@ class TestWhatsAppEvents:
             }
         )
 
-        assert [event.payload["text"] for event in events] == [
-            "Media: https://wa.to/media/one",
-            "Media: parent-media:2",
-        ]
+        assert [event.payload["text"] for event in events] == ["", ""]
         assert [event.payload["attachment_info"] for event in events] == [
             "one.jpg",
             "two.jpg",
@@ -885,9 +882,7 @@ class TestWhatsAppEvents:
 
         events = [_msg(payload) for payload in payloads]
 
-        assert [event.payload["text"] for event in events] == [
-            "Media: parent-media:1",
-        ] * len(payloads)
+        assert [event.payload["text"] for event in events] == [""] * len(payloads)
         assert [event.payload["attachment_id"] for event in events] == [None] * len(
             payloads
         )
@@ -939,7 +934,7 @@ class TestWhatsAppEvents:
         )
         assert ev.payload["attachment_id"] == "https://wa.to/img/no-text-photo.jpg"
         assert ev.payload["attachment_info"] == "Senza testo!"
-        assert ev.payload["text"] == "Media: https://wa.to/img/no-text-photo.jpg"
+        assert ev.payload["text"] == ""
 
     def test_event_from_raw_fallback_recognizes_hasMedia_without_text_key(self):
         """_event_from_raw fallback riconosce hasMedia anche senza key 'text'.
@@ -1564,10 +1559,7 @@ class TestWhatsAppWebhook:
         assert backend.handle_webhook(envelope) is True
         assert backend.handle_webhook(envelope) is True
         events = backend.poll_once()
-        assert [event.payload["text"] for event in events] == [
-            "Media: media-a",
-            "Media: media-b",
-        ]
+        assert [event.payload["text"] for event in events] == ["", ""]
 
         payload["attachments"].reverse()
         assert backend.handle_webhook(envelope) is True
@@ -2149,7 +2141,7 @@ class TestWAHAContract:
         assert msg["msg_type"] == "image"
         assert msg["attachment_id"] == "https://wa.to/media/abc123.jpg"
         assert msg["attachment_info"] == "Guarda questa foto!"
-        assert msg["text"] == "Media: https://wa.to/media/abc123.jpg"
+        assert msg["text"] == ""
 
     def test_webhook_image_via_message_any_end_to_end(self):
         """Stessa catena ma con event=message.any (WAHA Core può usarlo)."""
@@ -2353,10 +2345,7 @@ class TestSeedCacheFromDB:
 
         restarted = _make_backend()
         restarted.cache = restarted._load_protocol_cache()
-        assert [message["text"] for message in restarted.cache["1@c.us"]] == [
-            "Media: media-1",
-            "Media: media-2",
-        ]
+        assert [message["text"] for message in restarted.cache["1@c.us"]] == ["", ""]
         assert [message["id"] for message in restarted.cache["1@c.us"]] == [
             "parent-persisted",
             "parent-persisted",
@@ -2422,7 +2411,7 @@ class TestSeedCacheFromDB:
             assert backend.ingest_message(
                 event.contact_id, event.payload, event.payload["timestamp"]
             )
-            assert event.payload["text"] == "Media: stable-media-id"
+            assert event.payload["text"] == ""
 
         assert backend.handle_webhook(nested_form)
         assert backend.poll_once() == []
@@ -2785,7 +2774,7 @@ class TestSeedCacheFromDB:
         assert events[0].payload["id"] == "wa-echo-nested"
         assert events[0].payload["is_mine"] is True
         # La chiave effimera include id padre e testo (non ri-processato su retry).
-        assert (cid, "wa-echo-nested", "ciao") in backend._seen_message_keys
+        assert (cid, "wa-echo-nested", "ciao", "") in backend._seen_message_keys
         # Prima: entry ottimistica senza id, poi ingest dello stesso echo:
         # il dedup per id in ingest_message NON deve creare un duplicato.
         backend.cache[cid] = [

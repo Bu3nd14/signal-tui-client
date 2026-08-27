@@ -65,7 +65,7 @@ function signatureText(message) {
 }
 
 function messageDisplayText(message) {
-  return message.attachment && isTemporaryUploadName(message.text) ? "" : (message.text || "");
+  return messageMediaType(message) === "image" ? "" : (message.text || "");
 }
 
 function messageSignature(message) {
