@@ -273,6 +273,27 @@ def _add_message_to_cache(
     with _DB_LOCK:
         conn = sqlite3.connect(_backend.DB_FILE)
         try:
+            existing = conn.execute(
+                "SELECT id FROM messages "
+                "WHERE protocol = ? AND contact_number = ? AND text = ? "
+                "AND is_mine = ? AND timestamp = ? "
+                "AND ((msg_id IS NULL AND ? IS NULL) OR msg_id = ?) "
+                "AND ((attachment_id IS NULL AND ? IS NULL) OR attachment_id = ?) "
+                "LIMIT 1",
+                (
+                    protocol,
+                    contact_number,
+                    text,
+                    int(is_mine),
+                    timestamp,
+                    msg_id,
+                    msg_id,
+                    attachment_id,
+                    attachment_id,
+                ),
+            ).fetchone()
+            if existing is not None:
+                return existing[0]
             conn.execute(
                 """INSERT INTO messages
                    (protocol, contact_number, text, is_mine, sender, timestamp,

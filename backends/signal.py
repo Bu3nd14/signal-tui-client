@@ -250,6 +250,7 @@ class SignalBackend(ChatBackend):
         self._sse_thread: threading.Thread | None = None
         self._sent_attachment_paths: dict[str, Path] = {}
         self._sent_attachment_paths_lock = threading.Lock()
+        self._ingest_lock = threading.RLock()
 
         # Normalized contact list
         self.contacts: list[ChatContact] = []
@@ -272,7 +273,23 @@ class SignalBackend(ChatBackend):
         # Errore chiaro SOLO quando il backend tenta davvero di connettersi.
         if not self.user_number:
             self.user_number = _require_user_number()  # RuntimeError canonico
-        self.cache = self._load_protocol_cache()
+        loaded = self._load_protocol_cache()
+        with self._ingest_lock:
+            for contact_id, messages in loaded.items():
+                cached = self.cache.setdefault(contact_id, [])
+                have = {
+                    (message["timestamp"], message["text"], message["is_mine"])
+                    for message in cached
+                }
+                for message in messages:
+                    identity = (
+                        message["timestamp"],
+                        message["text"],
+                        message["is_mine"],
+                    )
+                    if identity not in have:
+                        cached.append(message)
+                        have.add(identity)
 
         if _is_daemon_running():
             self._use_daemon = True
@@ -1193,13 +1210,13 @@ class SignalBackend(ChatBackend):
         )
         return True
 
-    def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
+    def _persist_message(self, contact_id: str, data: dict, ts: int) -> int | None:
         """Persist a message to the SQLite cache (Signal protocol).
 
         Mirrors the arguments previously passed inline by ``ingest_message``
         (default ``protocol='signal'`` and ``msg_id=None``).
         """
-        _add_message_to_cache(
+        return _add_message_to_cache(
             contact_id,
             data["text"],
             data["is_mine"],
@@ -1237,6 +1254,8 @@ class SignalBackend(ChatBackend):
         Returns ``True`` when added, ``"changed"`` for an attachment upgrade,
         and ``False`` for an unchanged duplicate.
         """
+        if not hasattr(self, "_ingest_lock"):
+            self._ingest_lock = threading.RLock()
         if data.get("msg_type") == "image":
             data = {**data, "text": ""}
         text = data["text"]
@@ -1247,98 +1266,105 @@ class SignalBackend(ChatBackend):
             if attachment_path is None or not Path(attachment_path).is_file():
                 data = {**data, "attachment_id": None}
 
-        # Upgrade branch: an outgoing echo carrying the real server id attaches
-        # it to the optimistic twin (matched by text + dedup window) WITHOUT
-        # touching its optimistic timestamp — that timestamp stays the entry's
-        # identity for receipts and the DB.  Idempotent: a second echo falls
-        # through to the normal dedup below.
-        mid = data.get("id")
-        if mid and is_mine:
-            for m in self.cache.get(contact_id, []):
-                id_matches_timestamp = str(m.get("id")) == str(ts)
-                optimistic_match = (
-                    not m.get("id")
-                    and m.get("text") == text
-                    and abs(int(m.get("timestamp", 0)) - ts) <= _SEND_DEDUP_WINDOW_MS
-                )
-                if m.get("is_mine") and (id_matches_timestamp or optimistic_match):
-                    m["id"] = str(mid)  # ts entry INVARIATO (ottimistico)
-                    try:
-                        _update_message_id(
-                            contact_id,
-                            text,
-                            True,
-                            m["timestamp"],
-                            str(mid),  # ts OTTIMISTICO nel DB
-                            protocol=PROTOCOL_SIGNAL,
+        with self._ingest_lock:
+            # Upgrade branch: an outgoing echo carrying the real server id attaches
+            # it to the optimistic twin (matched by text + dedup window) WITHOUT
+            # touching its optimistic timestamp — that timestamp stays the entry's
+            # identity for receipts and the DB.  Idempotent: a second echo falls
+            # through to the normal dedup below.
+            mid = data.get("id")
+            if mid and is_mine:
+                for m in self.cache.get(contact_id, []):
+                    id_matches_timestamp = str(m.get("id")) == str(ts)
+                    optimistic_match = (
+                        not m.get("id")
+                        and m.get("text") == text
+                        and abs(int(m.get("timestamp", 0)) - ts)
+                        <= _SEND_DEDUP_WINDOW_MS
+                    )
+                    if m.get("is_mine") and (id_matches_timestamp or optimistic_match):
+                        m["id"] = str(mid)  # ts entry INVARIATO (ottimistico)
+                        try:
+                            _update_message_id(
+                                contact_id,
+                                text,
+                                True,
+                                m["timestamp"],
+                                str(mid),  # ts OTTIMISTICO nel DB
+                                protocol=PROTOCOL_SIGNAL,
+                            )
+                        except Exception:
+                            logger.exception("Signal: _update_message_id failed")
+                        changed = self._upgrade_outgoing_attachment(
+                            contact_id, m, data, ts
                         )
-                    except Exception:
-                        logger.exception("Signal: _update_message_id failed")
-                    changed = self._upgrade_outgoing_attachment(contact_id, m, data, ts)
-                    if not changed:
-                        logger.info(
-                            "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
-                            mid,
-                            ts,
-                            text,
-                            m.get("attachment_id"),
-                            data.get("attachment_id"),
-                        )
-                    return "changed" if changed else False
+                        if not changed:
+                            logger.info(
+                                "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
+                                mid,
+                                ts,
+                                text,
+                                m.get("attachment_id"),
+                                data.get("attachment_id"),
+                            )
+                        return "changed" if changed else False
 
-        existing = self._message_already_cached(
-            contact_id, ts, is_mine, text, data.get("attachment_id")
-        )
-        if existing is not None:
+            existing = self._message_already_cached(
+                contact_id, ts, is_mine, text, data.get("attachment_id")
+            )
+            if existing is not None:
+                if is_mine:
+                    changed = self._upgrade_outgoing_attachment(
+                        contact_id, existing, data, ts
+                    )
+                    if changed:
+                        return "changed"
+                    logger.info(
+                        "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
+                        data.get("id"),
+                        ts,
+                        text,
+                        existing.get("attachment_id"),
+                        data.get("attachment_id"),
+                    )
+                return False
+
+            persisted_id = (
+                self._persist_message(contact_id, data, ts) if persist else None
+            )
+            self._add_cached_message(
+                contact_id,
+                {
+                    "id": data.get("id"),
+                    "text": text,
+                    "is_mine": is_mine,
+                    "sender": data["sender"],
+                    "timestamp": ts,
+                    "quote_text": data["quote_text"],
+                    "msg_type": data["msg_type"],
+                    "attachment_info": data["attachment_info"],
+                    "attachment_id": data.get("attachment_id"),
+                    "content_type": data.get("content_type"),
+                    "read": is_mine,
+                    "status": data.get("status", "sent" if is_mine else "read"),
+                    "quote_timestamp": data.get("quote_timestamp"),
+                    "quote_author": data.get("quote_author"),
+                    "reply_to_message_id": data.get("reply_to_message_id"),
+                    "quote_attachment_id": data.get("quote_attachment_id"),
+                    "quote_attachment_path": data.get("quote_attachment_path"),
+                    "quote_content_type": data.get("quote_content_type"),
+                },
+            )
+            if persisted_id is not None:
+                return False
             if is_mine:
-                changed = self._upgrade_outgoing_attachment(
-                    contact_id, existing, data, ts
-                )
-                if changed:
-                    return "changed"
                 logger.info(
-                    "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
+                    "signal ingest: NEW ROW is_mine id=%s ts=%s att_incoming=%s",
                     data.get("id"),
                     ts,
-                    text,
-                    existing.get("attachment_id"),
                     data.get("attachment_id"),
                 )
-            return False
-
-        if persist:
-            self._persist_message(contact_id, data, ts)
-        self._add_cached_message(
-            contact_id,
-            {
-                "id": data.get("id"),
-                "text": text,
-                "is_mine": is_mine,
-                "sender": data["sender"],
-                "timestamp": ts,
-                "quote_text": data["quote_text"],
-                "msg_type": data["msg_type"],
-                "attachment_info": data["attachment_info"],
-                "attachment_id": data.get("attachment_id"),
-                "content_type": data.get("content_type"),
-                "read": is_mine,
-                "status": data.get("status", "sent" if is_mine else "read"),
-                "quote_timestamp": data.get("quote_timestamp"),
-                "quote_author": data.get("quote_author"),
-                "reply_to_message_id": data.get("reply_to_message_id"),
-                "quote_attachment_id": data.get("quote_attachment_id"),
-                "quote_attachment_path": data.get("quote_attachment_path"),
-                "quote_content_type": data.get("quote_content_type"),
-            },
-        )
-        if is_mine:
-            logger.info(
-                "signal ingest: NEW ROW is_mine id=%s ts=%s att_incoming=%s",
-                data.get("id"),
-                ts,
-                data.get("attachment_id"),
-            )
-        return True
+            return True
 
     def process_receipt(self, envelope: dict) -> list[dict]:
         """Process a receipt envelope against the in-memory cache.
