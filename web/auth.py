@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hmac
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def is_authorized(authorization: str | None, token: str) -> bool:
@@ -28,6 +31,11 @@ def install_auth(app: Any, token: str) -> None:
         if request.url.path.startswith("/api/") and not is_authorized(
             request.headers.get("authorization"), token
         ):
+            logger.warning(
+                "web auth 401 path=%s has_auth=%s",
+                request.url.path,
+                bool(request.headers.get("authorization")),
+            )
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Unauthorized"},
