@@ -108,6 +108,87 @@ def _contact_payload(
     }
 
 
+def _message_edit_id(row: sqlite3.Row | dict[str, Any]) -> str | None:
+    if (
+        not row["is_mine"]
+        or row["msg_type"] != "text"
+        or row["status"] in {"pending", "failed"}
+    ):
+        return None
+    if row["protocol"] == "signal":
+        return str(row["msg_id"] or row["timestamp"])
+    return str(row["msg_id"]) if row["msg_id"] else None
+
+
+def _message_row_for_edit(
+    protocol: str, contact_id: str, message_id: str
+) -> dict[str, Any] | None:
+    import backend
+    from backend.db import _DB_LOCK
+
+    with _DB_LOCK:
+        try:
+            connection = sqlite3.connect(backend.DB_FILE)
+            connection.row_factory = sqlite3.Row
+            try:
+                row = connection.execute(
+                    "SELECT id, msg_id, text, is_mine, timestamp, protocol, msg_type, "
+                    "status FROM messages WHERE protocol = ? AND contact_number = ? "
+                    "AND (msg_id = ? OR (? = 'signal' AND msg_id IS NULL "
+                    "AND timestamp = CAST(? AS INTEGER))) "
+                    "ORDER BY CASE WHEN msg_id = ? THEN 0 ELSE 1 END LIMIT 1",
+                    (
+                        protocol,
+                        contact_id,
+                        message_id,
+                        protocol,
+                        message_id,
+                        message_id,
+                    ),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            from fastapi import HTTPException
+
+            logger.exception(
+                "Web edit lookup database error: protocol=%s contact=%s",
+                protocol,
+                contact_id,
+            )
+            raise HTTPException(status_code=500, detail="Database error") from None
+    return dict(row) if row else None
+
+
+def _persist_message_edit(
+    protocol: str, contact_id: str, message_id: str, new_text: str
+) -> int:
+    import backend
+    from backend.db import _DB_LOCK
+
+    with _DB_LOCK:
+        connection = sqlite3.connect(backend.DB_FILE)
+        try:
+            cursor = connection.execute(
+                "UPDATE messages SET text = ?, edited = 1 "
+                "WHERE protocol = ? AND contact_number = ? "
+                "AND (msg_id = ? OR (? = 'signal' AND msg_id IS NULL "
+                "AND timestamp = CAST(? AS INTEGER)))",
+                (
+                    new_text,
+                    protocol,
+                    contact_id,
+                    message_id,
+                    protocol,
+                    message_id,
+                ),
+            )
+            connection.commit()
+            return cursor.rowcount
+        finally:
+            connection.close()
+
+
 def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
     import backend
     from backend.db import _DB_LOCK
@@ -120,7 +201,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 rows = connection.execute(
                     "SELECT id, msg_id, text, is_mine, timestamp, "
                     "attachment_id, attachment_info, content_type, protocol, msg_type, "
-                    "quote_text, quote_timestamp, quote_author "
+                    "quote_text, quote_timestamp, quote_author, status, edited, read "
                     "FROM messages WHERE protocol = ? AND contact_number = ? "
                     "ORDER BY timestamp, id",
                     (protocol, contact_id),
@@ -163,16 +244,21 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             # legitimate captions of other protocols.
             if row["protocol"] == "whatsapp" and text.startswith("Media: "):
                 text = ""
+        direction = "out" if row["is_mine"] else "in"
         messages.append(
             {
                 "id": row["msg_id"] or str(row["id"]),
                 "text": text,
-                "direction": "out" if row["is_mine"] else "in",
+                "direction": direction,
                 "timestamp": row["timestamp"],
                 "attachment": attachment,
                 "quote_text": row["quote_text"],
                 "quote_timestamp": row["quote_timestamp"],
                 "quote_author": row["quote_author"],
+                "status": (row["status"] or "sent") if direction == "out" else None,
+                "read": bool(row["read"]),
+                "edited": bool(row["edited"]),
+                "edit_id": _message_edit_id(row),
             }
         )
     return messages
@@ -603,6 +689,97 @@ def create_api_router() -> Any:
                 exc_info=True,
             )
         return {"status": "ok"}
+
+    @router.post("/messages/edit")
+    async def messages_edit(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, bool]:
+        protocol = payload.get("protocol")
+        contact_id = payload.get("contact_id")
+        message_id = payload.get("message_id")
+        new_text = payload.get("new_text")
+        if (
+            not isinstance(protocol, str)
+            or protocol not in _PROTOCOLS
+            or not isinstance(contact_id, str)
+            or not contact_id.strip()
+            or not isinstance(message_id, str)
+            or not message_id.strip()
+            or not isinstance(new_text, str)
+            or not new_text.strip()
+            or len(new_text) > _MAX_TEXT_LENGTH
+        ):
+            raise HTTPException(status_code=400, detail="Invalid request")
+
+        row = _message_row_for_edit(protocol, contact_id, message_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Not Found")
+        if _message_edit_id(row) is None:
+            raise HTTPException(status_code=400, detail="Message not editable")
+
+        manager = request.app.state.manager
+        try:
+            edited = await asyncio.to_thread(
+                manager.edit_message_sync,
+                protocol,
+                contact_id,
+                message_id,
+                new_text,
+            )
+            if not edited:
+                raise RuntimeError("Backend rejected message edit")
+            updated_rows = await asyncio.to_thread(
+                _persist_message_edit,
+                protocol,
+                contact_id,
+                message_id,
+                new_text,
+            )
+        except Exception:
+            logger.exception(
+                "Web edit failed: protocol=%s contact=%s", protocol, contact_id
+            )
+            raise HTTPException(status_code=502, detail="Message edit failed") from None
+
+        if updated_rows == 0:
+            logger.debug(
+                "Web edit persistence found no row: protocol=%s contact=%s id=%s",
+                protocol,
+                contact_id,
+                message_id,
+            )
+        backend = manager.get(protocol)
+        try:
+            await asyncio.to_thread(
+                backend.apply_edit,
+                contact_id,
+                message_id,
+                new_text,
+                is_mine=True,
+            )
+        except Exception:
+            logger.debug(
+                "Web edit backend cache sync failed: protocol=%s contact=%s",
+                protocol,
+                contact_id,
+                exc_info=True,
+            )
+
+        push_event(
+            {
+                "type": "message_edit",
+                "payload": {
+                    "protocol": protocol,
+                    "contact_id": contact_id,
+                    "message_id": str(message_id),
+                    "timestamp": int(row["timestamp"]),
+                    "old_text": row["text"] or "",
+                    "text": new_text,
+                    "is_mine": True,
+                },
+            }
+        )
+        return {"ok": True}
 
     @router.get("/media/{proto}/{attachment_id:path}")
     def media(

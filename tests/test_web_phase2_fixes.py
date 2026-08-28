@@ -184,6 +184,131 @@ def test_push_on_attachment_upgrade():
     assert app._cache == {}
 
 
+def _receipt_app(updated, web_enabled=True):
+    backend = SimpleNamespace(process_receipt=MagicMock(return_value=updated))
+    return SimpleNamespace(
+        manager=SimpleNamespace(get=lambda _protocol: backend),
+        _cache={},
+        selected_contact=None,
+        _web_enabled=web_enabled,
+    )
+
+
+def test_receipt_event_pushes_normalized_web_update():
+    app = _receipt_app(
+        [
+            {"id": 77, "timestamp": "1000", "status": "delivered", "text": "Ciao"},
+            {"id": "", "timestamp": None, "status": None, "text": None},
+        ]
+    )
+    event = ChatEvent(
+        type="receipt",
+        protocol="telegram",
+        contact_id="42",
+        payload={"message_ids": ["77"], "is_read": False},
+    )
+
+    with patch("web.bridge.push_event") as push_event:
+        assert EventHandlingMixin._handle_receipt_event(app, event)
+
+    push_event.assert_called_once_with(
+        {
+            "type": "receipt",
+            "payload": {
+                "protocol": "telegram",
+                "contact_id": "42",
+                "updates": [
+                    {
+                        "id": "77",
+                        "timestamp": 1000,
+                        "status": "delivered",
+                        "text": "Ciao",
+                    },
+                    {"id": None, "timestamp": 0, "status": "sent", "text": ""},
+                ],
+            },
+        }
+    )
+
+
+def test_receipt_event_does_not_push_when_web_is_disabled():
+    app = _receipt_app(
+        [{"id": "77", "timestamp": 1000, "status": "read", "text": "Ciao"}],
+        web_enabled=False,
+    )
+    event = ChatEvent(
+        type="receipt",
+        protocol="telegram",
+        contact_id="42",
+        payload={"message_ids": ["77"], "is_read": True},
+    )
+
+    with patch("web.bridge.push_event") as push_event:
+        assert EventHandlingMixin._handle_receipt_event(app, event)
+
+    push_event.assert_not_called()
+
+
+def _edit_app(web_enabled=True):
+    info = {
+        "message_id": "77",
+        "timestamp": 1000,
+        "old_text": "Prima",
+        "text": "Dopo",
+        "is_mine": False,
+    }
+    backend = SimpleNamespace(apply_edit=MagicMock(return_value=info))
+    return SimpleNamespace(
+        manager=SimpleNamespace(get=lambda _protocol: backend),
+        _cache={},
+        selected_contact=None,
+        _web_enabled=web_enabled,
+    )
+
+
+def test_edit_event_pushes_web_update():
+    app = _edit_app()
+    event = ChatEvent(
+        type="message_edit",
+        protocol="telegram",
+        contact_id="42",
+        payload={"edit_message_id": 77, "text": "Dopo", "is_mine": False},
+    )
+
+    with patch("web.bridge.push_event") as push_event:
+        assert EventHandlingMixin._handle_edit_event(app, event)
+
+    push_event.assert_called_once_with(
+        {
+            "type": "message_edit",
+            "payload": {
+                "protocol": "telegram",
+                "contact_id": "42",
+                "message_id": "77",
+                "timestamp": 1000,
+                "old_text": "Prima",
+                "text": "Dopo",
+                "is_mine": False,
+            },
+        }
+    )
+
+
+def test_edit_event_does_not_push_when_web_is_disabled():
+    app = _edit_app(web_enabled=False)
+    event = ChatEvent(
+        type="message_edit",
+        protocol="telegram",
+        contact_id="42",
+        payload={"edit_message_id": "77", "text": "Dopo"},
+    )
+
+    with patch("web.bridge.push_event") as push_event:
+        assert EventHandlingMixin._handle_edit_event(app, event)
+
+    push_event.assert_not_called()
+
+
 def test_whatsapp_echo_first_is_upgraded_to_sent_attachment(monkeypatch, tmp_path):
     db_file = _db(monkeypatch, tmp_path)
     media_dir = tmp_path / "whatsapp-media"
