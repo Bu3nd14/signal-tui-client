@@ -168,15 +168,15 @@ def test_quote_media_database_error_returns_500(web_client):
     assert response.json() == {"detail": "Database error"}
 
 
-def test_spa_renders_lazy_quote_thumbnails():
+def test_spa_renders_eager_quote_thumbnails():
     source = r"""
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const media = app.slice(app.indexOf("const MEDIA_CACHE_LIMIT"), app.indexOf("\nfunction attachmentName"));
-const quote = app.slice(app.indexOf("function quoteThumb("), app.indexOf("\nfunction renderMessages("));
-globalThis.state = { mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(), objectUrls: new Set(), mediaCache: new Map(), optimistic: [] };
+const quote = app.slice(app.indexOf("function fetchQuoteThumb("), app.indexOf("\nfunction renderMessages("));
+globalThis.state = { mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(), objectUrls: new Set(), pinnedUrls: new Set(), mediaCache: new Map(), optimistic: [] };
 globalThis.URL = { createObjectURL: () => "blob:quote-thumb", revokeObjectURL() {} };
 globalThis.scrollThreadToBottom = () => {};
 let mode = "ok";
@@ -203,9 +203,6 @@ function node(tag) {
 }
 globalThis.document = { createElement: node, querySelector: () => null };
 globalThis.elements = { messages: { parent: { id: "scroll-root" } } };
-let callback;
-let observed;
-globalThis.window = { setTimeout, clearTimeout, IntersectionObserver: class { constructor(cb) { callback = cb; } observe(target) { observed = target; } unobserve() {} disconnect() {} } };
 vm.runInThisContext(media);
 vm.runInThisContext(quote);
 
@@ -217,20 +214,20 @@ vm.runInThisContext(quote);
   assert.equal(renderedQuote.className, "message-quote has-thumb");
   assert.equal(image.tag, "img");
   assert.equal(image.className, "message-quote-thumb");
-  assert.equal(image.attributes.loading, "lazy");
+  assert.equal(image.attributes.loading, undefined);
   assert.equal(image.src, undefined);
-  callback([{ target: observed, isIntersecting: true }], state.mediaObserver);
   await new Promise(setImmediate);
   assert.equal(requestedPath, "/api/quote-media/signal/7?w=96");
   assert.equal(image.src, "blob:quote-thumb");
-  assert.ok(state.mediaCache.has("quote:/api/quote-media/signal/7?w=96"));
+  // Il blob della quote è pinnato: mai evittato dalla LRU né revocato dal prune.
+  assert.ok(state.pinnedUrls.has("blob:quote-thumb"));
+  assert.ok(!state.mediaCache.has("quote:/api/quote-media/signal/7?w=96"));
 
   mode = "missing";
   const failedBubble = node("div");
   appendRenderedQuote(failedBubble, { direction: "in", quote_author: "Bob", quote_text: "Testo", quote_thumb_url: "/api/quote-media/signal/8?w=96" });
   const failedQuote = failedBubble.children[0];
   const failedImage = failedQuote.children[0];
-  callback([{ target: observed, isIntersecting: true }], state.mediaObserver);
   await new Promise(setImmediate);
   assert.equal(failedImage.removed, true);
   assert.equal(failedQuote.children.length, 1);

@@ -201,7 +201,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             connection.row_factory = sqlite3.Row
             try:
                 rows = connection.execute(
-                    "SELECT id, msg_id, text, is_mine, timestamp, "
+                    "SELECT id, msg_id, text, is_mine, timestamp, contact_number, "
                     "attachment_id, attachment_info, content_type, protocol, msg_type, "
                     "quote_text, quote_timestamp, quote_author, quote_attachment_id, "
                     "quote_content_type, quote_attachment_path, status, edited, read "
@@ -272,17 +272,90 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
 
 
 def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
-    proto = row["protocol"]
-    if row["quote_attachment_path"]:
-        return f"/api/quote-media/{proto}/{row['id']}?w=96"
+    """URL miniatura della quote, calcolato dal server (cascata).
+
+    1. ``quote_attachment_path`` sotto ``CACHE_DIR/quote-thumbs`` (thumb
+       estratta) → ``/api/quote-media`` (endpoint dedicato anti-traversal);
+    2. ``quote_attachment_path`` esistente e immagine (anche sotto la media
+       root del protocollo, es. allegato originale Signal/Telegram/WhatsApp)
+       → ``/api/media`` con il path;
+    3. ``quote_attachment_id`` + ``image/*`` (o estensione immagine per quote
+       legacy senza content_type) → ``/api/media`` con l'id;
+    altrimenti ``None`` (nessuna miniatura: placeholder testuale).
+    """
+    proto = str(row["protocol"])
+    from backend import CACHE_DIR
+
+    thumbs_root = (Path(CACHE_DIR) / "quote-thumbs").resolve()
+    _IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+
+    def _media_url(value: str) -> str:
+        encoded = "/".join(
+            url_quote(segment, safe="") for segment in value.split("/")
+        )
+        return f"/api/media/{proto}/{encoded}?w=96"
+
+    path = row["quote_attachment_path"]
+    if path:
+        resolved = Path(path).resolve()
+        if resolved.parent == thumbs_root:
+            return f"/api/quote-media/{proto}/{row['id']}?w=96"
+        content_type = (row["quote_content_type"] or "").lower()
+        is_image = content_type.startswith("image/") or str(path).lower().endswith(
+            _IMAGE_EXT
+        )
+        if is_image and resolved.is_file():
+            return _media_url(str(path))
+        return None
     quote_attachment_id = row["quote_attachment_id"]
     quote_content_type = (row["quote_content_type"] or "").lower()
-    if quote_attachment_id and quote_content_type.startswith("image/"):
-        encoded_id = "/".join(
-            url_quote(segment, safe="") for segment in quote_attachment_id.split("/")
-        )
-        return f"/api/media/{proto}/{encoded_id}?w=96"
+    is_image = quote_content_type.startswith("image/") or (
+        not quote_content_type
+        and str(quote_attachment_id).lower().endswith(_IMAGE_EXT)
+    )
+    if quote_attachment_id and is_image:
+        return _media_url(str(quote_attachment_id))
+    # 4. Fallback (reply inviate senza metadati quote persistiti): risolvi
+    # l'immagine quotata dalla stessa chat tramite quote_timestamp e usa il
+    # suo attachment_id (il backend non persiste i metadati all'invio).
+    quoted = _quoted_image_attachment_id(
+        proto, str(row["contact_number"]), row["quote_timestamp"]
+    )
+    if quoted:
+        return _media_url(quoted)
     return None
+
+
+def _quoted_image_attachment_id(
+    proto: str, contact_number: str, quote_ts: Any
+) -> str | None:
+    """Attachment id dell'immagine quotata (stessa chat, ±2s su timestamp)."""
+    if not quote_ts:
+        return None
+    import backend
+    from backend.db import _DB_LOCK
+
+    try:
+        with _DB_LOCK:
+            connection = sqlite3.connect(backend.DB_FILE)
+            try:
+                row = connection.execute(
+                    "SELECT attachment_id, content_type, attachment_info "
+                    "FROM messages WHERE protocol = ? AND contact_number = ? "
+                    "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
+                    "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
+                    "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
+                    "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp') "
+                    "ORDER BY ABS(timestamp - ?) LIMIT 1",
+                    (proto, contact_number, quote_ts, quote_ts),
+                ).fetchone()
+            finally:
+                connection.close()
+    except sqlite3.Error:
+        return None
+    if row is None or not row[0]:
+        return None
+    return str(row[0])
 
 
 def _quote_media_placeholder(text: Any) -> bool:
@@ -692,11 +765,24 @@ def create_api_router() -> Any:
         contacts = search_contacts(manager.list_address_book_sync(force=False), query)
         return [_contact_payload(contact, unread) for contact in contacts]
 
+    @router.post("/log")
+    def client_log(payload: dict[str, Any]) -> dict[str, str]:
+        message = str(payload.get("message") or "")[:500]
+        logger.info("[web-client] %s", message)
+        return {"status": "ok"}
+
     @router.get("/messages")
     def messages(
         proto: Literal["signal", "whatsapp", "telegram"], contact_id: str
     ) -> list[dict[str, Any]]:
-        return _messages(proto, contact_id)
+        result = _messages(proto, contact_id)
+        quotes = [m for m in result if m.get("quote_attachment_id") or m.get("quote_thumb_url")]
+        thumbs = [m for m in result if m.get("quote_thumb_url")]
+        logger.info(
+            "web messages proto=%s contact=%s total=%d quotes=%d thumb_urls=%d",
+            proto, contact_id, len(result), len(quotes), len(thumbs),
+        )
+        return result
 
     @router.post("/messages/read")
     async def messages_read(

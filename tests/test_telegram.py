@@ -886,3 +886,56 @@ class TestTelegramQuoteMedia:
 
         assert event.payload["quote_text"] == "🖼️ Immagine"
         assert event.payload["reply_to_message_id"] == "12"
+
+
+def test_migrate_legacy_media_dir(tmp_path, monkeypatch):
+    """La migrazione one-shot sposta i media da /tmp a CACHE_DIR persistente
+    e riscrive i riferimenti nel DB."""
+    import sqlite3
+
+    import backend
+    from backends import telegram as tg
+
+    monkeypatch.setattr(
+        tg.tempfile, "gettempdir", lambda: str(tmp_path / "oldtmp")
+    )
+    monkeypatch.setattr(backend, "CACHE_DIR", tmp_path / "share")
+    monkeypatch.setattr(backend, "DB_FILE", str(tmp_path / "db.sqlite"))
+
+    old_dir = tmp_path / "oldtmp" / "telegram-media"
+    old_dir.mkdir(parents=True)
+    (old_dir / "photo.jpg").write_bytes(b"x")
+    (old_dir / "882-1-sent.png").write_bytes(b"y")
+
+    connection = sqlite3.connect(str(tmp_path / "db.sqlite"))
+    connection.execute(
+        "CREATE TABLE messages (id INTEGER PRIMARY KEY, contact_number TEXT, "
+        "text TEXT, is_mine INTEGER, timestamp INTEGER, attachment_id TEXT, "
+        "quote_attachment_id TEXT, quote_attachment_path TEXT, protocol TEXT, "
+        "quote_text TEXT, quote_timestamp INTEGER, quote_author TEXT, "
+        "msg_type TEXT, attachment_info TEXT, content_type TEXT, read INTEGER, "
+        "status TEXT, msg_id TEXT, quote_content_type TEXT, edited INTEGER, "
+        "local_id TEXT, reply_to_message_id TEXT, message_part_key TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO messages (protocol, attachment_id, quote_attachment_path) "
+        "VALUES ('telegram', ?, ?)",
+        (str(old_dir / "photo.jpg"), str(old_dir / "882-1-sent.png")),
+    )
+    connection.commit()
+    connection.close()
+
+    tg._migrate_legacy_media_dir()
+
+    new_dir = tmp_path / "share" / "telegram-media"
+    assert (new_dir / "photo.jpg").is_file()
+    assert (new_dir / "882-1-sent.png").is_file()
+    assert not old_dir.exists()
+
+    connection = sqlite3.connect(str(tmp_path / "db.sqlite"))
+    row = connection.execute(
+        "SELECT attachment_id, quote_attachment_path FROM messages"
+    ).fetchone()
+    connection.close()
+    assert row[0] == str(new_dir / "photo.jpg")
+    assert row[1] == str(new_dir / "882-1-sent.png")

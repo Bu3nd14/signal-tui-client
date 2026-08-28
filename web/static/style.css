@@ -52,10 +52,10 @@ button { color: inherit; }
 .sidebar-header, .thread-header {
   display: flex;
   flex: none;
-  min-height: 76px;
+  min-height: 58px;
   align-items: center;
   gap: 12px;
-  padding: 14px 18px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -63,15 +63,7 @@ button { color: inherit; }
 h1, h2, p { margin: 0; }
 h1 { font-size: 1.25rem; }
 h2 { font-size: 1.05rem; }
-
-.eyebrow {
-  margin-bottom: 3px;
-  color: var(--accent);
-  font-size: .68rem;
-  font-weight: 750;
-  letter-spacing: .13em;
-  text-transform: uppercase;
-}
+.sidebar-header h1 { color: var(--accent); }
 
 .header-actions { display: flex; gap: 6px; }
 .icon-button {
@@ -242,6 +234,7 @@ h2 { font-size: 1.05rem; }
 .message-time { display: block; margin-top: 5px; color: #c3cedaaa; font-size: .66rem; text-align: right; }
 .message-status.failed { color: var(--danger); }
 .message-tick { margin-left: 4px; color: #c3cedaaa; font-size: .66rem; white-space: nowrap; }
+.tick-delivered { color: #f0b90b; }
 .tick-read { color: var(--accent); }
 .tick-failed { color: var(--danger); }
 .message-edited { color: #c3cedaaa; font-size: .66rem; opacity: .72; }
@@ -292,6 +285,7 @@ h2 { font-size: 1.05rem; }
 }
 .message-quote.has-thumb { flex-direction: row; align-items: center; gap: 8px; }
 .message-quote-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.message-quote-body[hidden] { display: none; }
 .message-quote-thumb { width: 48px; height: 48px; object-fit: cover; border-radius: 3px; flex: none; background: var(--panel-raised); }
 .message-quote strong, .message-quote span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-quote strong { color: #b8d0ff; }
