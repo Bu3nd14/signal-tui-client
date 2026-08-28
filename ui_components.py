@@ -835,6 +835,8 @@ class QuoteWidget(Horizontal):
         attachment_path: Path | None = None,
         content_type: str | None = None,
         protocol: str | None = None,
+        quote_timestamp: int | None = None,
+        contact_key: str | None = None,
     ) -> None:
         super().__init__()
         quote_text = embedded_media_quote_placeholder(quote_text) or quote_text
@@ -856,6 +858,10 @@ class QuoteWidget(Horizontal):
         self.has_thumbnail_source = bool(attachment_id or attachment_path)
         # Source protocol, used to resolve the quoted attachment lazily (ingresso).
         self.protocol = protocol
+        # Fallback per le reply inviate (metadati quote non persistiti): per
+        # risolvere l'immagine quotata dalla stessa chat via quote_timestamp.
+        self.quote_timestamp = quote_timestamp
+        self.contact_key = contact_key
 
         # Native kitty-rendering state (same pattern as ``ImageWidget``).  The
         # placement is performed by the app's ``post_display_hook`` — never in
@@ -872,6 +878,11 @@ class QuoteWidget(Horizontal):
         # when the native thumbnail replaces a placeholder) without requiring a
         # mounted DOM.
         self._text_static = Static(f"▎ {quote_text}", classes=classes)
+        # Quote media senza caption (testo vuoto): il testo non viene mostrato
+        # (la miniatura lo sostituisce; se assente, la bolla resta vuota ma
+        # senza prefisso spurio).
+        if not (quote_text or "").strip():
+            self._text_static.display = False
 
     def compose(self):
         yield self._text_static
@@ -888,7 +899,13 @@ class QuoteWidget(Horizontal):
         try:
             return self.query_one(".quote-thumb", Static).content_region
         except NoMatches:
-            return None
+            # Slot ``.quote-thumb`` non presente (design non ancora completato):
+            # piazza la thumb sul content_region del widget. Le quote media
+            # senza caption hanno il testo nascosto → nessuna sovrapposizione.
+            try:
+                return self.content_region
+            except (AttributeError, TypeError, ValueError):
+                return None
 
     def show_native_thumbnail(
         self, renderer: KittyRenderer, image_id: int, png_bytes: bytes
@@ -909,7 +926,9 @@ class QuoteWidget(Horizontal):
         self.native_height_px = height_px
         rows = max(1, (height_px + renderer.cell_h - 1) // renderer.cell_h)
         self.styles.height = rows
-        if is_media_quote_placeholder_composite(self._quote_text_raw):
+        if not (
+            self._quote_text_raw or ""
+        ).strip() or is_media_quote_placeholder_composite(self._quote_text_raw):
             self._text_static.display = False
         self.refresh(layout=True)
 
@@ -931,7 +950,7 @@ class QuoteWidget(Horizontal):
         # Drop any pending (not-yet-consumed) thumbnail stashed by the worker.
         self._pending_quote_png = None
         # Re-show the textual placeholder (fallback text) when freed.
-        self._text_static.display = True
+        self._text_static.display = bool((self._quote_text_raw or "").strip())
 
 
 #: Cap on the hi-res modal image's long side, in pixels (DESIGN §6).

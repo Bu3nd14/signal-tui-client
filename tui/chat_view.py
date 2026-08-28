@@ -178,6 +178,7 @@ class ChatViewMixin:
         quote_attachment_id: str | None = None,
         quote_attachment_path: Path | None = None,
         quote_content_type: str | None = None,
+        quote_timestamp: int | None = None,
     ):
         """Add a message to the chat with correct alignment.
 
@@ -225,7 +226,7 @@ class ChatViewMixin:
 
         chat_log = self.chat_log
 
-        if quote_text:
+        if quote_text or quote_timestamp:
             quote_class = "msg-quote-right" if is_mine else "msg-quote"
             quote_widget = QuoteWidget(
                 quote_text,
@@ -234,6 +235,12 @@ class ChatViewMixin:
                 attachment_path=quote_attachment_path,
                 content_type=quote_content_type,
                 protocol=protocol,
+                quote_timestamp=quote_timestamp,
+                contact_key=(
+                    self.selected_contact.id
+                    if self.selected_contact is not None
+                    else None
+                ),
             )
             chat_log.mount(quote_widget)
             # Native quote thumbnail (uscita): resolve the already-known path in
@@ -631,8 +638,14 @@ class ChatViewMixin:
         path = quote_widget.attachment_path
         attachment_id = quote_widget.attachment_id
         protocol = quote_widget.protocol
-        if path is None and not (attachment_id and protocol):
-            return  # nothing resolvable → text-only bubble
+        if (
+            path is None
+            and not (attachment_id and protocol)
+            and not (quote_widget.quote_timestamp and quote_widget.contact_key)
+        ):
+            # Nessuna sorgente e nessun fallback dalle chat (le reply inviate
+            # non persistono i metadati quote) → bolla text-only.
+            return
         self.run_worker(
             lambda w=quote_widget, p=path, a=attachment_id, pr=protocol: (
                 self._resolve_quote_thumbnail_worker(w, p, a, pr)
@@ -663,13 +676,20 @@ class ChatViewMixin:
             if path is None:
                 # Lazy resolve (ingresso, or stale-path fallback), best-effort.
                 if not (attachment_id and protocol):
-                    logger.warning(
-                        "Quote thumbnail: no path and no resolvable id "
-                        "(protocol=%s id=%r) — text-only bubble",
-                        protocol,
-                        attachment_id,
-                    )
-                    return
+                    # Fallback per le reply inviate (metadati quote non
+                    # persistiti): risolvi l'immagine quotata dalla stessa chat
+                    # tramite quote_timestamp (stessa logica del fallback web).
+                    resolved_id = self._quoted_attachment_id_from_chat(widget)
+                    if resolved_id is None:
+                        logger.warning(
+                            "Quote thumbnail: no path and no resolvable id "
+                            "(protocol=%s id=%r) — text-only bubble",
+                            protocol,
+                            attachment_id,
+                        )
+                        return
+                    attachment_id = resolved_id
+                    protocol = widget.protocol
                 try:
                     path = self.manager.get_attachment_path(protocol, attachment_id)
                 except Exception as _e:
@@ -697,6 +717,43 @@ class ChatViewMixin:
                 logger.warning("Quote thumbnail prepare failed", exc_info=True)
                 return
             self.call_from_thread(self._finish_quote_thumbnail, widget, png)
+
+    def _quoted_attachment_id_from_chat(self, widget: QuoteWidget) -> str | None:
+        """Attachment id dell'immagine quotata (stessa chat, ±2s su timestamp).
+
+        Fallback per le reply inviate senza metadati quote persistiti:
+        risolve il messaggio quotato (``quote_timestamp``) e ne riusa
+        l'attachment — identico al fallback della web UI.
+        """
+        if not (widget.quote_timestamp and widget.contact_key and widget.protocol):
+            return None
+        import sqlite3
+
+        import backend
+        from backend.db import _DB_LOCK
+
+        ts = widget.quote_timestamp
+        try:
+            with _DB_LOCK:
+                connection = sqlite3.connect(backend.DB_FILE)
+                try:
+                    row = connection.execute(
+                        "SELECT attachment_id FROM messages "
+                        "WHERE protocol = ? AND contact_number = ? "
+                        "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
+                        "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
+                        "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
+                        "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp') "
+                        "ORDER BY ABS(timestamp - ?) LIMIT 1",
+                        (widget.protocol, widget.contact_key, ts, ts),
+                    ).fetchone()
+                finally:
+                    connection.close()
+        except (sqlite3.Error, OSError):
+            return None
+        if row is None or not row[0]:
+            return None
+        return str(row[0])
 
     def _finish_quote_thumbnail(self, widget: QuoteWidget, png: bytes) -> None:
         """UI thread: transmit the quote thumbnail once and register the widget.
@@ -1102,18 +1159,24 @@ class ChatViewMixin:
         message_id = msg.get("id")
 
         widgets: list = []
-        if quote_text:
+        if quote_text or msg.get("quote_timestamp"):
             quote_class = "msg-quote-right" if is_mine else "msg-quote"
             # Forward future quoted-attachment metadata (chunk 5) when already
             # present in the message dict; resolution stays out of scope here.
             widgets.append(
                 QuoteWidget(
-                    quote_text,
+                    quote_text or "",
                     classes=quote_class,
                     attachment_id=msg.get("quote_attachment_id"),
                     attachment_path=msg.get("quote_attachment_path"),
                     content_type=msg.get("quote_content_type"),
                     protocol=protocol,
+                    quote_timestamp=msg.get("quote_timestamp"),
+                    contact_key=(
+                        self.selected_contact.id
+                        if self.selected_contact is not None
+                        else None
+                    ),
                 )
             )
 
