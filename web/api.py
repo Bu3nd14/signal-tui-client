@@ -15,7 +15,6 @@ from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
 from models import is_media_quote_placeholder_composite
-
 from web.bridge import push_event
 
 logger = logging.getLogger(__name__)
