@@ -1,10 +1,17 @@
 "use strict";
 
 const TOKEN_KEY = "signal-tui-web-token";
+const PROTOCOL_KEY = "signal-tui-web-proto";
+const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   contacts: [],
-  protocolFilter: "all",
+  searchResults: null,
+  contactQuery: "",
+  protocolFilter: (() => {
+    const saved = localStorage.getItem(PROTOCOL_KEY);
+    return PROTOCOLS.includes(saved) ? saved : "signal";
+  })(),
   active: null,
   socket: null,
   reconnectTimer: null,
@@ -31,6 +38,7 @@ const state = {
 const elements = {
   app: document.querySelector("#app"),
   contacts: document.querySelector("#contact-list"),
+  contactSearch: document.querySelector("#contact-search"),
   protocolTabs: document.querySelector("#protocol-tabs"),
   contactStatus: document.querySelector("#contact-status"),
   messages: document.querySelector("#message-list"),
@@ -140,12 +148,10 @@ function protocolIcon(protocol, size = 15) {
 
 function renderContacts() {
   elements.contacts.replaceChildren();
-  const sortedContacts = [...state.contacts].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
-  const contacts = state.protocolFilter === "all"
-    ? sortedContacts
-    : sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
-  const activeMatchesFilter = state.protocolFilter === "all" || state.active?.protocol === state.protocolFilter;
-  if (state.active && activeMatchesFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
+  const base = state.searchResults ?? state.contacts;
+  const sortedContacts = [...base].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
+  const contacts = sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
+  if (state.active && state.active.protocol === state.protocolFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
     contacts.unshift(state.active);
   }
   for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
@@ -153,7 +159,11 @@ function renderContacts() {
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
   }
-  elements.contactStatus.textContent = contacts.length ? "" : "Nessuna conversazione disponibile.";
+  elements.contactStatus.textContent = contacts.length
+    ? ""
+    : state.contactQuery
+      ? `Nessun risultato per «${state.contactQuery}».`
+      : "Nessuna conversazione disponibile.";
   for (const contact of contacts) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1132,7 +1142,8 @@ if (elements.protocolTabs) {
     if (!tab) return;
     const protocol = tab.dataset.protocol;
     state.protocolFilter = protocol;
-    if (protocol !== "all" && state.active?.protocol !== protocol) {
+    localStorage.setItem(PROTOCOL_KEY, protocol);
+    if (state.active?.protocol !== protocol) {
       const firstContact = state.contacts.find((contact) => contact.protocol === protocol);
       if (firstContact) {
         openThread(firstContact);
@@ -1140,6 +1151,57 @@ if (elements.protocolTabs) {
       }
     }
     renderContacts();
+  });
+}
+if (elements.contactSearch) {
+  let searchTimer = null;
+  let searchSeq = 0;
+  elements.contactSearch.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    const query = elements.contactSearch.value;
+    state.contactQuery = query;
+    const seq = ++searchSeq;
+    searchTimer = setTimeout(async () => {
+      const trimmed = query.trim();
+      if (!trimmed) {
+        state.searchResults = null;
+        renderContacts();
+        return;
+      }
+      const render = (results) => {
+        if (seq === searchSeq && state.contactQuery === query) {
+          state.searchResults = results;
+          renderContacts();
+        }
+      };
+      let chatResults = [];
+      try {
+        const response = await apiFetch(`/api/contacts?q=${encodeURIComponent(trimmed)}`);
+        chatResults = await response.json();
+      } catch (error) {
+        if (error.name !== "AbortError" && error.message !== "unauthorized") {
+          console.debug("[web] contact search failed", error);
+        }
+      }
+      render(chatResults);
+      if (seq !== searchSeq || state.contactQuery !== query) return;
+      // Rubrica completa in background (come il picker TUI): aggiorna i risultati
+      // quando arriva; intanto segnala la ricerca in corso se le chat non hanno match.
+      if (chatResults.length === 0 && elements.contactStatus) {
+        elements.contactStatus.textContent = "Nessun risultato nelle conversazioni — cerco nella rubrica…";
+      }
+      try {
+        const bookResponse = await apiFetch(`/api/contacts/book?q=${encodeURIComponent(trimmed)}`);
+        const bookResults = await bookResponse.json();
+        if (seq !== searchSeq || state.contactQuery !== query) return;
+        const seen = new Set(chatResults.map((contact) => `${contact.protocol}:${contact.id}`));
+        render([...chatResults, ...bookResults.filter((contact) => !seen.has(`${contact.protocol}:${contact.id}`))]);
+      } catch (error) {
+        if (error.name !== "AbortError" && error.message !== "unauthorized") {
+          console.debug("[web] address book search failed", error);
+        }
+      }
+    }, 150);
   });
 }
 elements.cancelToken.addEventListener("click", () => elements.tokenDialog.close());

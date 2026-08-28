@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>Signal TUI Reader</title>
-  <link rel="stylesheet" href="/style.css?v=14">
+  <link rel="stylesheet" href="/style.css?v=16">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -20,11 +20,13 @@
           <button id="open-token" class="icon-button" type="button" aria-label="Imposta token" title="Token">⌁</button>
         </div>
       </header>
-      <div id="protocol-tabs" class="protocol-tabs" role="tablist" aria-label="Filtra conversazioni per protocollo">
-        <button class="protocol-tab active" type="button" role="tab" data-protocol="all" aria-selected="true">Tutti</button>
-        <button class="protocol-tab" type="button" role="tab" data-protocol="signal" aria-selected="false">Signal</button>
+      <div id="protocol-tabs" class="protocol-tabs" role="tablist" aria-label="Seleziona backend">
+        <button class="protocol-tab active" type="button" role="tab" data-protocol="signal" aria-selected="true">Signal</button>
         <button class="protocol-tab" type="button" role="tab" data-protocol="whatsapp" aria-selected="false">WhatsApp</button>
         <button class="protocol-tab" type="button" role="tab" data-protocol="telegram" aria-selected="false">Telegram</button>
+      </div>
+      <div class="sidebar-search">
+        <input id="contact-search" type="search" placeholder="Cerca contatti…" autocomplete="off" spellcheck="false" aria-label="Cerca contatti">
       </div>
       <div id="contact-status" class="list-status">Inserisci il token per iniziare.</div>
       <nav id="contact-list" class="contact-list" aria-live="polite"></nav>
@@ -100,6 +102,6 @@
   </dialog>
 
   <script src="/reconcile.js?v=3" defer></script>
-  <script src="/app.js?v=15" defer></script>
+  <script src="/app.js?v=18" defer></script>
 </body>
 </html>
