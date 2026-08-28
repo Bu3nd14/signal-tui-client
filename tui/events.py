@@ -334,6 +334,28 @@ class EventHandlingMixin:
         if not updated:
             return False
 
+        if getattr(self, "_web_enabled", False):
+            from web.bridge import push_event
+
+            push_event(
+                {
+                    "type": "receipt",
+                    "payload": {
+                        "protocol": event.protocol,
+                        "contact_id": event.contact_id,
+                        "updates": [
+                            {
+                                "id": str(msg.get("id")) if msg.get("id") else None,
+                                "timestamp": int(msg.get("timestamp") or 0),
+                                "status": str(msg.get("status") or "sent"),
+                                "text": str(msg.get("text") or ""),
+                            }
+                            for msg in updated
+                        ],
+                    },
+                }
+            )
+
         # Mirror the updated statuses into the UI's cache.
         ui_key = contact_cache_key(event.protocol, event.contact_id)
         ui_msgs = self._cache.get(ui_key)

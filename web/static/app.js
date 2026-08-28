@@ -605,6 +605,8 @@ function appendRenderedQuote(bubble, item) {
 function renderMessages(messages, protocol) {
   pruneOrphanObjectUrls();
   elements.messages.replaceChildren();
+  state.messageNodes ??= new Map();
+  state.messageNodes.clear();
   const active = state.active;
   const reconciliation = window.SignalTuiReconcile.reconcileOptimisticMessages(
     messages,
@@ -642,6 +644,8 @@ function renderMessages(messages, protocol) {
   for (const item of displayed) {
     const message = document.createElement("article");
     message.className = `message ${item.direction === "out" ? "out" : "in"}`;
+    message.setAttribute("data-mid", String(item.id));
+    message.setAttribute("data-ts", String(item.timestamp));
     const bubble = document.createElement("div");
     bubble.className = "bubble";
     appendRenderedQuote(bubble, item);
@@ -661,20 +665,35 @@ function renderMessages(messages, protocol) {
     }
     const safeText = window.SignalTuiReconcile.messageDisplayText(item);
     const displayText = safeText || (item.attachment && !isImage ? attachmentName(item) : "");
+    let textEl = null;
     if (displayText) {
-      const text = document.createElement("div");
-      text.className = "message-text";
-      text.textContent = displayText;
-      bubble.append(text);
+      textEl = document.createElement("div");
+      textEl.className = "message-text";
+      textEl.textContent = displayText;
+      bubble.append(textEl);
     }
     const time = document.createElement("time");
     time.className = "message-time";
     time.textContent = formatTimestamp(item.timestamp);
+    let tickEl = null;
     if (item.optimisticStatus) {
       const status = document.createElement("span");
       status.className = `message-status ${item.optimisticStatus}`;
       status.textContent = item.optimisticStatus === "failed" ? " · fallito" : item.optimisticStatus === "sent" ? " · inviato" : " · invio…";
       time.append(status);
+    } else {
+      if (item.edited) {
+        const edited = document.createElement("span");
+        edited.className = "message-edited";
+        edited.textContent = " · modificato";
+        time.append(edited);
+      }
+      if (item.direction === "out") {
+        tickEl = document.createElement("span");
+        tickEl.className = "message-tick";
+        time.append(tickEl);
+        setMessageTick({ tickEl }, item.status);
+      }
     }
     bubble.append(time);
     message.append(bubble);
@@ -688,10 +707,41 @@ function renderMessages(messages, protocol) {
       reply.addEventListener("click", () => startReply(item));
       message.append(reply);
     }
+    state.messageNodes.set(String(item.id), {
+      textEl,
+      timeEl: time,
+      tickEl,
+      ts: item.timestamp,
+      text: item.text,
+      status: item.status,
+      edited: Boolean(item.edited),
+      direction: item.direction,
+    });
     elements.messages.append(message);
   }
   scrollThreadToBottom();
   requestAnimationFrame(scrollThreadToBottom);
+}
+
+const STATUS_RANK = { pending: 0, failed: 0, sent: 1, delivered: 2, read: 3 };
+
+function tickSpec(status) {
+  const specs = {
+    pending: ["🕓", "tick-pending", "In attesa di invio"],
+    sent: ["✓", "tick-sent", "Inviato"],
+    delivered: ["✓✓", "tick-delivered", "Consegnato"],
+    read: ["✓✓", "tick-read", "Letto"],
+    failed: ["!", "tick-failed", "Invio non riuscito"],
+  };
+  return specs[status] || specs.sent;
+}
+
+function setMessageTick(entry, status) {
+  if (!entry?.tickEl) return;
+  const [glyph, className, title] = tickSpec(status);
+  entry.tickEl.className = `message-tick ${className}`;
+  entry.tickEl.textContent = glyph;
+  entry.tickEl.title = title;
 }
 
 async function loadMessages() {
@@ -713,6 +763,29 @@ async function loadMessages() {
     if (error.name !== "AbortError" && error.message !== "unauthorized") showError("Errore di rete durante il caricamento dei messaggi.");
   } finally {
     if (state.messageRequest === controller) state.messageRequest = null;
+  }
+}
+
+function applyReceiptUpdates(payload) {
+  if (!state.active || state.active.protocol !== payload?.protocol || state.active.id !== String(payload?.contact_id)) return;
+  for (const update of payload.updates || []) {
+    let entry = update.id == null ? null : state.messageNodes?.get(String(update.id));
+    if (!entry) {
+      entry = [...(state.messageNodes?.values() || [])].find((candidate) =>
+        candidate.text === update.text
+        && Math.abs(timestampMilliseconds(candidate.ts) - timestampMilliseconds(update.timestamp)) <= 2000);
+    }
+    if (!entry) continue;
+    const current = entry.status || "sent";
+    const next = update.status || "sent";
+    if ((STATUS_RANK[next] ?? 1) <= (STATUS_RANK[current] ?? 1)) continue;
+    setMessageTick(entry, next);
+    entry.status = next;
+    const item = state.messages.find((message) =>
+      String(message.id) === String(update.id)
+      || (message.text === update.text
+        && Math.abs(timestampMilliseconds(message.timestamp) - timestampMilliseconds(update.timestamp)) <= 2000));
+    if (item) item.status = next;
   }
 }
 
@@ -1083,18 +1156,27 @@ function connectSocket() {
     state.reconnectAttempt = 0;
     elements.connection.className = "connection-state online";
     elements.connection.textContent = "live";
+    if (state.active) loadMessages();
   };
   socket.onmessage = (event) => {
     try {
       const update = JSON.parse(event.data);
-      if (update.type !== "message" || !update.payload) return;
-      const attachmentId = update.payload.attachment_id ?? update.payload.attachment?.attachment_id;
-      if (attachmentId != null) state.mediaFailures.delete(String(attachmentId));
-      console.debug("[web] ws push", { protocol: update.payload.protocol, contact_id: update.payload.contact_id, id: update.payload?.id });
-      loadContacts({ quiet: true });
-      if (state.active?.id === String(update.payload.contact_id) && state.active?.protocol === update.payload.protocol) {
-        loadMessages();
-        markRead(state.active.protocol, state.active.id);
+      if (!update.payload) return;
+      switch (update.type) {
+        case "message": {
+          const attachmentId = update.payload.attachment_id ?? update.payload.attachment?.attachment_id;
+          if (attachmentId != null) state.mediaFailures.delete(String(attachmentId));
+          console.debug("[web] ws push", { protocol: update.payload.protocol, contact_id: update.payload.contact_id, id: update.payload?.id });
+          loadContacts({ quiet: true });
+          if (state.active?.id === String(update.payload.contact_id) && state.active?.protocol === update.payload.protocol) {
+            loadMessages();
+            markRead(state.active.protocol, state.active.id);
+          }
+          break;
+        }
+        case "receipt":
+          applyReceiptUpdates(update.payload);
+          break;
       }
     } catch {
       showError("Aggiornamento live non valido ricevuto dal server.");

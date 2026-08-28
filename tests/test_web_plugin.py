@@ -980,6 +980,9 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
             "quote_text",
             "quote_timestamp",
             "quote_author",
+            "status",
+            "read",
+            "edited",
         }
         for item in body
     )
@@ -990,6 +993,36 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
     }
     assert body[1]["id"].isdigit()
     assert body[2]["direction"] == "out"
+
+
+def test_messages_exposes_delivery_and_edit_state(web_client):
+    client, _, db_file = web_client
+    import sqlite3
+
+    with sqlite3.connect(db_file) as connection:
+        connection.executemany(
+            "INSERT INTO messages(protocol, contact_number, text, is_mine, "
+            "timestamp, msg_id, msg_type, status, read, edited) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("signal", "alice", "mine", 1, 10, "s1", "text", "read", 1, 1),
+                ("signal", "alice", "incoming", 0, 11, "s2", "text", "read", 0, 0),
+                ("signal", "alice", "fallback", 1, 12, "s3", "text", None, 0, 0),
+            ],
+        )
+
+    response = client.get(
+        "/api/messages",
+        params={"proto": "signal", "contact_id": "alice"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    mine, incoming, fallback = response.json()
+    assert (mine["status"], mine["read"], mine["edited"]) == ("read", True, True)
+    assert incoming["status"] is None
+    assert (incoming["read"], incoming["edited"]) == (False, False)
+    assert fallback["status"] == "sent"
 
 
 def test_messages_exposes_persisted_quote_fields(web_client):

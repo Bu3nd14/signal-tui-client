@@ -120,7 +120,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 rows = connection.execute(
                     "SELECT id, msg_id, text, is_mine, timestamp, "
                     "attachment_id, attachment_info, content_type, protocol, msg_type, "
-                    "quote_text, quote_timestamp, quote_author "
+                    "quote_text, quote_timestamp, quote_author, status, edited, read "
                     "FROM messages WHERE protocol = ? AND contact_number = ? "
                     "ORDER BY timestamp, id",
                     (protocol, contact_id),
@@ -163,16 +163,20 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             # legitimate captions of other protocols.
             if row["protocol"] == "whatsapp" and text.startswith("Media: "):
                 text = ""
+        direction = "out" if row["is_mine"] else "in"
         messages.append(
             {
                 "id": row["msg_id"] or str(row["id"]),
                 "text": text,
-                "direction": "out" if row["is_mine"] else "in",
+                "direction": direction,
                 "timestamp": row["timestamp"],
                 "attachment": attachment,
                 "quote_text": row["quote_text"],
                 "quote_timestamp": row["quote_timestamp"],
                 "quote_author": row["quote_author"],
+                "status": (row["status"] or "sent") if direction == "out" else None,
+                "read": bool(row["read"]),
+                "edited": bool(row["edited"]),
             }
         )
     return messages
