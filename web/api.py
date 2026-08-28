@@ -93,6 +93,19 @@ def _unread_counts() -> dict[tuple[str, str], int]:
     return {(row[0], row[1]): row[2] for row in rows}
 
 
+def _contact_payload(contact: Any, unread: dict[tuple[str, str], int]) -> dict[str, Any]:
+    """Serializza un contatto nel formato usato dalla web UI."""
+    extras = dict(contact.extras)
+    return {
+        "id": str(contact.id),
+        "display_name": str(contact.display_name),
+        "protocol": str(contact.protocol),
+        "extras": extras,
+        "last_message_ts": int(extras.get("last_message_ts", 0) or 0),
+        "unread": unread.get((contact.protocol, contact.id), 0),
+    }
+
+
 def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
     import backend
     from backend.db import _DB_LOCK
@@ -539,24 +552,25 @@ def create_api_router() -> Any:
         query = (q or "").strip()
         if query:
             # Riusa la ricerca del picker TUI (substring case-insensitive su
-            # nome/id/telefono) così la web UI ha la stessa semantica.
+            # nome/id/telefono) sulle chat attive (risposta rapida).
             from contact_picker import search_contacts  # lazy: evitare import TUI all'avvio
 
             contacts = search_contacts(contacts, query)
-        result = []
-        for contact in contacts:
-            extras = dict(contact.extras)
-            result.append(
-                {
-                    "id": str(contact.id),
-                    "display_name": str(contact.display_name),
-                    "protocol": str(contact.protocol),
-                    "extras": extras,
-                    "last_message_ts": int(extras.get("last_message_ts", 0) or 0),
-                    "unread": unread.get((contact.protocol, contact.id), 0),
-                }
-            )
-        return result
+        return [_contact_payload(contact, unread) for contact in contacts]
+
+    @router.get("/contacts/book")
+    def contacts_book(request: Request, q: str) -> list[dict[str, Any]]:
+        unread = _unread_counts()
+        manager = request.app.state.manager
+        query = (q or "").strip()
+        if not query:
+            return []
+        # Rubrica completa aggregata (come il picker TUI, in background):
+        # lenta, il client la chiama dopo aver già mostrato i risultati delle chat.
+        from contact_picker import search_contacts  # lazy: evitare import TUI all'avvio
+
+        contacts = search_contacts(manager.list_address_book_sync(force=False), query)
+        return [_contact_payload(contact, unread) for contact in contacts]
 
     @router.get("/messages")
     def messages(

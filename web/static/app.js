@@ -1168,16 +1168,37 @@ if (elements.contactSearch) {
         renderContacts();
         return;
       }
-      try {
-        const response = await apiFetch(`/api/contacts?q=${encodeURIComponent(trimmed)}`);
-        const results = await response.json();
+      const render = (results) => {
         if (seq === searchSeq && state.contactQuery === query) {
           state.searchResults = results;
           renderContacts();
         }
+      };
+      let chatResults = [];
+      try {
+        const response = await apiFetch(`/api/contacts?q=${encodeURIComponent(trimmed)}`);
+        chatResults = await response.json();
       } catch (error) {
         if (error.name !== "AbortError" && error.message !== "unauthorized") {
           console.debug("[web] contact search failed", error);
+        }
+      }
+      render(chatResults);
+      if (seq !== searchSeq || state.contactQuery !== query) return;
+      // Rubrica completa in background (come il picker TUI): aggiorna i risultati
+      // quando arriva; intanto segnala la ricerca in corso se le chat non hanno match.
+      if (chatResults.length === 0 && elements.contactStatus) {
+        elements.contactStatus.textContent = "Nessun risultato nelle conversazioni — cerco nella rubrica…";
+      }
+      try {
+        const bookResponse = await apiFetch(`/api/contacts/book?q=${encodeURIComponent(trimmed)}`);
+        const bookResults = await bookResponse.json();
+        if (seq !== searchSeq || state.contactQuery !== query) return;
+        const seen = new Set(chatResults.map((contact) => `${contact.protocol}:${contact.id}`));
+        render([...chatResults, ...bookResults.filter((contact) => !seen.has(`${contact.protocol}:${contact.id}`))]);
+      } catch (error) {
+        if (error.name !== "AbortError" && error.message !== "unauthorized") {
+          console.debug("[web] address book search failed", error);
         }
       }
     }, 150);
