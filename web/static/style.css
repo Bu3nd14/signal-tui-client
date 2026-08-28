@@ -368,7 +368,7 @@ h2 { font-size: 1.05rem; }
 
 .emoji-picker {
   position: absolute;
-  right: clamp(14px, 5vw, 70px);
+  right: 8px;
   bottom: calc(100% - 1px);
   z-index: 50;
   width: 310px;
