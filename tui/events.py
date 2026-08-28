@@ -238,6 +238,24 @@ class EventHandlingMixin:
         if not info:
             return False
 
+        if getattr(self, "_web_enabled", False):
+            from web.bridge import push_event
+
+            push_event(
+                {
+                    "type": "message_edit",
+                    "payload": {
+                        "protocol": event.protocol,
+                        "contact_id": event.contact_id,
+                        "message_id": str(info["message_id"]),
+                        "timestamp": int(info["timestamp"]),
+                        "old_text": str(info["old_text"] or ""),
+                        "text": new_text,
+                        "is_mine": bool(info["is_mine"]),
+                    },
+                }
+            )
+
         # Mirror nella cache UI + chirurgia identità.
         cache_key = contact.cache_key
         ui_msgs = self._cache.get(cache_key) or []

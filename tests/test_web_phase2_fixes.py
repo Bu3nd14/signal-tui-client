@@ -249,6 +249,66 @@ def test_receipt_event_does_not_push_when_web_is_disabled():
     push_event.assert_not_called()
 
 
+def _edit_app(web_enabled=True):
+    info = {
+        "message_id": "77",
+        "timestamp": 1000,
+        "old_text": "Prima",
+        "text": "Dopo",
+        "is_mine": False,
+    }
+    backend = SimpleNamespace(apply_edit=MagicMock(return_value=info))
+    return SimpleNamespace(
+        manager=SimpleNamespace(get=lambda _protocol: backend),
+        _cache={},
+        selected_contact=None,
+        _web_enabled=web_enabled,
+    )
+
+
+def test_edit_event_pushes_web_update():
+    app = _edit_app()
+    event = ChatEvent(
+        type="message_edit",
+        protocol="telegram",
+        contact_id="42",
+        payload={"edit_message_id": 77, "text": "Dopo", "is_mine": False},
+    )
+
+    with patch("web.bridge.push_event") as push_event:
+        assert EventHandlingMixin._handle_edit_event(app, event)
+
+    push_event.assert_called_once_with(
+        {
+            "type": "message_edit",
+            "payload": {
+                "protocol": "telegram",
+                "contact_id": "42",
+                "message_id": "77",
+                "timestamp": 1000,
+                "old_text": "Prima",
+                "text": "Dopo",
+                "is_mine": False,
+            },
+        }
+    )
+
+
+def test_edit_event_does_not_push_when_web_is_disabled():
+    app = _edit_app(web_enabled=False)
+    event = ChatEvent(
+        type="message_edit",
+        protocol="telegram",
+        contact_id="42",
+        payload={"edit_message_id": "77", "text": "Dopo"},
+    )
+
+    with patch("web.bridge.push_event") as push_event:
+        assert EventHandlingMixin._handle_edit_event(app, event)
+
+    push_event.assert_not_called()
+
+
 def test_whatsapp_echo_first_is_upgraded_to_sent_attachment(monkeypatch, tmp_path):
     db_file = _db(monkeypatch, tmp_path)
     media_dir = tmp_path / "whatsapp-media"

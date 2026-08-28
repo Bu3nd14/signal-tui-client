@@ -261,6 +261,22 @@ h2 { font-size: 1.05rem; }
 }
 .message.out .message-reply { right: auto; left: -38px; }
 .message:hover .message-reply, .message:focus-within .message-reply, .message-reply:focus-visible { opacity: 1; }
+.message-edit {
+  position: absolute;
+  top: calc(50% + 34px);
+  right: -38px;
+  width: 30px;
+  height: 30px;
+  translate: 0 -50%;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--panel-raised);
+  color: var(--muted);
+  opacity: 0;
+  cursor: pointer;
+}
+.message.out .message-edit { right: auto; left: -38px; }
+.message:hover .message-edit, .message:focus-within .message-edit, .message-edit:focus-visible { opacity: 1; }
 .message-quote {
   display: flex;
   flex-direction: column;

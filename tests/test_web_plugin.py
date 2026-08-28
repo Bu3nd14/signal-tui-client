@@ -983,6 +983,7 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
             "status",
             "read",
             "edited",
+            "edit_id",
         }
         for item in body
     )
@@ -1019,10 +1020,50 @@ def test_messages_exposes_delivery_and_edit_state(web_client):
 
     assert response.status_code == 200
     mine, incoming, fallback = response.json()
-    assert (mine["status"], mine["read"], mine["edited"]) == ("read", True, True)
+    assert (mine["status"], mine["read"], mine["edited"], mine["edit_id"]) == (
+        "read",
+        True,
+        True,
+        "s1",
+    )
     assert incoming["status"] is None
     assert (incoming["read"], incoming["edited"]) == (False, False)
     assert fallback["status"] == "sent"
+
+
+@pytest.mark.parametrize(
+    ("protocol", "is_mine", "msg_id", "msg_type", "status", "expected"),
+    [
+        ("signal", 1, None, "text", "sent", "1234"),
+        ("whatsapp", 1, None, "text", "sent", None),
+        ("telegram", 1, None, "text", "sent", None),
+        ("whatsapp", 1, "wa-1", "image", "sent", None),
+        ("telegram", 0, "10", "text", "read", None),
+        ("signal", 1, "s-pending", "text", "pending", None),
+        ("signal", 1, "s-failed", "text", "failed", None),
+    ],
+)
+def test_messages_edit_id_rules(
+    web_client, protocol, is_mine, msg_id, msg_type, status, expected
+):
+    client, _, db_file = web_client
+    import sqlite3
+
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            "INSERT INTO messages(protocol, contact_number, text, is_mine, "
+            "timestamp, msg_id, msg_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (protocol, "alice", "message", is_mine, 1234, msg_id, msg_type, status),
+        )
+
+    response = client.get(
+        "/api/messages",
+        params={"proto": protocol, "contact_id": "alice"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["edit_id"] == expected
 
 
 def test_messages_exposes_persisted_quote_fields(web_client):

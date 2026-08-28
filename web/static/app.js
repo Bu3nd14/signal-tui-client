@@ -28,6 +28,8 @@ const state = {
   optimisticSequence: 0,
   readTimers: new Map(),
   sending: false,
+  editing: null,
+  editSending: false,
   stagedAttachment: null,
   replyTo: null,
   emojiData: null,
@@ -63,6 +65,7 @@ const elements = {
   attachmentPreviewName: document.querySelector("#attachment-preview-name"),
   removeAttachment: document.querySelector("#remove-attachment"),
   replyBanner: document.querySelector("#reply-banner"),
+  replyMark: document.querySelector(".reply-mark"),
   replyAuthor: document.querySelector("#reply-author"),
   replySnippet: document.querySelector("#reply-snippet"),
   cancelReply: document.querySelector("#cancel-reply"),
@@ -547,9 +550,19 @@ function replyAuthor(item) {
 }
 
 function updateReplyBanner() {
+  const editing = state.editing;
+  if (editing) {
+    elements.replyBanner.hidden = false;
+    elements.replyMark.textContent = "✎";
+    elements.replyAuthor.textContent = "Modifica messaggio";
+    elements.replySnippet.textContent = editing.oldText.length > 80 ? `${editing.oldText.slice(0, 79)}…` : editing.oldText;
+    elements.messageInput.placeholder = "Modifica il messaggio";
+    return;
+  }
   const reply = state.replyTo;
   elements.replyBanner.hidden = !reply;
   if (!reply) {
+    elements.replyMark.textContent = "↩";
     elements.replyAuthor.textContent = "";
     elements.replySnippet.textContent = "";
     elements.messageInput.placeholder = "Scrivi un messaggio";
@@ -568,6 +581,7 @@ function cancelReply() {
 }
 
 function startReply(item) {
+  cancelEdit();
   if (!state.active || item.optimistic_id) return;
   const timestamp = timestampMilliseconds(item.timestamp);
   const id = item.id === null || item.id === undefined ? null : String(item.id);
@@ -683,10 +697,10 @@ function renderMessages(messages, protocol) {
       time.append(status);
     } else {
       if (item.edited) {
-        const edited = document.createElement("span");
-        edited.className = "message-edited";
-        edited.textContent = " · modificato";
-        time.append(edited);
+        const editedEl = document.createElement("span");
+        editedEl.className = "message-edited";
+        editedEl.textContent = " · modificato";
+        time.append(editedEl);
       }
       if (item.direction === "out") {
         tickEl = document.createElement("span");
@@ -706,6 +720,16 @@ function renderMessages(messages, protocol) {
       reply.title = "Rispondi";
       reply.addEventListener("click", () => startReply(item));
       message.append(reply);
+    }
+    if (item.direction === "out" && item.edit_id && !item.optimistic_id && item.text) {
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "message-edit";
+      edit.textContent = "✎";
+      edit.setAttribute("aria-label", "Modifica il messaggio");
+      edit.title = "Modifica";
+      edit.addEventListener("click", () => startEdit(item));
+      message.append(edit);
     }
     state.messageNodes.set(String(item.id), {
       textEl,
@@ -789,6 +813,145 @@ function applyReceiptUpdates(payload) {
   }
 }
 
+function ensureEditedMarker(entry) {
+  if (!entry) return null;
+  const existing = entry.timeEl.querySelector?.(".message-edited");
+  if (existing) return existing;
+  const marker = document.createElement("span");
+  marker.className = "message-edited";
+  marker.textContent = " · modificato";
+  if (entry.tickEl) entry.timeEl.insertBefore(marker, entry.tickEl);
+  else entry.timeEl.append(marker);
+  return marker;
+}
+
+function cancelEdit() {
+  state.editing = null;
+  elements.messageInput.value = "";
+  resizeComposer();
+  updateReplyBanner();
+  updateComposer();
+}
+
+function startEdit(item) {
+  if (!state.active || !item.edit_id || item.optimistic_id) return;
+  cancelReply();
+  state.editing = {
+    edit_id: String(item.edit_id),
+    id: item.id,
+    timestamp: item.timestamp,
+    oldText: item.text,
+    protocol: state.active.protocol,
+    contactId: state.active.id,
+  };
+  elements.messageInput.value = item.text;
+  resizeComposer();
+  updateReplyBanner();
+  updateComposer();
+  elements.messageInput.focus();
+}
+
+function messageEntryForEdit(editing, text = editing.oldText) {
+  return state.messageNodes?.get(String(editing.id))
+    || [...(state.messageNodes?.values() || [])].find((entry) =>
+      entry.text === text
+      && timestampMilliseconds(entry.ts) === timestampMilliseconds(editing.timestamp));
+}
+
+function storedMessageForEdit(editing, text = editing.oldText) {
+  return state.messages.find((item) =>
+    String(item.id) === String(editing.id)
+    || (item.text === text
+      && timestampMilliseconds(item.timestamp) === timestampMilliseconds(editing.timestamp)));
+}
+
+async function submitEdit() {
+  if (state.editSending || !state.editing) return;
+  const editing = { ...state.editing };
+  const newText = elements.messageInput.value;
+  if (!newText.trim()) return;
+  if (newText.trim() === editing.oldText.trim()) {
+    cancelEdit();
+    return;
+  }
+
+  const entry = messageEntryForEdit(editing);
+  const item = storedMessageForEdit(editing);
+  const wasEdited = Boolean(entry?.edited ?? item?.edited);
+  const previousMarker = entry?.timeEl.querySelector?.(".message-edited") || null;
+  if (entry?.textEl) entry.textEl.textContent = newText;
+  if (entry) {
+    ensureEditedMarker(entry);
+    entry.text = newText;
+    entry.edited = true;
+  }
+  if (item) {
+    item.text = newText;
+    item.edited = true;
+  }
+  state.editSending = true;
+  cancelEdit();
+  try {
+    await apiFetch("/api/messages/edit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        protocol: editing.protocol,
+        contact_id: editing.contactId,
+        message_id: editing.edit_id,
+        new_text: newText,
+      }),
+    });
+  } catch (error) {
+    if (error.message !== "unauthorized") {
+      if (entry?.textEl) entry.textEl.textContent = editing.oldText;
+      if (entry) {
+        if (!wasEdited && !previousMarker) {
+          entry.timeEl.querySelector?.(".message-edited")?.remove();
+        }
+        entry.text = editing.oldText;
+        entry.edited = wasEdited;
+      }
+      if (item) {
+        item.text = editing.oldText;
+        item.edited = wasEdited;
+      }
+      showError("Modifica non riuscita.");
+      state.editing = editing;
+      elements.messageInput.value = newText;
+      resizeComposer();
+      updateReplyBanner();
+      elements.messageInput.focus();
+    }
+  } finally {
+    state.editSending = false;
+    updateComposer();
+  }
+}
+
+function applyRemoteEdit(payload) {
+  if (!state.active || state.active.protocol !== payload?.protocol || state.active.id !== String(payload?.contact_id)) return;
+  let entry = state.messageNodes?.get(String(payload.message_id));
+  if (!entry) {
+    entry = [...(state.messageNodes?.values() || [])].find((candidate) =>
+      candidate.text === payload.old_text
+      && timestampMilliseconds(candidate.ts) === timestampMilliseconds(payload.timestamp));
+  }
+  if (!entry) return;
+  if (entry.textEl) entry.textEl.textContent = payload.text;
+  ensureEditedMarker(entry);
+  const item = state.messages.find((message) =>
+    String(message.id) === String(payload.message_id)
+    || (message.text === payload.old_text
+      && timestampMilliseconds(message.timestamp) === timestampMilliseconds(payload.timestamp)));
+  entry.text = payload.text;
+  entry.edited = true;
+  if (item) {
+    item.text = payload.text;
+    item.edited = true;
+  }
+}
+
 function markRead(protocol, contactId) {
   const key = `${protocol}:${contactId}`;
   // Persistenza DB immediata (i badge tornano azzerati dopo un refresh).
@@ -815,6 +978,7 @@ function markRead(protocol, contactId) {
 function openThread(contact) {
   closeEmojiPicker({ focus: false });
   cancelReply();
+  if (state.editing) cancelEdit();
   state.active = contact;
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
@@ -971,12 +1135,13 @@ function resizeComposer() {
 }
 
 function updateComposer() {
-  elements.sendMessage.disabled = state.sending || (!elements.messageInput.value.trim() && !state.stagedAttachment);
-  elements.messageInput.disabled = state.sending;
+  const busy = state.sending || state.editSending;
+  elements.sendMessage.disabled = busy || (!elements.messageInput.value.trim() && !state.stagedAttachment);
+  elements.messageInput.disabled = busy;
   elements.removeAttachment.disabled = state.sending;
-  elements.cancelReply.disabled = state.sending;
-  elements.sendIcon.hidden = state.sending;
-  elements.sendSpinner.hidden = !state.sending;
+  elements.cancelReply.disabled = busy;
+  elements.sendIcon.hidden = busy;
+  elements.sendSpinner.hidden = !busy;
 }
 
 function clearStagedAttachment({ revoke = true } = {}) {
@@ -1177,6 +1342,9 @@ function connectSocket() {
         case "receipt":
           applyReceiptUpdates(update.payload);
           break;
+        case "message_edit":
+          applyRemoteEdit(update.payload);
+          break;
       }
     } catch {
       showError("Aggiornamento live non valido ricevuto dal server.");
@@ -1199,16 +1367,23 @@ document.querySelector("#back-button").addEventListener("click", () => elements.
 document.querySelector("#dismiss-error").addEventListener("click", () => { elements.errorBanner.hidden = true; });
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
-  submitMessage();
+  state.editing ? submitEdit() : submitMessage();
 });
 elements.messageInput.addEventListener("input", () => {
   resizeComposer();
   updateComposer();
 });
 elements.messageInput.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.editing) {
+    event.preventDefault();
+    cancelEdit();
+    return;
+  }
   if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
-  if (!state.sending) submitMessage();
+  if (!state.sending && !state.editSending) {
+    state.editing ? submitEdit() : submitMessage();
+  }
 });
 elements.emojiToggle.addEventListener("click", toggleEmojiPicker);
 elements.emojiSearch.addEventListener("input", renderEmojiGrid);
