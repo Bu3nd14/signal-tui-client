@@ -455,7 +455,6 @@ async function loadImage(container, image, path, attachmentId, direction) {
     if (!url) return;
     image.addEventListener("load", () => {
       container.querySelector(".attachment-loading")?.remove();
-      scrollThreadToBottom();
     }, { once: true });
     image.src = url;
   } catch (error) {
@@ -499,7 +498,6 @@ function imageAttachment(attachment, protocol, direction) {
     state.mediaCache.set(attachmentId, cachedUrl);
     image.addEventListener("load", () => {
       loading.remove();
-      scrollThreadToBottom();
     }, { once: true });
     image.src = cachedUrl;
     return container;
