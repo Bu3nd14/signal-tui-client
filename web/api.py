@@ -553,7 +553,9 @@ def create_api_router() -> Any:
         if query:
             # Riusa la ricerca del picker TUI (substring case-insensitive su
             # nome/id/telefono) sulle chat attive (risposta rapida).
-            from contact_picker import search_contacts  # lazy: evitare import TUI all'avvio
+            from contact_picker import (
+                search_contacts,  # lazy: evitare import TUI all'avvio
+            )
 
             contacts = search_contacts(contacts, query)
         return [_contact_payload(contact, unread) for contact in contacts]
