@@ -101,7 +101,9 @@ def test_edit_requires_bearer_token(edit_client):
 )
 def test_edit_rejects_invalid_payload(edit_client, overrides):
     client, manager, _ = edit_client
-    response = client.post("/api/messages/edit", json=_payload(**overrides), headers=AUTH)
+    response = client.post(
+        "/api/messages/edit", json=_payload(**overrides), headers=AUTH
+    )
     assert response.status_code == 400
     manager.edit_message_sync.assert_not_called()
 
@@ -150,7 +152,9 @@ def test_edit_rejects_non_editable_message(edit_client, fields):
 def test_edit_maps_backend_failure_to_502(edit_client, failure):
     client, manager, db_file = edit_client
     _insert_message(db_file)
-    manager.edit_message_sync.side_effect = failure if isinstance(failure, Exception) else None
+    manager.edit_message_sync.side_effect = (
+        failure if isinstance(failure, Exception) else None
+    )
     manager.edit_message_sync.return_value = failure
     response = client.post("/api/messages/edit", json=_payload(), headers=AUTH)
     assert response.status_code == 502
@@ -167,9 +171,7 @@ def test_edit_signal_idless_message_uses_timestamp_fallback(edit_client):
         headers=AUTH,
     )
     assert response.status_code == 200
-    manager.edit_message_sync.assert_called_once_with(
-        "signal", "alice", "1234", "Dopo"
-    )
+    manager.edit_message_sync.assert_called_once_with("signal", "alice", "1234", "Dopo")
 
 
 def test_edit_success_applies_locally_and_pushes_event(edit_client):
