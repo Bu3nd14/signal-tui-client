@@ -14,6 +14,8 @@ from typing import Any, Literal
 from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
+from models import is_media_quote_placeholder_composite
+
 from web.bridge import push_event
 
 logger = logging.getLogger(__name__)
@@ -260,6 +262,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 "quote_attachment_id": row["quote_attachment_id"],
                 "quote_content_type": row["quote_content_type"],
                 "quote_thumb_url": _quote_thumb_url(row),
+                "quote_media_placeholder": _quote_media_placeholder(row["quote_text"]),
                 "status": (row["status"] or "sent") if direction == "out" else None,
                 "read": bool(row["read"]),
                 "edited": bool(row["edited"]),
@@ -281,6 +284,15 @@ def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
         )
         return f"/api/media/{proto}/{encoded_id}?w=96"
     return None
+
+
+def _quote_media_placeholder(text: Any) -> bool:
+    """True se ``text`` è un placeholder media tipizzato (o forma composta).
+
+    Riusa il predicato della TUI così la web UI nasconde il placeholder quando
+    la miniatura lo sostituisce (una caption reale resta visibile).
+    """
+    return is_media_quote_placeholder_composite(str(text or ""))
 
 
 def _allowed_media_root(manager: Any, proto: str) -> Path:

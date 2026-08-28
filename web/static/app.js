@@ -638,14 +638,23 @@ function appendRenderedQuote(bubble, item) {
     quote.className = "message-quote has-thumb";
     quote.append(thumb);
   }
-  const body = document.createElement("div");
-  body.className = "message-quote-body";
-  const author = document.createElement("strong");
-  author.textContent = item.quote_author || "Messaggio citato";
-  const text = document.createElement("span");
-  text.textContent = quoteText || "Messaggio";
-  body.append(author, text);
-  quote.append(body);
+  // Con la miniatura e senza caption reale mostriamo SOLO la miniatura
+  // (niente autore né placeholder "Messaggio"/"🖼️ Immagine": ridondanti).
+  // La caption reale (o l'assenza di miniatura) mantiene autore + testo.
+  const hasRealCaption = Boolean(quoteText) && !item.quote_media_placeholder;
+  if (!thumb || hasRealCaption) {
+    const body = document.createElement("div");
+    body.className = "message-quote-body";
+    const author = document.createElement("strong");
+    author.textContent = item.quote_author || "Messaggio citato";
+    body.append(author);
+    if (!item.quote_media_placeholder || !thumb) {
+      const text = document.createElement("span");
+      text.textContent = quoteText || "Messaggio";
+      body.append(text);
+    }
+    quote.append(body);
+  }
   bubble.append(quote);
 }
 
