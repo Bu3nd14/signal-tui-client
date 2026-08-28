@@ -12,6 +12,7 @@ const state = {
   messageRequest: null,
   mediaRequests: new Set(),
   mediaLoads: new Map(),
+  mediaFailures: new Set(),
   objectUrls: new Set(),
   mediaCache: new Map(),
   messages: [],
@@ -92,9 +93,17 @@ async function apiFetch(path, options = {}) {
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401) {
     handleUnauthorized();
-    throw new Error("unauthorized");
+    const error = new Error("unauthorized");
+    error.status = response.status;
+    error.response = response;
+    throw error;
   }
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`HTTP ${response.status}`);
+    error.status = response.status;
+    error.response = response;
+    throw error;
+  }
   return response;
 }
 
@@ -203,6 +212,7 @@ const MEDIA_CACHE_LIMIT = 50;
 function cacheMedia(attachmentId, url) {
   if (!attachmentId || !url) return;
   const key = String(attachmentId);
+  state.mediaFailures.delete(key);
   const previous = state.mediaCache.get(key);
   state.mediaCache.delete(key);
   state.mediaCache.set(key, url);
@@ -221,10 +231,13 @@ function cacheMedia(attachmentId, url) {
   }
 }
 
-function clearMedia() {
+function abortMediaRequests() {
   for (const controller of state.mediaRequests) controller.abort();
   state.mediaRequests.clear();
   state.mediaLoads.clear();
+}
+
+function pruneOrphanObjectUrls() {
   const cachedUrls = new Set(state.mediaCache.values());
   const optimisticUrls = new Set(state.optimistic.map((item) => item.localPreviewUrl).filter(Boolean));
   for (const url of state.objectUrls) {
@@ -234,11 +247,38 @@ function clearMedia() {
   }
 }
 
+const MAX_MEDIA_FETCHES = 6;
+let activeMediaFetches = 0;
+const mediaFetchQueue = [];
+
+function acquireMediaSlot() {
+  if (activeMediaFetches < MAX_MEDIA_FETCHES) {
+    activeMediaFetches += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    mediaFetchQueue.push(() => {
+      activeMediaFetches += 1;
+      resolve();
+    });
+  });
+}
+
+function releaseMediaSlot() {
+  activeMediaFetches -= 1;
+  const next = mediaFetchQueue.shift();
+  if (next) next();
+}
+
 async function fetchImage(path, attachmentId, direction) {
   const controller = new AbortController();
   state.mediaRequests.add(controller);
   const retryDelays = [3000, 6000];
+  let acquired = false;
   try {
+    await acquireMediaSlot();
+    acquired = true;
+    if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
     let response;
     const maxAttempts = direction === "in" ? 3 : 1;
     for (let attempt = 0; attempt < maxAttempts && !controller.signal.aborted; attempt += 1) {
@@ -249,6 +289,10 @@ async function fetchImage(path, attachmentId, direction) {
       } catch (error) {
         if (error.name === "AbortError") throw error;
         if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        if (Number.isInteger(error.status)) {
+          state.mediaFailures.add(String(attachmentId));
+          throw error;
+        }
         if (attempt === maxAttempts - 1) throw error;
         await new Promise((resolve, reject) => {
           const timer = window.setTimeout(resolve, retryDelays[attempt]);
@@ -266,12 +310,25 @@ async function fetchImage(path, attachmentId, direction) {
     cacheMedia(attachmentId, url);
     return url;
   } finally {
+    if (acquired) releaseMediaSlot();
     state.mediaRequests.delete(controller);
   }
 }
 
+function showImageFallback(container) {
+  container.replaceChildren();
+  const fallback = document.createElement("div");
+  fallback.className = "attachment-error";
+  fallback.textContent = "▧  Immagine non disponibile";
+  container.append(fallback);
+}
+
 async function loadImage(container, image, path, attachmentId, direction) {
   const key = String(attachmentId);
+  if (state.mediaFailures.has(key)) {
+    showImageFallback(container);
+    return;
+  }
   let request = state.mediaLoads.get(key);
   if (!request) {
     request = fetchImage(path, key, direction);
@@ -288,11 +345,7 @@ async function loadImage(container, image, path, attachmentId, direction) {
   } catch (error) {
     if (error.name !== "AbortError") {
       console.debug("[web] media failed", { attachment_id: attachmentId });
-      container.replaceChildren();
-      const fallback = document.createElement("div");
-      fallback.className = "attachment-error";
-      fallback.textContent = "▧  Immagine non disponibile";
-      container.append(fallback);
+      showImageFallback(container);
     }
   } finally {
     if (state.mediaLoads.get(key) === request) state.mediaLoads.delete(key);
@@ -395,7 +448,7 @@ function appendRenderedQuote(bubble, item) {
 }
 
 function renderMessages(messages, protocol) {
-  clearMedia();
+  pruneOrphanObjectUrls();
   elements.messages.replaceChildren();
   const active = state.active;
   const reconciliation = window.SignalTuiReconcile.reconcileOptimisticMessages(
@@ -523,6 +576,7 @@ function openThread(contact) {
   loading.className = "empty-state";
   loading.textContent = "Caricamento messaggi…";
   elements.messages.append(loading);
+  abortMediaRequests();
   loadMessages();
 }
 
@@ -827,6 +881,8 @@ function connectSocket() {
     try {
       const update = JSON.parse(event.data);
       if (update.type !== "message" || !update.payload) return;
+      const attachmentId = update.payload.attachment_id ?? update.payload.attachment?.attachment_id;
+      if (attachmentId != null) state.mediaFailures.delete(String(attachmentId));
       console.debug("[web] ws push", { protocol: update.payload.protocol, contact_id: update.payload.contact_id, id: update.payload?.id });
       loadContacts({ quiet: true });
       if (state.active?.id === String(update.payload.contact_id) && state.active?.protocol === update.payload.protocol) loadMessages();
@@ -938,7 +994,7 @@ document.querySelector("#token-form").addEventListener("submit", (event) => {
 
 window.addEventListener("beforeunload", () => {
   disconnectSocket();
-  clearMedia();
+  abortMediaRequests();
   clearStagedAttachment();
   for (const item of state.optimistic) {
     if (item.localPreviewUrl) URL.revokeObjectURL(item.localPreviewUrl);

@@ -283,7 +283,7 @@ const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const clearStart = app.indexOf("const MEDIA_CACHE_LIMIT");
 const loadEnd = app.indexOf("\nfunction imageAttachment", clearStart);
-globalThis.state = { mediaRequests: new Set(), mediaLoads: new Map(), objectUrls: new Set(), mediaCache: new Map(), optimistic: [] };
+globalThis.state = { mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(), objectUrls: new Set(), mediaCache: new Map(), optimistic: [] };
 globalThis.scrollThreadToBottom = () => {};
 globalThis.DOMException = globalThis.DOMException || class extends Error { constructor(message, name) { super(message); this.name = name; } };
 let now = 0;
@@ -326,7 +326,7 @@ vm.runInThisContext(app.slice(clearStart, loadEnd));
   calls = 0;
   globalThis.apiFetch = async () => {
     calls += 1;
-    if (calls < 3) throw new Error("HTTP 404");
+    if (calls < 3) throw new Error("network");
     return { blob: async () => ({}) };
   };
   let target = view();
@@ -338,11 +338,16 @@ vm.runInThisContext(app.slice(clearStart, loadEnd));
 
   calls = 0;
   now = 0;
-  globalThis.apiFetch = async () => { calls += 1; throw new Error("HTTP 404"); };
+  globalThis.apiFetch = async () => { calls += 1; throw Object.assign(new Error("HTTP 404"), { status: 404 }); };
   target = view();
   await loadImage(target.container, target.image, "/media", "missing-image", "in");
   assert.equal(target.container.children[0].textContent, "▧  Immagine non disponibile");
-  assert.equal(calls, 3);
+  assert.equal(calls, 1);
+  assert.equal(state.mediaFailures.has("missing-image"), true);
+  target = view();
+  await loadImage(target.container, target.image, "/media", "missing-image", "in");
+  assert.equal(calls, 1);
+  assert.equal(target.container.children[0].textContent, "▧  Immagine non disponibile");
 
   calls = 0;
   target = view();
@@ -351,7 +356,7 @@ vm.runInThisContext(app.slice(clearStart, loadEnd));
 
   calls = 0;
   now = 0;
-  globalThis.apiFetch = async () => { calls += 1; queueMicrotask(clearMedia); throw new Error("HTTP 404"); };
+  globalThis.apiFetch = async () => { calls += 1; queueMicrotask(abortMediaRequests); throw new Error("network"); };
   target = view();
   await loadImage(target.container, target.image, "/media", "aborted-image");
   assert.equal(calls, 1);
@@ -377,7 +382,7 @@ const mediaEnd = app.indexOf("\nfunction attachmentName", mediaStart);
 const renderStart = app.indexOf("function renderMessages(");
 const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
 globalThis.state = {
-  mediaRequests: new Set(), mediaLoads: new Map(), objectUrls: new Set(["blob:preview"]), mediaCache: new Map(),
+  mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(), objectUrls: new Set(["blob:preview"]), mediaCache: new Map(),
   optimistic: [{
     optimistic_id: "local-1", localPreviewUrl: "blob:preview", known_message_ids: [],
     protocol: "signal", contactId: "42", direction: "out", text: "", timestamp: 1,
@@ -450,8 +455,8 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const cacheStart = app.indexOf("const MEDIA_CACHE_LIMIT");
-const cacheEnd = app.indexOf("\nfunction clearMedia", cacheStart);
-globalThis.state = { mediaCache: new Map(), objectUrls: new Set() };
+const cacheEnd = app.indexOf("\nfunction abortMediaRequests", cacheStart);
+globalThis.state = { mediaCache: new Map(), mediaFailures: new Set(), objectUrls: new Set() };
 const revoked = [];
 globalThis.URL = { revokeObjectURL: (url) => revoked.push(url) };
 vm.runInThisContext(app.slice(cacheStart, cacheEnd));
@@ -462,6 +467,154 @@ assert.equal(state.mediaCache.get("image-50"), "blob:50");
 assert.deepEqual(revoked, ["blob:0"]);
 assert.equal(state.objectUrls.has("blob:0"), false);
 assert.equal(state.objectUrls.has("blob:50"), true);
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_web_media_renders_reuse_inflight_request_and_limit_concurrency():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const mediaStart = app.indexOf("const MEDIA_CACHE_LIMIT");
+const mediaEnd = app.indexOf("\nfunction attachmentName", mediaStart);
+const renderStart = app.indexOf("function renderMessages(");
+const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
+globalThis.state = {
+  mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(),
+  objectUrls: new Set(), mediaCache: new Map(), optimistic: [],
+  active: { protocol: "signal", id: "42" },
+};
+globalThis.window = {
+  SignalTuiReconcile: {
+    reconcileOptimisticMessages: () => ({ optimistic: [], visible: [] }),
+    messageDisplayText: (item) => item.text || "",
+  },
+  setTimeout, clearTimeout,
+};
+globalThis.URL = { createObjectURL: (() => { let id = 0; return () => `blob:${++id}`; })(), revokeObjectURL() {} };
+globalThis.scrollThreadToBottom = () => {};
+globalThis.requestAnimationFrame = () => {};
+globalThis.timestampMilliseconds = Number;
+globalThis.formatTimestamp = () => "";
+globalThis.appendRenderedQuote = () => {};
+function node(tag) {
+  return {
+    tag, className: "", children: [], classList: { add() {} },
+    append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.children = children; },
+    querySelector(selector) { return selector === ".attachment-loading" ? this.children.find((child) => child.className === "attachment-loading") : null; },
+    addEventListener(_name, callback) { this.callback = callback; },
+    setAttribute() {}, remove() {},
+    set src(value) { this.url = value; this.callback?.(); },
+  };
+}
+globalThis.document = { createElement: node };
+globalThis.elements = { messages: node("main") };
+vm.runInThisContext(app.slice(mediaStart, mediaEnd));
+vm.runInThisContext(app.slice(renderStart, renderEnd));
+const message = { id: "1", direction: "in", text: "", timestamp: 1, attachment: { type: "image/png", attachment_id: "shared" } };
+let resolveShared;
+let calls = 0;
+globalThis.apiFetch = async () => { calls += 1; await new Promise((resolve) => { resolveShared = resolve; }); return { status: 200, blob: async () => ({}) }; };
+(async () => {
+  renderMessages([message], "signal");
+  const firstRequest = state.mediaLoads.get("shared");
+  await Promise.resolve();
+  renderMessages([message], "signal");
+  assert.equal(state.mediaLoads.get("shared"), firstRequest);
+  assert.equal(calls, 1);
+  resolveShared();
+  await firstRequest;
+
+  let active = 0;
+  let maximum = 0;
+  const gates = [];
+  globalThis.apiFetch = async () => {
+    calls += 1;
+    active += 1;
+    maximum = Math.max(maximum, active);
+    await new Promise((resolve) => gates.push(resolve));
+    active -= 1;
+    return { status: 200, blob: async () => ({}) };
+  };
+  const loads = Array.from({ length: 20 }, (_, index) => loadImage(node("div"), node("img"), `/media/${index}`, `many-${index}`, "in"));
+  await new Promise(setImmediate);
+  assert.equal(maximum, 6);
+  assert.equal(gates.length, 6);
+  while (gates.length) {
+    gates.splice(0).forEach((resolve) => resolve());
+    await new Promise(setImmediate);
+  }
+  await Promise.all(loads);
+  assert.equal(maximum, 6);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_web_thread_switch_aborts_media_but_submit_does_not():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const mediaStart = app.indexOf("function abortMediaRequests(");
+const mediaEnd = app.indexOf("\nfunction pruneOrphanObjectUrls", mediaStart);
+const openStart = app.indexOf("function openThread(");
+const openEnd = app.indexOf("\nfunction normalizeEmojiSearch", openStart);
+const submitStart = app.indexOf("async function submitMessage(");
+const submitEnd = app.indexOf("\nfunction encodeToken", submitStart);
+const controller = { aborted: false, abort() { this.aborted = true; } };
+const inflight = Promise.resolve();
+globalThis.state = {
+  mediaRequests: new Set([controller]), mediaLoads: new Map([["old", inflight]]),
+  active: null, messages: [], optimistic: [], optimisticSequence: 0,
+  sending: false, stagedAttachment: null, replyTo: null,
+};
+function node() { return { children: [], classList: { add() {} }, append(child) { this.children.push(child); }, replaceChildren() { this.children = []; }, focus() {} }; }
+globalThis.elements = {
+  threadName: {}, threadMeta: {}, app: node(), composerShell: {}, messages: node(),
+  messageInput: { value: "hello", focus() {} },
+};
+globalThis.closeEmojiPicker = () => {};
+globalThis.cancelReply = () => {};
+globalThis.protocolIcon = () => "";
+globalThis.renderContacts = () => {};
+globalThis.document = { createElement: node };
+globalThis.loadMessages = () => {
+  assert.equal(controller.aborted, true);
+  assert.equal(state.mediaLoads.size, 0);
+};
+vm.runInThisContext(app.slice(mediaStart, mediaEnd));
+vm.runInThisContext(app.slice(openStart, openEnd));
+openThread({ id: "new", protocol: "signal", display_name: "New" });
+
+const submitController = { aborted: false, abort() { this.aborted = true; } };
+state.mediaRequests.add(submitController);
+state.mediaLoads.set("current", inflight);
+state.active = { id: "new", protocol: "signal" };
+globalThis.window = { SignalTuiReconcile: { messageIdentity: (message) => message.id } };
+globalThis.resizeComposer = () => {};
+globalThis.updateComposer = () => {};
+globalThis.renderMessages = () => {
+  assert.equal(submitController.aborted, false);
+  assert.equal(state.mediaLoads.get("current"), inflight);
+};
+globalThis.apiFetch = async () => ({ status: 200 });
+vm.runInThisContext(app.slice(submitStart, submitEnd));
+(async () => {
+  await submitMessage();
+  assert.equal(submitController.aborted, false);
+  assert.equal(state.mediaLoads.get("current"), inflight);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
 """
     completed = subprocess.run(
         ["node", "-e", source], capture_output=True, text=True, check=False
