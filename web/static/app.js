@@ -413,6 +413,7 @@ function renderMessages(messages, protocol) {
         window.SignalTuiReconcile.messageIdentity(m, x) === String(item.confirmed_message_id));
       if (idx >= 0) {
         console.debug("[web] deliver blob", { confirmed_message_id: item.confirmed_message_id, idx });
+        cacheMedia(messages[idx].attachment?.attachment_id, item.localPreviewUrl);
         messages[idx] = { ...messages[idx], localPreviewUrl: item.localPreviewUrl };
       } else {
         console.debug("[web] deliver blob MISS", { confirmed_message_id: item.confirmed_message_id });

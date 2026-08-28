@@ -365,7 +365,7 @@ vm.runInThisContext(app.slice(clearStart, loadEnd));
     assert completed.returncode == 0, completed.stderr
 
 
-def test_web_reconcile_transfers_preview_to_confirmed_row_without_fetching():
+def test_web_reconcile_caches_preview_and_reuses_it_without_fetching():
     source = r"""
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -387,14 +387,27 @@ globalThis.state = {
 };
 const revoked = [];
 globalThis.URL = { createObjectURL: () => "blob:fetched", revokeObjectURL: (url) => revoked.push(url) };
+let fetchCalls = 0;
+globalThis.apiFetch = async () => { fetchCalls += 1; throw new Error("unexpected media fetch"); };
 globalThis.scrollThreadToBottom = () => {};
 globalThis.requestAnimationFrame = () => {};
 globalThis.timestampMilliseconds = (value) => Number(value);
 globalThis.formatTimestamp = () => "";
 globalThis.appendRenderedQuote = () => {};
-function node() { return { className: "", append() {}, addEventListener() {}, setAttribute() {}, classList: { add() {} } }; }
+const images = [];
+function node(tag) {
+  const value = {
+    tag, className: "", children: [],
+    append(...children) { this.children.push(...children); },
+    addEventListener(_name, callback) { this.callback = callback; },
+    setAttribute() {}, remove() {}, classList: { add() {} },
+    set src(url) { this.url = url; },
+  };
+  if (tag === "img") images.push(value);
+  return value;
+}
 globalThis.document = { createElement: node };
-globalThis.elements = { messages: { replaceChildren() {}, append() {}, scrollTop: 0, scrollHeight: 0 } };
+globalThis.elements = { messages: { children: [], replaceChildren() { this.children = []; }, append(child) { this.children.push(child); }, scrollTop: 0, scrollHeight: 0 } };
 const real = { id: "wa-1", direction: "out", text: "", timestamp: 2, attachment: { type: "image/png", attachment_id: "sent-real.png" } };
 const messages = [real];
 globalThis.window = {};
@@ -403,9 +416,52 @@ vm.runInThisContext(app.slice(mediaStart, mediaEnd));
 vm.runInThisContext(app.slice(renderStart, renderEnd));
 renderMessages(messages, "signal");
 assert.equal(messages[0].localPreviewUrl, "blob:preview");
-assert.equal(state.mediaCache.get("sent-real.png"), undefined);
+assert.equal(state.mediaCache.get("sent-real.png"), "blob:preview");
 assert.equal(state.optimistic[0].localPreviewUrl, undefined);
 assert.deepEqual(revoked, []);
+
+renderMessages([{ ...real }], "signal");
+assert.equal(images.at(-1).url, "blob:preview");
+assert.equal(fetchCalls, 0);
+
+const cachedBeforeMissingId = [...state.mediaCache.entries()];
+state.optimistic = [{
+  confirmed_message_id: "missing-id", localPreviewUrl: "blob:missing-id", known_message_ids: [],
+  protocol: "signal", contactId: "42", direction: "out", text: "", timestamp: 3,
+  attachment: { type: "image/png", name: "missing.png" },
+}];
+const missingIdMessages = [{ id: "missing-id", direction: "out", text: "", timestamp: 3, attachment: { type: "image/png", name: "missing.png" } }];
+renderMessages(missingIdMessages, "signal");
+assert.equal(missingIdMessages[0].localPreviewUrl, "blob:missing-id");
+assert.equal(images.at(-1).url, "blob:missing-id");
+assert.deepEqual([...state.mediaCache.entries()], cachedBeforeMissingId);
+assert.equal(fetchCalls, 0);
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_web_media_cache_lru_revokes_only_oldest_url():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const cacheStart = app.indexOf("const MEDIA_CACHE_LIMIT");
+const cacheEnd = app.indexOf("\nfunction clearMedia", cacheStart);
+globalThis.state = { mediaCache: new Map(), objectUrls: new Set() };
+const revoked = [];
+globalThis.URL = { revokeObjectURL: (url) => revoked.push(url) };
+vm.runInThisContext(app.slice(cacheStart, cacheEnd));
+for (let index = 0; index < 51; index += 1) cacheMedia(`image-${index}`, `blob:${index}`);
+assert.equal(state.mediaCache.size, 50);
+assert.equal(state.mediaCache.has("image-0"), false);
+assert.equal(state.mediaCache.get("image-50"), "blob:50");
+assert.deepEqual(revoked, ["blob:0"]);
+assert.equal(state.objectUrls.has("blob:0"), false);
+assert.equal(state.objectUrls.has("blob:50"), true);
 """
     completed = subprocess.run(
         ["node", "-e", source], capture_output=True, text=True, check=False
