@@ -114,6 +114,20 @@ def test_edit_returns_404_for_unknown_or_wrong_scope(edit_client):
     manager.edit_message_sync.assert_not_called()
 
 
+def test_edit_returns_500_for_database_lookup_error(edit_client):
+    client, manager, _ = edit_client
+
+    with patch(
+        "web.api.sqlite3.connect",
+        side_effect=sqlite3.OperationalError("database unavailable"),
+    ):
+        response = client.post("/api/messages/edit", json=_payload(), headers=AUTH)
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Database error"}
+    manager.edit_message_sync.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "fields",
     [

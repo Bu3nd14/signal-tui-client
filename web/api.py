@@ -149,7 +149,14 @@ def _message_row_for_edit(
             finally:
                 connection.close()
         except sqlite3.Error:
-            return None
+            from fastapi import HTTPException
+
+            logger.exception(
+                "Web edit lookup database error: protocol=%s contact=%s",
+                protocol,
+                contact_id,
+            )
+            raise HTTPException(status_code=500, detail="Database error") from None
     return dict(row) if row else None
 
 
