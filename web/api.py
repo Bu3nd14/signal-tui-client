@@ -11,6 +11,7 @@ import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
 from web.bridge import push_event
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 _PROTOCOLS = {"signal", "whatsapp", "telegram"}
 _MAX_TEXT_LENGTH = 64 * 1024
-_THUMB_WIDTHS = {240, 480}
+_THUMB_WIDTHS = {96, 240, 480}
 _THUMB_CACHE_LIMIT = 500 * 1024 * 1024
 _THUMB_LOCKS: dict[Path, threading.Lock] = {}
 _THUMB_LOCKS_GUARD = threading.Lock()
@@ -201,7 +202,8 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 rows = connection.execute(
                     "SELECT id, msg_id, text, is_mine, timestamp, "
                     "attachment_id, attachment_info, content_type, protocol, msg_type, "
-                    "quote_text, quote_timestamp, quote_author, status, edited, read "
+                    "quote_text, quote_timestamp, quote_author, quote_attachment_id, "
+                    "quote_content_type, quote_attachment_path, status, edited, read "
                     "FROM messages WHERE protocol = ? AND contact_number = ? "
                     "ORDER BY timestamp, id",
                     (protocol, contact_id),
@@ -255,6 +257,9 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 "quote_text": row["quote_text"],
                 "quote_timestamp": row["quote_timestamp"],
                 "quote_author": row["quote_author"],
+                "quote_attachment_id": row["quote_attachment_id"],
+                "quote_content_type": row["quote_content_type"],
+                "quote_thumb_url": _quote_thumb_url(row),
                 "status": (row["status"] or "sent") if direction == "out" else None,
                 "read": bool(row["read"]),
                 "edited": bool(row["edited"]),
@@ -262,6 +267,20 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             }
         )
     return messages
+
+
+def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
+    proto = row["protocol"]
+    if row["quote_attachment_path"]:
+        return f"/api/quote-media/{proto}/{row['id']}?w=96"
+    quote_attachment_id = row["quote_attachment_id"]
+    quote_content_type = (row["quote_content_type"] or "").lower()
+    if quote_attachment_id and quote_content_type.startswith("image/"):
+        encoded_id = "/".join(
+            url_quote(segment, safe="") for segment in quote_attachment_id.split("/")
+        )
+        return f"/api/media/{proto}/{encoded_id}?w=96"
+    return None
 
 
 def _allowed_media_root(manager: Any, proto: str) -> Path:
@@ -826,5 +845,59 @@ def create_api_router() -> Any:
                     headers={"Cache-Control": "private, max-age=31536000, immutable"},
                 )
         return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
+
+    @router.get("/quote-media/{proto}/{message_row_id}")
+    def quote_media(
+        proto: Literal["signal", "whatsapp", "telegram"],
+        message_row_id: int,
+        w: int | None = None,
+    ) -> Any:
+        import backend
+        from backend.db import _DB_LOCK
+
+        with _DB_LOCK:
+            try:
+                connection = sqlite3.connect(backend.DB_FILE)
+                try:
+                    row = connection.execute(
+                        "SELECT quote_attachment_path FROM messages "
+                        "WHERE id = ? AND protocol = ?",
+                        (message_row_id, proto),
+                    ).fetchone()
+                finally:
+                    connection.close()
+            except sqlite3.Error:
+                logger.exception(
+                    "Web quote media lookup database error: proto=%s row_id=%s",
+                    proto,
+                    message_row_id,
+                )
+                raise HTTPException(status_code=500, detail="Database error") from None
+
+        stored = row[0] if row else None
+        root = (Path(backend.CACHE_DIR) / "quote-thumbs").resolve()
+        path = Path(stored).resolve() if stored else None
+        if path is None or not path.is_file() or path.parent != root:
+            logger.warning(
+                "web quote media 404 proto=%s row_id=%s resolved=%s",
+                proto,
+                message_row_id,
+                path,
+            )
+            raise HTTPException(status_code=404)
+
+        served_path = path
+        cache_control = "private, max-age=86400"
+        if w in _THUMB_WIDTHS:
+            thumb = _thumbnail(path, proto, str(message_row_id), w)
+            if thumb is not None:
+                served_path = thumb
+                cache_control = "private, max-age=31536000, immutable"
+        media_type, _ = mimetypes.guess_type(served_path.name)
+        return FileResponse(
+            served_path,
+            media_type=media_type,
+            headers={"Cache-Control": cache_control},
+        )
 
     return router
