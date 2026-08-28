@@ -548,8 +548,12 @@ def _quoted_image_by_message_id(
                     "AND (msg_id = ? OR msg_id LIKE '%_' || ?) "
                     + image_clause
                     + " LIMIT 1",
-                    (proto, contact_number, str(reply_to_message_id),
-                     str(reply_to_message_id)),
+                    (
+                        proto,
+                        contact_number,
+                        str(reply_to_message_id),
+                        str(reply_to_message_id),
+                    ),
                 ).fetchone()
             finally:
                 connection.close()
