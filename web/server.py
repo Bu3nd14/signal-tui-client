@@ -87,7 +87,18 @@ def start_web_server(
         name="web-ui",
     )
 
-    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        # ``log_config=None`` evita il ``dictConfig`` di uvicorn, che altrimenti
+        # chiude i FileHandler dell'applicazione (root e modulari) e nessun log
+        # arriva piu' a /tmp/signal-tui.log dopo l'avvio del server web.
+        # Con ``access_log=False`` l'access log di uvicorn resta fuori dal file.
+        log_config=None,
+        access_log=False,
+    )
     server = uvicorn.Server(config)
     ready = threading.Event()
     handle: WebServerHandle
