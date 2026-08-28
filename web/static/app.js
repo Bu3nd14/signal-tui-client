@@ -676,9 +676,13 @@ function appendRenderedQuote(bubble, item) {
   // Se la miniatura fallisce a caricare, il body torna visibile (fallback).
   const body = document.createElement("div");
   body.className = "message-quote-body";
-  const author = document.createElement("strong");
-  author.textContent = item.quote_author || "Messaggio citato";
-  body.append(author);
+  let hasBodyContent = false;
+  if (item.quote_author) {
+    const author = document.createElement("strong");
+    author.textContent = item.quote_author;
+    body.append(author);
+    hasBodyContent = true;
+  }
   const hasRealCaption = Boolean(quoteText) && !item.quote_media_placeholder;
   let thumb = null;
   thumb = quoteThumb(item, () => { body.hidden = false; });
@@ -687,12 +691,15 @@ function appendRenderedQuote(bubble, item) {
     quote.append(thumb);
     if (!hasRealCaption) body.hidden = true;
   }
-  if (!item.quote_media_placeholder || !thumb) {
+  if ((!item.quote_media_placeholder || !thumb) && quoteText) {
     const text = document.createElement("span");
-    text.textContent = quoteText || "Messaggio";
+    text.textContent = quoteText;
     body.append(text);
+    hasBodyContent = true;
   }
-  quote.append(body);
+  // Niente miniatura e nessun contenuto → nessuna bolla quote (evita righe vuote).
+  if (!thumb && !hasBodyContent) return;
+  if (hasBodyContent) quote.append(body);
   bubble.append(quote);
 }
 
@@ -755,6 +762,13 @@ function renderMessages(messages, protocol) {
     message.setAttribute("data-ts", String(item.timestamp));
     const bubble = document.createElement("div");
     bubble.className = "bubble";
+    // Chat di gruppo: nome del mittente in alto nella bolla (come la TUI).
+    if (item.direction === "in" && item.is_group && item.sender) {
+      const sender = document.createElement("span");
+      sender.className = "message-sender";
+      sender.textContent = item.sender;
+      bubble.append(sender);
+    }
     appendRenderedQuote(bubble, item);
     const isImage = item.attachment?.type?.toLowerCase().startsWith("image/");
     if (isImage) {
@@ -771,7 +785,10 @@ function renderMessages(messages, protocol) {
       }
     }
     const safeText = window.SignalTuiReconcile.messageDisplayText(item);
-    const displayText = safeText || (item.attachment && !isImage ? attachmentName(item) : "");
+    // Le immagini con caption reale (il server la espone in item.text) la
+    // mostrano sotto l'allegato; messageDisplayText le azzera.
+    const caption = isImage && item.text ? item.text : "";
+    const displayText = safeText || caption || (item.attachment && !isImage ? attachmentName(item) : "");
     let textEl = null;
     if (displayText) {
       textEl = document.createElement("div");

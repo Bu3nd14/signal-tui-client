@@ -202,7 +202,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             try:
                 rows = connection.execute(
                     "SELECT id, msg_id, text, is_mine, timestamp, contact_number, "
-                    "attachment_id, attachment_info, content_type, protocol, msg_type, "
+                    "sender, attachment_id, attachment_info, content_type, protocol, msg_type, "
                     "quote_text, quote_timestamp, quote_author, quote_attachment_id, "
                     "quote_content_type, quote_attachment_path, status, edited, read "
                     "FROM messages WHERE protocol = ? AND contact_number = ? "
@@ -238,21 +238,81 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 row["content_type"],
                 attachment["type"],
             )
-            if row["msg_type"] == "image" or (
-                attachment["type"] or ""
-            ).lower().startswith("image/"):
-                text = ""
-            # WhatsApp stores the WAHA media URL as message text
-            # ("Media: http://..."); drop it for WA only, never for
-            # legitimate captions of other protocols.
-            if row["protocol"] == "whatsapp" and text.startswith("Media: "):
-                text = ""
+            if (
+                row["msg_type"] == "image"
+                or (attachment["type"] or "").lower().startswith("image/")
+            ) and text:
+                # Caption: mantieni solo se reale; azzera placeholder media,
+                # nome file e URL media WA ("Media: http://...").
+                from models import is_media_quote_placeholder
+
+                lower = text.strip().lower()
+                if (
+                    text.strip() == str(row["attachment_info"] or "").strip()
+                    or is_media_quote_placeholder(text)
+                    or lower.startswith(
+                        (
+                            "immagine:",
+                            "image:",
+                            "media:",
+                            "video:",
+                            "audio:",
+                            "file:",
+                        )
+                    )
+                ):
+                    text = ""
+            if not text and row["attachment_info"]:
+                # Caption in attachment_info (es. invii WhatsApp che salvano la
+                # caption qui, col text = URL media): usala se non è un nome file.
+                info = str(row["attachment_info"] or "").strip()
+                file_name = Path(str(row["attachment_id"] or "")).name
+                from models import is_media_quote_placeholder
+
+                if (
+                    info
+                    and info != file_name
+                    and not info.lower().endswith(
+                        (
+                            ".png",
+                            ".jpg",
+                            ".jpeg",
+                            ".gif",
+                            ".webp",
+                            ".heic",
+                            ".mp4",
+                            ".mp3",
+                            ".pdf",
+                            ".doc",
+                            ".docx",
+                        )
+                    )
+                    and not is_media_quote_placeholder(info)
+                    and info.lower()
+                    not in {
+                        "photo",
+                        "image",
+                        "immagine",
+                        "video",
+                        "audio",
+                        "document",
+                        "documento",
+                        "file",
+                        "allegato",
+                        "sticker",
+                    }
+                    and not info.lower().startswith(
+                        ("media:", "image:", "immagine:", "video:", "audio:", "file:")
+                    )
+                ):
+                    text = info
         direction = "out" if row["is_mine"] else "in"
         messages.append(
             {
                 "id": row["msg_id"] or str(row["id"]),
                 "text": text,
                 "direction": direction,
+                "sender": row["sender"] or "",
                 "timestamp": row["timestamp"],
                 "attachment": attachment,
                 "quote_text": row["quote_text"],
@@ -326,26 +386,53 @@ def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
 def _quoted_image_attachment_id(
     proto: str, contact_number: str, quote_ts: Any
 ) -> str | None:
-    """Attachment id dell'immagine quotata (stessa chat, ±2s su timestamp)."""
+    """Attachment id dell'immagine quotata (stessa chat).
+
+    Match PRIMA esatto sul timestamp: evita falsi positivi quando messaggi
+    vicini (±2s) convivono (es. un'immagine appena inviata e la reply).
+    La finestra ±2s viene usata solo se il timestamp esatto non esiste affatto
+    (drift del protocollo).
+    """
     if not quote_ts:
         return None
     import backend
     from backend.db import _DB_LOCK
 
+    image_clause = (
+        "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
+        "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
+        "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
+    )
     try:
         with _DB_LOCK:
             connection = sqlite3.connect(backend.DB_FILE)
             try:
                 row = connection.execute(
-                    "SELECT attachment_id, content_type, attachment_info "
-                    "FROM messages WHERE protocol = ? AND contact_number = ? "
-                    "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
-                    "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-                    "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-                    "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp') "
-                    "ORDER BY ABS(timestamp - ?) LIMIT 1",
-                    (proto, contact_number, quote_ts, quote_ts),
+                    "SELECT attachment_id FROM messages "
+                    "WHERE protocol = ? AND contact_number = ? "
+                    "AND timestamp = ? AND attachment_id IS NOT NULL "
+                    + image_clause
+                    + " LIMIT 1",
+                    (proto, contact_number, quote_ts),
                 ).fetchone()
+                if row is None:
+                    exists = connection.execute(
+                        "SELECT 1 FROM messages WHERE protocol = ? AND contact_number = ? "
+                        "AND timestamp = ? LIMIT 1",
+                        (proto, contact_number, quote_ts),
+                    ).fetchone()
+                    if exists:
+                        # Il messaggio quotato esiste ma non è un'immagine:
+                        # niente miniatura (mai prendere messaggi vicini).
+                        return None
+                    row = connection.execute(
+                        "SELECT attachment_id FROM messages "
+                        "WHERE protocol = ? AND contact_number = ? "
+                        "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
+                        + image_clause
+                        + " ORDER BY ABS(timestamp - ?) LIMIT 1",
+                        (proto, contact_number, quote_ts, quote_ts),
+                    ).fetchone()
             finally:
                 connection.close()
     except sqlite3.Error:
@@ -489,6 +576,83 @@ def _thumbnail(path: Path, proto: str, attachment_id: str, width: int) -> Path |
             tmp.unlink(missing_ok=True)
             logger.debug("Unable to generate web thumbnail for %s", path, exc_info=True)
             return None
+
+
+def _quoted_sender(proto: str, contact_id: str, quote_ts: Any) -> str | None:
+    """Sender del messaggio quotato nella stessa chat (match esatto su timestamp)."""
+    if not quote_ts:
+        return None
+    import backend
+    from backend.db import _DB_LOCK
+
+    try:
+        with _DB_LOCK:
+            connection = sqlite3.connect(backend.DB_FILE)
+            try:
+                row = connection.execute(
+                    "SELECT sender FROM messages "
+                    "WHERE protocol = ? AND contact_number = ? AND timestamp = ? "
+                    "LIMIT 1",
+                    (proto, contact_id, quote_ts),
+                ).fetchone()
+            finally:
+                connection.close()
+    except sqlite3.Error:
+        return None
+    if row is None or not row[0]:
+        return None
+    return str(row[0])
+
+
+def _group_sender_resolver(manager: Any, proto: str):
+    """Risolvi il sender (JID/numero) al nome della rubrica, come la TUI.
+
+    Mappa una volta la rubrica aggregata (id/phone → display_name), poi per
+    ogni sender: nome diretto, @lid→phone (WA), @c.us→numero, numero nudo.
+    """
+    phone_to_name: dict[str, str] = {}
+    id_to_name: dict[str, str] = {}
+    try:
+        book = manager.list_address_book_sync(protocols={proto}, force=False)
+    except Exception:  # noqa: BLE001 — rubrica best-effort
+        book = []
+    for contact in book:
+        name = str(contact.display_name or "")
+        if not name:
+            continue
+        cid = str(contact.id or "")
+        phone = str(contact.phone or "")
+        if cid:
+            id_to_name[cid] = name
+        if phone:
+            phone_to_name[phone] = name
+
+    def resolve(sender: str) -> str:
+        if not sender:
+            return sender
+        if sender in id_to_name:
+            return id_to_name[sender]
+        is_jid = sender.endswith(("@lid", "@c.us"))
+        local = sender.split("@", 1)[0]
+        if sender.endswith("@lid"):
+            try:
+                phone = str(manager.get(proto)._jid_to_phone(sender) or "")
+            except Exception:  # noqa: BLE001
+                phone = ""
+            if phone in phone_to_name:
+                return phone_to_name[phone]
+            if phone:
+                return phone
+        if sender.endswith("@c.us") and local in phone_to_name:
+            return phone_to_name[local]
+        if sender in phone_to_name:
+            return phone_to_name[sender]
+        if is_jid:
+            # Fallback leggibile: numero senza @lid/@c.us (mai il JID grezzo).
+            return local
+        return sender
+
+    return resolve
 
 
 def create_api_router() -> Any:
@@ -770,23 +934,44 @@ def create_api_router() -> Any:
 
     @router.get("/messages")
     def messages(
-        proto: Literal["signal", "whatsapp", "telegram"], contact_id: str
+        request: Request,
+        proto: Literal["signal", "whatsapp", "telegram"],
+        contact_id: str,
     ) -> list[dict[str, Any]]:
         result = _messages(proto, contact_id)
-        quotes = [
-            m
-            for m in result
-            if m.get("quote_attachment_id") or m.get("quote_thumb_url")
-        ]
-        thumbs = [m for m in result if m.get("quote_thumb_url")]
-        logger.info(
-            "web messages proto=%s contact=%s total=%d quotes=%d thumb_urls=%d",
-            proto,
-            contact_id,
-            len(result),
-            len(quotes),
-            len(thumbs),
-        )
+        is_group = contact_id.endswith("@g.us")
+        if not is_group:
+            manager = request.app.state.manager
+            try:
+                for contact in manager.list_contacts():
+                    if str(contact.id) == contact_id and contact.protocol == proto:
+                        is_group = bool(contact.extras.get("is_group"))
+                        break
+            except (AttributeError, TypeError):
+                is_group = False
+        if is_group:
+            manager = request.app.state.manager
+            resolver = _group_sender_resolver(manager, proto)
+            for message in result:
+                message["is_group"] = True
+                message["sender"] = resolver(message.get("sender") or "")
+                qa = message.get("quote_author") or ""
+                resolved_qa = resolver(qa)
+                if qa and resolved_qa.endswith(("@lid", "@c.us")):
+                    # L'autore della quote non risolto: il messaggio quotato
+                    # nella stessa chat ha il sender (spesso già un nome,
+                    # es. pushname) — lo usiamo come autore.
+                    quoted_sender = _quoted_sender(
+                        proto, contact_id, message.get("quote_timestamp")
+                    )
+                    if quoted_sender:
+                        resolved_qa = resolver(quoted_sender)
+                message["quote_author"] = resolved_qa
+        else:
+            # Chat 1:1: l'autore della quote è sempre il contatto (o noi) —
+            # ridondante, e il valore grezzo potrebbe essere un @lid.
+            for message in result:
+                message["quote_author"] = ""
         return result
 
     @router.post("/messages/read")
