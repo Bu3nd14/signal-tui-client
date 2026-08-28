@@ -153,6 +153,35 @@ def _message_row_for_edit(
     return dict(row) if row else None
 
 
+def _persist_message_edit(
+    protocol: str, contact_id: str, message_id: str, new_text: str
+) -> int:
+    import backend
+    from backend.db import _DB_LOCK
+
+    with _DB_LOCK:
+        connection = sqlite3.connect(backend.DB_FILE)
+        try:
+            cursor = connection.execute(
+                "UPDATE messages SET text = ?, edited = 1 "
+                "WHERE protocol = ? AND contact_number = ? "
+                "AND (msg_id = ? OR (? = 'signal' AND msg_id IS NULL "
+                "AND timestamp = CAST(? AS INTEGER)))",
+                (
+                    new_text,
+                    protocol,
+                    contact_id,
+                    message_id,
+                    protocol,
+                    message_id,
+                ),
+            )
+            connection.commit()
+            return cursor.rowcount
+        finally:
+            connection.close()
+
+
 def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
     import backend
     from backend.db import _DB_LOCK
@@ -692,7 +721,28 @@ def create_api_router() -> Any:
             )
             if not edited:
                 raise RuntimeError("Backend rejected message edit")
-            backend = manager.get(protocol)
+            updated_rows = await asyncio.to_thread(
+                _persist_message_edit,
+                protocol,
+                contact_id,
+                message_id,
+                new_text,
+            )
+        except Exception:
+            logger.exception(
+                "Web edit failed: protocol=%s contact=%s", protocol, contact_id
+            )
+            raise HTTPException(status_code=502, detail="Message edit failed") from None
+
+        if updated_rows == 0:
+            logger.debug(
+                "Web edit persistence found no row: protocol=%s contact=%s id=%s",
+                protocol,
+                contact_id,
+                message_id,
+            )
+        backend = manager.get(protocol)
+        try:
             await asyncio.to_thread(
                 backend.apply_edit,
                 contact_id,
@@ -701,10 +751,12 @@ def create_api_router() -> Any:
                 is_mine=True,
             )
         except Exception:
-            logger.exception(
-                "Web edit failed: protocol=%s contact=%s", protocol, contact_id
+            logger.debug(
+                "Web edit backend cache sync failed: protocol=%s contact=%s",
+                protocol,
+                contact_id,
+                exc_info=True,
             )
-            raise HTTPException(status_code=502, detail="Message edit failed") from None
 
         push_event(
             {
