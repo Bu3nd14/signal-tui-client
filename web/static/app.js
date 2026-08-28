@@ -426,7 +426,9 @@ async function openImageModal(path, alt) {
     modal._objectUrl = url;
     state.modalObjectUrl = url;
     image.src = url;
+    console.debug("[web] modal ok", { path });
   } catch (fetchError) {
+    console.debug("[web] modal error", { path, error: String(fetchError) });
     if (modal._mediaController === controller && !modal.hidden) {
       loading.hidden = true;
       error.hidden = false;

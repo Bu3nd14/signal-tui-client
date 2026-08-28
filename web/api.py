@@ -585,10 +585,11 @@ def create_api_router() -> Any:
             )
             raise HTTPException(status_code=404)
         logger.info(
-            "web media ok proto=%s attachment_id=%s path=%s",
+            "web media ok proto=%s attachment_id=%s path=%s w=%s",
             proto,
             attachment_id,
             path,
+            w,
         )
         if w in _THUMB_WIDTHS:
             thumb = _thumbnail(path, proto, attachment_id, w)
