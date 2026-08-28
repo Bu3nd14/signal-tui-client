@@ -260,6 +260,7 @@ h2 { font-size: 1.05rem; }
   cursor: pointer;
 }
 .message.out .message-reply { right: auto; left: -38px; }
+.message.in .message-reply { top: 50%; }
 .message:hover .message-reply, .message:focus-within .message-reply, .message-reply:focus-visible { opacity: 1; }
 .message-edit {
   position: absolute;
@@ -367,13 +368,18 @@ h2 { font-size: 1.05rem; }
 .send-button [hidden] { display: none; }
 
 .emoji-picker {
+  position: absolute;
+  right: 8px;
+  bottom: calc(100% - 1px);
+  z-index: 50;
   width: 310px;
   max-height: 360px;
-  flex: none;
   padding: 10px;
   overflow: hidden;
-  border-left: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 12px 12px 0 0;
   background: var(--panel);
+  box-shadow: 0 -12px 35px #0008;
 }
 .emoji-picker[hidden] { display: none; }
 .emoji-tabs { display: flex; gap: 3px; overflow-x: auto; padding-bottom: 8px; scrollbar-width: thin; }
