@@ -532,10 +532,19 @@ def create_api_router() -> Any:
         return {"ok": True}
 
     @router.get("/contacts")
-    def contacts(request: Request) -> list[dict[str, Any]]:
+    def contacts(request: Request, q: str | None = None) -> list[dict[str, Any]]:
         unread = _unread_counts()
+        manager = request.app.state.manager
+        contacts = manager.list_contacts()
+        query = (q or "").strip()
+        if query:
+            # Riusa la ricerca del picker TUI (substring case-insensitive su
+            # nome/id/telefono) così la web UI ha la stessa semantica.
+            from contact_picker import search_contacts  # lazy: evitare import TUI all'avvio
+
+            contacts = search_contacts(contacts, query)
         result = []
-        for contact in request.app.state.manager.list_contacts():
+        for contact in contacts:
             extras = dict(contact.extras)
             result.append(
                 {

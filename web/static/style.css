@@ -107,8 +107,22 @@ h2 { font-size: 1.05rem; }
   font-size: .76rem;
   cursor: pointer;
 }
+.sidebar-search { padding: 0 12px 10px; flex: none; }
+.sidebar-search input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: .82rem;
+  outline: none;
+}
+.sidebar-search input:focus { border-color: var(--accent); background: var(--panel-raised); }
+.sidebar-search input::placeholder { color: var(--muted); }
 .protocol-tab:hover, .protocol-tab:focus-visible { background: var(--panel-raised); color: var(--text); }
 .protocol-tab.active { border-color: var(--accent); background: #4f8cff25; color: var(--text); }
+
 
 .list-status {
   flex: none;

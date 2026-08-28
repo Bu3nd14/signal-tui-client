@@ -6,6 +6,8 @@ const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   contacts: [],
+  searchResults: null,
+  contactQuery: "",
   protocolFilter: (() => {
     const saved = localStorage.getItem(PROTOCOL_KEY);
     return PROTOCOLS.includes(saved) ? saved : "signal";
@@ -36,6 +38,7 @@ const state = {
 const elements = {
   app: document.querySelector("#app"),
   contacts: document.querySelector("#contact-list"),
+  contactSearch: document.querySelector("#contact-search"),
   protocolTabs: document.querySelector("#protocol-tabs"),
   contactStatus: document.querySelector("#contact-status"),
   messages: document.querySelector("#message-list"),
@@ -145,7 +148,8 @@ function protocolIcon(protocol, size = 15) {
 
 function renderContacts() {
   elements.contacts.replaceChildren();
-  const sortedContacts = [...state.contacts].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
+  const base = state.searchResults ?? state.contacts;
+  const sortedContacts = [...base].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
   const contacts = sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
   if (state.active && state.active.protocol === state.protocolFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
     contacts.unshift(state.active);
@@ -155,7 +159,11 @@ function renderContacts() {
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
   }
-  elements.contactStatus.textContent = contacts.length ? "" : "Nessuna conversazione disponibile.";
+  elements.contactStatus.textContent = contacts.length
+    ? ""
+    : state.contactQuery
+      ? `Nessun risultato per «${state.contactQuery}».`
+      : "Nessuna conversazione disponibile.";
   for (const contact of contacts) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1143,6 +1151,36 @@ if (elements.protocolTabs) {
       }
     }
     renderContacts();
+  });
+}
+if (elements.contactSearch) {
+  let searchTimer = null;
+  let searchSeq = 0;
+  elements.contactSearch.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    const query = elements.contactSearch.value;
+    state.contactQuery = query;
+    const seq = ++searchSeq;
+    searchTimer = setTimeout(async () => {
+      const trimmed = query.trim();
+      if (!trimmed) {
+        state.searchResults = null;
+        renderContacts();
+        return;
+      }
+      try {
+        const response = await apiFetch(`/api/contacts?q=${encodeURIComponent(trimmed)}`);
+        const results = await response.json();
+        if (seq === searchSeq && state.contactQuery === query) {
+          state.searchResults = results;
+          renderContacts();
+        }
+      } catch (error) {
+        if (error.name !== "AbortError" && error.message !== "unauthorized") {
+          console.debug("[web] contact search failed", error);
+        }
+      }
+    }, 150);
   });
 }
 elements.cancelToken.addEventListener("click", () => elements.tokenDialog.close());
