@@ -356,7 +356,10 @@ async function openImageModal(path, alt) {
     const spinner = document.createElement("span");
     spinner.className = "spinner";
     spinner.setAttribute("aria-label", "Caricamento immagine originale");
-    loading.append(spinner);
+    const loadingText = document.createElement("span");
+    loadingText.className = "image-modal-loading-text";
+    loadingText.textContent = "Loading…";
+    loading.append(spinner, loadingText);
     const image = document.createElement("img");
     const error = document.createElement("div");
     error.className = "image-modal-error";
@@ -393,7 +396,7 @@ async function openImageModal(path, alt) {
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && !modal.hidden) closeModal();
     });
-    image.addEventListener("load", () => { loading.hidden = true; });
+    image.addEventListener("load", () => { loading.hidden = true; image.hidden = false; });
     image.addEventListener("error", () => {
       loading.hidden = true;
       error.hidden = false;
@@ -408,6 +411,7 @@ async function openImageModal(path, alt) {
   loading.hidden = false;
   error.hidden = true;
   image.alt = alt;
+  image.hidden = true;
   modal.hidden = false;
   const controller = new AbortController();
   modal._mediaController = controller;
