@@ -99,3 +99,19 @@ def test_connect_merge_preserves_inflight():
         backend._connect_sync()
 
     assert backend.cache == {CONTACT: [inflight]}
+
+
+def test_signal_quote_timestamp_extraction():
+    """Il timestamp del messaggio quotato è esposto da id/targetSentTimestamp."""
+    from backends.signal import _signal_quote_timestamp
+
+    assert _signal_quote_timestamp({"id": "1787948503599"}) == 1787948503599
+    assert (
+        _signal_quote_timestamp({"targetSentTimestamp": 1787948503599}) == 1787948503599
+    )
+    assert _signal_quote_timestamp({"targetSentTimestamp": "1787948503599"}) == (
+        1787948503599
+    )
+    assert _signal_quote_timestamp(None) is None
+    assert _signal_quote_timestamp({}) is None
+    assert _signal_quote_timestamp({"id": "not-a-number"}) is None

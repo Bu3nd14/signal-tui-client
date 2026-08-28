@@ -287,3 +287,86 @@ vm.runInThisContext(submit);
         ["node", "-e", source], capture_output=True, text=True, check=False
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_quote_thumb_resolved_by_filename_when_timestamp_missing(web_client):
+    """Quote a immagine senza quote_timestamp né metadati allegato: la thumb
+    è risolta cercando il nome file (es. da attachment_info) nella stessa chat.
+    """
+    client, db_file, _ = web_client
+    _insert_message(
+        db_file,
+        contact_number="alice",
+        timestamp=1000,
+        is_mine=1,
+        attachment_id="ZNIWHsP-XwhFe3PWTpnx.jpg",
+        attachment_info="Image: IMG_1303.jpg",
+        content_type="image/jpeg",
+    )
+    _insert_message(
+        db_file,
+        contact_number="alice",
+        timestamp=2000,
+        is_mine=0,
+        text="what a cool",
+        quote_text="IMG_1303.jpg — 🖼️ Immagine",
+        quote_timestamp=None,
+        quote_content_type="image/jpeg",
+    )
+
+    response = client.get("/api/messages?proto=signal&contact_id=alice", headers=AUTH)
+
+    assert response.status_code == 200
+    messages = response.json()
+    quoting = next(m for m in messages if m["text"] == "what a cool")
+    assert quoting["quote_thumb_url"] == (
+        "/api/media/signal/ZNIWHsP-XwhFe3PWTpnx.jpg?w=96"
+    )
+
+
+def test_quote_filename_fallback_ignores_unknown_names_and_future():
+    """Nessun nome file → nessuna risoluzione; allegati futuri esclusi."""
+    from web.api import _quoted_image_by_filename
+
+    assert _quoted_image_by_filename("signal", "alice", "solo testo", 2000) is None
+    assert (
+        _quoted_image_by_filename("signal", "alice", "IMG_1303.jpg — 🖼️ Immagine", 2000)
+        is None
+    )
+
+
+def test_quote_thumb_resolved_by_reply_to_message_id_telegram(web_client):
+    """Telegram non persiste quote_timestamp ma ha reply_to_message_id:
+    la thumb è risolta per msg_id del messaggio quotato."""
+    client, db_file, _ = web_client
+    _insert_message(
+        db_file,
+        protocol="telegram",
+        contact_number="alice",
+        timestamp=1000,
+        is_mine=1,
+        msg_id="9001",
+        attachment_id="tgref:folder/photo id",
+        content_type="image/jpeg",
+    )
+    _insert_message(
+        db_file,
+        protocol="telegram",
+        contact_number="alice",
+        timestamp=2000,
+        is_mine=0,
+        msg_id="9002",
+        text="reply to photo",
+        reply_to_message_id="9001",
+        quote_text="🖼️ Immagine",
+        quote_content_type=None,
+    )
+
+    response = client.get("/api/messages?proto=telegram&contact_id=alice", headers=AUTH)
+
+    assert response.status_code == 200
+    messages = response.json()
+    quoting = next(m for m in messages if m["text"] == "reply to photo")
+    assert quoting["quote_thumb_url"] == (
+        "/api/media/telegram/tgref%3Afolder/photo%20id?w=96"
+    )

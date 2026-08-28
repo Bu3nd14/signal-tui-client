@@ -725,7 +725,7 @@ class ChatViewMixin:
         vicini (±2s) convivono (es. un'immagine appena inviata e la reply).
         La finestra ±2s solo se il timestamp esatto non esiste affatto (drift).
         """
-        if not (widget.quote_timestamp and widget.contact_key and widget.protocol):
+        if not (widget.contact_key and widget.protocol):
             return None
         import sqlite3
 
@@ -733,6 +733,14 @@ class ChatViewMixin:
         from backend.db import _DB_LOCK
 
         ts = widget.quote_timestamp
+        if not ts:
+            # Quote senza timestamp quotato: fallback per id messaggio quotato
+            # (Telegram/WhatsApp) o per nome file (es. Signal).
+            if widget.reply_to_message_id:
+                resolved = self._quoted_attachment_id_from_message_id(widget)
+                if resolved:
+                    return resolved
+            return self._quoted_attachment_id_from_filename(widget)
         image_clause = (
             "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
             "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
@@ -768,6 +776,111 @@ class ChatViewMixin:
                             + " ORDER BY ABS(timestamp - ?) LIMIT 1",
                             (widget.protocol, widget.contact_key, ts, ts),
                         ).fetchone()
+                finally:
+                    connection.close()
+        except (sqlite3.Error, OSError):
+            return None
+        if row is None or not row[0]:
+            # Nessun match per timestamp: per le quote a immagine senza
+            # metadati, prova a risolvere per nome file.
+            return self._quoted_attachment_id_from_filename(widget)
+        return str(row[0])
+
+    def _quoted_attachment_id_from_message_id(
+        self,
+        widget: QuoteWidget,
+    ) -> str | None:
+        """Risolve l'immagine quotata per ``msg_id`` (Telegram/WhatsApp).
+
+        Il backend persiste ``reply_to_message_id`` (= msg_id del target) ma
+        non sempre il timestamp quotato né l'allegato: il match per id è
+        preciso e copre anche i target non in cache all'arrivo.
+        """
+        if not (widget.reply_to_message_id and widget.contact_key and widget.protocol):
+            return None
+        image_clause = (
+            "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
+            "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
+            "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
+        )
+        try:
+            import sqlite3
+
+            import backend
+            from backend.db import _DB_LOCK
+
+            with _DB_LOCK:
+                connection = sqlite3.connect(backend.DB_FILE)
+                try:
+                    row = connection.execute(
+                        "SELECT attachment_id FROM messages "
+                        "WHERE protocol = ? AND contact_number = ? "
+                        "AND msg_id = ? AND attachment_id IS NOT NULL "
+                        + image_clause
+                        + " LIMIT 1",
+                        (
+                            widget.protocol,
+                            widget.contact_key,
+                            widget.reply_to_message_id,
+                        ),
+                    ).fetchone()
+                finally:
+                    connection.close()
+        except (sqlite3.Error, OSError):
+            return None
+        if row is None or not row[0]:
+            return None
+        return str(row[0])
+
+    def _quoted_attachment_id_from_filename(
+        self,
+        widget: QuoteWidget,
+    ) -> str | None:
+        """Risolve l'immagine quotata per nome file (quote senza metadati).
+
+        Es. quote Signal a un'immagine: quote_text = "IMG_1303.jpg — 🖼️
+        Immagine" e nessun ``quote_timestamp``/``quote_attachment_id``. Il nome
+        file compare in ``attachment_info`` del messaggio quotato.
+        """
+        if not str(widget.content_type or "").lower().startswith("image/"):
+            return None
+        quote_text = str(getattr(widget, "_quote_text_raw", "") or "")
+        match = re.search(
+            r"([A-Za-z0-9][\w.\- ]*\.(?:jpe?g|png|gif|webp))\b",
+            quote_text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        filename = match.group(1).strip()
+        image_clause = (
+            "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
+            "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
+            "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
+        )
+        try:
+            import sqlite3
+
+            import backend
+            from backend.db import _DB_LOCK
+
+            with _DB_LOCK:
+                connection = sqlite3.connect(backend.DB_FILE)
+                try:
+                    row = connection.execute(
+                        "SELECT attachment_id FROM messages "
+                        "WHERE protocol = ? AND contact_number = ? "
+                        "AND attachment_id IS NOT NULL "
+                        "AND (attachment_info LIKE ? OR attachment_id LIKE ?) "
+                        + image_clause
+                        + " LIMIT 1",
+                        (
+                            widget.protocol,
+                            widget.contact_key,
+                            f"%{filename}%",
+                            f"%{filename}%",
+                        ),
+                    ).fetchone()
                 finally:
                     connection.close()
         except (sqlite3.Error, OSError):
@@ -1193,6 +1306,7 @@ class ChatViewMixin:
                     content_type=msg.get("quote_content_type"),
                     protocol=protocol,
                     quote_timestamp=msg.get("quote_timestamp"),
+                    reply_to_message_id=msg.get("reply_to_message_id"),
                     contact_key=(
                         self.selected_contact.id
                         if self.selected_contact is not None

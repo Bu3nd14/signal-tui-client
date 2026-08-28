@@ -136,6 +136,25 @@ def _signal_quote_content_type(quote: dict | None) -> str | None:
     return (first.get("contentType") or "").strip() or None
 
 
+def _signal_quote_timestamp(quote: dict | None) -> int | None:
+    """Timestamp (ms) del messaggio quotato, quando esposto.
+
+    signal-cli espone il target del quote come ``id`` (l'id della quote è il
+    timestamp del messaggio quotato) o ``targetSentTimestamp``. Senza questo
+    valore i fallback web/TUI per la miniatura della quote non possono
+    risolvere il messaggio quotato dalla chat.
+    """
+    if not quote:
+        return None
+    raw = quote.get("targetSentTimestamp") or quote.get("id")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _signal_quote_attachment_id(quote: dict | None) -> str | None:
     """Return the quoted first attachment's id (``id``/``attachmentId``).
 
@@ -831,6 +850,7 @@ class SignalBackend(ChatBackend):
             is_mine: bool,
             quote_text: str | None,
             attachments: list,
+            quote_timestamp: int | None,
             quote_attachment_id: str | None,
             quote_attachment_path: Path | None,
             quote_content_type: str | None,
@@ -863,6 +883,7 @@ class SignalBackend(ChatBackend):
                             "text": msg_text,
                             "is_mine": is_mine,
                             "quote_text": quote_text,
+                            "quote_timestamp": quote_timestamp,
                             "msg_type": msg_type,
                             "attachment_info": att_info,
                             "attachment_id": att_id,
@@ -880,6 +901,7 @@ class SignalBackend(ChatBackend):
                     "text": text,
                     "is_mine": is_mine,
                     "quote_text": quote_text,
+                    "quote_timestamp": quote_timestamp,
                     "msg_type": "text",
                     "attachment_info": None,
                     "attachment_id": None,
@@ -896,6 +918,7 @@ class SignalBackend(ChatBackend):
             sender = source_name or source_number
             quote = data_msg.get("quote")
             quote_text = _signal_quote_text(quote)
+            quote_timestamp = _signal_quote_timestamp(quote)
             quote_attachment_id = _signal_quote_attachment_id(quote)
             quote_attachment_path = _extract_quote_thumbnail(quote)
             quote_content_type = _signal_quote_content_type(quote)
@@ -911,6 +934,7 @@ class SignalBackend(ChatBackend):
                         "text": text,
                         "is_mine": False,
                         "quote_text": quote_text,
+                        "quote_timestamp": quote_timestamp,
                         "msg_type": msg_type,
                         "attachment_info": att_info,
                         "content_type": None,
@@ -926,6 +950,7 @@ class SignalBackend(ChatBackend):
                 is_mine=False,
                 quote_text=quote_text,
                 attachments=data_msg.get("attachments", []),
+                quote_timestamp=quote_timestamp,
                 quote_attachment_id=quote_attachment_id,
                 quote_attachment_path=quote_attachment_path,
                 quote_content_type=quote_content_type,
@@ -938,6 +963,7 @@ class SignalBackend(ChatBackend):
             sender = "You"
             quote = sent.get("quote")
             quote_text = _signal_quote_text(quote)
+            quote_timestamp = _signal_quote_timestamp(quote)
             quote_attachment_id = _signal_quote_attachment_id(quote)
             quote_attachment_path = _extract_quote_thumbnail(quote)
             quote_content_type = _signal_quote_content_type(quote)
@@ -953,6 +979,7 @@ class SignalBackend(ChatBackend):
                         "text": text,
                         "is_mine": True,
                         "quote_text": quote_text,
+                        "quote_timestamp": quote_timestamp,
                         "msg_type": msg_type,
                         "attachment_info": att_info,
                         "content_type": None,
@@ -968,6 +995,7 @@ class SignalBackend(ChatBackend):
                 is_mine=True,
                 quote_text=quote_text,
                 attachments=sent.get("attachments", []),
+                quote_timestamp=quote_timestamp,
                 quote_attachment_id=quote_attachment_id,
                 quote_attachment_path=quote_attachment_path,
                 quote_content_type=quote_content_type,
