@@ -11,7 +11,10 @@ const state = {
   reconnectAttempt: 0,
   messageRequest: null,
   mediaRequests: new Set(),
+  mediaLoads: new Map(),
+  mediaFailures: new Set(),
   objectUrls: new Set(),
+  mediaCache: new Map(),
   messages: [],
   optimistic: [],
   optimisticSequence: 0,
@@ -90,9 +93,17 @@ async function apiFetch(path, options = {}) {
   const response = await fetch(path, { ...options, headers });
   if (response.status === 401) {
     handleUnauthorized();
-    throw new Error("unauthorized");
+    const error = new Error("unauthorized");
+    error.status = response.status;
+    error.response = response;
+    throw error;
   }
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(`HTTP ${response.status}`);
+    error.status = response.status;
+    error.response = response;
+    throw error;
+  }
   return response;
 }
 
@@ -196,20 +207,136 @@ async function loadContacts({ quiet = false } = {}) {
   }
 }
 
-function clearMedia() {
-  for (const controller of state.mediaRequests) controller.abort();
-  state.mediaRequests.clear();
-  for (const url of state.objectUrls) URL.revokeObjectURL(url);
-  state.objectUrls.clear();
+const MEDIA_CACHE_LIMIT = 50;
+
+function cacheMedia(attachmentId, url) {
+  if (!attachmentId || !url) return;
+  const key = String(attachmentId);
+  state.mediaFailures.delete(key);
+  const previous = state.mediaCache.get(key);
+  state.mediaCache.delete(key);
+  state.mediaCache.set(key, url);
+  state.objectUrls.add(url);
+  if (previous && previous !== url && ![...state.mediaCache.values()].includes(previous)) {
+    state.objectUrls.delete(previous);
+    URL.revokeObjectURL(previous);
+  }
+  while (state.mediaCache.size > MEDIA_CACHE_LIMIT) {
+    const [oldestKey, oldestUrl] = state.mediaCache.entries().next().value;
+    state.mediaCache.delete(oldestKey);
+    if (![...state.mediaCache.values()].includes(oldestUrl)) {
+      state.objectUrls.delete(oldestUrl);
+      URL.revokeObjectURL(oldestUrl);
+    }
+  }
 }
 
-async function loadImage(container, image, path) {
+function abortMediaRequests() {
+  for (const controller of state.mediaRequests) controller.abort();
+  state.mediaRequests.clear();
+  state.mediaLoads.clear();
+}
+
+function pruneOrphanObjectUrls() {
+  const cachedUrls = new Set(state.mediaCache.values());
+  const optimisticUrls = new Set(state.optimistic.map((item) => item.localPreviewUrl).filter(Boolean));
+  for (const url of state.objectUrls) {
+    if (cachedUrls.has(url) || optimisticUrls.has(url)) continue;
+    URL.revokeObjectURL(url);
+    state.objectUrls.delete(url);
+  }
+}
+
+const MAX_MEDIA_FETCHES = 6;
+let activeMediaFetches = 0;
+const mediaFetchQueue = [];
+
+function acquireMediaSlot() {
+  if (activeMediaFetches < MAX_MEDIA_FETCHES) {
+    activeMediaFetches += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    mediaFetchQueue.push(() => {
+      activeMediaFetches += 1;
+      resolve();
+    });
+  });
+}
+
+function releaseMediaSlot() {
+  activeMediaFetches -= 1;
+  const next = mediaFetchQueue.shift();
+  if (next) next();
+}
+
+async function fetchImage(path, attachmentId, direction) {
   const controller = new AbortController();
   state.mediaRequests.add(controller);
+  const retryDelays = [3000, 6000];
+  let acquired = false;
   try {
-    const response = await apiFetch(path, { signal: controller.signal });
-    const url = URL.createObjectURL(await response.blob());
-    state.objectUrls.add(url);
+    await acquireMediaSlot();
+    acquired = true;
+    if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    let response;
+    const maxAttempts = direction === "in" ? 3 : 1;
+    for (let attempt = 0; attempt < maxAttempts && !controller.signal.aborted; attempt += 1) {
+      try {
+        response = await apiFetch(path, { signal: controller.signal });
+        console.debug("[web] media fetched", { attachment_id: attachmentId, status: response.status });
+        break;
+      } catch (error) {
+        if (error.name === "AbortError") throw error;
+        if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        if (Number.isInteger(error.status)) {
+          state.mediaFailures.add(String(attachmentId));
+          throw error;
+        }
+        if (attempt === maxAttempts - 1) throw error;
+        await new Promise((resolve, reject) => {
+          const timer = window.setTimeout(resolve, retryDelays[attempt]);
+          controller.signal.addEventListener("abort", () => {
+            window.clearTimeout(timer);
+            reject(new DOMException("Aborted", "AbortError"));
+          }, { once: true });
+        });
+      }
+    }
+    if (!response) return;
+    const blob = await response.blob();
+    if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const url = URL.createObjectURL(blob);
+    cacheMedia(attachmentId, url);
+    return url;
+  } finally {
+    if (acquired) releaseMediaSlot();
+    state.mediaRequests.delete(controller);
+  }
+}
+
+function showImageFallback(container) {
+  container.replaceChildren();
+  const fallback = document.createElement("div");
+  fallback.className = "attachment-error";
+  fallback.textContent = "▧  Immagine non disponibile";
+  container.append(fallback);
+}
+
+async function loadImage(container, image, path, attachmentId, direction) {
+  const key = String(attachmentId);
+  if (state.mediaFailures.has(key)) {
+    showImageFallback(container);
+    return;
+  }
+  let request = state.mediaLoads.get(key);
+  if (!request) {
+    request = fetchImage(path, key, direction);
+    state.mediaLoads.set(key, request);
+  }
+  try {
+    const url = await request;
+    if (!url) return;
     image.addEventListener("load", () => {
       container.querySelector(".attachment-loading")?.remove();
       scrollThreadToBottom();
@@ -217,18 +344,15 @@ async function loadImage(container, image, path) {
     image.src = url;
   } catch (error) {
     if (error.name !== "AbortError") {
-      container.replaceChildren();
-      const fallback = document.createElement("div");
-      fallback.className = "attachment-error";
-      fallback.textContent = "▧  Immagine non disponibile";
-      container.append(fallback);
+      console.debug("[web] media failed", { attachment_id: attachmentId });
+      showImageFallback(container);
     }
   } finally {
-    state.mediaRequests.delete(controller);
+    if (state.mediaLoads.get(key) === request) state.mediaLoads.delete(key);
   }
 }
 
-function imageAttachment(attachment, protocol) {
+function imageAttachment(attachment, protocol, direction) {
   const container = document.createElement("div");
   container.className = "attachment";
   const loading = document.createElement("div");
@@ -240,8 +364,21 @@ function imageAttachment(attachment, protocol) {
   const image = document.createElement("img");
   image.alt = attachment.name || "Immagine allegata";
   container.append(loading, image);
-  const path = `/api/media/${encodeURIComponent(protocol)}/${attachment.attachment_id.split("/").map(encodeURIComponent).join("/")}`;
-  loadImage(container, image, path);
+  const attachmentId = String(attachment.attachment_id);
+  console.debug("[web] media", { attachment_id: attachmentId, cache: state.mediaCache.has(attachmentId) ? "hit" : "miss" });
+  const cachedUrl = state.mediaCache.get(attachmentId);
+  if (cachedUrl) {
+    state.mediaCache.delete(attachmentId);
+    state.mediaCache.set(attachmentId, cachedUrl);
+    image.addEventListener("load", () => {
+      loading.remove();
+      scrollThreadToBottom();
+    }, { once: true });
+    image.src = cachedUrl;
+    return container;
+  }
+  const path = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+  loadImage(container, image, path, attachmentId, direction);
   return container;
 }
 
@@ -311,7 +448,7 @@ function appendRenderedQuote(bubble, item) {
 }
 
 function renderMessages(messages, protocol) {
-  clearMedia();
+  pruneOrphanObjectUrls();
   elements.messages.replaceChildren();
   const active = state.active;
   const reconciliation = window.SignalTuiReconcile.reconcileOptimisticMessages(
@@ -321,9 +458,19 @@ function renderMessages(messages, protocol) {
     active?.id,
   );
   state.optimistic = reconciliation.optimistic;
+  console.debug("[web] optimistic pending", state.optimistic.filter((o) => o.protocol === active.protocol && o.contactId === active.id && o.optimistic_id).map((o) => o.optimistic_id));
+  console.debug("[web] reconciled", state.optimistic.filter((o) => o.protocol === active.protocol && o.contactId === active.id && o.confirmed_message_id).map((o) => o.confirmed_message_id));
   for (const item of state.optimistic) {
     if (item.localPreviewUrl && !item.optimistic_id) {
-      URL.revokeObjectURL(item.localPreviewUrl);
+      const idx = messages.findIndex((m, x) =>
+        window.SignalTuiReconcile.messageIdentity(m, x) === String(item.confirmed_message_id));
+      if (idx >= 0) {
+        console.debug("[web] deliver blob", { confirmed_message_id: item.confirmed_message_id, idx });
+        cacheMedia(messages[idx].attachment?.attachment_id, item.localPreviewUrl);
+        messages[idx] = { ...messages[idx], localPreviewUrl: item.localPreviewUrl };
+      } else {
+        console.debug("[web] deliver blob MISS", { confirmed_message_id: item.confirmed_message_id });
+      }
       delete item.localPreviewUrl;
     }
   }
@@ -354,7 +501,7 @@ function renderMessages(messages, protocol) {
         preview.append(image);
         bubble.append(preview);
       } else {
-        bubble.append(imageAttachment(item.attachment, protocol));
+        bubble.append(imageAttachment(item.attachment, protocol, item.direction));
       }
     }
     const safeText = window.SignalTuiReconcile.messageDisplayText(item);
@@ -429,6 +576,7 @@ function openThread(contact) {
   loading.className = "empty-state";
   loading.textContent = "Caricamento messaggi…";
   elements.messages.append(loading);
+  abortMediaRequests();
   loadMessages();
 }
 
@@ -639,6 +787,7 @@ async function submitMessage() {
     optimistic.attachment = { type: attachment.file.type, name: attachment.filename, attachment_id: attachment.filename };
     optimistic.localPreviewUrl = attachment.previewUrl;
   }
+  console.debug("[web] optimistic", { protocol: active.protocol, optimistic_id: optimistic.optimistic_id, attachment_id: attachment?.filename, hasPreview: !!optimistic.localPreviewUrl });
   state.optimistic.push(optimistic);
   state.sending = true;
   elements.messageInput.value = "";
@@ -732,6 +881,9 @@ function connectSocket() {
     try {
       const update = JSON.parse(event.data);
       if (update.type !== "message" || !update.payload) return;
+      const attachmentId = update.payload.attachment_id ?? update.payload.attachment?.attachment_id;
+      if (attachmentId != null) state.mediaFailures.delete(String(attachmentId));
+      console.debug("[web] ws push", { protocol: update.payload.protocol, contact_id: update.payload.contact_id, id: update.payload?.id });
       loadContacts({ quiet: true });
       if (state.active?.id === String(update.payload.contact_id) && state.active?.protocol === update.payload.protocol) loadMessages();
     } catch {
@@ -842,7 +994,7 @@ document.querySelector("#token-form").addEventListener("submit", (event) => {
 
 window.addEventListener("beforeunload", () => {
   disconnectSocket();
-  clearMedia();
+  abortMediaRequests();
   clearStagedAttachment();
   for (const item of state.optimistic) {
     if (item.localPreviewUrl) URL.revokeObjectURL(item.localPreviewUrl);

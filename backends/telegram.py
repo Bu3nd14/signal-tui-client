@@ -22,7 +22,7 @@ import threading
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from models import (
     PROTOCOL_TELEGRAM,
@@ -31,7 +31,7 @@ from models import (
     media_quote_placeholder,
 )
 
-from .base import ChatBackend
+from .base import ChatBackend, should_upgrade_outgoing_attachment
 from .config import (
     get_address_book_ttl_s,
     get_telegram_api_hash,
@@ -177,6 +177,17 @@ class TelegramBackend(ChatBackend):
             msg_id = int(msg_id_s)
         except (ValueError, TypeError):
             return None
+
+        mirrored = next(
+            (
+                candidate
+                for candidate in _media_dir().glob(f"{chat_id}-{msg_id}-sent*")
+                if candidate.is_file()
+            ),
+            None,
+        )
+        if mirrored is not None:
+            return mirrored
 
         return self._download_media_by_ref(chat_id, msg_id)
 
@@ -1289,6 +1300,7 @@ class TelegramBackend(ChatBackend):
             msg_type=data.get("msg_type", "text"),
             attachment_info=data.get("attachment_info"),
             attachment_id=data.get("attachment_id"),
+            content_type=data.get("content_type"),
             protocol=PROTOCOL_TELEGRAM,
             msg_id=data.get("id"),
             status=data.get("status"),
@@ -1302,16 +1314,17 @@ class TelegramBackend(ChatBackend):
 
     def ingest_message(
         self, contact_id: str, data: dict, ts: int, persist: bool = True
-    ) -> bool:
+    ) -> bool | Literal["changed"]:
         """Add a message to the in-memory cache AND SQLite with dedup.
 
         When ``persist=False`` the in-memory cache is still seeded (dedup
         keeps working on the UI thread) but the SQLite write is skipped;
         the caller is responsible for calling ``_persist_message`` later.
 
-        Returns True if the message was newly added, False if duplicate.
+        Returns True when added, ``"changed"`` for an attachment upgrade,
+        and False for an unchanged duplicate.
         """
-        from backend import _update_message_id
+        from backend import _update_message_attachment_id, _update_message_id
 
         if data.get("msg_type") == "image":
             data = {**data, "text": ""}
@@ -1336,6 +1349,54 @@ class TelegramBackend(ChatBackend):
                     and text
                 ):
                     self.apply_edit(contact_id, str(mid), text)
+                incoming_attachment = data.get("attachment_id")
+                if (
+                    entry is not None
+                    and data.get("is_mine")
+                    and entry.get("is_mine")
+                    and str(entry.get("attachment_id") or "").startswith(_TGREF_PREFIX)
+                    and incoming_attachment
+                    and should_upgrade_outgoing_attachment(
+                        is_mine=True,
+                        existing_path=entry.get("attachment_id"),
+                        incoming_path=incoming_attachment,
+                    )
+                ):
+                    logger.info(
+                        "telegram ingest: echo is_mine id=%s att_incoming=%s att_existing=%s upgrade=%s",
+                        mid,
+                        incoming_attachment,
+                        entry.get("attachment_id"),
+                        True,
+                    )
+                    entry["attachment_id"] = incoming_attachment
+                    _update_message_attachment_id(
+                        PROTOCOL_TELEGRAM,
+                        contact_id,
+                        str(mid),
+                        int(entry.get("timestamp", ts)),
+                        incoming_attachment,
+                    )
+                    return "changed"
+                if (
+                    entry is not None
+                    and data.get("is_mine")
+                    and entry.get("is_mine")
+                    and incoming_attachment
+                    and (
+                        str(incoming_attachment).startswith(_TGREF_PREFIX)
+                        or str(entry.get("attachment_id") or "").startswith(
+                            _TGREF_PREFIX
+                        )
+                    )
+                ):
+                    logger.info(
+                        "telegram ingest: echo is_mine id=%s att_incoming=%s att_existing=%s upgrade=%s",
+                        mid,
+                        incoming_attachment,
+                        entry.get("attachment_id"),
+                        False,
+                    )
                 return False
             for m in self.cache.get(contact_id, []):
                 if (
@@ -1392,6 +1453,7 @@ class TelegramBackend(ChatBackend):
                 "msg_type": data.get("msg_type", "text"),
                 "attachment_info": data.get("attachment_info"),
                 "attachment_id": data.get("attachment_id"),
+                "content_type": data.get("content_type"),
                 "read": data.get("is_mine", False),  # incoming = unread
                 "status": data.get("status", "sent" if data.get("is_mine") else "read"),
                 "quote_timestamp": data.get("quote_timestamp"),

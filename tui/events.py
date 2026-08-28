@@ -87,24 +87,38 @@ class EventHandlingMixin:
         # if the identity already exists (e.g. an optimistic save is confirmed
         # by a sync sent-envelope), nothing is duplicated.
         ingest = getattr(backend, "ingest_message", None)
-        added = ingest(contact.id, event.payload, ts) if ingest is not None else True
+        ingest_result = (
+            ingest(contact.id, event.payload, ts) if ingest is not None else True
+        )
+        added = ingest_result is True
+        changed = ingest_result == "changed"
+
+        if (added or changed) and getattr(self, "_web_enabled", False):
+            logger.debug(
+                "events: push type=%s added=%s changed=%s protocol=%s contact=%s id=%s",
+                event.type,
+                added,
+                changed,
+                event.protocol,
+                contact.id,
+                event.payload.get("id"),
+            )
+            from web.bridge import push_event
+
+            push_event(
+                {
+                    "type": "message",
+                    "payload": {
+                        "id": event.payload.get("id"),
+                        "protocol": event.protocol,
+                        "contact_id": contact.id,
+                        "timestamp": ts,
+                    },
+                }
+            )
 
         # Mirror into the UI's protocol-aware cache only when actually new.
         if added:
-            if getattr(self, "_web_enabled", False):
-                from web.bridge import push_event
-
-                push_event(
-                    {
-                        "type": "message",
-                        "payload": {
-                            "id": event.payload.get("id"),
-                            "protocol": event.protocol,
-                            "contact_id": contact.id,
-                            "timestamp": ts,
-                        },
-                    }
-                )
             if cache_key not in self._cache:
                 self._cache[cache_key] = []
             self._cache[cache_key].append(
