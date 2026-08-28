@@ -1,10 +1,15 @@
 "use strict";
 
 const TOKEN_KEY = "signal-tui-web-token";
+const PROTOCOL_KEY = "signal-tui-web-proto";
+const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   contacts: [],
-  protocolFilter: "all",
+  protocolFilter: (() => {
+    const saved = localStorage.getItem(PROTOCOL_KEY);
+    return PROTOCOLS.includes(saved) ? saved : "signal";
+  })(),
   active: null,
   socket: null,
   reconnectTimer: null,
@@ -141,11 +146,8 @@ function protocolIcon(protocol, size = 15) {
 function renderContacts() {
   elements.contacts.replaceChildren();
   const sortedContacts = [...state.contacts].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
-  const contacts = state.protocolFilter === "all"
-    ? sortedContacts
-    : sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
-  const activeMatchesFilter = state.protocolFilter === "all" || state.active?.protocol === state.protocolFilter;
-  if (state.active && activeMatchesFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
+  const contacts = sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
+  if (state.active && state.active.protocol === state.protocolFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
     contacts.unshift(state.active);
   }
   for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
@@ -1132,7 +1134,8 @@ if (elements.protocolTabs) {
     if (!tab) return;
     const protocol = tab.dataset.protocol;
     state.protocolFilter = protocol;
-    if (protocol !== "all" && state.active?.protocol !== protocol) {
+    localStorage.setItem(PROTOCOL_KEY, protocol);
+    if (state.active?.protocol !== protocol) {
       const firstContact = state.contacts.find((contact) => contact.protocol === protocol);
       if (firstContact) {
         openThread(firstContact);
