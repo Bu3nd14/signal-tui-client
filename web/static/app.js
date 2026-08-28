@@ -603,16 +603,49 @@ function startReply(item) {
   elements.messageInput.focus();
 }
 
+function quoteThumb(item) {
+  if (!item.quote_thumb_url) return null;
+  const image = document.createElement("img");
+  image.className = "message-quote-thumb";
+  image.alt = item.quote_text || item.quote_message || "Miniatura citazione";
+  image.setAttribute("loading", "lazy");
+  image.addEventListener("error", () => image.remove());
+  const url = item.quote_thumb_url;
+  const key = `quote:${url}`;
+  const load = () => {
+    fetchImage(url, key, item.direction).then((src) => {
+      if (src) image.src = src;
+      else image.remove();
+    }, () => image.remove());
+  };
+  const observer = mediaObserver();
+  if (observer) {
+    image._loadMedia = load;
+    observer.observe(image);
+  } else {
+    load();
+  }
+  return image;
+}
+
 function appendRenderedQuote(bubble, item) {
   const quoteText = item.quote_text ?? item.quote_message;
   if (quoteText == null && item.quote_timestamp == null && item.quote_author == null) return;
   const quote = document.createElement("div");
   quote.className = "message-quote";
+  const thumb = quoteThumb(item);
+  if (thumb) {
+    quote.className = "message-quote has-thumb";
+    quote.append(thumb);
+  }
+  const body = document.createElement("div");
+  body.className = "message-quote-body";
   const author = document.createElement("strong");
   author.textContent = item.quote_author || "Messaggio citato";
   const text = document.createElement("span");
   text.textContent = quoteText || "Messaggio";
-  quote.append(author, text);
+  body.append(author, text);
+  quote.append(body);
   bubble.append(quote);
 }
 
@@ -1227,6 +1260,10 @@ async function submitMessage() {
     optimistic.quote_message = reply.quoteMessage;
     optimistic.quote_text = reply.quoteMessage;
     if (reply.isImage && active.protocol !== "signal") optimistic.quote_media_type = "image";
+    if (reply.isImage && reply.attachmentId && active.protocol !== "whatsapp") {
+      const quoteAttachmentId = String(reply.attachmentId).split("/").map(encodeURIComponent).join("/");
+      optimistic.quote_thumb_url = `/api/media/${active.protocol}/${quoteAttachmentId}?w=96`;
+    }
   }
   if (attachment) {
     optimistic.attachment = { type: attachment.file.type, name: attachment.filename, attachment_id: attachment.filename };
