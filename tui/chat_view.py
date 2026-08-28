@@ -745,7 +745,8 @@ class ChatViewMixin:
                     row = connection.execute(
                         "SELECT attachment_id FROM messages "
                         "WHERE protocol = ? AND contact_number = ? "
-                        "AND timestamp = ? AND attachment_id IS NOT NULL " + image_clause
+                        "AND timestamp = ? AND attachment_id IS NOT NULL "
+                        + image_clause
                         + " LIMIT 1",
                         (widget.protocol, widget.contact_key, ts),
                     ).fetchone()
@@ -763,7 +764,8 @@ class ChatViewMixin:
                             "SELECT attachment_id FROM messages "
                             "WHERE protocol = ? AND contact_number = ? "
                             "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
-                            + image_clause + " ORDER BY ABS(timestamp - ?) LIMIT 1",
+                            + image_clause
+                            + " ORDER BY ABS(timestamp - ?) LIMIT 1",
                             (widget.protocol, widget.contact_key, ts, ts),
                         ).fetchone()
                 finally:
