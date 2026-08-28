@@ -706,6 +706,21 @@ async function loadMessages() {
   }
 }
 
+function markRead(protocol, contactId) {
+  const contact = state.contacts.find((c) => c.protocol === protocol && c.id === contactId);
+  if (contact && Number(contact.unread) > 0) {
+    contact.unread = 0;
+    renderContacts();
+  }
+  apiFetch("/api/messages/read", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ protocol, contact_id: contactId }),
+  }).catch((error) => {
+    if (error.message !== "unauthorized") console.debug("[web] mark-read failed", error);
+  });
+}
+
 function openThread(contact) {
   closeEmojiPicker({ focus: false });
   cancelReply();
@@ -716,6 +731,7 @@ function openThread(contact) {
   elements.composerShell.hidden = false;
   state.messages = [];
   renderContacts();
+  markRead(contact.protocol, contact.id);
   elements.messages.replaceChildren();
   const loading = document.createElement("div");
   loading.className = "empty-state";
@@ -1058,7 +1074,10 @@ function connectSocket() {
       if (attachmentId != null) state.mediaFailures.delete(String(attachmentId));
       console.debug("[web] ws push", { protocol: update.payload.protocol, contact_id: update.payload.contact_id, id: update.payload?.id });
       loadContacts({ quiet: true });
-      if (state.active?.id === String(update.payload.contact_id) && state.active?.protocol === update.payload.protocol) loadMessages();
+      if (state.active?.id === String(update.payload.contact_id) && state.active?.protocol === update.payload.protocol) {
+        loadMessages();
+        markRead(state.active.protocol, state.active.id);
+      }
     } catch {
       showError("Aggiornamento live non valido ricevuto dal server.");
     }
