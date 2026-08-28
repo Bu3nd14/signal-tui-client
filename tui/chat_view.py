@@ -815,12 +815,14 @@ class ChatViewMixin:
                     row = connection.execute(
                         "SELECT attachment_id FROM messages "
                         "WHERE protocol = ? AND contact_number = ? "
-                        "AND msg_id = ? AND attachment_id IS NOT NULL "
+                        "AND attachment_id IS NOT NULL "
+                        "AND (msg_id = ? OR msg_id LIKE '%_' || ?) "
                         + image_clause
                         + " LIMIT 1",
                         (
                             widget.protocol,
                             widget.contact_key,
+                            widget.reply_to_message_id,
                             widget.reply_to_message_id,
                         ),
                     ).fetchone()
