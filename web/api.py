@@ -5,6 +5,7 @@ import hashlib
 import logging
 import mimetypes
 import os
+import re
 import sqlite3
 import tempfile
 import threading
@@ -204,7 +205,8 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                     "SELECT id, msg_id, text, is_mine, timestamp, contact_number, "
                     "sender, attachment_id, attachment_info, content_type, protocol, msg_type, "
                     "quote_text, quote_timestamp, quote_author, quote_attachment_id, "
-                    "quote_content_type, quote_attachment_path, status, edited, read "
+                    "quote_content_type, quote_attachment_path, status, edited, read, "
+                    "reply_to_message_id "
                     "FROM messages WHERE protocol = ? AND contact_number = ? "
                     "ORDER BY timestamp, id",
                     (protocol, contact_id),
@@ -378,6 +380,22 @@ def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
     quoted = _quoted_image_attachment_id(
         proto, str(row["contact_number"]), row["quote_timestamp"]
     )
+    if not quoted and (row["quote_content_type"] or "").lower().startswith("image/"):
+        # 5. Fallback per nome file: la quote testuale cita il file (es.
+        # "IMG_1303.jpg — 🖼️ Immagine"); lo cerchiamo tra gli allegati della
+        # chat quando il timestamp quotato non è stato persistito dal backend.
+        quoted = _quoted_image_by_filename(
+            proto,
+            str(row["contact_number"]),
+            row["quote_text"],
+            row["timestamp"],
+        )
+    if not quoted:
+        # 6. Fallback per id messaggio quotato (Telegram/WhatsApp persistono
+        # reply_to_message_id ma non sempre il timestamp quotato né l'allegato).
+        quoted = _quoted_image_by_message_id(
+            proto, str(row["contact_number"]), row["reply_to_message_id"]
+        )
     if quoted:
         return _media_url(quoted)
     return None
@@ -433,6 +451,104 @@ def _quoted_image_attachment_id(
                         + " ORDER BY ABS(timestamp - ?) LIMIT 1",
                         (proto, contact_number, quote_ts, quote_ts),
                     ).fetchone()
+            finally:
+                connection.close()
+    except sqlite3.Error:
+        return None
+    if row is None or not row[0]:
+        return None
+    return str(row[0])
+
+
+def _quoted_image_by_filename(
+    proto: str, contact_number: str, quote_text: Any, quoter_ts: Any
+) -> str | None:
+    """Attachment id dell'immagine quotata, risolto per nome file nella quote.
+
+    Usato quando il backend non ha persistito ``quote_timestamp`` né metadati
+    dell'allegato quotato (es. quote Signal a un'immagine): la ``quote_text``
+    contiene il nome del file (``IMG_1303.jpg — 🖼️ Immagine``) che troviamo
+    tra gli allegati della stessa chat, scegliendo quello più vicino temporalmente
+    (solo prima del messaggio quotante, per non citare messaggi futuri).
+    """
+    if not quote_text:
+        return None
+    match = re.search(
+        r"([A-Za-z0-9][\w.\- ]*\.(?:jpe?g|png|gif|webp))\b",
+        str(quote_text),
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    filename = match.group(1).strip()
+    if not filename or not quoter_ts:
+        return None
+    import backend
+    from backend.db import _DB_LOCK
+
+    try:
+        with _DB_LOCK:
+            connection = sqlite3.connect(backend.DB_FILE)
+            try:
+                rows = connection.execute(
+                    "SELECT attachment_id, timestamp FROM messages "
+                    "WHERE protocol = ? AND contact_number = ? "
+                    "AND attachment_id IS NOT NULL AND timestamp < ? "
+                    "AND (attachment_info LIKE ? OR attachment_id LIKE ?) "
+                    "ORDER BY timestamp DESC LIMIT 5",
+                    (
+                        proto,
+                        contact_number,
+                        int(quoter_ts),
+                        f"%{filename}%",
+                        f"%{filename}%",
+                    ),
+                ).fetchall()
+            finally:
+                connection.close()
+    except sqlite3.Error:
+        return None
+    if not rows:
+        return None
+    # Più match: preferisci il più vicino al messaggio quotante.
+    best = min(
+        rows,
+        key=lambda r: abs(int(r[1]) - int(quoter_ts)),
+    )
+    return str(best[0])
+
+
+def _quoted_image_by_message_id(
+    proto: str, contact_number: str, reply_to_message_id: Any
+) -> str | None:
+    """Attachment id dell'immagine quotata per ``msg_id``.
+
+    Telegram/WhatsApp persistono ``reply_to_message_id`` (= id del messaggio
+    quotato, colonna ``msg_id``) ma non sempre il timestamp quotato: il match
+    per id è preciso e copre anche i target non in cache all'arrivo.
+    """
+    if not reply_to_message_id:
+        return None
+    import backend
+    from backend.db import _DB_LOCK
+
+    image_clause = (
+        "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
+        "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
+        "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
+    )
+    try:
+        with _DB_LOCK:
+            connection = sqlite3.connect(backend.DB_FILE)
+            try:
+                row = connection.execute(
+                    "SELECT attachment_id FROM messages "
+                    "WHERE protocol = ? AND contact_number = ? "
+                    "AND msg_id = ? AND attachment_id IS NOT NULL "
+                    + image_clause
+                    + " LIMIT 1",
+                    (proto, contact_number, str(reply_to_message_id)),
+                ).fetchone()
             finally:
                 connection.close()
     except sqlite3.Error:

@@ -836,6 +836,7 @@ class QuoteWidget(Horizontal):
         content_type: str | None = None,
         protocol: str | None = None,
         quote_timestamp: int | None = None,
+        reply_to_message_id: str | None = None,
         contact_key: str | None = None,
     ) -> None:
         super().__init__()
@@ -861,6 +862,9 @@ class QuoteWidget(Horizontal):
         # Fallback per le reply inviate (metadati quote non persistiti): per
         # risolvere l'immagine quotata dalla stessa chat via quote_timestamp.
         self.quote_timestamp = quote_timestamp
+        # Fallback per id messaggio quotato (Telegram/WhatsApp persistono
+        # reply_to_message_id ma non sempre il timestamp quotato).
+        self.reply_to_message_id = reply_to_message_id
         self.contact_key = contact_key
 
         # Native kitty-rendering state (same pattern as ``ImageWidget``).  The
