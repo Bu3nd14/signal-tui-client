@@ -678,6 +678,19 @@ function renderMessages(messages, protocol) {
       delete item.localPreviewUrl;
     }
   }
+  // Preserva la miniatura della quote attraverso la reconciliation: il
+  // messaggio confermato arriva dal server senza quote_thumb_url per gli
+  // invii (i metadati quote media non sono sempre persistiti); ereditiamo
+  // l'URL calcolato sulla bolla optimistic, come per localPreviewUrl.
+  for (const item of state.optimistic) {
+    if (item.quote_thumb_url && item.confirmed_message_id) {
+      const idx = messages.findIndex((m, x) =>
+        window.SignalTuiReconcile.messageIdentity(m, x) === String(item.confirmed_message_id));
+      if (idx >= 0 && !messages[idx].quote_thumb_url) {
+        messages[idx] = { ...messages[idx], quote_thumb_url: item.quote_thumb_url };
+      }
+    }
+  }
   const displayed = [...messages, ...reconciliation.visible].sort((a, b) => timestampMilliseconds(a.timestamp) - timestampMilliseconds(b.timestamp));
   if (!displayed.length) {
     const empty = document.createElement("div");
@@ -1260,7 +1273,7 @@ async function submitMessage() {
     optimistic.quote_message = reply.quoteMessage;
     optimistic.quote_text = reply.quoteMessage;
     if (reply.isImage && active.protocol !== "signal") optimistic.quote_media_type = "image";
-    if (reply.isImage && reply.attachmentId && active.protocol !== "whatsapp") {
+    if (reply.isImage && reply.attachmentId) {
       const quoteAttachmentId = String(reply.attachmentId).split("/").map(encodeURIComponent).join("/");
       optimistic.quote_thumb_url = `/api/media/${active.protocol}/${quoteAttachmentId}?w=96`;
     }
