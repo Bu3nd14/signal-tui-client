@@ -834,7 +834,7 @@ async function stageAttachment(file) {
     let bitmap;
     try {
       bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
-      if (Math.max(bitmap.width, bitmap.height) > 2048 || (file.type === "image/png" && file.size > 2 * 1024 * 1024)) {
+      if (Math.max(bitmap.width, bitmap.height) > 2048 || (file.type === "image/png" && file.size > 512 * 1024)) {
         const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
         const canvas = document.createElement("canvas");
         canvas.width = Math.max(1, Math.round(bitmap.width * scale));
