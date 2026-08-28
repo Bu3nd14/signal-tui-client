@@ -26,6 +26,7 @@ const state = {
   messages: [],
   optimistic: [],
   optimisticSequence: 0,
+  readTimers: new Map(),
   sending: false,
   stagedAttachment: null,
   replyTo: null,
@@ -716,11 +717,8 @@ async function loadMessages() {
 }
 
 function markRead(protocol, contactId) {
-  const contact = state.contacts.find((c) => c.protocol === protocol && c.id === contactId);
-  if (contact && Number(contact.unread) > 0) {
-    contact.unread = 0;
-    renderContacts();
-  }
+  const key = `${protocol}:${contactId}`;
+  // Persistenza DB immediata (i badge tornano azzerati dopo un refresh).
   apiFetch("/api/messages/read", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -728,6 +726,17 @@ function markRead(protocol, contactId) {
   }).catch((error) => {
     if (error.message !== "unauthorized") console.debug("[web] mark-read failed", error);
   });
+  // Il badge visivo resta per 3s (utile quando il contatto si apre da solo
+  // selezionando il backend: il tempo di accorgersi dei non letti), poi sparisce.
+  if (state.readTimers.has(key)) clearTimeout(state.readTimers.get(key));
+  state.readTimers.set(key, setTimeout(() => {
+    state.readTimers.delete(key);
+    const contact = state.contacts.find((c) => c.protocol === protocol && c.id === contactId);
+    if (contact && Number(contact.unread) > 0) {
+      contact.unread = 0;
+      renderContacts();
+    }
+  }, 3000));
 }
 
 function openThread(contact) {
