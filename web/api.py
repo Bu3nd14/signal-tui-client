@@ -93,7 +93,9 @@ def _unread_counts() -> dict[tuple[str, str], int]:
     return {(row[0], row[1]): row[2] for row in rows}
 
 
-def _contact_payload(contact: Any, unread: dict[tuple[str, str], int]) -> dict[str, Any]:
+def _contact_payload(
+    contact: Any, unread: dict[tuple[str, str], int]
+) -> dict[str, Any]:
     """Serializza un contatto nel formato usato dalla web UI."""
     extras = dict(contact.extras)
     return {
