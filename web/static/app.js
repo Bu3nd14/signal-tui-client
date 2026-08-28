@@ -598,6 +598,7 @@ function startReply(item) {
     isImage: Boolean(item.attachment?.type?.toLowerCase().startsWith("image/")),
     contentType: item.attachment?.type,
     attachmentId: item.attachment?.attachment_id,
+    caption: item.text || "",
   };
   updateReplyBanner();
   elements.messageInput.focus();
@@ -1285,6 +1286,14 @@ async function submitMessage() {
     if (reply.isImage && reply.attachmentId) {
       const quoteAttachmentId = String(reply.attachmentId).split("/").map(encodeURIComponent).join("/");
       optimistic.quote_thumb_url = `/api/media/${active.protocol}/${quoteAttachmentId}?w=96`;
+      // Senza caption reale la bolla optimistic mostra SOLO la miniatura
+      // (come il messaggio confermato): evita il nome file accanto alla
+      // thumb e il flash "testo che sparisce" alla reconciliation.
+      optimistic.quote_media_placeholder = !reply.caption;
+      if (!reply.caption) {
+        optimistic.quote_text = "";
+        optimistic.quote_message = "";
+      }
     }
   }
   if (attachment) {
