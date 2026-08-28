@@ -249,7 +249,7 @@ vm.runInThisContext(quote);
     assert completed.returncode == 0, completed.stderr
 
 
-def test_spa_optimistic_reply_thumbnail_excludes_whatsapp():
+def test_spa_optimistic_reply_thumbnail_all_protocols():
     source = r"""
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -283,7 +283,7 @@ vm.runInThisContext(submit);
   state.replyTo = { timestamp: 11, quoteAuthor: "bob", quoteMessage: "Foto WA", isImage: true, isMedia: true, contentType: "image/jpeg", attachmentId: "wa/image", id: "wa-11" };
   elements.messageInput.value = "reply wa";
   await submitMessage();
-  assert.equal(Object.hasOwn(state.optimistic[1], "quote_thumb_url"), false);
+  assert.equal(state.optimistic[1].quote_thumb_url, "/api/media/whatsapp/wa/image?w=96");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
     completed = subprocess.run(
