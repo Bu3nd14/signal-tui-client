@@ -260,6 +260,10 @@ function abortMediaRequests() {
   state.mediaRequests.clear();
   state.mediaLoads.clear();
   state.mediaObserver?.disconnect();
+  // Un IntersectionObserver disconnesso non osserva piu' nulla: azzerandolo
+  // il prossimo mediaObserver() ne crea uno nuovo (le immagini lazy e le
+  // miniature quote al rientro nella chat si ricaricano).
+  state.mediaObserver = null;
 }
 
 function pruneOrphanObjectUrls() {
