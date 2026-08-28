@@ -1260,6 +1260,10 @@ async function submitMessage() {
     optimistic.quote_message = reply.quoteMessage;
     optimistic.quote_text = reply.quoteMessage;
     if (reply.isImage && active.protocol !== "signal") optimistic.quote_media_type = "image";
+    if (reply.isImage && reply.attachmentId && active.protocol !== "whatsapp") {
+      const quoteAttachmentId = String(reply.attachmentId).split("/").map(encodeURIComponent).join("/");
+      optimistic.quote_thumb_url = `/api/media/${active.protocol}/${quoteAttachmentId}?w=96`;
+    }
   }
   if (attachment) {
     optimistic.attachment = { type: attachment.file.type, name: attachment.filename, attachment_id: attachment.filename };

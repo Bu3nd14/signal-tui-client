@@ -247,3 +247,46 @@ vm.runInThisContext(quote);
         ["node", "-e", source], capture_output=True, text=True, check=False
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_spa_optimistic_reply_thumbnail_excludes_whatsapp():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const submit = app.slice(app.indexOf("async function submitMessage("), app.indexOf("\nfunction encodeToken"));
+globalThis.state = {
+  sending: false,
+  active: { id: "alice", protocol: "signal" },
+  stagedAttachment: null,
+  replyTo: { timestamp: 10, quoteAuthor: "alice", quoteMessage: "Foto", isImage: true, isMedia: true, contentType: "image/jpeg", attachmentId: "folder/photo id:1", id: "10" },
+  messages: [],
+  optimistic: [],
+  optimisticSequence: 0,
+};
+globalThis.elements = { messageInput: { value: "reply", focus() {} } };
+globalThis.window = { SignalTuiReconcile: { messageIdentity: (message) => message.id } };
+globalThis.resizeComposer = () => {};
+globalThis.updateComposer = () => {};
+globalThis.renderMessages = () => {};
+globalThis.cancelReply = () => { state.replyTo = null; };
+globalThis.showError = assert.fail;
+globalThis.apiFetch = async () => ({ status: 200 });
+vm.runInThisContext(submit);
+
+(async () => {
+  await submitMessage();
+  assert.equal(state.optimistic[0].quote_thumb_url, "/api/media/signal/folder/photo%20id%3A1?w=96");
+
+  state.active = { id: "bob", protocol: "whatsapp" };
+  state.replyTo = { timestamp: 11, quoteAuthor: "bob", quoteMessage: "Foto WA", isImage: true, isMedia: true, contentType: "image/jpeg", attachmentId: "wa/image", id: "wa-11" };
+  elements.messageInput.value = "reply wa";
+  await submitMessage();
+  assert.equal(Object.hasOwn(state.optimistic[1], "quote_thumb_url"), false);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
