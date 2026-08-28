@@ -247,7 +247,7 @@ h2 { font-size: 1.05rem; }
 .message-edited { color: #c3cedaaa; font-size: .66rem; opacity: .72; }
 .message-reply {
   position: absolute;
-  top: 50%;
+  top: calc(50% - 15px);
   right: -38px;
   width: 30px;
   height: 30px;
@@ -263,7 +263,7 @@ h2 { font-size: 1.05rem; }
 .message:hover .message-reply, .message:focus-within .message-reply, .message-reply:focus-visible { opacity: 1; }
 .message-edit {
   position: absolute;
-  top: calc(50% + 34px);
+  top: calc(50% + 19px);
   right: -38px;
   width: 30px;
   height: 30px;

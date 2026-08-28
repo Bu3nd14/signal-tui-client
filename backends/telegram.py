@@ -754,7 +754,13 @@ class TelegramBackend(ChatBackend):
         return future.result(timeout=30)
 
     async def mark_read(self, contact_id: str) -> None:
-        """Mark messages as read (Telethon handles this automatically)."""
+        """Mark messages as read.
+
+        Telethon gestisce il read lato remoto; qui persistiamo anche
+        ``read=1`` in SQLite (da cui web UI e TUI calcolano i badge non
+        letti) via ``mark_read_sync``.
+        """
+        await asyncio.to_thread(self.mark_read_sync, contact_id)
 
     def send_message_sync(
         self,
