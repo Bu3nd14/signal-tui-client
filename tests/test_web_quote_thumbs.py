@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import sqlite3
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -165,3 +166,84 @@ def test_quote_media_database_error_returns_500(web_client):
 
     assert response.status_code == 500
     assert response.json() == {"detail": "Database error"}
+
+
+def test_spa_renders_lazy_quote_thumbnails():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const media = app.slice(app.indexOf("const MEDIA_CACHE_LIMIT"), app.indexOf("\nfunction attachmentName"));
+const quote = app.slice(app.indexOf("function quoteThumb("), app.indexOf("\nfunction renderMessages("));
+globalThis.state = { mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(), objectUrls: new Set(), mediaCache: new Map(), optimistic: [] };
+globalThis.URL = { createObjectURL: () => "blob:quote-thumb", revokeObjectURL() {} };
+globalThis.scrollThreadToBottom = () => {};
+let mode = "ok";
+let requestedPath;
+globalThis.apiFetch = async (path) => {
+  requestedPath = path;
+  if (mode === "missing") throw Object.assign(new Error("404"), { status: 404 });
+  return { status: 200, blob: async () => ({}) };
+};
+function node(tag) {
+  return {
+    tag,
+    children: [],
+    className: "",
+    attributes: {},
+    removed: false,
+    append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } },
+    replaceChildren(...items) { this.children = items; },
+    querySelector() { return null; },
+    addEventListener(type, callback) { this.listeners ??= {}; this.listeners[type] = callback; },
+    setAttribute(name, value) { this.attributes[name] = value; },
+    remove() { this.removed = true; if (this.parent) this.parent.children = this.parent.children.filter((item) => item !== this); },
+  };
+}
+globalThis.document = { createElement: node, querySelector: () => null };
+globalThis.elements = { messages: { parent: { id: "scroll-root" } } };
+let callback;
+let observed;
+globalThis.window = { setTimeout, clearTimeout, IntersectionObserver: class { constructor(cb) { callback = cb; } observe(target) { observed = target; } unobserve() {} disconnect() {} } };
+vm.runInThisContext(media);
+vm.runInThisContext(quote);
+
+(async () => {
+  const bubble = node("div");
+  appendRenderedQuote(bubble, { direction: "in", quote_author: "Alice", quote_text: "Foto", quote_thumb_url: "/api/quote-media/signal/7?w=96" });
+  const renderedQuote = bubble.children[0];
+  const image = renderedQuote.children[0];
+  assert.equal(renderedQuote.className, "message-quote has-thumb");
+  assert.equal(image.tag, "img");
+  assert.equal(image.className, "message-quote-thumb");
+  assert.equal(image.attributes.loading, "lazy");
+  assert.equal(image.src, undefined);
+  callback([{ target: observed, isIntersecting: true }], state.mediaObserver);
+  await new Promise(setImmediate);
+  assert.equal(requestedPath, "/api/quote-media/signal/7?w=96");
+  assert.equal(image.src, "blob:quote-thumb");
+  assert.ok(state.mediaCache.has("quote:/api/quote-media/signal/7?w=96"));
+
+  mode = "missing";
+  const failedBubble = node("div");
+  appendRenderedQuote(failedBubble, { direction: "in", quote_author: "Bob", quote_text: "Testo", quote_thumb_url: "/api/quote-media/signal/8?w=96" });
+  const failedQuote = failedBubble.children[0];
+  const failedImage = failedQuote.children[0];
+  callback([{ target: observed, isIntersecting: true }], state.mediaObserver);
+  await new Promise(setImmediate);
+  assert.equal(failedImage.removed, true);
+  assert.equal(failedQuote.children.length, 1);
+  assert.equal(failedQuote.children[0].children[0].textContent, "Bob");
+  assert.equal(failedQuote.children[0].children[1].textContent, "Testo");
+
+  const plainBubble = node("div");
+  appendRenderedQuote(plainBubble, { quote_author: "Carol", quote_text: "Solo testo" });
+  const images = plainBubble.children[0].children.filter((child) => child.tag === "img");
+  assert.equal(images.length, 0);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
