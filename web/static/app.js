@@ -14,6 +14,7 @@ const state = {
   mediaLoads: new Map(),
   mediaFailures: new Set(),
   objectUrls: new Set(),
+  modalObjectUrl: null,
   mediaCache: new Map(),
   messages: [],
   optimistic: [],
@@ -242,7 +243,7 @@ function pruneOrphanObjectUrls() {
   const cachedUrls = new Set(state.mediaCache.values());
   const optimisticUrls = new Set(state.optimistic.map((item) => item.localPreviewUrl).filter(Boolean));
   for (const url of state.objectUrls) {
-    if (cachedUrls.has(url) || optimisticUrls.has(url)) continue;
+    if (cachedUrls.has(url) || optimisticUrls.has(url) || url === state.modalObjectUrl) continue;
     URL.revokeObjectURL(url);
     state.objectUrls.delete(url);
   }
@@ -342,7 +343,7 @@ function mediaObserver() {
   return state.mediaObserver;
 }
 
-function openImageModal(path, alt) {
+async function openImageModal(path, alt) {
   let modal = document.querySelector(".image-modal");
   if (!modal) {
     modal = document.createElement("div");
@@ -366,10 +367,25 @@ function openImageModal(path, alt) {
     close.className = "image-modal-close";
     close.setAttribute("aria-label", "Chiudi immagine");
     close.textContent = "×";
+    const resetMedia = () => {
+      if (modal._mediaController) {
+        modal._mediaController.abort();
+        state.mediaRequests.delete(modal._mediaController);
+        modal._mediaController = null;
+      }
+      image.removeAttribute("src");
+      if (modal._objectUrl) {
+        if (state.modalObjectUrl === modal._objectUrl) state.modalObjectUrl = null;
+        state.objectUrls.delete(modal._objectUrl);
+        URL.revokeObjectURL(modal._objectUrl);
+        modal._objectUrl = null;
+      }
+    };
     const closeModal = () => {
       modal.hidden = true;
-      image.removeAttribute("src");
+      resetMedia();
     };
+    modal._resetMedia = resetMedia;
     close.addEventListener("click", closeModal);
     modal.addEventListener("click", (event) => {
       if (event.target === modal) closeModal();
@@ -386,11 +402,39 @@ function openImageModal(path, alt) {
     document.body.append(modal);
   }
   const image = modal.querySelector("img");
-  modal.querySelector(".image-modal-loading").hidden = false;
-  modal.querySelector(".image-modal-error").hidden = true;
+  const loading = modal.querySelector(".image-modal-loading");
+  const error = modal.querySelector(".image-modal-error");
+  modal._resetMedia();
+  loading.hidden = false;
+  error.hidden = true;
   image.alt = alt;
   modal.hidden = false;
-  image.src = path;
+  const controller = new AbortController();
+  modal._mediaController = controller;
+  state.mediaRequests.add(controller);
+  try {
+    const response = await apiFetch(path, { signal: controller.signal });
+    const blob = await response.blob();
+    if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const url = URL.createObjectURL(blob);
+    state.objectUrls.add(url);
+    if (modal._mediaController !== controller || modal.hidden) {
+      state.objectUrls.delete(url);
+      URL.revokeObjectURL(url);
+      return;
+    }
+    modal._objectUrl = url;
+    state.modalObjectUrl = url;
+    image.src = url;
+  } catch (fetchError) {
+    if (modal._mediaController === controller && !modal.hidden) {
+      loading.hidden = true;
+      error.hidden = false;
+    }
+  } finally {
+    state.mediaRequests.delete(controller);
+    if (modal._mediaController === controller) modal._mediaController = null;
+  }
 }
 
 async function loadImage(container, image, path, attachmentId, direction) {
