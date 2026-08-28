@@ -235,6 +235,7 @@ function abortMediaRequests() {
   for (const controller of state.mediaRequests) controller.abort();
   state.mediaRequests.clear();
   state.mediaLoads.clear();
+  state.mediaObserver?.disconnect();
 }
 
 function pruneOrphanObjectUrls() {
@@ -323,6 +324,75 @@ function showImageFallback(container) {
   container.append(fallback);
 }
 
+function mediaObserver() {
+  if (!("IntersectionObserver" in window)) return null;
+  if (!state.mediaObserver) {
+    state.mediaObserver = new window.IntersectionObserver((entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer.unobserve(entry.target);
+        entry.target._loadMedia?.();
+        delete entry.target._loadMedia;
+      }
+    }, {
+      root: elements.messages.parent || elements.messages.parentElement || elements.messages.parentNode,
+      rootMargin: "300px",
+    });
+  }
+  return state.mediaObserver;
+}
+
+function openImageModal(path, alt) {
+  let modal = document.querySelector(".image-modal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.className = "image-modal";
+    modal.hidden = true;
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    const loading = document.createElement("div");
+    loading.className = "image-modal-loading";
+    const spinner = document.createElement("span");
+    spinner.className = "spinner";
+    spinner.setAttribute("aria-label", "Caricamento immagine originale");
+    loading.append(spinner);
+    const image = document.createElement("img");
+    const error = document.createElement("div");
+    error.className = "image-modal-error";
+    error.textContent = "Immagine non disponibile";
+    error.hidden = true;
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "image-modal-close";
+    close.setAttribute("aria-label", "Chiudi immagine");
+    close.textContent = "×";
+    const closeModal = () => {
+      modal.hidden = true;
+      image.removeAttribute("src");
+    };
+    close.addEventListener("click", closeModal);
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeModal();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !modal.hidden) closeModal();
+    });
+    image.addEventListener("load", () => { loading.hidden = true; });
+    image.addEventListener("error", () => {
+      loading.hidden = true;
+      error.hidden = false;
+    });
+    modal.append(loading, image, error, close);
+    document.body.append(modal);
+  }
+  const image = modal.querySelector("img");
+  modal.querySelector(".image-modal-loading").hidden = false;
+  modal.querySelector(".image-modal-error").hidden = true;
+  image.alt = alt;
+  modal.hidden = false;
+  image.src = path;
+}
+
 async function loadImage(container, image, path, attachmentId, direction) {
   const key = String(attachmentId);
   if (state.mediaFailures.has(key)) {
@@ -365,6 +435,17 @@ function imageAttachment(attachment, protocol, direction) {
   image.alt = attachment.name || "Immagine allegata";
   container.append(loading, image);
   const attachmentId = String(attachment.attachment_id);
+  const mediaPath = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+  const path = `${mediaPath}?w=480`;
+  container.setAttribute("role", "button");
+  container.tabIndex = 0;
+  container.addEventListener("click", () => openImageModal(mediaPath, image.alt));
+  container.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openImageModal(mediaPath, image.alt);
+    }
+  });
   console.debug("[web] media", { attachment_id: attachmentId, cache: state.mediaCache.has(attachmentId) ? "hit" : "miss" });
   const cachedUrl = state.mediaCache.get(attachmentId);
   if (cachedUrl) {
@@ -377,8 +458,14 @@ function imageAttachment(attachment, protocol, direction) {
     image.src = cachedUrl;
     return container;
   }
-  const path = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
-  loadImage(container, image, path, attachmentId, direction);
+  const load = () => loadImage(container, image, path, attachmentId, direction);
+  const observer = mediaObserver();
+  if (observer) {
+    container._loadMedia = load;
+    observer.observe(container);
+  } else {
+    load();
+  }
   return container;
 }
 
@@ -736,19 +823,47 @@ function clearStagedAttachment({ revoke = true } = {}) {
   updateComposer();
 }
 
-function stageAttachment(file) {
+async function stageAttachment(file) {
   if (!file || !file.type.startsWith("image/") || state.sending) return;
+  const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+  if (!extensions[file.type]) {
+    showError("Formato immagine non supportato.");
+    return;
+  }
+  if (file.type === "image/jpeg" || file.type === "image/png") {
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+      if (Math.max(bitmap.width, bitmap.height) > 2048 || (file.type === "image/png" && file.size > 2 * 1024 * 1024)) {
+        const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+        const context = canvas.getContext("2d");
+        context.fillStyle = "#fff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise((resolve, reject) => {
+          canvas.toBlob((result) => result ? resolve(result) : reject(new Error("JPEG encoding failed")), "image/jpeg", 0.85);
+        });
+        file = new File(
+          [blob],
+          file.name.replace(/\.[a-z0-9]+$/i, ".jpg"),
+          { type: "image/jpeg" },
+        );
+      }
+    } catch {
+    } finally {
+      bitmap?.close?.();
+    }
+  }
+  if (state.sending) return;
   if (file.size > 20 * 1024 * 1024) {
     showError("L'immagine supera il limite di 20 MiB.");
     return;
   }
   clearStagedAttachment();
-  const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
   const extension = extensions[file.type];
-  if (!extension) {
-    showError("Formato immagine non supportato.");
-    return;
-  }
   const filename = `clipboard-${Date.now()}.${extension}`;
   const previewUrl = URL.createObjectURL(file);
   state.stagedAttachment = { file, filename, previewUrl };

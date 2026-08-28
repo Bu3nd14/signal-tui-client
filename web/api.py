@@ -1,10 +1,13 @@
 """REST API for contacts, persisted messages, media, and message sending."""
 
 import asyncio
+import hashlib
 import logging
 import mimetypes
+import os
 import sqlite3
 import tempfile
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -16,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 _PROTOCOLS = {"signal", "whatsapp", "telegram"}
 _MAX_TEXT_LENGTH = 64 * 1024
+_THUMB_WIDTHS = {240, 480}
+_THUMB_CACHE_LIMIT = 500 * 1024 * 1024
+_THUMB_LOCKS: dict[Path, threading.Lock] = {}
+_THUMB_LOCKS_GUARD = threading.Lock()
 
 _IMAGE_EXTENSIONS = {
     ".jpg",
@@ -174,6 +181,113 @@ def _allowed_media_root(manager: Any, proto: str) -> Path:
         except ImportError:
             return (Path(tempfile.gettempdir()) / "telegram-media").resolve()
     raise ValueError(f"Unsupported protocol: {proto}")
+
+
+def _web_thumb_dir(proto: str) -> Path:
+    cache_home = Path(
+        os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")
+    ).expanduser()
+    return cache_home / "signal-tui-client" / "web-thumbs" / proto
+
+
+def _attachment_content_type(proto: str, attachment_id: str) -> str | None:
+    import backend
+    from backend.db import _DB_LOCK
+
+    with _DB_LOCK:
+        try:
+            connection = sqlite3.connect(backend.DB_FILE)
+            try:
+                row = connection.execute(
+                    "SELECT content_type, msg_type FROM messages "
+                    "WHERE protocol = ? AND attachment_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (proto, attachment_id),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            return None
+    if not row:
+        return None
+    return row[0] or ("image/*" if row[1] == "image" else None)
+
+
+def _is_thumbnail_candidate(path: Path, proto: str, attachment_id: str) -> bool:
+    content_type = (_attachment_content_type(proto, attachment_id) or "").lower()
+    suffix = path.suffix.lower()
+    is_image = content_type.startswith("image/") or suffix in _IMAGE_EXTENSIONS
+    return (
+        is_image
+        and suffix not in {".gif", ".heic", ".heif"}
+        and content_type
+        not in {
+            "image/gif",
+            "image/heic",
+            "image/heif",
+        }
+    )
+
+
+def _thumb_lock(path: Path) -> threading.Lock:
+    with _THUMB_LOCKS_GUARD:
+        return _THUMB_LOCKS.setdefault(path, threading.Lock())
+
+
+def _prune_thumb_cache(cache_root: Path) -> None:
+    try:
+        files = [path for path in cache_root.rglob("*.jpg") if path.is_file()]
+        entries = sorted(
+            ((path.stat().st_mtime_ns, path.stat().st_size, path) for path in files),
+            reverse=True,
+        )
+        total = sum(size for _, size, _ in entries)
+        for _, size, path in reversed(entries):
+            if total <= _THUMB_CACHE_LIMIT:
+                break
+            path.unlink(missing_ok=True)
+            total -= size
+    except OSError:
+        logger.debug("Unable to prune web thumbnail cache", exc_info=True)
+
+
+def _thumbnail(path: Path, proto: str, attachment_id: str, width: int) -> Path | None:
+    if not _is_thumbnail_candidate(path, proto, attachment_id):
+        return None
+
+    from PIL import Image
+
+    thumb_dir = _web_thumb_dir(proto)
+    digest = hashlib.sha1(
+        f"{path}|{path.stat().st_mtime_ns}|{width}".encode(), usedforsecurity=False
+    ).hexdigest()
+    thumb = thumb_dir / f"{digest}.jpg"
+    with _thumb_lock(thumb):
+        if thumb.exists():
+            try:
+                thumb.touch()
+            except OSError:
+                pass
+            return thumb
+        tmp = thumb.with_suffix(".tmp")
+        try:
+            thumb_dir.mkdir(parents=True, exist_ok=True)
+            with Image.open(path) as image:
+                if image.format == "GIF" or (
+                    image.format == "WEBP" and getattr(image, "is_animated", False)
+                ):
+                    return None
+                image.draft("RGB", (width, width))
+                with image.convert("RGB") as converted:
+                    converted.thumbnail((width, width), Image.BILINEAR)
+                    converted.save(tmp, "JPEG", quality=78, optimize=True)
+            tmp.replace(thumb)
+            _prune_thumb_cache(thumb_dir.parent)
+            return thumb
+        except (OSError, ValueError):
+            tmp.unlink(missing_ok=True)
+            logger.debug("Unable to generate web thumbnail for %s", path, exc_info=True)
+            return None
 
 
 def create_api_router() -> Any:
@@ -446,6 +560,7 @@ def create_api_router() -> Any:
         request: Request,
         proto: Literal["signal", "whatsapp", "telegram"],
         attachment_id: str,
+        w: int | None = None,
     ) -> Any:
         manager = request.app.state.manager
         root = _allowed_media_root(manager, proto)
@@ -475,6 +590,14 @@ def create_api_router() -> Any:
             attachment_id,
             path,
         )
+        if w in _THUMB_WIDTHS:
+            thumb = _thumbnail(path, proto, attachment_id, w)
+            if thumb is not None:
+                return FileResponse(
+                    thumb,
+                    media_type="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=31536000, immutable"},
+                )
         return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
 
     return router
