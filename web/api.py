@@ -469,7 +469,7 @@ def create_api_router() -> Any:
                 path,
             )
             raise HTTPException(status_code=404)
-        logger.debug(
+        logger.info(
             "web media ok proto=%s attachment_id=%s path=%s",
             proto,
             attachment_id,
