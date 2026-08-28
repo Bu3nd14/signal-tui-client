@@ -896,9 +896,7 @@ def test_migrate_legacy_media_dir(tmp_path, monkeypatch):
     import backend
     from backends import telegram as tg
 
-    monkeypatch.setattr(
-        tg.tempfile, "gettempdir", lambda: str(tmp_path / "oldtmp")
-    )
+    monkeypatch.setattr(tg.tempfile, "gettempdir", lambda: str(tmp_path / "oldtmp"))
     monkeypatch.setattr(backend, "CACHE_DIR", tmp_path / "share")
     monkeypatch.setattr(backend, "DB_FILE", str(tmp_path / "db.sqlite"))
 

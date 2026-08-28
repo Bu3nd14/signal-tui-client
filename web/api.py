@@ -290,9 +290,7 @@ def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
     _IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 
     def _media_url(value: str) -> str:
-        encoded = "/".join(
-            url_quote(segment, safe="") for segment in value.split("/")
-        )
+        encoded = "/".join(url_quote(segment, safe="") for segment in value.split("/"))
         return f"/api/media/{proto}/{encoded}?w=96"
 
     path = row["quote_attachment_path"]
@@ -310,8 +308,7 @@ def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
     quote_attachment_id = row["quote_attachment_id"]
     quote_content_type = (row["quote_content_type"] or "").lower()
     is_image = quote_content_type.startswith("image/") or (
-        not quote_content_type
-        and str(quote_attachment_id).lower().endswith(_IMAGE_EXT)
+        not quote_content_type and str(quote_attachment_id).lower().endswith(_IMAGE_EXT)
     )
     if quote_attachment_id and is_image:
         return _media_url(str(quote_attachment_id))
@@ -776,11 +773,19 @@ def create_api_router() -> Any:
         proto: Literal["signal", "whatsapp", "telegram"], contact_id: str
     ) -> list[dict[str, Any]]:
         result = _messages(proto, contact_id)
-        quotes = [m for m in result if m.get("quote_attachment_id") or m.get("quote_thumb_url")]
+        quotes = [
+            m
+            for m in result
+            if m.get("quote_attachment_id") or m.get("quote_thumb_url")
+        ]
         thumbs = [m for m in result if m.get("quote_thumb_url")]
         logger.info(
             "web messages proto=%s contact=%s total=%d quotes=%d thumb_urls=%d",
-            proto, contact_id, len(result), len(quotes), len(thumbs),
+            proto,
+            contact_id,
+            len(result),
+            len(quotes),
+            len(thumbs),
         )
         return result
 

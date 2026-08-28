@@ -158,9 +158,13 @@ def _migrate_legacy_media_dir() -> None:
                 for column in columns:
                     for old in old_prefixes:
                         connection.execute(
-                            "UPDATE messages SET " + column + " = replace("
-                            + column + ", ?, ?) WHERE protocol = 'telegram' AND "
-                            + column + " LIKE ?",
+                            "UPDATE messages SET "
+                            + column
+                            + " = replace("
+                            + column
+                            + ", ?, ?) WHERE protocol = 'telegram' AND "
+                            + column
+                            + " LIKE ?",
                             (old, new_prefix, old + "%"),
                         )
                 connection.commit()
