@@ -98,6 +98,7 @@ h2 { font-size: 1.05rem; }
   scrollbar-width: thin;
 }
 .protocol-tab {
+  position: relative;
   flex: none;
   padding: 6px 10px;
   border: 1px solid var(--line);
@@ -107,6 +108,18 @@ h2 { font-size: 1.05rem; }
   font-size: .76rem;
   cursor: pointer;
 }
+.unread-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ff3b30;
+  border: 2px solid var(--bg);
+  box-sizing: content-box;
+}
+.protocol-tab .unread-dot[hidden] { display: none; }
 .sidebar-search { padding: 10px 12px 10px; flex: none; }
 .sidebar-search input {
   width: 100%;

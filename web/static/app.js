@@ -158,6 +158,15 @@ function renderContacts() {
     const active = tab.dataset.protocol === state.protocolFilter;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
+    const dot = tab.querySelector(".unread-dot");
+    if (dot) {
+      const total = state.contacts
+        .filter((contact) => contact.protocol === tab.dataset.protocol)
+        .reduce((sum, contact) => sum + Number(contact.unread || 0), 0);
+      // Pallino solo sui backend NON selezionati con non letti (quello attivo
+      // ha già i badge nella lista).
+      dot.hidden = !(total > 0 && tab.dataset.protocol !== state.protocolFilter);
+    }
   }
   elements.contactStatus.textContent = contacts.length
     ? ""
