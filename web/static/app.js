@@ -21,6 +21,7 @@ const state = {
   mediaLoads: new Map(),
   mediaFailures: new Set(),
   objectUrls: new Set(),
+  pinnedUrls: new Set(),
   modalObjectUrl: null,
   mediaCache: new Map(),
   messages: [],
@@ -270,7 +271,7 @@ function pruneOrphanObjectUrls() {
   const cachedUrls = new Set(state.mediaCache.values());
   const optimisticUrls = new Set(state.optimistic.map((item) => item.localPreviewUrl).filter(Boolean));
   for (const url of state.objectUrls) {
-    if (cachedUrls.has(url) || optimisticUrls.has(url) || url === state.modalObjectUrl) continue;
+    if (cachedUrls.has(url) || optimisticUrls.has(url) || state.pinnedUrls.has(url) || url === state.modalObjectUrl) continue;
     URL.revokeObjectURL(url);
     state.objectUrls.delete(url);
   }
@@ -357,6 +358,7 @@ function mediaObserver() {
   if (!state.mediaObserver) {
     state.mediaObserver = new window.IntersectionObserver((entries, observer) => {
       for (const entry of entries) {
+        console.debug("[web] observer entry", { cls: entry.target.className, intersecting: entry.isIntersecting, hasLoad: !!entry.target._loadMedia });
         if (!entry.isIntersecting) continue;
         observer.unobserve(entry.target);
         entry.target._loadMedia?.();
@@ -608,28 +610,58 @@ function startReply(item) {
   elements.messageInput.focus();
 }
 
-function quoteThumb(item) {
+function remoteLog(tag, data) {
+  console.debug(`[web] ${tag}`, data);
+  try {
+    fetch("/api/log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.token}` },
+      body: JSON.stringify({ message: `${tag} ${JSON.stringify(data ?? "")}` }),
+    }).catch(() => {});
+  } catch {
+    /* noop */
+  }
+}
+
+function fetchQuoteThumb(url, onOk, onFail) {
+  // Fetch dedicato per le miniature quote: il blob viene PINNATO (mai
+  // evittato dalla LRU né revocato da pruneOrphanObjectUrls). Passare dalla
+  // mediaCache farebbe revocare il blob quando la chat carica tante immagini
+  // (LRU 50) → img quote invisibili (src verso URL revocato).
+  const controller = new AbortController();
+  state.mediaRequests.add(controller);
+  apiFetch(url, { signal: controller.signal })
+    .then((response) => response.blob())
+    .then((blob) => {
+      const objectUrl = URL.createObjectURL(blob);
+      state.objectUrls.add(objectUrl);
+      state.pinnedUrls.add(objectUrl);
+      onOk(objectUrl);
+    })
+    .catch((error) => {
+      if (error.name !== "AbortError") onFail();
+    })
+    .finally(() => state.mediaRequests.delete(controller));
+}
+
+function quoteThumb(item, onError) {
   if (!item.quote_thumb_url) return null;
   const image = document.createElement("img");
   image.className = "message-quote-thumb";
   image.alt = item.quote_text || item.quote_message || "Miniatura citazione";
-  image.setAttribute("loading", "lazy");
-  image.addEventListener("error", () => image.remove());
-  const url = item.quote_thumb_url;
-  const key = `quote:${url}`;
-  const load = () => {
-    fetchImage(url, key, item.direction).then((src) => {
-      if (src) image.src = src;
-      else image.remove();
-    }, () => image.remove());
+  // Niente loading="lazy": interferisce con lo src blob dinamico su Safari
+  // (la miniatura è piccola e già eager, il lazy nativo non serve).
+  const fail = () => {
+    image.remove();
+    onError?.();
   };
-  const observer = mediaObserver();
-  if (observer) {
-    image._loadMedia = load;
-    observer.observe(image);
-  } else {
-    load();
-  }
+  image.addEventListener("error", fail);
+  const url = item.quote_thumb_url;
+  // Caricamento immediato (eager): la miniatura è piccola (96px), il lazy
+  // loading non serve e l'IntersectionObserver si era rivelato inaffidabile.
+  fetchQuoteThumb(url, (src) => {
+    image.src = src;
+  }, fail);
   return image;
 }
 
@@ -638,28 +670,29 @@ function appendRenderedQuote(bubble, item) {
   if (quoteText == null && item.quote_timestamp == null && item.quote_author == null) return;
   const quote = document.createElement("div");
   quote.className = "message-quote";
-  const thumb = quoteThumb(item);
-  if (thumb) {
-    quote.className = "message-quote has-thumb";
-    quote.append(thumb);
-  }
   // Con la miniatura e senza caption reale mostriamo SOLO la miniatura
   // (niente autore né placeholder "Messaggio"/"🖼️ Immagine": ridondanti).
   // La caption reale (o l'assenza di miniatura) mantiene autore + testo.
+  // Se la miniatura fallisce a caricare, il body torna visibile (fallback).
+  const body = document.createElement("div");
+  body.className = "message-quote-body";
+  const author = document.createElement("strong");
+  author.textContent = item.quote_author || "Messaggio citato";
+  body.append(author);
   const hasRealCaption = Boolean(quoteText) && !item.quote_media_placeholder;
-  if (!thumb || hasRealCaption) {
-    const body = document.createElement("div");
-    body.className = "message-quote-body";
-    const author = document.createElement("strong");
-    author.textContent = item.quote_author || "Messaggio citato";
-    body.append(author);
-    if (!item.quote_media_placeholder || !thumb) {
-      const text = document.createElement("span");
-      text.textContent = quoteText || "Messaggio";
-      body.append(text);
-    }
-    quote.append(body);
+  let thumb = null;
+  thumb = quoteThumb(item, () => { body.hidden = false; });
+  if (thumb) {
+    quote.className = "message-quote has-thumb";
+    quote.append(thumb);
+    if (!hasRealCaption) body.hidden = true;
   }
+  if (!item.quote_media_placeholder || !thumb) {
+    const text = document.createElement("span");
+    text.textContent = quoteText || "Messaggio";
+    body.append(text);
+  }
+  quote.append(body);
   bubble.append(quote);
 }
 

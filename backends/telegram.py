@@ -17,6 +17,7 @@ import asyncio
 import logging
 import queue
 import shutil
+import sqlite3
 import tempfile
 import threading
 import time
@@ -99,8 +100,78 @@ def _tg_quote_text_from_cached(target: dict) -> str | None:
 
 
 def _media_dir() -> Path:
-    """Return the Telegram media cache directory (system temp)."""
-    return Path(tempfile.gettempdir()) / "telegram-media"
+    """Return the Telegram media cache directory (persistent, app-local).
+
+    Storicamente i media Telegram vivevano in ``/tmp/telegram-media``
+    (volatili: sparivano a ogni riavvio del sistema). Dal 28/08/2026 la
+    directory è persistente sotto ``CACHE_DIR``; ``_migrate_legacy_media_dir``
+    sposta i file già scaricati e aggiorna i riferimenti nel DB.
+    """
+    from backend import CACHE_DIR
+
+    return Path(CACHE_DIR) / "telegram-media"
+
+
+def _migrate_legacy_media_dir() -> None:
+    """One-shot best-effort: media Telegram da /tmp → CACHE_DIR persistente.
+
+    Sposta i file da ``<tmp>/telegram-media`` (se esiste) nel nuovo percorso
+    e riscrive i riferimenti nel DB (``attachment_id``, ``quote_attachment_id``,
+    ``quote_attachment_path``) che puntano al vecchio prefisso. Non solleva
+    mai: in caso di errore logga in debug e prosegue (i file restano dove sono).
+    """
+    from backend import CACHE_DIR, DB_FILE
+    from backend.db import _DB_LOCK
+
+    new_dir = Path(CACHE_DIR) / "telegram-media"
+    old_dir = Path(tempfile.gettempdir()) / "telegram-media"
+
+    moved = False
+    if old_dir.is_dir():
+        try:
+            new_dir.mkdir(parents=True, exist_ok=True)
+            for item in old_dir.iterdir():
+                try:
+                    shutil.move(str(item), str(new_dir / item.name))
+                except OSError:
+                    continue
+            try:
+                old_dir.rmdir()  # rimuove la dir se ormai vuota
+            except OSError:
+                pass
+            moved = True
+        except OSError:
+            logger.debug("Telegram media migration failed", exc_info=True)
+    if not moved:
+        return
+
+    old_prefixes = {str(old_dir)}
+    generic = "/tmp/telegram-media"
+    if generic != str(old_dir):
+        old_prefixes.add(generic)
+    new_prefix = str(new_dir)
+    columns = ("attachment_id", "quote_attachment_id", "quote_attachment_path")
+    try:
+        with _DB_LOCK:
+            connection = sqlite3.connect(DB_FILE)
+            try:
+                for column in columns:
+                    for old in old_prefixes:
+                        connection.execute(
+                            "UPDATE messages SET "
+                            + column
+                            + " = replace("
+                            + column
+                            + ", ?, ?) WHERE protocol = 'telegram' AND "
+                            + column
+                            + " LIKE ?",
+                            (old, new_prefix, old + "%"),
+                        )
+                connection.commit()
+            finally:
+                connection.close()
+    except sqlite3.Error:
+        logger.debug("Telegram media DB migration failed", exc_info=True)
 
 
 # ─── TelegramBackend ──────────────────────────────────────────────────────────
@@ -268,6 +339,8 @@ class TelegramBackend(ChatBackend):
         # the same session file: two concurrent clients corrupt the update
         # state (pts/qts) and break live message delivery.
         self.disconnect_sync()
+
+        _migrate_legacy_media_dir()
 
         self.cache = self._load_protocol_cache()
 
