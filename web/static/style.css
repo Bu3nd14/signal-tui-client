@@ -260,6 +260,7 @@ h2 { font-size: 1.05rem; }
   cursor: pointer;
 }
 .message.out .message-reply { right: auto; left: -38px; }
+.message.in .message-reply { top: 50%; }
 .message:hover .message-reply, .message:focus-within .message-reply, .message-reply:focus-visible { opacity: 1; }
 .message-edit {
   position: absolute;
