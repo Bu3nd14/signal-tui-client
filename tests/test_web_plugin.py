@@ -983,6 +983,7 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
             "quote_attachment_id",
             "quote_content_type",
             "quote_thumb_url",
+            "quote_media_placeholder",
             "status",
             "read",
             "edited",

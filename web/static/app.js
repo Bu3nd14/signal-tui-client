@@ -260,6 +260,10 @@ function abortMediaRequests() {
   state.mediaRequests.clear();
   state.mediaLoads.clear();
   state.mediaObserver?.disconnect();
+  // Un IntersectionObserver disconnesso non osserva piu' nulla: azzerandolo
+  // il prossimo mediaObserver() ne crea uno nuovo (le immagini lazy e le
+  // miniature quote al rientro nella chat si ricaricano).
+  state.mediaObserver = null;
 }
 
 function pruneOrphanObjectUrls() {
@@ -598,6 +602,7 @@ function startReply(item) {
     isImage: Boolean(item.attachment?.type?.toLowerCase().startsWith("image/")),
     contentType: item.attachment?.type,
     attachmentId: item.attachment?.attachment_id,
+    caption: item.text || "",
   };
   updateReplyBanner();
   elements.messageInput.focus();
@@ -638,14 +643,23 @@ function appendRenderedQuote(bubble, item) {
     quote.className = "message-quote has-thumb";
     quote.append(thumb);
   }
-  const body = document.createElement("div");
-  body.className = "message-quote-body";
-  const author = document.createElement("strong");
-  author.textContent = item.quote_author || "Messaggio citato";
-  const text = document.createElement("span");
-  text.textContent = quoteText || "Messaggio";
-  body.append(author, text);
-  quote.append(body);
+  // Con la miniatura e senza caption reale mostriamo SOLO la miniatura
+  // (niente autore né placeholder "Messaggio"/"🖼️ Immagine": ridondanti).
+  // La caption reale (o l'assenza di miniatura) mantiene autore + testo.
+  const hasRealCaption = Boolean(quoteText) && !item.quote_media_placeholder;
+  if (!thumb || hasRealCaption) {
+    const body = document.createElement("div");
+    body.className = "message-quote-body";
+    const author = document.createElement("strong");
+    author.textContent = item.quote_author || "Messaggio citato";
+    body.append(author);
+    if (!item.quote_media_placeholder || !thumb) {
+      const text = document.createElement("span");
+      text.textContent = quoteText || "Messaggio";
+      body.append(text);
+    }
+    quote.append(body);
+  }
   bubble.append(quote);
 }
 
@@ -1276,6 +1290,14 @@ async function submitMessage() {
     if (reply.isImage && reply.attachmentId) {
       const quoteAttachmentId = String(reply.attachmentId).split("/").map(encodeURIComponent).join("/");
       optimistic.quote_thumb_url = `/api/media/${active.protocol}/${quoteAttachmentId}?w=96`;
+      // Senza caption reale la bolla optimistic mostra SOLO la miniatura
+      // (come il messaggio confermato): evita il nome file accanto alla
+      // thumb e il flash "testo che sparisce" alla reconciliation.
+      optimistic.quote_media_placeholder = !reply.caption;
+      if (!reply.caption) {
+        optimistic.quote_text = "";
+        optimistic.quote_message = "";
+      }
     }
   }
   if (attachment) {
