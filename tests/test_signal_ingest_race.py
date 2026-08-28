@@ -107,8 +107,7 @@ def test_signal_quote_timestamp_extraction():
 
     assert _signal_quote_timestamp({"id": "1787948503599"}) == 1787948503599
     assert (
-        _signal_quote_timestamp({"targetSentTimestamp": 1787948503599})
-        == 1787948503599
+        _signal_quote_timestamp({"targetSentTimestamp": 1787948503599}) == 1787948503599
     )
     assert _signal_quote_timestamp({"targetSentTimestamp": "1787948503599"}) == (
         1787948503599

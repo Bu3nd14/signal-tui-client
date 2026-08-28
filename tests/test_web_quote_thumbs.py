@@ -330,9 +330,7 @@ def test_quote_filename_fallback_ignores_unknown_names_and_future():
 
     assert _quoted_image_by_filename("signal", "alice", "solo testo", 2000) is None
     assert (
-        _quoted_image_by_filename(
-            "signal", "alice", "IMG_1303.jpg — 🖼️ Immagine", 2000
-        )
+        _quoted_image_by_filename("signal", "alice", "IMG_1303.jpg — 🖼️ Immagine", 2000)
         is None
     )
 

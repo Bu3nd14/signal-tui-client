@@ -787,7 +787,8 @@ class ChatViewMixin:
         return str(row[0])
 
     def _quoted_attachment_id_from_message_id(
-        self, widget: QuoteWidget,
+        self,
+        widget: QuoteWidget,
     ) -> str | None:
         """Risolve l'immagine quotata per ``msg_id`` (Telegram/WhatsApp).
 
@@ -832,7 +833,8 @@ class ChatViewMixin:
         return str(row[0])
 
     def _quoted_attachment_id_from_filename(
-        self, widget: QuoteWidget,
+        self,
+        widget: QuoteWidget,
     ) -> str | None:
         """Risolve l'immagine quotata per nome file (quote senza metadati).
 
