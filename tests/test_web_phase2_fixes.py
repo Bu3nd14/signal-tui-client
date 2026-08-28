@@ -593,6 +593,7 @@ globalThis.loadMessages = () => {
   assert.equal(controller.aborted, true);
   assert.equal(state.mediaLoads.size, 0);
 };
+globalThis.markRead = () => {};
 vm.runInThisContext(app.slice(mediaStart, mediaEnd));
 vm.runInThisContext(app.slice(openStart, openEnd));
 openThread({ id: "new", protocol: "signal", display_name: "New" });
