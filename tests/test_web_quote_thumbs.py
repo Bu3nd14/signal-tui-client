@@ -370,3 +370,43 @@ def test_quote_thumb_resolved_by_reply_to_message_id_telegram(web_client):
     assert quoting["quote_thumb_url"] == (
         "/api/media/telegram/tgref%3Afolder/photo%20id?w=96"
     )
+
+
+def test_quote_thumb_whatsapp_prefixed_msg_id(web_client):
+    """WhatsApp: reply_to_message_id è l'id senza prefisso, ma il msg_id del
+    messaggio quotato è 'true_<jid>_<id>' — il match deve accettare il suffisso."""
+    client, db_file, _ = web_client
+    _insert_message(
+        db_file,
+        protocol="whatsapp",
+        contact_number="189025889575055@lid",
+        timestamp=1000,
+        is_mine=1,
+        msg_id="true_189025889575055@lid_3EB0795971ED487CC7627F",
+        attachment_id="sent-8a44cb8499554832aa70afa2e0d998ca.jpg",
+        content_type="image/jpeg",
+    )
+    _insert_message(
+        db_file,
+        protocol="whatsapp",
+        contact_number="189025889575055@lid",
+        timestamp=2000,
+        is_mine=0,
+        msg_id="false_189025889575055@lid_XXXX",
+        text="Davvero bella",
+        quote_text="🖼️ Immagine",
+        quote_timestamp=None,
+        quote_content_type=None,
+        reply_to_message_id="3EB0795971ED487CC7627F",
+    )
+
+    response = client.get(
+        "/api/messages?proto=whatsapp&contact_id=189025889575055@lid", headers=AUTH
+    )
+
+    assert response.status_code == 200
+    messages = response.json()
+    quoting = next(m for m in messages if m["text"] == "Davvero bella")
+    assert quoting["quote_thumb_url"] == (
+        "/api/media/whatsapp/sent-8a44cb8499554832aa70afa2e0d998ca.jpg?w=96"
+    )
