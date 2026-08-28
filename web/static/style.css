@@ -228,7 +228,7 @@ h2 { font-size: 1.05rem; }
 .message { display: flex; flex-direction: column; max-width: min(76%, 680px); align-self: flex-start; }
 .message.out { align-self: flex-end; align-items: flex-end; }
 .message { position: relative; }
-.bubble { min-width: 90px; padding: 9px 11px 7px; border-radius: 6px 16px 16px; background: var(--incoming); box-shadow: 0 2px 8px #0003; }
+.bubble { min-width: 0; padding: 9px 11px 7px; border-radius: 6px 16px 16px; background: var(--incoming); box-shadow: 0 2px 8px #0003; }
 .message.out .bubble { border-radius: 16px 6px 16px 16px; background: var(--outgoing); }
 .message-text { line-height: 1.42; overflow-wrap: anywhere; white-space: pre-wrap; }
 .message-time { display: block; margin-top: 5px; color: #c3cedaaa; font-size: .66rem; text-align: right; }
@@ -288,8 +288,11 @@ h2 { font-size: 1.05rem; }
 .message-quote-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .message-quote-body[hidden] { display: none; }
 .message-quote-thumb { width: 48px; height: 48px; object-fit: cover; border-radius: 3px; flex: none; background: var(--panel-raised); }
-.message-quote strong, .message-quote span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.message-quote strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.message-quote span { overflow-wrap: anywhere; }
 .message-quote strong { color: #b8d0ff; }
+
+.message-sender { display: block; margin-bottom: 2px; color: #daa520; font-size: .72rem; font-weight: 700; letter-spacing: .01em; }
 
 .composer-shell {
   position: relative;

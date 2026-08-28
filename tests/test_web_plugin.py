@@ -968,13 +968,14 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
     )
     assert response.status_code == 200
     body = response.json()
-    assert [item["text"] for item in body] == ["", "second tie", "later"]
+    assert [item["text"] for item in body] == ["first tie", "second tie", "later"]
     assert all(
         set(item)
         == {
             "id",
             "text",
             "direction",
+            "sender",
             "timestamp",
             "attachment",
             "quote_text",
@@ -1095,7 +1096,7 @@ def test_messages_exposes_persisted_quote_fields(web_client):
     } == {
         "quote_text": "quoted",
         "quote_timestamp": 10,
-        "quote_author": "alice",
+        "quote_author": "",  # chat 1:1: autore quote ridondante (togliamo i @lid)
     }
 
 

@@ -719,11 +719,11 @@ class ChatViewMixin:
             self.call_from_thread(self._finish_quote_thumbnail, widget, png)
 
     def _quoted_attachment_id_from_chat(self, widget: QuoteWidget) -> str | None:
-        """Attachment id dell'immagine quotata (stessa chat, ±2s su timestamp).
+        """Attachment id dell'immagine quotata (stessa chat).
 
-        Fallback per le reply inviate senza metadati quote persistiti:
-        risolve il messaggio quotato (``quote_timestamp``) e ne riusa
-        l'attachment — identico al fallback della web UI.
+        Match PRIMA esatto sul timestamp: evita falsi positivi quando messaggi
+        vicini (±2s) convivono (es. un'immagine appena inviata e la reply).
+        La finestra ±2s solo se il timestamp esatto non esiste affatto (drift).
         """
         if not (widget.quote_timestamp and widget.contact_key and widget.protocol):
             return None
@@ -733,6 +733,11 @@ class ChatViewMixin:
         from backend.db import _DB_LOCK
 
         ts = widget.quote_timestamp
+        image_clause = (
+            "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
+            "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
+            "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
+        )
         try:
             with _DB_LOCK:
                 connection = sqlite3.connect(backend.DB_FILE)
@@ -740,13 +745,29 @@ class ChatViewMixin:
                     row = connection.execute(
                         "SELECT attachment_id FROM messages "
                         "WHERE protocol = ? AND contact_number = ? "
-                        "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
-                        "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-                        "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-                        "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp') "
-                        "ORDER BY ABS(timestamp - ?) LIMIT 1",
-                        (widget.protocol, widget.contact_key, ts, ts),
+                        "AND timestamp = ? AND attachment_id IS NOT NULL "
+                        + image_clause
+                        + " LIMIT 1",
+                        (widget.protocol, widget.contact_key, ts),
                     ).fetchone()
+                    if row is None:
+                        exists = connection.execute(
+                            "SELECT 1 FROM messages WHERE protocol = ? AND contact_number = ? "
+                            "AND timestamp = ? LIMIT 1",
+                            (widget.protocol, widget.contact_key, ts),
+                        ).fetchone()
+                        if exists:
+                            # Il messaggio quotato esiste ma non è un'immagine:
+                            # niente miniatura (mai prendere messaggi vicini).
+                            return None
+                        row = connection.execute(
+                            "SELECT attachment_id FROM messages "
+                            "WHERE protocol = ? AND contact_number = ? "
+                            "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
+                            + image_clause
+                            + " ORDER BY ABS(timestamp - ?) LIMIT 1",
+                            (widget.protocol, widget.contact_key, ts, ts),
+                        ).fetchone()
                 finally:
                     connection.close()
         except (sqlite3.Error, OSError):
