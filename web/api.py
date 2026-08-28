@@ -582,6 +582,28 @@ def create_api_router() -> Any:
     ) -> list[dict[str, Any]]:
         return _messages(proto, contact_id)
 
+    @router.post("/messages/read")
+    async def messages_read(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, str]:
+        proto = str(payload.get("protocol") or "").strip()
+        contact_id = str(payload.get("contact_id") or "").strip()
+        if proto not in ("signal", "whatsapp", "telegram") or not contact_id:
+            raise HTTPException(status_code=400, detail="Invalid request")
+        manager = request.app.state.manager
+        try:
+            # Come il TUI: mark-read del backend (remoto, es. WAHA) + persistenza
+            # read=1 in SQLite (da cui la web UI calcola i badge non letti).
+            await manager.mark_read(proto, contact_id)
+        except Exception:
+            logger.warning(
+                "web mark-read failed proto=%s contact_id=%s",
+                proto,
+                contact_id,
+                exc_info=True,
+            )
+        return {"status": "ok"}
+
     @router.get("/media/{proto}/{attachment_id:path}")
     def media(
         request: Request,

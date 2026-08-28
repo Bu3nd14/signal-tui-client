@@ -26,6 +26,7 @@ const state = {
   messages: [],
   optimistic: [],
   optimisticSequence: 0,
+  readTimers: new Map(),
   sending: false,
   stagedAttachment: null,
   replyTo: null,
@@ -158,6 +159,15 @@ function renderContacts() {
     const active = tab.dataset.protocol === state.protocolFilter;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
+    const dot = tab.querySelector(".unread-dot");
+    if (dot) {
+      const total = state.contacts
+        .filter((contact) => contact.protocol === tab.dataset.protocol)
+        .reduce((sum, contact) => sum + Number(contact.unread || 0), 0);
+      // Pallino solo sui backend NON selezionati con non letti (quello attivo
+      // ha già i badge nella lista).
+      dot.hidden = !(total > 0 && tab.dataset.protocol !== state.protocolFilter);
+    }
   }
   elements.contactStatus.textContent = contacts.length
     ? ""
@@ -706,6 +716,29 @@ async function loadMessages() {
   }
 }
 
+function markRead(protocol, contactId) {
+  const key = `${protocol}:${contactId}`;
+  // Persistenza DB immediata (i badge tornano azzerati dopo un refresh).
+  apiFetch("/api/messages/read", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ protocol, contact_id: contactId }),
+  }).catch((error) => {
+    if (error.message !== "unauthorized") console.debug("[web] mark-read failed", error);
+  });
+  // Il badge visivo resta per 3s (utile quando il contatto si apre da solo
+  // selezionando il backend: il tempo di accorgersi dei non letti), poi sparisce.
+  if (state.readTimers.has(key)) clearTimeout(state.readTimers.get(key));
+  state.readTimers.set(key, setTimeout(() => {
+    state.readTimers.delete(key);
+    const contact = state.contacts.find((c) => c.protocol === protocol && c.id === contactId);
+    if (contact && Number(contact.unread) > 0) {
+      contact.unread = 0;
+      renderContacts();
+    }
+  }, 3000));
+}
+
 function openThread(contact) {
   closeEmojiPicker({ focus: false });
   cancelReply();
@@ -716,6 +749,7 @@ function openThread(contact) {
   elements.composerShell.hidden = false;
   state.messages = [];
   renderContacts();
+  markRead(contact.protocol, contact.id);
   elements.messages.replaceChildren();
   const loading = document.createElement("div");
   loading.className = "empty-state";
@@ -1058,7 +1092,10 @@ function connectSocket() {
       if (attachmentId != null) state.mediaFailures.delete(String(attachmentId));
       console.debug("[web] ws push", { protocol: update.payload.protocol, contact_id: update.payload.contact_id, id: update.payload?.id });
       loadContacts({ quiet: true });
-      if (state.active?.id === String(update.payload.contact_id) && state.active?.protocol === update.payload.protocol) loadMessages();
+      if (state.active?.id === String(update.payload.contact_id) && state.active?.protocol === update.payload.protocol) {
+        loadMessages();
+        markRead(state.active.protocol, state.active.id);
+      }
     } catch {
       showError("Aggiornamento live non valido ricevuto dal server.");
     }
