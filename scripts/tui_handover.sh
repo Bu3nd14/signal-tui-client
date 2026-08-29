@@ -16,10 +16,22 @@
 #   HZ_USER   — utente SSH sul server (default root)
 #   Richiede chiave SSH già installata sul server (ssh-copy-id).
 #
+# L'IP può cambiare (es. dopo snapshot/recreate del server): aggiorna il file
+#   ~/.config/signal-tui-handover.conf  contenente  HZ_HOST=<nuovo-ip>
+#   oppure esporta HZ_HOST nella shell. La password NON viene mai usata:
+#   l'accesso avviene solo con la chiave SSH.
+#
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Config opzionale (~/.config/signal-tui-handover.conf) per l'IP che cambia.
+CONF_FILE="${SIGNAL_TUI_HANDOVER_CONF:-$HOME/.config/signal-tui-handover.conf}"
+if [ -f "$CONF_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONF_FILE"
+fi
 
 HZ_HOST="${HZ_HOST:-167.233.140.207}"
 HZ_USER="${HZ_USER:-root}"
