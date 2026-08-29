@@ -1275,6 +1275,56 @@ def test_messages_never_serializes_image_placeholder_text(web_client, protocol):
     assert response.json()[0]["attachment"]["type"] == "image/png"
 
 
+@pytest.mark.parametrize(
+    ("attachment_info", "expected_text"),
+    [
+        ("🖼️ Image", ""),
+        ("🖼️ Immagine", ""),
+        ("🖼️ Photo", ""),
+        ("🎬 Video", ""),
+        ("🎵 Audio", ""),
+        ("🎨 Sticker", ""),
+        ("📎 File", ""),
+        ("Image: IMG_1303.jpg", ""),
+        ("bellissima foto", "bellissima foto"),
+    ],
+)
+def test_messages_attachment_info_exposes_only_real_image_captions(
+    web_client, attachment_info, expected_text
+):
+    client, _, db_file = web_client
+    import sqlite3
+
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            "INSERT INTO messages(protocol, contact_number, text, is_mine, "
+            "timestamp, msg_type, attachment_id, attachment_info, content_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "signal",
+                "alice",
+                "",
+                0,
+                1,
+                "image",
+                "signal-image-id",
+                attachment_info,
+                "image/jpeg",
+            ),
+        )
+
+    response = client.get(
+        "/api/messages",
+        params={"proto": "signal", "contact_id": "alice"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    message = response.json()[0]
+    assert message["text"] == expected_text
+    assert message["attachment"]["name"] == attachment_info
+
+
 def test_web_ui_static_contracts():
     source = Path("web/static/app.js").read_text()
     assert 'elements.cancelReply.addEventListener("click", cancelReply)' in source

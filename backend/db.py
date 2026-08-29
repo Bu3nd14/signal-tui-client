@@ -518,6 +518,10 @@ def _prune_cache(limit: int | None = None, *, now_ms: int | None = None) -> int:
                     conn.execute("VACUUM")
                 except sqlite3.Error:
                     pass  # best-effort: mai bloccare l'uscita
+            if deleted > 0:
+                logger.info("Cache pruned: %d rows removed (limit=%s)", deleted, limit)
+            else:
+                logger.info("Cache prune: no rows removed (limit=%s)", limit)
             return deleted
         finally:
             conn.close()

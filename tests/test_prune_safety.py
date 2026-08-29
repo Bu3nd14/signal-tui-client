@@ -225,6 +225,26 @@ class TestCachePruneSafety:
         assert db._prune_cache(limit=100, now_ms=1_000_000) == 1
         assert any(sql.strip().upper() == "VACUUM" for sql in statements)
 
+    @pytest.mark.parametrize(
+        ("row_count", "expected_deleted", "expected_log"),
+        [
+            (100, 0, "Cache prune: no rows removed (limit=100)"),
+            (101, 1, "Cache pruned: 1 rows removed (limit=100)"),
+        ],
+    )
+    def test_prune_logs_outcome(
+        self, prune_db, caplog, row_count, expected_deleted, expected_log
+    ):
+        _insert_rows(
+            prune_db, [_message("signal", "A", i) for i in range(row_count)]
+        )
+
+        with caplog.at_level("INFO", logger=db.logger.name):
+            deleted = db._prune_cache(limit=100, now_ms=1_000_000)
+
+        assert deleted == expected_deleted
+        assert expected_log in caplog.messages
+
     def test_vacuum_failure_is_non_fatal(self, prune_db, monkeypatch):
         _insert_rows(prune_db, [_message("signal", "A", i) for i in range(101)])
         original_connect = db.sqlite3.connect
