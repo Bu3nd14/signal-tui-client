@@ -76,6 +76,7 @@ La colonna **Correlazione review** riporta la sigla della review architetturale 
 | #69 | `TelegramBackend.mark_read` no-op: `read=1` mai persistito (badge non letti mai azzerati) | Alti | RISOLTO | — |
 | #70 | Lazy rendering assente in TUI: chat con molte immagini enormi montate inline → lentezza severa | Medi | APERTO | — |
 | #71 | `install.sh` non installa le dipendenze opzionali della Web UI | Risolt | RISOLTO | — |
+| #72 | Media Telegram non risolti dopo lo spostamento della cache su un'altra macchina (path assoluti nel DB) | Risolt | RISOLTO | — |
 
 ---
 
@@ -250,3 +251,4 @@ Validazione del 25/08/2026 (verifica sul codice `master`, riferimenti file:riga 
 | #29 | Le reply Telegram erano visualizzate ma inviate come messaggi normali | ID Telegram originale propagato e persistito, passato a Telethon come `reply_to`; reply senza ID bloccata esplicitamente senza fallback normale e supporto retry sicuro. |
 | #33 | Uno stream SSE Signal vuoto causava `UnboundLocalError` su `envelope` | Il listener usa un flag `received_any`, distingue la fine vuota dello stream dagli errori interni e conserva il backoff esistente; test di regressione dedicati. |
 | #71 | `install.sh` non installava `requirements-web.txt`, lasciando inutilizzabili gli alias Web UI di default | Le dipendenze Web UI sono installate di default con lo stesso pip del core; `--no-web` consente l'opt-out e il fallimento resta soft. Aggiunti test per default, opt-out, errore soft e help. |
+| #72 | I media Telegram restavano "immagine non disponibile" dopo lo spostamento della cache (`~/.local/share/signal-tui-client`) su un'altra macchina: il DB conteneva `attachment_id` come path assoluto della macchina di origine | `get_attachment_path` (Telegram) risolve ora il file come basename dentro `_media_dir()` quando il path assoluto non esiste più, bloccando path traversal (`..`); il flusso `tgref:` resta invariato. Test di regressione dedicati. |

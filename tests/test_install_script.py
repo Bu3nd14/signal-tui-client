@@ -227,6 +227,8 @@ def test_helpers(tmp_path: Path) -> Path:
 def _run_install(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
     """Copy install.sh into tmp_path and run it with the given args."""
     script = tmp_path / "install.sh"
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(exist_ok=True)
     shutil.copy(INSTALL_SCRIPT, script)
     _make_executable(script)
     return subprocess.run(  # noqa: PLW1510 — return code inspected by each test
@@ -234,6 +236,7 @@ def _run_install(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         cwd=str(tmp_path),
+        env={**os.environ, "HOME": str(fake_home)},
         timeout=60,
     )
 
@@ -487,3 +490,20 @@ class TestWebDependencies:
 
         assert result.returncode == 0
         assert "--no-web" in result.stdout
+
+
+class TestAliasIsolation:
+    def test_install_writes_aliases_only_to_isolated_home(
+        self, tmp_path: Path, fake_path: Path, test_helpers: Path
+    ):
+        real_bashrc = Path.home() / ".bashrc"
+        real_bashrc_before = real_bashrc.read_bytes() if real_bashrc.exists() else None
+
+        result = _run_install(tmp_path, "--skip-signal-cli", "--no-venv")
+
+        assert result.returncode == 0
+        isolated_bashrc = tmp_path / "home" / ".bashrc"
+        assert isolated_bashrc.exists()
+        assert "web-signal-tui-bg" in isolated_bashrc.read_text(encoding="utf-8")
+        real_bashrc_after = real_bashrc.read_bytes() if real_bashrc.exists() else None
+        assert real_bashrc_after == real_bashrc_before
