@@ -77,6 +77,7 @@ A terminal-based (TUI) multi-protocol messaging client built with [Textual](http
 | **Python 3.10+** | Everything | |
 | **Java 25 (JRE)** | Signal | Required by the `signal-cli` JVM build. Without it, Signal will not start. |
 | **signal-cli** (JVM build) in `./bin/` | Signal | Downloaded automatically by `install.sh`; see [Installation](#installation). |
+| **requirements-web.txt** | Web UI (optional) | Installed by default by install.sh (skip with --no-web). Never in requirements.txt by design. |
 | **Docker + Docker Compose** | WhatsApp | Runs the WAHA container. Skip if you only use Signal. |
 | **catimg** | Image rendering | Optional; falls back to text placeholders if missing. On kitty >= 0.20 images render natively, no `catimg` needed — see [Native inline images](#native-inline-images-kitty-graphics-protocol). |
 | **A linked account** | Signal and/or WhatsApp and/or Telegram | Via `link_account.py` / `link_whatsapp.py` or the TUI `Ctrl+L` — see [Device linking](#device-linking). |
@@ -107,6 +108,8 @@ Supported options:
 ./install.sh --update             # update signal-cli to the latest version
 ./install.sh --whatsapp           # start the WAHA Docker container for WhatsApp
 ./install.sh --check-whatsapp     # check WhatsApp prerequisites (Docker, ports, firewall)
+./install.sh --no-web             # skip optional Web UI dependencies
+./install.sh --aliases            # install only the Web UI shell aliases
 ./install.sh --help               # show usage
 ```
 
@@ -590,6 +593,8 @@ Three shell aliases (bash/zsh) launch the optional web reader and manage its lif
 | `web-signal-tui` | Starts the TUI with the web server in the **foreground** on `0.0.0.0:4242` |
 | `web-signal-tui-bg` | Starts the TUI + web server in a **detached tmux session** (background) and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN` |
 | `web-signal-tui-stop` | Cleanly stops the tmux session and removes `/tmp/signal-tui.lock` |
+
+> The web server requires the optional dependencies in requirements-web.txt (installed by default; if you used --no-web: .venv/bin/pip install -r requirements-web.txt). Without them the TUI logs "optional dependencies are missing (web down)" and continues normally.
 
 ### Fast cycle (background + token)
 

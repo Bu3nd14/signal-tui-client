@@ -161,7 +161,17 @@ if [ "$1" = "-c" ]; then
 fi
 if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
     mkdir -p "$3/bin"
-    touch "$3/bin/pip" "$3/bin/python"
+    cat > "$3/bin/pip" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$PIP_ARGS_LOG"
+case "$*" in
+    *requirements-web.txt*)
+        if [ "${PIP_FAIL_WEB:-0}" = "1" ]; then exit 1; fi
+        ;;
+esac
+exit 0
+EOF
+    touch "$3/bin/python"
     chmod +x "$3/bin/pip" "$3/bin/python"
     exit 0
 fi
@@ -187,6 +197,7 @@ exit 0
     _write_stub(fake_bin_dir / "pip3", pip_stub)
 
     # tar is real (needed to extract the fake tarball).
+    monkeypatch.setenv("PIP_ARGS_LOG", str(tmp_path / "pip_args.log"))
     monkeypatch.setenv("PATH", f"{fake_bin_dir}:{os.environ['PATH']}")
     return fake_bin_dir
 
@@ -434,3 +445,45 @@ class TestVenv:
         result = _run_install(tmp_path, "--skip-signal-cli", "--no-venv")
         assert result.returncode == 0
         assert (tmp_path / ".venv").exists() is False
+
+
+class TestWebDependencies:
+    def test_web_deps_installed_by_default(
+        self, tmp_path: Path, fake_path: Path, test_helpers: Path
+    ):
+        result = _run_install(tmp_path, "--skip-signal-cli")
+
+        assert result.returncode == 0
+        pip_args = (tmp_path / "pip_args.log").read_text(encoding="utf-8")
+        assert "requirements.txt" in pip_args
+        assert "requirements-web.txt" in pip_args
+
+    def test_no_web_flag_skips_web_deps(
+        self, tmp_path: Path, fake_path: Path, test_helpers: Path
+    ):
+        result = _run_install(tmp_path, "--skip-signal-cli", "--no-web")
+
+        assert result.returncode == 0
+        pip_args = (tmp_path / "pip_args.log").read_text(encoding="utf-8")
+        assert "requirements.txt" in pip_args
+        assert "requirements-web.txt" not in pip_args
+
+    def test_web_deps_failure_is_soft(
+        self,
+        tmp_path: Path,
+        fake_path: Path,
+        test_helpers: Path,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("PIP_FAIL_WEB", "1")
+
+        result = _run_install(tmp_path, "--skip-signal-cli")
+
+        assert result.returncode == 0
+        assert "[WARN] Dipendenze Web UI non installate" in result.stdout
+
+    def test_help_lists_no_web(self, tmp_path: Path):
+        result = _run_install(tmp_path, "--help")
+
+        assert result.returncode == 0
+        assert "--no-web" in result.stdout

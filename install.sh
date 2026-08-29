@@ -12,6 +12,7 @@
 #   ./install.sh --version 0.14.7    # scarica una versione specifica di signal-cli
 #   ./install.sh --skip-signal-cli   # non scaricare signal-cli (se già presente)
 #   ./install.sh --update            # aggiorna signal-cli all'ultima versione
+#   ./install.sh --no-web           # non installare le dipendenze opzionali della Web UI
 #   ./install.sh --aliases           # installa solo gli alias shell della Web UI
 #   ./install.sh --help              # mostra questo aiuto
 #
@@ -50,6 +51,7 @@ DO_UPDATE=0
 DO_WHATSAPP=0
 DO_CHECK_WHATSAPP=0
 DO_ALIASES_ONLY=0
+DO_WEB=1
 SPECIFIC_VERSION=""
 
 # ─── Parsing argomenti ────────────────────────────────────────────────────────
@@ -67,6 +69,7 @@ Opzioni:
   --update             Aggiorna signal-cli all'ultima versione disponibile
   --whatsapp           Avvia il WhatsApp HTTP API (WAHA) via Docker Compose
   --check-whatsapp     Verifica i prerequisiti WhatsApp (Docker, porte, firewall)
+  --no-web            Non installare le dipendenze opzionali della Web UI (requirements-web.txt)
   --aliases            Installa solo gli alias shell della Web UI
   --help               Mostra questo aiuto
 
@@ -87,6 +90,7 @@ while [ $# -gt 0 ]; do
         --update)           DO_UPDATE=1; shift ;;
         --whatsapp)         DO_WHATSAPP=1; shift ;;
         --check-whatsapp)   DO_CHECK_WHATSAPP=1; shift ;;
+        --no-web)           DO_WEB=0; shift ;;
         --aliases)          DO_ALIASES_ONLY=1; shift ;;
         --version)
             [ $# -lt 2 ] && die "--version richiede un argomento (es. 0.14.7)"
@@ -395,6 +399,12 @@ install_python_deps() {
     info "Installazione delle dipendenze Python (requirements.txt) ..."
     "$python_cmd" -m pip install --upgrade pip >/dev/null 2>&1 || true
     "$pip_cmd" install -r "$PROJECT_DIR/requirements.txt" || die "Installazione delle dipendenze Python fallita."
+
+    if [ "$DO_WEB" -eq 1 ]; then
+        "$pip_cmd" install -r "$PROJECT_DIR/requirements-web.txt" || warn "Dipendenze Web UI non installate; la Web UI resterà disabilitata. Riprovare: $pip_cmd install -r requirements-web.txt"
+    else
+        info "Dipendenze Web UI saltate (--no-web)."
+    fi
 
     if [ "$DO_VENV" -eq 1 ]; then
         ok "Dipendenze installate nel virtualenv. Attivalo con:"
