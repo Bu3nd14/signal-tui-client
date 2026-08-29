@@ -9,6 +9,7 @@ dedup, read receipts and unread counts.  No Textual dependency.
 import logging
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import backend as _backend
@@ -18,7 +19,12 @@ logger = logging.getLogger(__name__)
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 CACHE_FILE = CACHE_DIR / "messages.json"
 DB_FILE = CACHE_DIR / "messages.db"
-CACHE_RETENTION_DAYS = 3
+
+# Il cap non può scendere sotto la finestra di re-fetch massima (50:
+# WhatsAppBackend.resync_history / chat open-chat), altrimenti al boot
+# successivo i messaggi potati verrebbero re-inseriti come nuovi
+# (read=False) gonfiando i badge unread.
+_MIN_PRUNE_LIMIT = 100
 
 # Window (ms) entro cui un'entry id-less può essere considerata l'echo di un
 # messaggio con id reale.  Condivisa tra ``_update_message_id`` (match mirato a
@@ -461,30 +467,58 @@ def _fill_message_quote_fields(
             conn.close()
 
 
-def _prune_cache():
-    """Remove messages older than CACHE_RETENTION_DAYS and limit to 200 per contact."""
+def _prune_cache(limit: int | None = None, *, now_ms: int | None = None) -> int:
+    """Prune the cache on app shutdown to a per-contact message cap.
 
+    Pending/failed rows and guarded id-less rows are protected from deletion.
+    Keeping the cap above the maximum re-fetch window (50 messages) preserves
+    the dedup cycle: a later fetch cannot reinsert pruned messages as unread.
+    """
+    if limit is None:
+        from backends.config import get_message_retention_per_contact
+
+        limit = get_message_retention_per_contact()
+    if not limit or limit <= 0:
+        return 0
+    if limit < _MIN_PRUNE_LIMIT:
+        logging.getLogger("signal-tui").warning(
+            "MESSAGE_RETENTION_PER_CONTACT=%s sotto il minimo %s; forzato a %s",
+            limit,
+            _MIN_PRUNE_LIMIT,
+            _MIN_PRUNE_LIMIT,
+        )
+        limit = _MIN_PRUNE_LIMIT
+
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
     _init_db()
     with _DB_LOCK:
         conn = sqlite3.connect(_backend.DB_FILE)
         try:
-            # Keep only the 200 most recent messages per contact; no time-based
-            # pruning — WhatsApp re-downloads history from WAHA anyway, and
-            # time-based deletion breaks the dedup cycle (old messages are
-            # deleted from DB, then re-inserted as "new" with read=False).
-            # conn.execute("DELETE FROM messages WHERE timestamp < ?", (cutoff,))
-            # Limit to 200 per contact: delete messages beyond the 200 most recent
-            conn.execute("""
-                DELETE FROM messages WHERE id NOT IN (
+            cursor = conn.execute(
+                """
+                DELETE FROM messages WHERE id IN (
                     SELECT id FROM (
                         SELECT id, ROW_NUMBER() OVER (
                             PARTITION BY protocol, contact_number
-                            ORDER BY timestamp DESC
+                            ORDER BY timestamp DESC, rowid DESC
                         ) AS rn FROM messages
-                    ) WHERE rn <= 200
+                        WHERE COALESCE(status, '') NOT IN ('pending', 'failed')
+                          AND ((msg_id IS NOT NULL AND msg_id != '')
+                               OR timestamp < ?)
+                    ) WHERE rn > ?
                 )
-            """)
+                """,
+                (now_ms - _ECHO_MATCH_WINDOW_MS, limit),
+            )
+            deleted = cursor.rowcount
             conn.commit()
+            if deleted > 0:
+                try:
+                    conn.execute("VACUUM")
+                except sqlite3.Error:
+                    pass  # best-effort: mai bloccare l'uscita
+            return deleted
         finally:
             conn.close()
 

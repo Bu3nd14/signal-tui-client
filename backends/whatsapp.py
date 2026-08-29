@@ -1153,12 +1153,6 @@ class WhatsAppBackend(ChatBackend):
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(_fetch_one, targets))
-        # Prune old messages AFTER the resync, so the next startup's cache
-        # still includes old messages (for dedup) and the resync can fill
-        # any gaps without re-inserting them as new.
-        from backend import _prune_cache
-
-        _prune_cache()
         return len(targets)
 
     # ─── Messaging ────────────────────────────────────────────────────

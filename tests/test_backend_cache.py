@@ -16,7 +16,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # We'll test the cache functions by temporarily patching DB_FILE / CACHE_DIR
 from backend import (
-    CACHE_RETENTION_DAYS,
     _add_message_to_cache,
     _load_cache,
     _mark_as_read,
@@ -131,30 +130,34 @@ class TestCacheAddLoad:
 
 
 class TestCachePrune:
-    """✂️ Potatura della cache (messaggi vecchi e limite 200)."""
+    """✂️ Potatura della cache con limite per contatto."""
 
-    def test_prune_old_messages(self, tmp_db):
-        """Messaggi più vecchi di CACHE_RETENTION_DAYS vengono rimossi."""
+    def test_prune_keeps_messages_below_cap(self, tmp_db):
+        """La sola età non elimina righe sotto il cap.
+
+        Le righe id-less recenti sono protette.
+        """
         now_ms = int(time.time() * 1000)
-        cutoff = now_ms - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000
-        old_ts = cutoff - 1000  # un secondo prima del cutoff
+        old_ts = now_ms - 4 * 24 * 60 * 60 * 1000
         recent_ts = now_ms
 
         _add_message_to_cache("+39", "vecchio", False, "Mario", old_ts)
         _add_message_to_cache("+39", "nuovo", False, "Mario", recent_ts)
 
-        _prune_cache()
+        _prune_cache(limit=200)
         pruned = _load_cache()
-        assert len(pruned["+39"]) == 2  # time-based prune disabled, both kept
+        assert len(pruned["+39"]) == 2  # sotto il cap, restano entrambe
         assert pruned["+39"][0]["text"] == "vecchio"  # older msg now first
 
     def test_prune_max_200_messages(self, tmp_db):
         """Limite 200 messaggi per contatto."""
         now_ms = int(time.time() * 1000)
         for i in range(250):
-            _add_message_to_cache("+39", f"msg-{i}", False, "Mario", now_ms + i)
+            _add_message_to_cache(
+                "+39", f"msg-{i}", False, "Mario", now_ms + i, msg_id=str(i)
+            )
 
-        _prune_cache()
+        _prune_cache(limit=200)
         pruned = _load_cache()
         assert len(pruned["+39"]) == 200
         # Verifica che siano gli ultimi 200

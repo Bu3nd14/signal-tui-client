@@ -586,7 +586,7 @@ class SignalTUI(
         self._apply_contact_filter()
         self._sync_status_segments()
 
-    def on_exit(self):
+    def on_exit_app(self):
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
         try:
@@ -603,6 +603,15 @@ class SignalTUI(
             except Exception as _e:
                 logger.debug("Telegram disconnect on exit failed", exc_info=True)
         # No flush needed — SQLite writes are incremental
+        # Prune dello storico (bug #51): a chiusura app, quando nessun altro
+        # evento può arrivare. Best-effort: un errore non deve mai impedire
+        # l'uscita.
+        try:
+            from backend import _prune_cache
+
+            _prune_cache()
+        except Exception:
+            logger.exception("Cache prune on exit failed (non-fatal)")
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Gate the global Ctrl+W / Ctrl+U / Ctrl+A filters while a picker is open.

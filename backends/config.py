@@ -229,6 +229,29 @@ def get_telegram_api_id() -> int:
         return 0
 
 
+def get_message_retention_per_contact() -> int:
+    """Return the per-contact history cap (default ``300``; ``0`` disables it)."""
+    raw = os.environ.get("MESSAGE_RETENTION_PER_CONTACT", "")
+    if raw:
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return 300
+
+    cfg = _load_config()
+    if "message_retention_per_contact" in cfg:
+        try:
+            return int(cfg["message_retention_per_contact"])
+        except (ValueError, TypeError):
+            return 300
+
+    raw = _load_dotenv().get("MESSAGE_RETENTION_PER_CONTACT", "")
+    try:
+        return int(raw) if raw else 300
+    except (ValueError, TypeError):
+        return 300
+
+
 def get_telegram_api_hash() -> str:
     """Read ``TELEGRAM_API_HASH`` from env, config.json, or .env."""
     raw = os.environ.get("TELEGRAM_API_HASH", "")

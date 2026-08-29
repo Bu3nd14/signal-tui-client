@@ -55,7 +55,7 @@ La colonna **Correlazione review** riporta la sigla della review architetturale 
 | #48 | Interfaccia async cerimoniale; `get_pairing_qr` viola Liskov | Medi | APERTO | P2-4 |
 | #49 | Transizione `sent`→`failed` impossibile (rank guard) | Medi | APERTO | P2-6 |
 | #50 | Edit su messaggio mai visto: drop o bolla senza marker edited | Medi | APERTO | P2-7 |
-| #51 | Igiene SQLite: init doppio, dedup full-scan ×3, prune solo WA | Medi | APERTO | P2-8 |
+| #51 | Igiene SQLite: init doppio, dedup full-scan ×3, prune solo WA | Medi | APERTO (prune RISOLTO: in chiusura app, `MESSAGE_RETENTION_PER_CONTACT`, floor 100, VACUUM condizionale; restano init doppio, dedup ×3, cache Signal non filtrata) | P2-8 |
 | #52 | Lifecycle thread: leak Telethon, shutdown assente | Medi | APERTO | P2-9 |
 | #53 | Fallback verso `signal_backend`; `register()` non protetta | Minori | APERTO | P3-5 |
 | #54 | `DuplicateIds` sul widget `load-more-msg` al remount | Minori | APERTO | — |

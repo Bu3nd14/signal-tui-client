@@ -15,7 +15,6 @@ from .db import (
     _ECHO_MATCH_WINDOW_MS,
     CACHE_DIR,
     CACHE_FILE,
-    CACHE_RETENTION_DAYS,
     DB_FILE,
     _add_message_to_cache,
     _count_unread,
@@ -80,7 +79,6 @@ from .webhook import (
 __all__ = [
     "CACHE_DIR",
     "CACHE_FILE",
-    "CACHE_RETENTION_DAYS",
     "DAEMON_HTTP_PORT",
     "DAEMON_URL",
     "DB_FILE",
