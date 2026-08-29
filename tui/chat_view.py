@@ -1234,8 +1234,11 @@ class ChatViewMixin:
                     if abs(existing_ts - ts) <= 5000:
                         return existing
                 elif mid:
-                    # Outgoing: text + echo window (10 min) when id absent.
-                    if abs(existing_ts - ts) <= 600000:
+                    # Outgoing: fallback echo SOLO se la riga UI è ancora
+                    # id-less (optimistic non confermato).  Veto id-mismatch:
+                    # una riga con id diverso è un messaggio distinto
+                    # (bug: 2ª/3ª immagine e "OK"+"OK" ravvicinati collassavano).
+                    if not existing.get("id") and abs(existing_ts - ts) <= 600000:
                         return existing
                 elif abs(existing_ts - ts) <= 5000:
                     return existing

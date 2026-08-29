@@ -1551,6 +1551,8 @@ class WhatsAppBackend(ChatBackend):
         For **outgoing** messages (``is_mine=True``) the id is stable and
         used as the primary identity (optimistic-send echo dedup).
         """
+        best_idless: dict | None = None
+        best_idless_delta: int | None = None
         for msg in self.cache.get(contact_id, []):
             if msg.get("is_mine") != is_mine:
                 continue
@@ -1586,11 +1588,22 @@ class WhatsAppBackend(ChatBackend):
                 cached_id = msg.get("id")
                 if cached_id and cached_id == msg_id:
                     return msg
-                if abs(msg.get("timestamp", 0) - ts) <= _ECHO_MATCH_WINDOW_MS:
-                    return msg
+                # Fallback echo: SOLO per una riga ancora id-less (optimistic
+                # non confermato).  Una riga con GIÀ un id diverso è un
+                # messaggio DISTINTO: mai fonderla (bug: 2ª/3ª immagine e
+                # "OK"+"OK" ravvicinati collassavano).  Tra più candidate
+                # id-less vince la più vicina nel tempo (mirror di
+                # ``_update_message_id``: ORDER BY ABS(timestamp-?) LIMIT 1).
+                if not cached_id and same_attachment:
+                    delta = abs(msg.get("timestamp", 0) - ts)
+                    if delta <= _ECHO_MATCH_WINDOW_MS and (
+                        best_idless_delta is None or delta < best_idless_delta
+                    ):
+                        best_idless = msg
+                        best_idless_delta = delta
             elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:
                 return msg
-        return None
+        return best_idless
 
     def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
         """Persist a message to the SQLite cache (WhatsApp protocol)."""
