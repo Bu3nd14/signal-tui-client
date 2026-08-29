@@ -303,6 +303,16 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                         "allegato",
                         "sticker",
                     }
+                    and info.strip().lower()
+                    not in {
+                        "🖼️ image",
+                        "🖼️ immagine",
+                        "🖼️ photo",
+                        "🎬 video",
+                        "🎵 audio",
+                        "🎨 sticker",
+                        "📎 file",
+                    }
                     and not info.lower().startswith(
                         ("media:", "image:", "immagine:", "video:", "audio:", "file:")
                     )
