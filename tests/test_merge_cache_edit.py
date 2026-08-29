@@ -179,6 +179,23 @@ class TestEditAwareMerge:
         assert harness._cache[contact.cache_key][0]["text"] == "same"
 
 
+def test_merge_ui_two_identical_outgoing_stay_two():
+    """Confirmed outgoing messages with different ids must not merge by text/time."""
+    harness, contact, changed = _merge(
+        existing=[],
+        incoming=[
+            _msg("OK", is_mine=True, ts=1000, mid="A"),
+            _msg("OK", is_mine=True, ts=121_000, mid="B"),
+        ],
+        protocol=PROTOCOL_WHATSAPP,
+    )
+
+    entries = harness._cache[contact.cache_key]
+    assert changed is True
+    assert len(entries) == 2
+    assert [entry["id"] for entry in entries] == ["A", "B"]
+
+
 # ─── Status-only upgrade ──────────────────────────────────────────────────────
 
 

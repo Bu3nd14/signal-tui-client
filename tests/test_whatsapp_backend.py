@@ -1429,6 +1429,180 @@ class TestWhatsAppBackend:
             )  # echo entro finestra
             mock_add.assert_called_once()
 
+    def test_two_identical_texts_confirmed_not_merged(self):
+        """Outgoing rows with different real ids remain distinct within 10 min."""
+        import backend as backend_mod
+
+        backend = _make_backend()
+        cid = "wa:1@s.whatsapp.net"
+        t0 = 1_700_000_000_000
+        original = {
+            "id": "A",
+            "text": "OK",
+            "is_mine": True,
+            "sender": "You",
+            "timestamp": t0,
+            "msg_type": "text",
+            "attachment_id": None,
+        }
+        backend.cache[cid] = [original]
+        echo = {
+            "id": "B",
+            "text": "OK",
+            "is_mine": True,
+            "sender": "You",
+            "msg_type": "text",
+            "attachment_id": None,
+        }
+
+        with (
+            patch.object(backend_mod, "_add_message_to_cache") as mock_add,
+            patch.object(backend_mod, "_update_message_id") as mock_update,
+            patch.object(backend, "_reuse_failed_db_row", return_value=False),
+        ):
+            added = backend.ingest_message(cid, echo, t0 + 120_000)
+
+        assert added is True
+        assert len(backend.cache[cid]) == 2
+        assert original["id"] == "A"
+        assert original["timestamp"] == t0
+        assert {msg["id"] for msg in backend.cache[cid]} == {"A", "B"}
+        mock_add.assert_called_once()
+        mock_update.assert_not_called()
+
+    def test_three_images_rapid_send_not_merged(self):
+        """Three rapid images with distinct ids and attachments produce three rows."""
+        import backend as backend_mod
+
+        backend = _make_backend()
+        cid = "wa:1@s.whatsapp.net"
+        t0 = 1_700_000_000_000
+
+        with (
+            patch.object(backend_mod, "_add_message_to_cache") as mock_add,
+            patch.object(backend, "_reuse_failed_db_row", return_value=False),
+        ):
+            results = [
+                backend.ingest_message(
+                    cid,
+                    {
+                        "id": f"image-{index}",
+                        "text": "",
+                        "is_mine": True,
+                        "sender": "You",
+                        "msg_type": "image",
+                        "attachment_id": f"attachment-{index}",
+                        "attachment_info": f"photo-{index}.jpg",
+                    },
+                    t0 + index * 1000,
+                )
+                for index in range(3)
+            ]
+
+        assert results == [True, True, True]
+        assert len(backend.cache[cid]) == 3
+        assert {msg["id"] for msg in backend.cache[cid]} == {
+            "image-0",
+            "image-1",
+            "image-2",
+        }
+        assert {msg["attachment_id"] for msg in backend.cache[cid]} == {
+            "attachment-0",
+            "attachment-1",
+            "attachment-2",
+        }
+        assert mock_add.call_count == 3
+
+    def test_echo_upgrades_only_idless_row(self):
+        """An echo cannot fallback-match a confirmed row with a different id."""
+        import backend as backend_mod
+
+        backend = _make_backend()
+        cid = "wa:1@s.whatsapp.net"
+        t0 = 1_700_000_000_000
+        confirmed = {
+            "id": "A",
+            "text": "ciao",
+            "is_mine": True,
+            "timestamp": t0,
+            "attachment_id": None,
+        }
+        optimistic = {
+            "id": None,
+            "text": "ciao",
+            "is_mine": True,
+            "timestamp": t0 + 1000,
+            "attachment_id": None,
+        }
+        backend.cache[cid] = [confirmed, optimistic]
+
+        with patch.object(backend_mod, "_update_message_id") as mock_update:
+            added = backend.ingest_message(
+                cid,
+                {
+                    "id": "B",
+                    "text": "ciao",
+                    "is_mine": True,
+                    "sender": "You",
+                    "msg_type": "text",
+                    "attachment_id": None,
+                },
+                t0 + 2000,
+            )
+
+        assert added is False
+        assert len(backend.cache[cid]) == 2
+        assert confirmed["id"] == "A"
+        assert confirmed["timestamp"] == t0
+        assert optimistic["id"] == "B"
+        assert optimistic["timestamp"] == t0 + 2000
+        mock_update.assert_called_once()
+
+    def test_echo_out_of_order_picks_closest_idless(self):
+        """Among id-less fallback candidates, the closest timestamp is upgraded."""
+        import backend as backend_mod
+
+        backend = _make_backend()
+        cid = "wa:1@s.whatsapp.net"
+        t0 = 1_700_000_000_000
+        older = {
+            "id": None,
+            "text": "OK",
+            "is_mine": True,
+            "timestamp": t0,
+            "attachment_id": None,
+        }
+        closest = {
+            "id": None,
+            "text": "OK",
+            "is_mine": True,
+            "timestamp": t0 + 6000,
+            "attachment_id": None,
+        }
+        backend.cache[cid] = [older, closest]
+
+        with patch.object(backend_mod, "_update_message_id") as mock_update:
+            added = backend.ingest_message(
+                cid,
+                {
+                    "id": "B",
+                    "text": "OK",
+                    "is_mine": True,
+                    "sender": "You",
+                    "msg_type": "text",
+                    "attachment_id": None,
+                },
+                t0 + 6000,
+            )
+
+        assert added is False
+        assert len(backend.cache[cid]) == 2
+        assert older["id"] is None
+        assert older["timestamp"] == t0
+        assert closest["id"] == "B"
+        assert closest["timestamp"] == t0 + 6000
+        mock_update.assert_called_once()
+
     def test_ack_echo_media_does_not_duplicate(self):
         """🛡️ Regressione: il message.ack di un'immagine uscente con caption in
         `body` (stesso msg_id del media reale ma text=caption) NON deve essere
