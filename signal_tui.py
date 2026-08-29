@@ -128,7 +128,7 @@ if __name__ == "__main__":
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=[logging.FileHandler("/tmp/signal-tui.log", mode="w")],
+        handlers=[logging.FileHandler("/tmp/signal-tui.log", mode="a")],
     )
     import signal as signal_module
 
