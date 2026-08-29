@@ -203,8 +203,20 @@ if __name__ == "__main__":
     )
 
     def _handle_sigint(sig, frame):
-        """Handle Ctrl+C: stop polling and exit cleanly."""
+        """Handle Ctrl+C: stop polling, prune the cache, and exit cleanly.
+
+        Il prune va eseguito QUI e non solo in ``on_exit_app``: ``app.exit()``
+        chiamato dal gestore del segnale non innesca in modo affidabile il
+        ciclo di shutdown di Textual, quindi senza questo step lo stop via
+        segnale (web-signal-tui-stop) non poterebbe mai lo storico.
+        """
         app._polling_active = False
+        try:
+            from backend import _prune_cache
+
+            _prune_cache()
+        except Exception:
+            logger.exception("Cache prune on exit failed (non-fatal)")
         app.exit()
 
     signal_module.signal(signal_module.SIGINT, _handle_sigint)
