@@ -80,7 +80,12 @@ waha_stop() {
 }
 
 waha_start() {
-    bash "$1/scripts/start_whatsapp.sh" --no-wait >/dev/null 2>&1 && ok "WAHA avviato" || info "avvio WAHA non riuscito (continua comunque)"
+    # Attende che WAHA sia pronto (con wait) così la TUI lo trova subito attivo:
+    # se la TUI parte prima di WAHA il backend WhatsApp resta idle (nessun retry).
+    bash "$1/scripts/start_whatsapp.sh" >/dev/null 2>&1 && ok "WAHA avviato e pronto" || {
+        info "avvio WAHA non riuscito o timeout; provo comunque a far partire la TUI"
+        bash "$1/scripts/start_whatsapp.sh" --no-wait >/dev/null 2>&1 || true
+    }
 }
 
 # ─── Stato ────────────────────────────────────────────────────────────────────
