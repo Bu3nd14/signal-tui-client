@@ -57,7 +57,12 @@ class WhatsAppRESTClient:
         return text[:500] or "empty response"
 
     def _request(
-        self, method: str, path: str, payload: dict | None = None, timeout: int = 30
+        self,
+        method: str,
+        path: str,
+        payload: dict | None = None,
+        timeout: int = 30,
+        log_level: int = logging.ERROR,
     ) -> dict | None:
         """Execute an HTTP request and return the JSON body.
 
@@ -88,24 +93,31 @@ class WhatsAppRESTClient:
                     return {}
                 return json.loads(raw)
         except urllib.error.HTTPError as err:
-            self.last_status = err.code
-            self.last_error = self._response_error(err.read())
-            logger.error(
+            status = err.code
+            detail = self._response_error(err.read())
+            self.last_status = status
+            self.last_error = detail
+            log_detail = " ".join(str(detail).split())[:300]
+            logger.log(
+                log_level,
                 "WAHA request failed: method=%s path=%s status=%s detail=%s",
                 method,
                 path,
-                self.last_status,
-                self.last_error,
+                status,
+                log_detail,
             )
             return None
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            detail = str(exc)[:500]
             self.last_status = 0
-            self.last_error = str(exc)[:500]
-            logger.error(
+            self.last_error = detail
+            log_detail = " ".join(str(detail).split())[:300]
+            logger.log(
+                log_level,
                 "WAHA request failed: method=%s path=%s status=0 detail=%s",
                 method,
                 path,
-                self.last_error,
+                log_detail,
             )
             return None
 
@@ -456,10 +468,12 @@ class WhatsAppRESTClient:
         """
         return self._request(
             "POST",
-            f"/api/chats/{contact_id}/read",
+            "/api/sendSeen",
             {
                 "session": self.session_name,
+                "chatId": contact_id,
             },
+            log_level=logging.DEBUG,
         )
 
     def presence_subscribe(self, chat_id: str) -> dict | None:

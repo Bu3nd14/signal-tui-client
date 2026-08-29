@@ -3376,3 +3376,93 @@ def test_tui_optimistic_reply_is_upgraded_by_waha_echo_without_quote_loss():
     )
     assert len(backend.cache[echo.contact_id]) == 1
     assert backend.cache[echo.contact_id][0]["quote_text"] == "domanda"
+
+
+# ─── Architecture-fix regressions (WAHA fetch/logging/read receipt) ───────────
+
+
+def test_fetch_history_rejects_non_fetchable_jid_without_rest_call():
+    backend = _make_backend()
+    backend._rest.list_messages = MagicMock(return_value=[])
+
+    assert backend.fetch_history("db@lid") == []
+
+    backend._rest.list_messages.assert_not_called()
+
+
+def test_fetch_history_negative_caches_no_lid_500_for_session():
+    backend = _make_backend()
+    backend._rest.list_messages = MagicMock(return_value=[])
+    backend._rest.last_status = 500
+    backend._rest.last_error = "No LID for user 123"
+
+    assert backend.fetch_history("123@c.us") == []
+    assert backend.fetch_history("123@c.us") == []
+
+    backend._rest.list_messages.assert_called_once_with("123@c.us", limit=20)
+
+
+def test_request_http_error_logs_local_status_and_single_line(caplog):
+    import io
+    import logging
+    import urllib.error
+
+    client = WhatsAppRESTClient("http://api.test")
+    client.last_status = 200
+    error = urllib.error.HTTPError(
+        "http://api.test/api/messages",
+        500,
+        "Internal Server Error",
+        {},
+        io.BytesIO(b'{"detail":"first line\\nsecond line"}'),
+    )
+
+    with (
+        caplog.at_level(logging.ERROR, logger="backends.whatsapp_rest"),
+        patch("urllib.request.urlopen", side_effect=error),
+    ):
+        assert client._request("GET", "/api/messages") is None
+
+    record = next(r for r in caplog.records if "WAHA request failed" in r.getMessage())
+    assert "status=500" in record.getMessage()
+    assert "status=200" not in record.getMessage()
+    assert "first line second line" in record.getMessage()
+    assert "\n" not in record.getMessage()
+
+
+def test_mark_read_uses_send_seen_and_404_still_marks_local(caplog):
+    import io
+    import logging
+    import urllib.error
+
+    backend = _make_backend()
+    captured = {}
+
+    def not_found(req, timeout=30):
+        captured["method"] = req.method
+        captured["path"] = req.full_url
+        captured["payload"] = json.loads(req.data)
+        raise urllib.error.HTTPError(
+            req.full_url,
+            404,
+            "Not Found",
+            {},
+            io.BytesIO(b'{"detail":"endpoint unavailable"}'),
+        )
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="backends.whatsapp_rest"),
+        patch("urllib.request.urlopen", side_effect=not_found),
+        patch("backend._mark_as_read") as mark_local,
+    ):
+        backend.mark_read_sync("123@c.us")
+
+    assert captured == {
+        "method": "POST",
+        "path": "http://api.test/api/sendSeen",
+        "payload": {"session": "default", "chatId": "123@c.us"},
+    }
+    mark_local.assert_called_once_with("123@c.us", protocol=PROTOCOL_WHATSAPP)
+    records = [r for r in caplog.records if "path=/api/sendSeen" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG

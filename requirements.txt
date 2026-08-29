@@ -4,4 +4,4 @@ pillow>=10.3
 rich>=13.0
 emoji>=2.0.0
 websocket-client>=1.6.0
-telethon>=1.36.0
+telethon>=1.37

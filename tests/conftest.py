@@ -13,12 +13,23 @@ import pytest
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def tmp_cache_dir(tmp_path: Path) -> Path:
-    """Create a temporary cache directory and patch backend constants."""
-    cache_dir = tmp_path / "cache"
+@pytest.fixture(autouse=True)
+def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Isolate every test from the user's persistent cache and database."""
+    import backend
+
+    cache_dir = tmp_path / "backend-cache"
     cache_dir.mkdir()
+    monkeypatch.setattr(backend, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(backend, "DB_FILE", cache_dir / "messages.db")
+    monkeypatch.setattr(backend, "CACHE_FILE", cache_dir / "messages.json")
     return cache_dir
+
+
+@pytest.fixture
+def tmp_cache_dir(isolate_backend_cache: Path) -> Path:
+    """Return the isolated cache directory for the current test."""
+    return isolate_backend_cache
 
 
 @pytest.fixture

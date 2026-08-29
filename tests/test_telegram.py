@@ -752,7 +752,7 @@ class TestTelegramBackendOperations:
         backend._needs_2fa = False
         assert backend.complete_2fa("password") is False
         backend._needs_2fa = True
-        backend._client = SimpleNamespace(sign_in=AsyncMock(), disconnect=AsyncMock())
+        backend._client = SimpleNamespace(sign_in=AsyncMock(), disconnect=MagicMock())
         backend._loop = SimpleNamespace(
             run_until_complete=lambda coro: asyncio.run(coro), close=MagicMock()
         )
@@ -937,3 +937,71 @@ def test_migrate_legacy_media_dir(tmp_path, monkeypatch):
     connection.close()
     assert row[0] == str(new_dir / "photo.jpg")
     assert row[1] == str(new_dir / "882-1-sent.png")
+
+
+
+class TestTelegramDisconnectLifecycle:
+    @staticmethod
+    def _real_loop_thread():
+        loop = asyncio.new_event_loop()
+        started = threading.Event()
+
+        def run():
+            asyncio.set_event_loop(loop)
+            started.set()
+            loop.run_forever()
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        assert started.wait(timeout=1)
+        return loop, thread
+
+    def test_disconnect_sync_handles_telethon_144_sync_wrapper(self):
+        import time
+
+        backend = _backend()
+        loop, thread = self._real_loop_thread()
+        disconnected = threading.Event()
+
+        class Telethon144StyleClient:
+            def disconnect(self):
+                async def perform_disconnect():
+                    disconnected.set()
+
+                return asyncio.shield(loop.create_task(perform_disconnect()))
+
+        backend._loop = loop
+        backend._loop_thread = thread
+        backend._client = Telethon144StyleClient()
+        started = time.monotonic()
+        try:
+            backend.disconnect_sync()
+            elapsed = time.monotonic() - started
+
+            assert disconnected.is_set()
+            assert not thread.is_alive()
+            assert elapsed < 1
+            assert backend._loop is None
+            assert backend._loop_thread is None
+            assert backend._client is None
+            backend.disconnect_sync()  # idempotent no-op
+        finally:
+            if thread.is_alive():
+                loop.call_soon_threadsafe(loop.stop)
+                thread.join(timeout=1)
+            if not loop.is_closed():
+                loop.close()
+
+    def test_disconnect_sync_closed_loop_skips_client_cleanly(self):
+        backend = _backend()
+        loop = asyncio.new_event_loop()
+        loop.close()
+        client = SimpleNamespace(disconnect=MagicMock())
+        backend._loop = loop
+        backend._client = client
+
+        backend.disconnect_sync()
+
+        client.disconnect.assert_not_called()
+        assert backend._loop is None
+        assert backend._client is None
