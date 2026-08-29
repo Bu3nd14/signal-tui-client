@@ -270,7 +270,6 @@ class TestWaitSessionReady:
         assert backend._wait_session_ready(timeout=0.2) is False
 
 
-
 def test_resync_requests_only_fetchable_numeric_jids():
     backend = _make_backend()
     backend.cache = {

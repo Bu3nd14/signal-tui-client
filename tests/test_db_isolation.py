@@ -8,7 +8,9 @@ def test_autouse_fixture_routes_ingest_away_from_real_database(tmp_path):
 
     real_db = Path.home() / ".local" / "share" / "signal-tui-client" / "messages.db"
     before = (
-        (real_db.stat().st_size, real_db.stat().st_mtime_ns) if real_db.exists() else None
+        (real_db.stat().st_size, real_db.stat().st_mtime_ns)
+        if real_db.exists()
+        else None
     )
 
     assert backend.DB_FILE != real_db
@@ -26,6 +28,8 @@ def test_autouse_fixture_routes_ingest_away_from_real_database(tmp_path):
 
     assert Path(backend.DB_FILE).is_file()
     after = (
-        (real_db.stat().st_size, real_db.stat().st_mtime_ns) if real_db.exists() else None
+        (real_db.stat().st_size, real_db.stat().st_mtime_ns)
+        if real_db.exists()
+        else None
     )
     assert after == before

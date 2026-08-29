@@ -939,7 +939,6 @@ def test_migrate_legacy_media_dir(tmp_path, monkeypatch):
     assert row[1] == str(new_dir / "882-1-sent.png")
 
 
-
 class TestTelegramDisconnectLifecycle:
     @staticmethod
     def _real_loop_thread():
