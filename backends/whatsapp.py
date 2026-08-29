@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import sqlite3
 import threading
@@ -54,6 +55,12 @@ from .whatsapp_events import (
 from .whatsapp_rest import WhatsAppRESTClient
 
 logger = logging.getLogger(__name__)
+
+_FETCHABLE_JID_RE = re.compile(r"^[0-9][0-9-]*@(c\.us|lid|g\.us)$")
+
+
+def _is_fetchable_jid(jid: str) -> bool:
+    return bool(_FETCHABLE_JID_RE.fullmatch(jid))
 
 
 def _jid_digits(jid: str) -> str:
@@ -162,6 +169,7 @@ class WhatsAppBackend(ChatBackend):
         #: caso di retry, quindi teniamo gli id già visti per non accodare in
         #: doppio un messaggio (il dedup definitivo avviene in ``ingest_message``).
         self._seen_message_keys: set[tuple[str, ...]] = set()
+        self._history_unfetchable: set[str] = set()
 
         # ── Address book (rubrica completa) ────────────────────────────
         self._address_book: list[ChatContact] | None = None
@@ -1009,12 +1017,22 @@ class WhatsAppBackend(ChatBackend):
         Ritorna la lista (già ordinata) dei messaggi normalizzati per il
         contatto, oppure ``[]`` se l'API non risponde (fallback non distruttivo).
         """
-        if not self._rest:
+        if (
+            not _is_fetchable_jid(contact_id)
+            or contact_id in self._history_unfetchable
+            or not self._rest
+        ):
             return []
         # Lazy per-chat presence subscribe: aprire una chat è il segnale che
         # vogliamo anche il suo indicatore di digitazione.
         self._presence_subscribe_lazy(contact_id)
         raw = self._rest.list_messages(contact_id, limit=limit)
+        if (
+            raw == []
+            and self._rest.last_status == 500
+            and "No LID" in (self._rest.last_error or "")
+        ):
+            self._history_unfetchable.add(contact_id)
         if not isinstance(raw, list):
             return []
         # WAHA ritorna i messaggi dal più recente in giù; li riordiniamo

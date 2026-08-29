@@ -45,7 +45,7 @@ class TestUIResync:
         backend = _make_backend()
         app.whatsapp_backend = backend
         backend._rest._request.return_value = []
-        backend.cache = {"db@lid": [{"id": "a"}]}
+        backend.cache = {"111@lid": [{"id": "a"}]}
         backend._rest.list_messages.return_value = []
         n = app._resync_wa_history()
         assert n == 1
@@ -84,14 +84,14 @@ class TestResyncHistory:
         """Unione: chat non lette + chat già con messaggi nel DB vengono scaricate."""
         backend = _make_backend()
         # chat con messaggi nel DB (chiavi del cache seminato da connect_sync)
-        backend.cache = {"db@lid": [{"id": "a", "text": "x", "timestamp": 1}]}
+        backend.cache = {"111@lid": [{"id": "a", "text": "x", "timestamp": 1}]}
         # unread dichiarate da WAHA (aggiunte pure se non in cache)
         now = 1_700_000_000
-        backend._active_chats = {"unread@lid": (3, now), "read@lid": (0, now)}
+        backend._active_chats = {"222@lid": (3, now), "333@lid": (0, now)}
 
         # un solo GET /chats (nessun throttling/polling) -> /chats
         backend._rest._request.return_value = [
-            {"id": "unread@lid", "isGroup": False, "unreadCount": 3, "timestamp": now},
+            {"id": "222@lid", "isGroup": False, "unreadCount": 3, "timestamp": now},
         ]
 
         def fake_list(cid, limit=1):
@@ -113,13 +113,13 @@ class TestResyncHistory:
         # unread + db-cache = 2 target unici
         assert n == 2
         called_jids = {c[0][0] for c in backend._rest.list_messages.call_args_list}
-        assert called_jids == {"unread@lid", "db@lid"}
+        assert called_jids == {"222@lid", "111@lid"}
 
     def test_no_targets_does_not_fetch(self):
         """Nessuna chat in DB e nessuna unread => nessun GET (avvio veloce)."""
         backend = _make_backend()
         backend.cache = {}
-        backend._active_chats = {"read@lid": (0, 0)}
+        backend._active_chats = {"333@lid": (0, 0)}
         backend._rest._request.return_value = []
         n = backend.resync_history()
         assert n == 0
@@ -128,8 +128,8 @@ class TestResyncHistory:
     def test_errors_are_nonfatal(self):
         """Un errore in una chat non deve bloccare o sollevare."""
         backend = _make_backend()
-        backend.cache = {"a@lid": [{"id": "a"}]}
-        backend._active_chats = {"b@lid": (1, 0)}
+        backend.cache = {"111@lid": [{"id": "a"}]}
+        backend._active_chats = {"222@lid": (1, 0)}
         backend._rest._request.return_value = []  # nessuna unread da /chats
 
         def boom(cid, limit=1):
@@ -143,7 +143,7 @@ class TestResyncHistory:
     def test_disconnected_returns_zero(self):
         backend = _make_backend()
         backend._connected = False
-        backend.cache = {"a@lid": [{"id": "a"}]}
+        backend.cache = {"111@lid": [{"id": "a"}]}
         n = backend.resync_history()
         assert n == 0
         backend._rest.list_messages.assert_not_called()
@@ -268,3 +268,20 @@ class TestWaitSessionReady:
         backend = _make_backend()
         backend._rest.get_session_status.return_value = None
         assert backend._wait_session_ready(timeout=0.2) is False
+
+
+def test_resync_requests_only_fetchable_numeric_jids():
+    backend = _make_backend()
+    backend.cache = {
+        "db@lid": [{"id": "test-pollution"}],
+        "123@c.us": [{"id": "direct"}],
+        "120363123456789@g.us": [{"id": "group"}],
+    }
+    backend._active_chats = {}
+    backend._rest._request.return_value = []
+    backend._rest.list_messages.return_value = []
+
+    backend.resync_history()
+
+    called_jids = {call.args[0] for call in backend._rest.list_messages.call_args_list}
+    assert called_jids == {"123@c.us", "120363123456789@g.us"}

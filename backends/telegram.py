@@ -309,24 +309,31 @@ class TelegramBackend(ChatBackend):
 
     async def disconnect(self) -> None:
         """Stop the Telethon event loop and disconnect."""
-        self.disconnect_sync()
+        await asyncio.to_thread(self.disconnect_sync)
 
     def disconnect_sync(self) -> None:
         """Stop the event loop thread and disconnect the client."""
+
+        async def _disconnect_on_loop(client):
+            await client.disconnect()
+
         self._running = False
         self._connected = False
-        if self._loop is not None and self._client is not None:
+        loop, client = self._loop, self._client
+        if loop is not None and client is not None:
             try:
-                asyncio.run_coroutine_threadsafe(
-                    self._client.disconnect(), self._loop
-                ).result(timeout=5)
+                if loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        _disconnect_on_loop(client), loop
+                    ).result(timeout=5)
+                    loop.call_soon_threadsafe(loop.stop)
+                elif not loop.is_closed():
+                    client.disconnect()
             except Exception as _e:
                 logger.debug("Telegram client disconnect failed", exc_info=True)
         if self._loop_thread is not None and self._loop_thread.is_alive():
             self._loop_thread.join(timeout=5)
-        self._loop = None
-        self._loop_thread = None
-        self._client = None
+        self._loop = self._loop_thread = self._client = None
 
     # ─── Connection (called from worker thread by the TUI) ─────────────────
 
@@ -1655,7 +1662,7 @@ class TelegramBackend(ChatBackend):
             return f"ERROR: {exc}"
 
         if loop.run_until_complete(client.is_user_authorized()):
-            loop.run_until_complete(client.disconnect())
+            client.disconnect()
             loop.close()
             self._loop = None
             self._client = None
@@ -1666,7 +1673,7 @@ class TelegramBackend(ChatBackend):
             qr_login = loop.run_until_complete(client.qr_login())
         except Exception as exc:
             logger.exception("Telegram QR login start failed")
-            loop.run_until_complete(client.disconnect())
+            client.disconnect()
             loop.close()
             self._loop = None
             self._client = None
@@ -1696,7 +1703,7 @@ class TelegramBackend(ChatBackend):
                 # Only cleanup if not waiting for 2FA
                 if not self._needs_2fa:
                     try:
-                        loop.run_until_complete(client.disconnect())
+                        client.disconnect()
                     except Exception as _e:
                         logger.debug(
                             "Telegram QR cleanup disconnect failed", exc_info=True
@@ -1730,7 +1737,7 @@ class TelegramBackend(ChatBackend):
             self._needs_2fa = False
             # Cleanup
             try:
-                self._loop.run_until_complete(self._client.disconnect())
+                self._client.disconnect()
             except Exception as _e:
                 logger.debug("Telegram 2FA cleanup disconnect failed", exc_info=True)
             self._loop.close()
