@@ -235,9 +235,7 @@ class TestCachePruneSafety:
     def test_prune_logs_outcome(
         self, prune_db, caplog, row_count, expected_deleted, expected_log
     ):
-        _insert_rows(
-            prune_db, [_message("signal", "A", i) for i in range(row_count)]
-        )
+        _insert_rows(prune_db, [_message("signal", "A", i) for i in range(row_count)])
 
         with caplog.at_level("INFO", logger=db.logger.name):
             deleted = db._prune_cache(limit=100, now_ms=1_000_000)
