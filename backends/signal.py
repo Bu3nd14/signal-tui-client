@@ -1493,8 +1493,10 @@ class SignalBackend(ChatBackend):
         pause.
         """
         while self._polling_active and self._sse_thread is not None:
+            received_any = False
             try:
                 for envelope in self._rpc.listen_events(self.user_number):
+                    received_any = True
                     if not self._polling_active:
                         return
                     events = self.envelope_to_event(envelope.get("envelope", {}))
@@ -1503,10 +1505,13 @@ class SignalBackend(ChatBackend):
                             self._event_queue.put(event)
                     if events:
                         logger.info("SSE: received %d events", len(events))
-                if envelope:
-                    logger.info("SSE: envelope received")
-            except Exception as e:  # noqa: BLE001
-                logger.info("SSE: connection lost, retrying... (%s)", e)
+                if not received_any:
+                    logger.info(
+                        "SSE: connection lost, retrying... "
+                        "(stream ended without events)"
+                    )
+            except Exception:  # noqa: BLE001, RUF100
+                logger.exception("SSE: unexpected listener error, retrying...")
             # Brief pause before reconnect — keep it short (1s)
             # so we don't miss pending messages from a fresh daemon
             # startup with --receive-mode on-start.
