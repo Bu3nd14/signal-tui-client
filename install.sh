@@ -134,7 +134,7 @@ install_aliases() {
 SIGNAL_TUI_DIR="__PROJECT_DIR__"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 alias web-signal-tui-bg='tmux new-session -d -s tui "cd $SIGNAL_TUI_DIR && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0" && export SIGNAL_TUI_WEB_TOKEN="$(python3 -c "import json; print(json.load(open(\"$SIGNAL_TUI_DIR/config.json\"))[\"web\"][\"token\"]))")" && echo "TUI bg avviata — token: $SIGNAL_TUI_WEB_TOKEN"'
-alias web-signal-tui-stop='tmux send-keys -t tui C-c 2>/dev/null; sleep 1; tmux kill-session -t tui 2>/dev/null; sleep 0.5; [ -f /tmp/signal-tui.lock ] && rm -f /tmp/signal-tui.lock'
+alias web-signal-tui-stop='tmux send-keys -t tui C-c 2>/dev/null; for i in $(seq 1 12); do [ ! -f /tmp/signal-tui.lock ] && break; sleep 0.5; done; tmux kill-session -t tui 2>/dev/null; sleep 0.5; [ -f /tmp/signal-tui.lock ] && rm -f /tmp/signal-tui.lock'
 EOF
     ALIASES_BLOCK="${ALIASES_BLOCK//__PROJECT_DIR__/$PROJECT_DIR}"
 
