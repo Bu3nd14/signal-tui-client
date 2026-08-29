@@ -228,8 +228,9 @@ class TelegramBackend(ChatBackend):
 
         1. Empty id → ``None``.
         2. Existing local file → its ``Path`` (live download, legacy rows).
-        3. ``tgref:<chat_id>:<msg_id>`` → lazy download via Telethon.
-        4. Anything else → ``None``.
+        3. Legacy path from another machine → basename in ``_media_dir()``.
+        4. ``tgref:<chat_id>:<msg_id>`` → lazy download via Telethon.
+        5. Anything else → ``None``.
         """
         if not attachment_id:
             return None
@@ -239,6 +240,16 @@ class TelegramBackend(ChatBackend):
             return p
 
         if not attachment_id.startswith(_TGREF_PREFIX):
+            safe_name = p.name
+            if (
+                safe_name not in {"", ".", ".."}
+                and "/" not in safe_name
+                and ".." not in safe_name
+                and ".." not in p.parts
+            ):
+                candidate = _media_dir() / safe_name
+                if candidate.is_file():
+                    return candidate
             return None
 
         rest = attachment_id[len(_TGREF_PREFIX) :]
