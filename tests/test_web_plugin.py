@@ -260,6 +260,147 @@ const {{ reconcileOptimisticMessages, replyQuoteMessage }} = require("./web/stat
     assert completed.returncode == 0, completed.stderr
 
 
+def test_spa_submit_image_caption_keeps_caption_in_optimistic_message():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const submit = app.slice(app.indexOf("async function submitMessage("), app.indexOf("\nfunction encodeToken"));
+globalThis.state = {
+  sending: false,
+  active: { id: "alice", protocol: "signal" },
+  stagedAttachment: { file: new Blob(["image"], { type: "image/png" }), filename: "photo.png", previewUrl: "blob:photo" },
+  replyTo: null,
+  messages: [],
+  optimistic: [],
+  optimisticSequence: 0,
+};
+globalThis.elements = { messageInput: { value: "la caption", focus() {} } };
+globalThis.window = { SignalTuiReconcile: { messageIdentity: (message) => message.id } };
+globalThis.resizeComposer = () => {};
+globalThis.updateComposer = () => {};
+globalThis.renderMessages = () => {};
+globalThis.clearStagedAttachment = () => { state.stagedAttachment = null; };
+globalThis.showError = assert.fail;
+let request;
+globalThis.apiFetch = async (url, options) => { request = { url, options }; return { status: 200 }; };
+vm.runInThisContext(submit);
+(async () => {
+  await submitMessage();
+  assert.equal(state.optimistic.length, 1);
+  assert.equal(state.optimistic[0].text, "la caption");
+  assert.equal(state.optimistic[0].attachment.type, "image/png");
+  assert.equal(state.optimistic[0].localPreviewUrl, "blob:photo");
+  assert.equal(request.url, "/api/send");
+  assert.equal(request.options.body.get("text"), "la caption");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
+def test_optimistic_image_caption_reconciles_echo_without_duplicate(protocol):
+    _run_reconciliation_node(f"""
+const optimistic = {{ optimistic_id: "captioned-image", protocol: {json.dumps(protocol)}, contactId: "alice", direction: "out", text: "la caption", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", attachment: {{ type: "image/png", name: "photo.png", attachment_id: "photo.png" }} }};
+const echo = {{ id: "echo-1", direction: "out", text: "la caption", timestamp: 2001, attachment: {{ type: "image/jpeg", name: "server-photo.jpg", attachment_id: "remote-image" }} }};
+const result = reconcileOptimisticMessages([echo], [optimistic], {json.dumps(protocol)}, "alice");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].optimistic_id, undefined);
+assert.equal(result.optimistic[0].confirmed_message_id, "echo-1");
+""")
+
+
+def test_optimistic_image_without_caption_still_reconciles_by_media_signature():
+    _run_reconciliation_node("""
+const optimistic = { optimistic_id: "uncaptioned-image", protocol: "signal", contactId: "alice", direction: "out", text: "", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", attachment: { type: "image/png", name: "photo.png", attachment_id: "photo.png" } };
+const echo = { id: "echo-1", direction: "out", text: "", timestamp: 2001, attachment: { type: "image/jpeg", name: "server-photo.jpg", attachment_id: "remote-image" } };
+const result = reconcileOptimisticMessages([echo], [optimistic], "signal", "alice");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "echo-1");
+""")
+
+
+def test_optimistic_plain_text_still_reconciles_without_attachment():
+    _run_reconciliation_node("""
+const optimistic = { optimistic_id: "plain-text", protocol: "telegram", contactId: "alice", direction: "out", text: "solo testo", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent" };
+const echo = { id: "echo-1", direction: "out", text: "solo testo", timestamp: 2001 };
+const result = reconcileOptimisticMessages([echo], [optimistic], "telegram", "alice");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "echo-1");
+""")
+
+
+def test_optimistic_image_caption_with_quote_reconciles_echo():
+    _run_reconciliation_node("""
+const optimistic = { optimistic_id: "quoted-captioned-image", protocol: "signal", contactId: "alice", direction: "out", text: "la caption", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", attachment: { type: "image/png", name: "photo.png", attachment_id: "photo.png" }, quote_timestamp: 1000, quote_author: "alice", quote_message: "messaggio citato", quote_text: "messaggio citato" };
+const echo = { id: "echo-1", direction: "out", text: "la caption", timestamp: 2001, attachment: { type: "image/jpeg", name: "server-photo.jpg", attachment_id: "remote-image" }, quote_timestamp: 1000, quote_author: "alice", quote_text: "messaggio citato" };
+const result = reconcileOptimisticMessages([echo], [optimistic], "signal", "alice");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "echo-1");
+""")
+
+
+def test_render_optimistic_image_preview_includes_caption():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const renderStart = app.indexOf("function renderMessages(");
+const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
+globalThis.state = {
+  active: { protocol: "signal", id: "alice" },
+  optimistic: [{
+    optimistic_id: "local-image", protocol: "signal", contactId: "alice",
+    direction: "out", text: "la caption", timestamp: 2000,
+    optimisticStatus: "sending", known_message_ids: [], localPreviewUrl: "blob:photo",
+    attachment: { type: "image/png", name: "photo.png", attachment_id: "photo.png" },
+  }],
+  messageNodes: new Map(),
+};
+globalThis.window = require("./web/static/reconcile.js");
+window.SignalTuiReconcile = window;
+globalThis.pruneOrphanObjectUrls = () => {};
+globalThis.appendRenderedQuote = () => {};
+globalThis.timestampMilliseconds = Number;
+globalThis.formatTimestamp = () => "12:00";
+globalThis.scrollThreadToBottom = () => {};
+globalThis.requestAnimationFrame = () => {};
+globalThis.setMessageTick = () => {};
+function node(tag) {
+  return {
+    tag, className: "", textContent: "", children: [], classList: { add() {} },
+    append(...children) { this.children.push(...children); },
+    replaceChildren(...children) { this.children = children; },
+    setAttribute(name, value) { this[name] = value; },
+    addEventListener() {},
+    set src(value) { this.url = value; },
+  };
+}
+globalThis.document = { createElement: node };
+globalThis.elements = { messages: node("main") };
+vm.runInThisContext(app.slice(renderStart, renderEnd));
+renderMessages([], "signal");
+assert.equal(elements.messages.children.length, 1);
+const bubble = elements.messages.children[0].children[0];
+const preview = bubble.children.find((child) => child.className === "attachment local-preview");
+const caption = bubble.children.find((child) => child.className === "message-text");
+assert.ok(preview);
+assert.equal(preview.children[0].tag, "img");
+assert.equal(preview.children[0].url, "blob:photo");
+assert.ok(caption);
+assert.equal(caption.textContent, "la caption");
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_optimistic_dedup_two_identical_messages_is_one_to_one():
     _run_reconciliation_node("""
 const old = { id: "old", direction: "out", text: "same", timestamp: 1000 };
@@ -1138,6 +1279,9 @@ def test_web_ui_static_contracts():
     source = Path("web/static/app.js").read_text()
     assert 'elements.cancelReply.addEventListener("click", cancelReply)' in source
     assert "state.replyTo = null" in source
+
+    index = Path("web/static/index.html").read_text()
+    assert '<script src="/app.js?v=46" defer></script>' in index
 
     css = Path("web/static/style.css").read_text()
     assert ".contact-copy { min-width: 0; overflow: hidden; }" in css
