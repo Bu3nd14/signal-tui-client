@@ -112,18 +112,19 @@ Le 5 righe Telegram `msg_type='image'` senza `attachment_id` sono **escluse** (m
 
 ```python
 {
-    "target_message_id": str | None,    # §3.2
-    "target_timestamp": int | None,     # ms
+    "target_message_id": str | None,  # §3.2
+    "target_timestamp": int | None,  # ms
     "mode": "delta" | "snapshot",
     # mode == "delta":
-    "emoji": str,                       # "" solo se is_remove
+    "emoji": str,  # "" solo se is_remove
     "is_remove": bool,
-    "author": str,                      # display best-effort
-    "author_key": str,                  # identità stabile (numero/JID/peer id / "me")
+    "author": str,  # display best-effort
+    "author_key": str,  # identità stabile (numero/JID/peer id / "me")
     "is_mine": bool,
     # mode == "snapshot":
-    "snapshot": [{"emoji": str, "count": int, "is_mine": bool, "authors": list[str]}] | None,
-    "timestamp": int,                   # ts evento (ms)
+    "snapshot": [{"emoji": str, "count": int, "is_mine": bool, "authors": list[str]}]
+    | None,
+    "timestamp": int,  # ts evento (ms)
     "contact": ChatContact | None,
 }
 ```
