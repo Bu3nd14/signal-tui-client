@@ -581,6 +581,45 @@ below it, labeled with that protocol's icon and color.
 - Use `Ctrl+U` to focus on unread conversations, `Ctrl+A` to go back to All — see
   [Contact grouping and unread filters](#contact-grouping-and-unread-filters)
 
+## Web reader aliases
+
+Three shell aliases (bash/zsh) launch the optional web reader and manage its lifecycle:
+
+| Alias | What it does |
+|---|---|
+| `web-signal-tui` | Starts the TUI with the web server in the **foreground** on `0.0.0.0:4242` |
+| `web-signal-tui-bg` | Starts the TUI + web server in a **detached tmux session** (background) and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN` |
+| `web-signal-tui-stop` | Cleanly stops the tmux session and removes `/tmp/signal-tui.lock` |
+
+### Fast cycle (background + token)
+
+`web-signal-tui-bg` runs in the background and exports `SIGNAL_TUI_WEB_TOKEN` to the current shell,
+so the token is immediately ready for the Web UI login (it is printed to the console) or for `curl`:
+
+```bash
+web-signal-tui-bg
+# TUI bg avviata — token: <the-token>
+
+curl -H "Authorization: Bearer $SIGNAL_TUI_WEB_TOKEN" http://127.0.0.1:4242/api/contacts
+```
+
+The Bearer token lives in `config.json` under `web.token`; the web server also accepts it via the
+`SIGNAL_TUI_WEB_TOKEN` environment variable. The default port is `4242`.
+
+### Installing the aliases
+
+Automatic install — detects bash/zsh and writes the real project path:
+
+```bash
+./install.sh --aliases
+```
+
+Or manually copy the alias block from [docs/ALIASES.md](docs/ALIASES.md) into `~/.bashrc` (bash) or
+`~/.zshrc` (zsh), then `source ~/.bashrc` (or reopen the shell).
+
+> **Compatibility:** bash and zsh are supported; other shells (fish, dash/sh) are not — see
+> [docs/ALIASES.md](docs/ALIASES.md).
+
 ## Native inline images (kitty graphics protocol)
 
 In chats with images the client renders **high-resolution inline thumbnails** directly in the

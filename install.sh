@@ -12,6 +12,7 @@
 #   ./install.sh --version 0.14.7    # scarica una versione specifica di signal-cli
 #   ./install.sh --skip-signal-cli   # non scaricare signal-cli (se già presente)
 #   ./install.sh --update            # aggiorna signal-cli all'ultima versione
+#   ./install.sh --aliases           # installa solo gli alias shell della Web UI
 #   ./install.sh --help              # mostra questo aiuto
 #
 set -euo pipefail
@@ -48,6 +49,7 @@ DO_SIGNAL_CLI=1
 DO_UPDATE=0
 DO_WHATSAPP=0
 DO_CHECK_WHATSAPP=0
+DO_ALIASES_ONLY=0
 SPECIFIC_VERSION=""
 
 # ─── Parsing argomenti ────────────────────────────────────────────────────────
@@ -65,6 +67,7 @@ Opzioni:
   --update             Aggiorna signal-cli all'ultima versione disponibile
   --whatsapp           Avvia il WhatsApp HTTP API (WAHA) via Docker Compose
   --check-whatsapp     Verifica i prerequisiti WhatsApp (Docker, porte, firewall)
+  --aliases            Installa solo gli alias shell della Web UI
   --help               Mostra questo aiuto
 
 Esempi:
@@ -73,6 +76,7 @@ Esempi:
   ./install.sh --update                 # aggiorna signal-cli
   ./install.sh --check-whatsapp         # controlla solo prerequisiti WhatsApp
   ./install.sh --whatsapp               # avvia WAHA (WhatsApp HTTP API)
+  ./install.sh --aliases                # installa solo gli alias della Web UI
 EOF
 }
 
@@ -83,6 +87,7 @@ while [ $# -gt 0 ]; do
         --update)           DO_UPDATE=1; shift ;;
         --whatsapp)         DO_WHATSAPP=1; shift ;;
         --check-whatsapp)   DO_CHECK_WHATSAPP=1; shift ;;
+        --aliases)          DO_ALIASES_ONLY=1; shift ;;
         --version)
             [ $# -lt 2 ] && die "--version richiede un argomento (es. 0.14.7)"
             SPECIFIC_VERSION="$2"; shift 2 ;;
@@ -99,6 +104,78 @@ require_cmd() {
     if ! command -v "$cmd" >/dev/null 2>&1; then
         die "Comando '$cmd' non trovato. Installalo e riprova."
     fi
+}
+
+install_aliases() {
+    local shell_name="${SHELL:-}"
+    shell_name="${shell_name##*/}"
+    local rc_file
+    local begin_marker="# ── BEGIN signal-tui aliases ──"
+    local end_marker="# ── END signal-tui aliases ──"
+    local ALIASES_BLOCK
+
+    case "$shell_name" in
+        *zsh*)  rc_file="$HOME/.zshrc" ;;
+        *bash*|"") rc_file="$HOME/.bashrc" ;;
+        *)
+            warn "Shell '$shell_name' non supportata: gli alias richiedono bash/zsh; fish richiederebbe funzioni (vedi docs/ALIASES.md)."
+            return 0
+            ;;
+    esac
+
+    if [[ "$PROJECT_DIR" == *[[:space:]]* ]]; then
+        warn "Il path del progetto contiene spazi; verifica il quoting degli alias dopo l'installazione: $PROJECT_DIR"
+    fi
+
+    read -r -d '' ALIASES_BLOCK <<'EOF' || true
+# ─── Signal TUI Client: web reader + background via tmux ─────────────────
+# Web su 0.0.0.0:4242. Token Bearer: config.json (web.token) o SIGNAL_TUI_WEB_TOKEN.
+# web-signal-tui-bg esporta il token nella shell (fast cycle: curl + login Web UI).
+SIGNAL_TUI_DIR="__PROJECT_DIR__"
+alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
+alias web-signal-tui-bg='tmux new-session -d -s tui "cd $SIGNAL_TUI_DIR && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0" && export SIGNAL_TUI_WEB_TOKEN="$(python3 -c "import json; print(json.load(open(\"$SIGNAL_TUI_DIR/config.json\"))[\"web\"][\"token\"]))")" && echo "TUI bg avviata — token: $SIGNAL_TUI_WEB_TOKEN"'
+alias web-signal-tui-stop='tmux send-keys -t tui C-c 2>/dev/null; sleep 1; tmux kill-session -t tui 2>/dev/null; sleep 0.5; [ -f /tmp/signal-tui.lock ] && rm -f /tmp/signal-tui.lock'
+EOF
+    ALIASES_BLOCK="${ALIASES_BLOCK//__PROJECT_DIR__/$PROJECT_DIR}"
+
+    if [ ! -e "$rc_file" ]; then
+        : > "$rc_file" || return 1
+    fi
+
+    local tmp_file
+    tmp_file="$(mktemp "${rc_file}.tmp.XXXXXX")" || return 1
+    local line in_block=0 replaced=0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$line" = "$begin_marker" ]; then
+            if [ "$replaced" -eq 0 ]; then
+                printf '%s\n%s\n%s\n' "$begin_marker" "$ALIASES_BLOCK" "$end_marker" >> "$tmp_file"
+                replaced=1
+            fi
+            in_block=1
+        elif [ "$line" = "$end_marker" ] && [ "$in_block" -eq 1 ]; then
+            in_block=0
+        elif [ "$in_block" -eq 0 ]; then
+            printf '%s\n' "$line" >> "$tmp_file"
+        fi
+    done < "$rc_file"
+
+    if [ "$in_block" -eq 1 ]; then
+        rm -f "$tmp_file"
+        warn "Marcatore END mancante in $rc_file; file lasciato invariato."
+        return 1
+    fi
+
+    if [ "$replaced" -eq 0 ]; then
+        printf '\n%s\n%s\n%s\n' "$begin_marker" "$ALIASES_BLOCK" "$end_marker" >> "$tmp_file"
+    fi
+
+    if ! command cat "$tmp_file" > "$rc_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
+    rm -f "$tmp_file"
+    ok "Alias shell della Web UI installati in $rc_file"
 }
 
 # ── WhatsApp helpers ───────────────────────────────────────────────────────────
@@ -327,6 +404,12 @@ install_python_deps() {
     fi
 }
 
+if [ "$DO_ALIASES_ONLY" -eq 1 ]; then
+    info "Aggiunta alias web…"
+    install_aliases
+    exit $?
+fi
+
 # ─── Esecuzione principale ────────────────────────────────────────────────────
 echo
 echo "${C_BOLD}=== Signal TUI Client — Installazione ===${C_RESET}"
@@ -395,6 +478,9 @@ if [ "$DO_CHECK_WHATSAPP" -eq 1 ]; then
 elif [ "$DO_WHATSAPP" -eq 1 ]; then
     setup_whatsapp 1
 fi
+
+# 5.6 Alias shell della Web UI
+install_aliases || warn "Installazione degli alias shell non riuscita; l'installazione continua."
 
 # 6. Riepilogo finale
 echo
