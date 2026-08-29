@@ -19,8 +19,7 @@ def test_resolves_foreign_absolute_path_by_basename(monkeypatch, tmp_path: Path)
     monkeypatch.setattr("backends.telegram._media_dir", lambda: media_dir)
 
     attachment_id = (
-        "/home/altrouser/.local/share/signal-tui-client/telegram-media/"
-        "123-456-sent.png"
+        "/home/altrouser/.local/share/signal-tui-client/telegram-media/123-456-sent.png"
     )
 
     assert _backend().get_attachment_path(attachment_id) == expected
