@@ -9,6 +9,7 @@ PATH, so no real downloads or installs happen.
 
 from __future__ import annotations
 
+import ast
 import io
 import os
 import shutil
@@ -507,3 +508,21 @@ class TestAliasIsolation:
         assert "web-signal-tui-bg" in isolated_bashrc.read_text(encoding="utf-8")
         real_bashrc_after = real_bashrc.read_bytes() if real_bashrc.exists() else None
         assert real_bashrc_after == real_bashrc_before
+
+    def test_web_bg_alias_python_syntax_is_valid(self, tmp_path: Path):
+        """Il comando python3 -c dell'alias web-signal-tui-bg deve essere sintatticamente
+        valido: una parentesi extra lo rompe (bug osservato: token mai estratto)."""
+        script = tmp_path / "install.sh"
+        shutil.copy(INSTALL_SCRIPT, script)
+        text = script.read_text(encoding="utf-8")
+        line = next(ln for ln in text.splitlines() if "alias web-signal-tui-bg=" in ln)
+        marker = 'python3 -c "'
+        start = line.index(marker) + len(marker)
+        # Il codice finisce alla prima " non preceduta da backslash.
+        i = start
+        while i < len(line):
+            if line[i] == '"' and line[i - 1] != "\\":
+                break
+            i += 1
+        code = line[start:i].replace('\\"', '"')
+        ast.parse(code)  # deve essere Python valido (no parentesi sbilanciate)
