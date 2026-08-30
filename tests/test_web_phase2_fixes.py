@@ -152,6 +152,34 @@ def test_telegram_persists_content_type_and_api_marks_tgref_as_image(
     assert _messages("telegram", "42")[0]["attachment"]["type"] == "image/*"
 
 
+def test_web_api_does_not_use_mimetype_as_caption(monkeypatch, tmp_path):
+    """attachment_info che contiene solo un mimetype (es. 'image/jpeg', reperto
+    live WAHA su immagini inviate) non deve diventare la caption della bolla."""
+    _db(monkeypatch, tmp_path)
+    from backend import _add_message_to_cache
+
+    for info in ("image/jpeg", "video/mp4"):
+        _add_message_to_cache(
+            "555",
+            "",
+            is_mine=True,
+            sender="You",
+            timestamp=1_000,
+            msg_type="image",
+            attachment_info=info,
+            attachment_id="http://localhost:3000/api/files/default/true_555@lid_ABC.jpeg",
+            content_type=None,
+            protocol="whatsapp",
+            msg_id=f"true_555@lid_ABC_{info}",
+        )
+    result = _messages("whatsapp", "555")
+    assert len(result) == 2
+    for message in result:
+        assert message["text"] == ""
+        assert message["attachment"] is not None
+        assert message["attachment"]["type"] in ("image/jpeg", "image/*")
+
+
 def test_push_on_attachment_upgrade():
     contact = ChatContact(id="42", display_name="Test", protocol="telegram")
     backend = SimpleNamespace(ingest_message=MagicMock(return_value="changed"))

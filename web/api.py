@@ -335,6 +335,10 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 if (
                     info
                     and info != file_name
+                    # Un mimetype puro (es. "image/jpeg", "video/mp4") non è mai
+                    # una caption: arriva da attachment_info usato come mimetype
+                    # (reperto live WAHA su messaggi immagine inviati).
+                    and not re.fullmatch(r"[a-z0-9.+-]+/[a-z0-9.+-]+", info)
                     and not info.lower().endswith(
                         (
                             ".png",

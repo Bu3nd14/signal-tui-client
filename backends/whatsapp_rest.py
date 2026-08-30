@@ -553,7 +553,18 @@ class WhatsAppRESTClient:
                     data = resp.read()
                     return data
             except (urllib.error.HTTPError, urllib.error.URLError, OSError):
-                return None
+                # URL non più servito da WAHA (es. media.url datato o storage
+                # purgato): NON arrendersi — estrai l'id dal path e prova i
+                # fallback per id sotto, che usano la forma canonica.
+                logger.debug(
+                    "WAHA media URL fetch failed, falling back to id endpoints: %s",
+                    safe_url,
+                )
+                from pathlib import Path as _Path
+
+                # Estrai l'id dal path ORIGINALE (non da safe_url, che è già
+                # percent-encoded): l'id va ri-encodato una sola volta sotto.
+                media_id_or_url = _Path(urlparse(media_id_or_url).path).stem
         # 1) WAHA Core: direct binary endpoint — percent-encode the id
         #    so @lid / @c.us / @g.us don't become userinfo in the URL.
         encoded = quote(media_id_or_url, safe="")

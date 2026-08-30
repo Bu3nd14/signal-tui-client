@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import sys
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -1312,9 +1313,24 @@ class TestWhatsAppBackend:
             mock_urlopen.return_value.__enter__.return_value = mock_resp
             result = client.download_media("https://wa.to/media/img.jpg")
         assert result == fake_bytes
-        mock_urlopen.assert_called_once()
-        call_url = mock_urlopen.call_args[0][0].full_url
-        assert call_url == "https://wa.to/media/img.jpg"
+
+    def test_download_media_url_fetch_failure_falls_back_to_id_endpoint(self):
+        """Quando il fetch dell'URL fallisce (media.url non più servito da
+        WAHA), estrae l'id dal path e prova l'endpoint binario per id."""
+        client = WhatsAppRESTClient("http://api.test")
+        fake_bytes = b"\x89PNG\r\n\x1a\nimage"
+        url = "http://localhost:3000/api/files/default/true_123@lid_ABC.jpeg"
+        with (
+            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("down")),
+            patch.object(client, "_request_raw", return_value=fake_bytes) as mock_raw,
+        ):
+            result = client.download_media(url, timeout=30)
+        assert result == fake_bytes
+        # L'id estratto dallo stem del path (estensione rimossa) viene
+        # percent-encodato per il download endpoint.
+        mock_raw.assert_any_call(
+            "GET", "/api/default/true_123%40lid_ABC/download", timeout=30
+        )
 
     def test_download_media_encodes_at_sign(self):
         """Message IDs with @lid are percent-encoded in the URL path."""
