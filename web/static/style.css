@@ -269,6 +269,11 @@ h2 { font-size: 1.05rem; }
   position: absolute;
   top: 0;
   left: -38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
   width: 26px;
   height: 26px;
   border: 1px solid var(--line);
@@ -306,6 +311,8 @@ h2 { font-size: 1.05rem; }
   grid-template-columns: repeat(6, 40px);
   gap: 3px;
   padding: 6px;
+  max-height: 45vh;
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel);
