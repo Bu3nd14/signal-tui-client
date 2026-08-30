@@ -774,7 +774,9 @@ class SignalBackend(ChatBackend):
                 ),
                 None,
             )
-            author = self.user_number if target and target.get("is_mine") else contact_id
+            author = (
+                self.user_number if target and target.get("is_mine") else contact_id
+            )
         if not self._use_daemon or not self._rpc:
             return False
         try:

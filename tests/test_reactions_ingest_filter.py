@@ -208,7 +208,10 @@ class TestWhatsAppReactionIngestFilter:
             "body": "",
         }
 
-        assert backend.handle_webhook({"event": "message.ack", "payload": payload}) is False
+        assert (
+            backend.handle_webhook({"event": "message.ack", "payload": payload})
+            is False
+        )
         assert backend.poll_once() == []
         assert backend._seen_message_keys == set()
 
@@ -226,7 +229,9 @@ class TestWhatsAppReactionIngestFilter:
             "body": "",
         }
 
-        assert backend.handle_webhook({"event": "message.ack", "payload": payload}) is True
+        assert (
+            backend.handle_webhook({"event": "message.ack", "payload": payload}) is True
+        )
         events = backend.poll_once()
         assert len(events) == 1
         assert events[0].type == "message"

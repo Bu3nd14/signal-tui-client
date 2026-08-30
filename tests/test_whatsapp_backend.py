@@ -1976,8 +1976,14 @@ class TestWhatsAppWebhook:
         }
 
         try:
-            assert backend.handle_webhook({"event": "message", "payload": payload}) is False
-            assert backend.handle_webhook({"event": "message", "payload": payload}) is False
+            assert (
+                backend.handle_webhook({"event": "message", "payload": payload})
+                is False
+            )
+            assert (
+                backend.handle_webhook({"event": "message", "payload": payload})
+                is False
+            )
             assert list(backend._media_pending) == [("1@c.us", "media-race-1")]
         finally:
             backend.disconnect_sync()

@@ -427,8 +427,7 @@ class SignalRPCClient:
         result = response.get("result")
         results = result.get("results", []) if isinstance(result, dict) else []
         return any(
-            isinstance(item, dict) and item.get("type") == "SUCCESS"
-            for item in results
+            isinstance(item, dict) and item.get("type") == "SUCCESS" for item in results
         )
 
     def receive(self) -> list[dict]:

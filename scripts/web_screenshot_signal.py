@@ -152,7 +152,9 @@ async def drive_browser(cdp: base.CDPClient, token: str) -> list[str]:
         "proto: localStorage.getItem('signal-tui-web-proto')})"
     )
     storage_verified = stored_values == {"token": token, "proto": PROTO}
-    print(f"Verifica localStorage token/protocollo: {'OK' if storage_verified else 'FALLITA'}")
+    print(
+        f"Verifica localStorage token/protocollo: {'OK' if storage_verified else 'FALLITA'}"
+    )
     if not storage_verified:
         raise RuntimeError("verifica di token e protocollo in localStorage fallita")
     await base.reload_and_wait(cdp)
@@ -191,21 +193,18 @@ async def drive_browser(cdp: base.CDPClient, token: str) -> list[str]:
     )
     target_resolution = await cdp.evaluate(
         "(() => { const id = '1787950650355'; "
-        "const byId = document.querySelector(`[data-mid=\"${id}\"]`); "
+        'const byId = document.querySelector(`[data-mid="${id}"]`); '
         "if (byId) return {matched:'data-mid', originalMid:byId.dataset.mid}; "
-        "const byTimestamp = document.querySelector(`[data-ts=\"${id}\"]`); "
+        'const byTimestamp = document.querySelector(`[data-ts="${id}"]`); '
         "if (!byTimestamp) return {matched:null}; "
         "const originalMid = byTimestamp.dataset.mid; "
         "byTimestamp.dataset.mid = id; "
         "return {matched:'data-ts', originalMid}; })()"
     )
     summary.append(
-        "messaggio target risolto: "
-        + json.dumps(target_resolution, ensure_ascii=False)
+        "messaggio target risolto: " + json.dumps(target_resolution, ensure_ascii=False)
     )
-    reaction_selector = json.dumps(
-        f'[data-mid="{TARGET_MESSAGE_ID}"] .reaction-chip'
-    )
+    reaction_selector = json.dumps(f'[data-mid="{TARGET_MESSAGE_ID}"] .reaction-chip')
     await base.wait_for_condition(
         cdp,
         f"Boolean(document.querySelector({reaction_selector}))",
@@ -225,8 +224,7 @@ async def drive_browser(cdp: base.CDPClient, token: str) -> list[str]:
         json.dumps(reaction_result, ensure_ascii=False),
     )
     summary.append(
-        "reaction-chip verificata: "
-        + json.dumps(reaction_result, ensure_ascii=False)
+        "reaction-chip verificata: " + json.dumps(reaction_result, ensure_ascii=False)
     )
     await asyncio.sleep(1.0)
 

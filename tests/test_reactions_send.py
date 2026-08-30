@@ -42,9 +42,7 @@ def test_signal_rpc_and_backend_send_reaction():
     signal._use_daemon = True
     signal._rpc = client
     client.send_reaction = MagicMock(return_value=True)
-    assert signal.send_reaction_sync(
-        "+3902", "1234", "❤️", target_author="+3901"
-    )
+    assert signal.send_reaction_sync("+3902", "1234", "❤️", target_author="+3901")
     client.send_reaction.assert_called_once_with("+3902", "❤️", "+3901", 1234)
 
 
@@ -101,7 +99,9 @@ def test_reaction_endpoint_validates_sends_persists_and_pushes(tmp_path):
         ]
     }
     signal.send_reaction_sync = MagicMock(return_value=True)
-    manager = SimpleNamespace(get=lambda protocol: signal if protocol == "signal" else None)
+    manager = SimpleNamespace(
+        get=lambda protocol: signal if protocol == "signal" else None
+    )
     app = FastAPI()
     app.state.manager = manager
     app.include_router(create_api_router())
@@ -118,24 +118,30 @@ def test_reaction_endpoint_validates_sends_persists_and_pushes(tmp_path):
             msg_id="1234",
         )
         with patch("web.api.push_event") as pushed, TestClient(app) as client:
-            assert client.post(
-                "/api/messages/reaction",
-                json={
-                    "protocol": "invalid",
-                    "contact_id": "+3902",
-                    "message_id": "1234",
-                    "emoji": "👍",
-                },
-            ).status_code == 400
-            assert client.post(
-                "/api/messages/reaction",
-                json={
-                    "protocol": "signal",
-                    "contact_id": "+3902",
-                    "message_id": "1234",
-                    "emoji": "not-emoji",
-                },
-            ).status_code == 400
+            assert (
+                client.post(
+                    "/api/messages/reaction",
+                    json={
+                        "protocol": "invalid",
+                        "contact_id": "+3902",
+                        "message_id": "1234",
+                        "emoji": "👍",
+                    },
+                ).status_code
+                == 400
+            )
+            assert (
+                client.post(
+                    "/api/messages/reaction",
+                    json={
+                        "protocol": "signal",
+                        "contact_id": "+3902",
+                        "message_id": "1234",
+                        "emoji": "not-emoji",
+                    },
+                ).status_code
+                == 400
+            )
             response = client.post(
                 "/api/messages/reaction",
                 json={

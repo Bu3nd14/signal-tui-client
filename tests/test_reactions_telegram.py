@@ -167,7 +167,9 @@ def test_configure_reaction_notify_enables_all_by_default(monkeypatch):
 
     asyncio.run(backend._configure_reaction_notify())
 
-    assert isinstance(client.await_args_list[0].args[0], GetReactionsNotifySettingsRequest)
+    assert isinstance(
+        client.await_args_list[0].args[0], GetReactionsNotifySettingsRequest
+    )
     request = client.await_args_list[1].args[0]
     assert isinstance(request, SetReactionsNotifySettingsRequest)
     assert isinstance(
@@ -418,9 +420,7 @@ def test_on_raw_dispatches_reaction_update(monkeypatch):
     handle.assert_awaited_once_with(update)
 
 
-def test_reaction_catchup_during_connect_is_enqueued_and_persisted(
-    monkeypatch, tmp_db
-):
+def test_reaction_catchup_during_connect_is_enqueued_and_persisted(monkeypatch, tmp_db):
     update = _update(PeerChat(chat_id=123))
 
     class FakeClient:

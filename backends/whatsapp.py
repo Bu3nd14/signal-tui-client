@@ -251,9 +251,7 @@ class WhatsAppBackend(ChatBackend):
                     ack_media = content.get("media")
                     skip_ack_message = (
                         ack_has_media
-                        and not (
-                            isinstance(ack_media, dict) and ack_media.get("url")
-                        )
+                        and not (isinstance(ack_media, dict) and ack_media.get("url"))
                     ) or (not ack_has_media and not str(ack_text).strip())
 
                     # ── Edit detection (message.ack with a new body) ──────
@@ -1095,9 +1093,7 @@ class WhatsAppBackend(ChatBackend):
         delivered_ids: set[str] = set()
         for m in msgs:
             media = m.get("media")
-            if m.get("hasMedia") and not (
-                isinstance(media, dict) and media.get("url")
-            ):
+            if m.get("hasMedia") and not (isinstance(media, dict) and media.get("url")):
                 msg_id = m.get("id") or (m.get("key") or {}).get("id")
                 if msg_id:
                     self._schedule_media_resolve(contact_id, str(msg_id))

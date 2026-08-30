@@ -227,7 +227,7 @@ def test_reaction_button_picker_and_send_flow_are_wired():
     emojis = json.loads(match.group(1))
     assert 'reaction.className = "message-reaction";' in source
     assert 'reaction.title = "Reagisci";' in source
-    assert 'startReaction(item, event)' in source
+    assert "startReaction(item, event)" in source
     assert len(emojis) > 6
     assert {"👍", "❤️", "😂", "🔥", "🎉", "💯", "🤣", "💪"} <= set(emojis)
     assert "for (const emoji of REACTION_EMOJIS)" in source

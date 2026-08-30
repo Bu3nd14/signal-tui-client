@@ -592,9 +592,7 @@ def _event_from_message(
     # ghost/servizio): mai creare bolle vuote.  Il messaggio viene ri-ingerito
     # con il media alla prossima fetch_history (apertura chat nel TUI).
     if not text.strip() and not media_items:
-        logger.debug(
-            "whatsapp: skip empty text message without media (id=%s)", msg_id
-        )
+        logger.debug("whatsapp: skip empty text message without media (id=%s)", msg_id)
         return []
 
     # No media: pure text message (or sticker from msg_type).
