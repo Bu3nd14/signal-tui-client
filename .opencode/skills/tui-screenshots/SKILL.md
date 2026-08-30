@@ -25,6 +25,18 @@ Un'app Textual gira in un terminale. Per fotografarla servono:
 
 ## Lezioni chiave (imparate sul campo)
 
+- **PRIVACY: MAI pubblicare/condividere screenshot che mostrano persone, e in
+  particolare minori.** Le chat reali contengono foto di familiari/amici:
+  prima di usare uno screenshot per documentazione, VERIFICA con un agente con
+  capacità di visione che non ci siano volti/persone riconoscibili. Preferisci
+  immagini di **paesaggi, natura, luoghi** quando disponibili. Se serve, cambia
+  chat/posizione nello scroll per evitare contenuti sensibili.
+- **Verifica SEMPRE lo screenshot FINALE, non solo le immagini sorgente.**
+  Anche se le singole immagini analizzate sono paesaggi puliti, lo screenshot
+  mostra la chat intera: un messaggio adiacente (foto di famiglia, minori)
+  può comparire nello stesso frame. La verifica visiva va fatta sull'immagine
+  catturata (`import` PNG), non solo sul DB. Se lo screenshot contiene persone,
+  scarta e rifai con posizione/scroll diversi.
 - **Il testo Textual SI presenta** su Xvfb+openbox+kitty. Se lo screenshot sembra
   "vuoto" controlla con il conteggio dei **pixel chiari** (sotto), NON solo i
   colori: il tema scuro (colore di sfondo ~`(30,30,30)`) domina il conteggio

@@ -23,7 +23,7 @@ CONTACTS_SCREENSHOT = Path("/tmp/web-contacts.png")
 CHAT_SCREENSHOT = Path("/tmp/web-chat.png")
 DEBUG_URL = "http://127.0.0.1:9222/json"
 APP_URL = "http://127.0.0.1:4242/"
-TARGET_CONTACT_ID = "189025889575055@lid"
+TARGET_CONTACT_ID = "16660245291231@lid"
 
 
 class CDPError(RuntimeError):

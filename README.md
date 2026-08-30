@@ -460,7 +460,6 @@ Behavior details:
 Implementation: `contact_picker.py`; design notes in `docs/DESIGN_CTRLS_RUBRICA.md`.
 
 ![Address book picker](assets/screenshots/address-book.png)
-> **Screenshot placeholder** — capture with the real TUI and replace `address-book.png`
 
 ### Message editing
 
@@ -484,7 +483,6 @@ Limitations: only text messages can be edited (not media or captions); messages 
 Implementation: `tui/edit.py`; design notes in `docs/DESIGN_EDIT_MESSAGES.md`.
 
 ![Editing a sent message](assets/screenshots/message-editing.png)
-> **Screenshot placeholder** — capture with the real TUI and replace `message-editing.png`
 
 ### Replies and quoted media
 
@@ -504,7 +502,6 @@ Implementation: `ui_components.py` (`alt+r` binding on `ImageWidget`), `tui/send
 design notes in `docs/DESIGN_QUOTE_MEDIA_37_V2.md` and `docs/DESIGN_QUOTE_MEDIA_37_PLANB.md`.
 
 ![Replying with a quoted image](assets/screenshots/quote-media.png)
-> **Screenshot placeholder** — capture with the real TUI and replace `quote-media.png`
 
 ### Message delivery status
 
@@ -611,6 +608,14 @@ curl -H "Authorization: Bearer $SIGNAL_TUI_WEB_TOKEN" http://127.0.0.1:4242/api/
 The Bearer token lives in `config.json` under `web.token`; the web server also accepts it via the
 `SIGNAL_TUI_WEB_TOKEN` environment variable. The default port is `4242`.
 
+### Web UI
+
+The optional web reader gives read-only access to conversations and attachments from a browser:
+
+![Web UI — contact list](assets/screenshots/web-contacts.png)
+
+![Web UI — conversation](assets/screenshots/web-chat.png)
+
 ### Installing the aliases
 
 Automatic install — detects bash/zsh and writes the real project path:
@@ -652,7 +657,6 @@ in the modal.
 | Unsupported terminal and `catimg` missing | `off` | Placeholder only; clicking shows a "rendering disabled" status, no modal |
 
 ![Native kitty thumbnails](assets/screenshots/native-images-kitty.png)
-> **Screenshot placeholder** — capture with the real TUI and replace `native-images-kitty.png`
 
 ### Configuration
 
