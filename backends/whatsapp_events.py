@@ -587,6 +587,16 @@ def _event_from_message(
             )
         return events
 
+    # Un messaggio senza testo E senza media è una bolla vuota (es. media in
+    # download in corso su WAHA che arriva con hasMedia=true ma media=null, o
+    # ghost/servizio): mai creare bolle vuote.  Il messaggio viene ri-ingerito
+    # con il media alla prossima fetch_history (apertura chat nel TUI).
+    if not text.strip() and not media_items:
+        logger.debug(
+            "whatsapp: skip empty text message without media (id=%s)", msg_id
+        )
+        return []
+
     # No media: pure text message (or sticker from msg_type).
     return [
         ChatEvent(

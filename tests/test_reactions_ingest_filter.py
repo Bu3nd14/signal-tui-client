@@ -156,6 +156,43 @@ class TestWhatsAppReactionIngestFilter:
         assert events[0].type == "message"
         assert events[0].payload["text"] == "Ciao"
 
+    def test_empty_text_without_media_is_filtered(self):
+        # Media in download in corso su WAHA (hasMedia=true, media=null) o
+        # ghost/servizio: mai bolle vuote (reperto live: 3ª foto ingerita come
+        # text vuoto).  Il messaggio rientra con il media alla fetch_history.
+        events = _event_from_message(
+            {
+                "id": "true_391234567890@c.us_ABC",
+                "from": "391234567890@c.us",
+                "fromMe": True,
+                "hasMedia": True,
+                "media": None,
+                "timestamp": 1700000000,
+                "body": "",
+            }
+        )
+
+        assert events == []
+
+    def test_empty_text_with_media_is_preserved(self):
+        events = _event_from_message(
+            {
+                "id": "true_391234567890@c.us_ABC",
+                "from": "391234567890@c.us",
+                "fromMe": True,
+                "hasMedia": True,
+                "media": {
+                    "url": "http://localhost:3000/api/files/default/true_391234567890@c.us_ABC.jpeg",
+                    "mimetype": "image/jpeg",
+                },
+                "timestamp": 1700000000,
+                "body": "",
+            }
+        )
+
+        assert len(events) == 1
+        assert events[0].payload["msg_type"] == "image"
+
 
 class TestTelegramEmptyMessageIngestFilter:
     def test_empty_message_without_media_or_reply_is_filtered(self):
