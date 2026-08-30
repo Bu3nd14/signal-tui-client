@@ -452,6 +452,45 @@ def _update_message_attachment_id(
             conn.close()
 
 
+def _update_message_media_identity(
+    protocol: str,
+    contact_number: str,
+    msg_id: str | None,
+    timestamp: int,
+    attachment_id: str,
+    msg_type: str,
+) -> bool:
+    """Attach a real media identity (attachment_id + msg_type) to an existing row.
+
+    Ripara le righe "media race": quando un messaggio media viene ingerito
+    senza attachment (webhook WAHA partito prima del download → hasMedia=true
+    ma media=null), la riga resta vuota finché non arriva il media reale (echo
+    o fetch_history).  Questo helper aggiorna in place attachment_id e msg_type
+    così la bolla compare senza duplicati.  Ritorna True se ha aggiornato.
+    """
+    if not msg_id:
+        return False
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
+                "AND msg_id = ? ORDER BY ABS(timestamp - ?) ASC, rowid ASC LIMIT 1",
+                (protocol, contact_number, str(msg_id), timestamp),
+            ).fetchone()
+            if row is None:
+                return False
+            cursor = conn.execute(
+                "UPDATE messages SET attachment_id = ?, msg_type = ? WHERE id = ?",
+                (attachment_id, msg_type, row[0]),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
 def _fill_message_quote_fields(
     protocol: str,
     contact_number: str,

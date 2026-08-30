@@ -1574,6 +1574,61 @@ class TestWhatsAppBackend:
         assert optimistic["timestamp"] == t0 + 2000
         mock_update.assert_called_once()
 
+    def test_media_race_row_is_upgraded_by_later_echo(self):
+        """Riga text vuota creata da media race (webhook senza media) viene
+        ripristinata in place a immagine quando l'echo/fetch porta l'URL media
+        reale di WAHA (reperto live: la 3ª foto a Giovanni non compariva
+        nemmeno dopo aver riaperto la chat)."""
+        import backend as backend_mod
+
+        backend = _make_backend()
+        cid = "15771304468671@lid"
+        t0 = 1_788_114_863_000
+        mid = "true_15771304468671@lid_4AB02B4889D1AFFF775C"
+        url = (
+            "http://localhost:3000/api/files/default/"
+            "true_15771304468671@lid_4AB02B4889D1AFFF775C.jpeg"
+        )
+
+        # 1) Media race: il webhook arriva con hasMedia=true ma media=null →
+        #    riga text vuota (prima della fix veniva creata una bolla vuota).
+        assert backend.ingest_message(
+            cid,
+            {
+                "id": mid,
+                "text": "",
+                "is_mine": True,
+                "sender": "You",
+                "msg_type": "text",
+                "attachment_id": None,
+            },
+            t0,
+        )
+
+        # 2) Echo/fetch successivo con il media reale → upgrade in place.
+        added = backend.ingest_message(
+            cid,
+            {
+                "id": mid,
+                "text": "",
+                "is_mine": True,
+                "sender": "You",
+                "msg_type": "image",
+                "attachment_id": url,
+            },
+            t0,
+        )
+
+        assert added is False  # dedup: nessuna riga duplicata
+        assert len(backend.cache[cid]) == 1
+        assert backend.cache[cid][0]["attachment_id"] == url
+        assert backend.cache[cid][0]["msg_type"] == "image"
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            row = conn.execute(
+                "SELECT attachment_id, msg_type FROM messages"
+            ).fetchone()
+            assert row == (url, "image")
+
     def test_echo_out_of_order_picks_closest_idless(self):
         """Among id-less fallback candidates, the closest timestamp is upgraded."""
         import backend as backend_mod

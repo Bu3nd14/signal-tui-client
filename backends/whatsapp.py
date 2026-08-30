@@ -1647,10 +1647,32 @@ class WhatsAppBackend(ChatBackend):
     def _upgrade_outgoing_attachment(
         self, contact_id: str, message: dict, data: dict, ts: int
     ) -> None:
-        from backend import _update_message_attachment_id
+        from backend import (
+            _update_message_attachment_id,
+            _update_message_media_identity,
+        )
 
         current_id = message.get("attachment_id")
         incoming_id = data.get("attachment_id")
+        if not incoming_id:
+            return
+        # Media race: la riga è stata creata senza attachment (webhook WAHA
+        # partito prima del download → media=null, o riga text vuota).  Echo o
+        # fetch_history successivi portano il media REALE (URL WAHA o sent-*):
+        # aggiorna in place attachment_id + msg_type così la bolla compare
+        # senza duplicati (il download del file resta lazy in get_attachment_path).
+        if not current_id:
+            message["attachment_id"] = incoming_id
+            message["msg_type"] = data.get("msg_type", message.get("msg_type", "text"))
+            _update_message_media_identity(
+                PROTOCOL_WHATSAPP,
+                contact_id,
+                message.get("id") or data.get("id"),
+                int(message.get("timestamp", ts)),
+                incoming_id,
+                message["msg_type"],
+            )
+            return
         media_dir = self._ensure_media_dir()
         current_path = media_dir / Path(current_id).name if current_id else None
         incoming_path = media_dir / Path(incoming_id).name if incoming_id else None
