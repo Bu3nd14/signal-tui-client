@@ -46,6 +46,7 @@ logger.addHandler(_fh)
 logger.setLevel(logging.DEBUG)
 
 from backend import (
+    _ECHO_MATCH_WINDOW_MS,
     CACHE_DIR,
     DAEMON_HTTP_PORT,
     SIGNAL_CLI_ATTACHMENTS_DIR,
@@ -1172,34 +1173,66 @@ class SignalBackend(ChatBackend):
         ts: int,
         is_mine: bool,
         text: str,
+        msg_id: str | None = None,
         attachment_id: str | None = None,
     ) -> dict | None:
         """Return the cached message with the same identity, if present.
 
-        For outgoing messages (``is_mine=True``) the optimistic save on send
-        and the later sync sent-envelope can carry different timestamps but are
-        the same logical message.  To avoid merging genuinely distinct messages
-        with identical text, an outgoing echo is only deduplicated if it falls
-        within a short window of the existing outgoing message.
+        For outgoing messages (``is_mine=True``), a confirmed row with a
+        different id is always a distinct message.  Echo fallback by text is
+        restricted to id-less optimistic rows within the DB echo-match window,
+        requires compatible attachment ids, and chooses the nearest timestamp.
+        Matching ids remain the primary identity, including the post-text
+        fallback used by attachment-upgrade echoes.
 
         For incoming messages a window is also used (instead of exact timestamp
         match) so that signal-cli re-deliveries (e.g. sync from another device)
         with a slightly different timestamp are still recognised as duplicates.
         """
+        best_idless: dict | None = None
+        best_idless_delta: int | None = None
         for msg in self.cache.get(contact_id, []):
             if msg.get("is_mine") != is_mine:
                 continue
+            cached_attachment_id = msg.get("attachment_id")
+            same_attachment = (
+                not attachment_id
+                or not cached_attachment_id
+                or cached_attachment_id == attachment_id
+            )
+            if (
+                is_mine
+                and msg_id
+                and msg.get("id")
+                and msg.get("id") == msg_id
+                and same_attachment
+            ):
+                return msg
             if msg.get("text") != text:
                 continue
-            cached_attachment_id = msg.get("attachment_id")
             if not is_mine and attachment_id and cached_attachment_id != attachment_id:
                 continue
             if not is_mine:
                 if abs(msg.get("timestamp", 0) - ts) <= _INCOMING_DEDUP_WINDOW_MS:
                     return msg
-            elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:
+            elif msg_id:
+                cached_id = msg.get("id")
+                if cached_id and cached_id == msg_id:
+                    return msg
+                if not cached_id and same_attachment:
+                    delta = abs(msg.get("timestamp", 0) - ts)
+                    if delta <= _ECHO_MATCH_WINDOW_MS and (
+                        best_idless_delta is None or delta < best_idless_delta
+                    ):
+                        best_idless = msg
+                        best_idless_delta = delta
+            elif (
+                not msg.get("id")
+                and same_attachment
+                and abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS
+            ):
                 return msg
-        return None
+        return best_idless
 
     def _upgrade_outgoing_attachment(
         self, contact_id: str, message: dict, data: dict, ts: int
@@ -1302,43 +1335,69 @@ class SignalBackend(ChatBackend):
             # through to the normal dedup below.
             mid = data.get("id")
             if mid and is_mine:
+                best_optimistic: dict | None = None
+                best_optimistic_delta: int | None = None
                 for m in self.cache.get(contact_id, []):
-                    id_matches_timestamp = str(m.get("id")) == str(ts)
+                    if not m.get("is_mine"):
+                        continue
+                    cached_attachment_id = m.get("attachment_id")
+                    incoming_attachment_id = data.get("attachment_id")
+                    same_attachment = (
+                        not incoming_attachment_id
+                        or not cached_attachment_id
+                        or cached_attachment_id == incoming_attachment_id
+                    )
+                    id_matches_timestamp = (
+                        str(m.get("id")) == str(ts) and same_attachment
+                    )
+                    delta = abs(int(m.get("timestamp", 0)) - ts)
                     optimistic_match = (
                         not m.get("id")
                         and m.get("text") == text
-                        and abs(int(m.get("timestamp", 0)) - ts)
-                        <= _SEND_DEDUP_WINDOW_MS
+                        and delta <= _SEND_DEDUP_WINDOW_MS
+                        and same_attachment
                     )
-                    if m.get("is_mine") and (id_matches_timestamp or optimistic_match):
-                        m["id"] = str(mid)  # ts entry INVARIATO (ottimistico)
-                        try:
-                            _update_message_id(
-                                contact_id,
-                                text,
-                                True,
-                                m["timestamp"],
-                                str(mid),  # ts OTTIMISTICO nel DB
-                                protocol=PROTOCOL_SIGNAL,
-                            )
-                        except Exception:
-                            logger.exception("Signal: _update_message_id failed")
-                        changed = self._upgrade_outgoing_attachment(
-                            contact_id, m, data, ts
+                    if id_matches_timestamp:
+                        best_optimistic = m
+                        break
+                    if optimistic_match and (
+                        best_optimistic_delta is None or delta < best_optimistic_delta
+                    ):
+                        best_optimistic = m
+                        best_optimistic_delta = delta
+                if best_optimistic is not None:
+                    m = best_optimistic
+                    m["id"] = str(mid)  # ts entry INVARIATO (ottimistico)
+                    try:
+                        _update_message_id(
+                            contact_id,
+                            text,
+                            True,
+                            m["timestamp"],
+                            str(mid),  # ts OTTIMISTICO nel DB
+                            protocol=PROTOCOL_SIGNAL,
                         )
-                        if not changed:
-                            logger.info(
-                                "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
-                                mid,
-                                ts,
-                                text,
-                                m.get("attachment_id"),
-                                data.get("attachment_id"),
-                            )
-                        return "changed" if changed else False
+                    except Exception:
+                        logger.exception("Signal: _update_message_id failed")
+                    changed = self._upgrade_outgoing_attachment(contact_id, m, data, ts)
+                    if not changed:
+                        logger.info(
+                            "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
+                            mid,
+                            ts,
+                            text,
+                            m.get("attachment_id"),
+                            data.get("attachment_id"),
+                        )
+                    return "changed" if changed else False
 
             existing = self._message_already_cached(
-                contact_id, ts, is_mine, text, data.get("attachment_id")
+                contact_id,
+                ts,
+                is_mine,
+                text,
+                msg_id=data.get("id"),
+                attachment_id=data.get("attachment_id"),
             )
             if existing is not None:
                 if is_mine:
