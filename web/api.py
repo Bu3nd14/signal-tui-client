@@ -966,6 +966,20 @@ def create_api_router() -> Any:
             headers={"Cache-Control": "public, max-age=3600"},
         )
 
+    @router.get("/reactions")
+    async def reactions(request: Request, protocol: str) -> dict[str, list[str]]:
+        if protocol != "telegram":
+            return {"emojis": []}
+        try:
+            backend = request.app.state.manager.get(protocol)
+            if backend is None or not hasattr(backend, "get_available_reactions"):
+                return {"emojis": []}
+            emojis = await asyncio.to_thread(backend.get_available_reactions)
+        except Exception:
+            logger.debug("Telegram available reactions request failed", exc_info=True)
+            return {"emojis": []}
+        return {"emojis": emojis if isinstance(emojis, list) else []}
+
     @router.post("/send")
     async def send(request: Request) -> dict[str, bool]:
         origin = request.headers.get("origin")

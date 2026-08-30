@@ -49,6 +49,8 @@ const state = {
   emojiCategory: 0,
   reactionPicker: null,
   telegramRefreshTimer: null,
+  telegramReactions: [],
+  userScrolledUp: false,
 };
 
 const elements = {
@@ -718,6 +720,8 @@ function appendRenderedQuote(bubble, item) {
 
 function renderMessages(messages, protocol) {
   pruneOrphanObjectUrls();
+  const prevScrollTop = elements.messages.scrollTop;
+  const wasAtBottom = !state.userScrolledUp;
   elements.messages.replaceChildren();
   state.messageNodes ??= new Map();
   state.messageNodes.clear();
@@ -764,8 +768,8 @@ function renderMessages(messages, protocol) {
     empty.className = "empty-state";
     empty.textContent = "Nessun messaggio archiviato in questa conversazione.";
     elements.messages.append(empty);
-    scrollThreadToBottom();
-    requestAnimationFrame(scrollThreadToBottom);
+    if (wasAtBottom) scrollThreadToBottom();
+    else elements.messages.scrollTop = Math.min(prevScrollTop, elements.messages.scrollHeight);
     return;
   }
   for (const item of displayed) {
@@ -878,8 +882,8 @@ function renderMessages(messages, protocol) {
     });
     elements.messages.append(message);
   }
-  scrollThreadToBottom();
-  requestAnimationFrame(scrollThreadToBottom);
+  if (wasAtBottom) scrollThreadToBottom();
+  else elements.messages.scrollTop = Math.min(prevScrollTop, elements.messages.scrollHeight);
 }
 
 function copyReactions(reactions) {
@@ -940,7 +944,10 @@ function startReaction(item, event) {
   picker.className = "reaction-picker";
   picker.setAttribute("role", "dialog");
   picker.setAttribute("aria-label", "Scegli una reazione");
-  for (const emoji of REACTION_EMOJIS) {
+  const reactionEmojis = state.active?.protocol === "telegram" && state.telegramReactions?.length
+    ? state.telegramReactions
+    : REACTION_EMOJIS;
+  for (const emoji of reactionEmojis) {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = emoji;
@@ -1017,7 +1024,6 @@ async function loadMessages() {
     if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
       state.messages = messages;
       renderMessages(messages, active.protocol);
-      scrollThreadToBottom();
     }
   } catch (error) {
     if (error.name !== "AbortError" && error.message !== "unauthorized") showError("Errore di rete durante il caricamento dei messaggi.");
@@ -1252,13 +1258,29 @@ function updateTelegramRefreshTimer() {
   }
 }
 
+async function loadTelegramReactions() {
+  if (state.active?.protocol !== "telegram") return;
+  try {
+    const response = await apiFetch("/api/reactions?protocol=telegram");
+    const data = await response.json();
+    state.telegramReactions = Array.isArray(data.emojis) ? data.emojis : [];
+  } catch (error) {
+    state.telegramReactions = [];
+    if (error.message !== "unauthorized") {
+      console.debug("[web] telegram reactions unavailable", error);
+    }
+  }
+}
+
 function openThread(contact) {
   closeEmojiPicker({ focus: false });
   closeReactionPicker();
   cancelReply();
   if (state.editing) cancelEdit();
   state.active = contact;
+  state.userScrolledUp = false;
   updateTelegramRefreshTimer();
+  if (contact.protocol === "telegram") void loadTelegramReactions();
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
   elements.app.classList.add("thread-open");
@@ -1662,6 +1684,13 @@ document.querySelector("#back-button").addEventListener("click", () => {
   elements.app.classList.remove("thread-open");
 });
 document.querySelector("#dismiss-error").addEventListener("click", () => { elements.errorBanner.hidden = true; });
+elements.messages.addEventListener("scroll", () => {
+  state.userScrolledUp = (
+    elements.messages.scrollHeight
+    - elements.messages.scrollTop
+    - elements.messages.clientHeight
+  ) > 80;
+});
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   state.editing ? submitEdit() : submitMessage();

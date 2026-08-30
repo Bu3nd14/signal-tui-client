@@ -122,6 +122,23 @@ def test_emoji_uses_raw_predefined_categories(web_client):
     assert any("\u200d" in char for char in raw_chars)
 
 
+def test_available_reactions_are_telegram_only():
+    backend = MagicMock()
+    backend.get_available_reactions.return_value = ["👍", "❤️"]
+    manager = FakeManager()
+    manager.get = MagicMock(return_value=backend)
+
+    with TestClient(make_app(manager)) as client:
+        telegram = client.get(
+            "/api/reactions?protocol=telegram", headers=AUTH
+        )
+        signal = client.get("/api/reactions?protocol=signal", headers=AUTH)
+
+    assert telegram.json() == {"emojis": ["👍", "❤️"]}
+    assert signal.json() == {"emojis": []}
+    backend.get_available_reactions.assert_called_once_with()
+
+
 def test_send_requires_bearer_token():
     contact = ChatContact("alice", "Alice", "signal")
     manager = FakeManager([contact])

@@ -41,6 +41,51 @@ def _backend() -> TelegramBackend:
     return backend
 
 
+def test_get_available_reactions_filters_and_caches(monkeypatch):
+    backend = _backend()
+    backend._loop = object()
+    backend._client = AsyncMock(
+        return_value=SimpleNamespace(
+            reactions=[
+                SimpleNamespace(reaction=ReactionEmoji("👍")),
+                SimpleNamespace(reaction=ReactionCustomEmoji(document_id=1)),
+                SimpleNamespace(reaction=SimpleNamespace(document_id=2)),
+            ]
+        )
+    )
+    scheduled = 0
+
+    def run_coroutine(coroutine, loop):
+        nonlocal scheduled
+        scheduled += 1
+        assert loop is backend._loop
+        return SimpleNamespace(result=lambda timeout: asyncio.run(coroutine))
+
+    monkeypatch.setattr(
+        "backends.telegram.asyncio.run_coroutine_threadsafe", run_coroutine
+    )
+
+    assert backend.get_available_reactions() == ["👍"]
+    assert backend.get_available_reactions() == ["👍"]
+    assert scheduled == 1
+
+
+def test_get_available_reactions_returns_empty_on_error(monkeypatch):
+    backend = _backend()
+    backend._loop = object()
+    backend._client = AsyncMock()
+
+    def run_coroutine(coroutine, _loop):
+        coroutine.close()
+        return SimpleNamespace(result=lambda timeout: (_ for _ in ()).throw(OSError()))
+
+    monkeypatch.setattr(
+        "backends.telegram.asyncio.run_coroutine_threadsafe", run_coroutine
+    )
+
+    assert backend.get_available_reactions() == []
+
+
 def _update(
     peer=None,
     *,

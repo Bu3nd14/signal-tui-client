@@ -230,6 +230,80 @@ def test_reaction_button_picker_and_send_flow_are_wired():
     assert "startReaction(item, event)" in source
     assert len(emojis) > 6
     assert {"👍", "❤️", "😂", "🔥", "🎉", "💯", "🤣", "💪"} <= set(emojis)
-    assert "for (const emoji of REACTION_EMOJIS)" in source
+    assert 'state.active?.protocol === "telegram"' in source
+    assert "state.telegramReactions?.length" in source
+    assert ": REACTION_EMOJIS" in source
     assert 'apiFetch("/api/messages/reaction"' in source
     assert "applyReactionUpdate({" in source
+
+
+def test_telegram_picker_uses_available_reactions_and_falls_back():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const start = app.indexOf("function closeReactionPicker(");
+const end = app.indexOf("\nasync function sendReaction", start);
+function node() {
+  return {
+    children: [], parentNode: null,
+    append(child) { child.parentNode = this; this.children.push(child); },
+    remove() {}, setAttribute() {}, addEventListener() {}, focus() {},
+  };
+}
+globalThis.document = { createElement: node };
+globalThis.REACTION_EMOJIS = ["👍", "💀"];
+globalThis.sendReaction = () => {};
+globalThis.state = {
+  active: { protocol: "telegram" }, telegramReactions: ["❤️", "🔥"], reactionPicker: null,
+};
+vm.runInThisContext(app.slice(start, end));
+const parent = node();
+const anchor = node();
+parent.append(anchor);
+startReaction({ id: "1" }, { stopPropagation() {}, currentTarget: anchor });
+assert.deepEqual(state.reactionPicker.picker.children.map((button) => button.textContent), ["❤️", "🔥"]);
+closeReactionPicker();
+state.telegramReactions = [];
+startReaction({ id: "1" }, { stopPropagation() {}, currentTarget: anchor });
+assert.deepEqual(state.reactionPicker.picker.children.map((button) => button.textContent), ["👍", "💀"]);
+""")
+
+
+def test_render_messages_preserves_scroll_when_user_scrolled_up():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const start = app.indexOf("function renderMessages(");
+const end = app.indexOf("\nfunction copyReactions", start);
+let bottomCalls = 0;
+globalThis.state = { optimistic: [], active: { protocol: "telegram", id: "42" }, userScrolledUp: true };
+globalThis.window = { SignalTuiReconcile: {
+  reconcileOptimisticMessages: () => ({ optimistic: [], visible: [] }),
+  messageDisplayText: (item) => item.text || "",
+} };
+globalThis.pruneOrphanObjectUrls = () => {};
+globalThis.scrollThreadToBottom = () => { bottomCalls += 1; };
+globalThis.timestampMilliseconds = Number;
+globalThis.formatTimestamp = () => "10:00";
+globalThis.appendRenderedQuote = () => {};
+globalThis.startReply = () => {};
+function node() {
+  return {
+    className: "", textContent: "", children: [], parentNode: null,
+    append(...children) { for (const child of children) { child.parentNode = this; this.children.push(child); } },
+    replaceChildren() { this.children = []; }, setAttribute() {}, addEventListener() {},
+  };
+}
+globalThis.document = { createElement: node };
+globalThis.elements = { messages: node() };
+elements.messages.scrollTop = 240;
+elements.messages.scrollHeight = 1200;
+vm.runInThisContext(app.slice(start, end));
+renderMessages([], "telegram");
+assert.equal(bottomCalls, 0);
+assert.equal(elements.messages.scrollTop, 240);
+""")

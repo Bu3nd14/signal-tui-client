@@ -56,6 +56,8 @@ _MAX_CACHE_PER_CONTACT = 50
 # Dedup window (ms) for incoming messages from the same (contact, text).
 _INCOMING_DEDUP_WINDOW_MS = 2000
 
+_AVAILABLE_REACTIONS_TTL_S = 600
+
 # Prefix for lazy-download media references (``tgref:<chat_id>:<msg_id>``).
 _TGREF_PREFIX = "tgref:"
 
@@ -202,6 +204,9 @@ class TelegramBackend(ChatBackend):
         # Address book (rubrica completa) — cache + TTL
         self._address_book: list[ChatContact] | None = None
         self._address_book_ts: float = 0.0
+
+        self._available_reactions: list[str] | None = None
+        self._available_reactions_ts: float = 0.0
 
         # Protocol-aware message cache (contact_id → list[dict])
         self.cache: dict[str, list[dict]] = {}
@@ -1116,6 +1121,44 @@ class TelegramBackend(ChatBackend):
         except Exception:
             logger.debug("Telegram reaction send failed", exc_info=True)
             return False
+
+    def get_available_reactions(self) -> list[str]:
+        now = time.monotonic()
+        if (
+            self._available_reactions is not None
+            and now - self._available_reactions_ts < _AVAILABLE_REACTIONS_TTL_S
+        ):
+            return list(self._available_reactions)
+        if self._loop is None or self._client is None:
+            return []
+
+        async def _fetch() -> list[str]:
+            from telethon.tl.functions.messages import GetAvailableReactionsRequest
+            from telethon.tl.types import ReactionEmoji
+
+            result = await self._client(GetAvailableReactionsRequest(hash=0))
+            emojis: list[str] = []
+            for available in getattr(result, "reactions", []) or []:
+                reaction = getattr(available, "reaction", None)
+                if isinstance(reaction, ReactionEmoji):
+                    emoticon = reaction.emoticon
+                elif isinstance(reaction, str):
+                    emoticon = reaction
+                else:
+                    continue
+                if emoticon:
+                    emojis.append(emoticon)
+            return emojis
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_fetch(), self._loop)
+            emojis = future.result(timeout=20)
+        except Exception:
+            logger.debug("Telegram available reactions fetch failed", exc_info=True)
+            return []
+        self._available_reactions = list(emojis)
+        self._available_reactions_ts = now
+        return list(emojis)
 
     @staticmethod
     def _validated_reply_to_message_id(reply_to_message_id: str | None) -> int | None:
