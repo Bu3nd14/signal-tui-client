@@ -734,10 +734,17 @@ def _event_from_reaction(
         return None
 
     participant = _jid_string(content.get("participant"))
-    author_key = participant or ("me" if is_mine else _jid_string(content.get("from")))
+    if is_mine:
+        # Una reaction propria (anche quella inviata via WAHA API) arriva con
+        # ``fromMe=True`` ma ``participant`` può comunque contenere il nostro
+        # LID: per coerenza con gli altri protocolli l'autore è sempre "me".
+        author_key = "me"
+        author = "You"
+    else:
+        author_key = participant or _jid_string(content.get("from"))
+        author = _resolve_sender_name(author_key, contacts_by_jid)
     if not author_key:
         return None
-    author = _resolve_sender_name(author_key, contacts_by_jid)
     emoji = str(reaction.get("text") or "")
 
     ts = content.get("timestamp")

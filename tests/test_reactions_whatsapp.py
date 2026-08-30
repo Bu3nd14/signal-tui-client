@@ -99,6 +99,19 @@ def test_from_me_reaction_uses_me_as_author():
     assert event.payload["is_mine"] is True
 
 
+def test_from_me_reaction_ignores_participant_even_when_present():
+    # WAHA include il nostro LID in ``participant`` anche per le reaction
+    # proprie (reperto reale 2026.8.1): l'autore deve restare "me".
+    event = _event_from_reaction(
+        _reaction_payload(fromMe=True, to=CONTACT_ID, participant="19645297868955@lid")
+    )
+
+    assert event is not None
+    assert event.payload["author_key"] == "me"
+    assert event.payload["author"] == "You"
+    assert event.payload["is_mine"] is True
+
+
 def test_empty_reaction_text_is_remove():
     event = _event_from_reaction(
         _reaction_payload(reaction={"text": "", "messageId": SERIALIZED_ID})
