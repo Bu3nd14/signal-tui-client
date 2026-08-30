@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import sys
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -70,6 +71,19 @@ class TestWhatsAppRESTClient:
 
     def test_protocol(self):
         assert WhatsAppBackend.protocol == PROTOCOL_WHATSAPP
+
+    def test_get_message_media_encodes_path_and_forces_download(self):
+        client = WhatsAppRESTClient("http://api.test")
+        message = {"id": "message/id", "media": {"url": "https://wa.test/a.jpg"}}
+
+        with patch.object(client, "_request", return_value=message) as request:
+            result = client.get_message_media("39123@c.us", "message/id")
+
+        assert result == message
+        request.assert_called_once_with(
+            "GET",
+            "/api/default/chats/39123%40c.us/messages/message%2Fid?downloadMedia=true",
+        )
 
     def test_list_contacts(self):
         client = WhatsAppRESTClient("http://api.test")
@@ -1312,9 +1326,41 @@ class TestWhatsAppBackend:
             mock_urlopen.return_value.__enter__.return_value = mock_resp
             result = client.download_media("https://wa.to/media/img.jpg")
         assert result == fake_bytes
-        mock_urlopen.assert_called_once()
-        call_url = mock_urlopen.call_args[0][0].full_url
-        assert call_url == "https://wa.to/media/img.jpg"
+
+    def test_download_media_url_fetch_failure_falls_back_to_id_endpoint(self):
+        """Quando il fetch dell'URL fallisce (media.url non più servito da
+        WAHA), estrae l'id dal path e prova l'endpoint binario per id."""
+        client = WhatsAppRESTClient("http://api.test")
+        fake_bytes = b"\x89PNG\r\n\x1a\nimage"
+        url = "http://localhost:3000/api/files/default/true_123@lid_ABC.jpeg"
+        with (
+            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("down")),
+            patch.object(client, "_request_raw", return_value=fake_bytes) as mock_raw,
+        ):
+            result = client.download_media(url, timeout=30)
+        assert result == fake_bytes
+        # L'id estratto dallo stem del path (estensione rimossa) viene
+        # percent-encodato per il download endpoint.
+        mock_raw.assert_any_call(
+            "GET", "/api/default/true_123%40lid_ABC/download", timeout=30
+        )
+
+    def test_download_media_url_without_extension_keeps_complete_id(self):
+        client = WhatsAppRESTClient("http://api.test")
+        fake_bytes = b"image"
+        url = "http://api.test/api/files/default/true_391234567890@c.us_ABC"
+        with (
+            patch("urllib.request.urlopen", side_effect=urllib.error.URLError("down")),
+            patch.object(client, "_request_raw", return_value=fake_bytes) as mock_raw,
+        ):
+            result = client.download_media(url)
+
+        assert result == fake_bytes
+        mock_raw.assert_called_once_with(
+            "GET",
+            "/api/default/true_391234567890%40c.us_ABC/download",
+            timeout=60,
+        )
 
     def test_download_media_encodes_at_sign(self):
         """Message IDs with @lid are percent-encoded in the URL path."""
@@ -1558,6 +1604,61 @@ class TestWhatsAppBackend:
         assert optimistic["timestamp"] == t0 + 2000
         mock_update.assert_called_once()
 
+    def test_media_race_row_is_upgraded_by_later_echo(self):
+        """Riga text vuota creata da media race (webhook senza media) viene
+        ripristinata in place a immagine quando l'echo/fetch porta l'URL media
+        reale di WAHA (reperto live: la 3ª foto a Giovanni non compariva
+        nemmeno dopo aver riaperto la chat)."""
+        import backend as backend_mod
+
+        backend = _make_backend()
+        cid = "15771304468671@lid"
+        t0 = 1_788_114_863_000
+        mid = "true_15771304468671@lid_4AB02B4889D1AFFF775C"
+        url = (
+            "http://localhost:3000/api/files/default/"
+            "true_15771304468671@lid_4AB02B4889D1AFFF775C.jpeg"
+        )
+
+        # 1) Media race: il webhook arriva con hasMedia=true ma media=null →
+        #    riga text vuota (prima della fix veniva creata una bolla vuota).
+        assert backend.ingest_message(
+            cid,
+            {
+                "id": mid,
+                "text": "",
+                "is_mine": True,
+                "sender": "You",
+                "msg_type": "text",
+                "attachment_id": None,
+            },
+            t0,
+        )
+
+        # 2) Echo/fetch successivo con il media reale → upgrade in place.
+        added = backend.ingest_message(
+            cid,
+            {
+                "id": mid,
+                "text": "",
+                "is_mine": True,
+                "sender": "You",
+                "msg_type": "image",
+                "attachment_id": url,
+            },
+            t0,
+        )
+
+        assert added == "changed"  # dedup + heal: nessuna riga duplicata
+        assert len(backend.cache[cid]) == 1
+        assert backend.cache[cid][0]["attachment_id"] == url
+        assert backend.cache[cid][0]["msg_type"] == "image"
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            row = conn.execute(
+                "SELECT attachment_id, msg_type FROM messages"
+            ).fetchone()
+            assert row == (url, "image")
+
     def test_echo_out_of_order_picks_closest_idless(self):
         """Among id-less fallback candidates, the closest timestamp is upgraded."""
         import backend as backend_mod
@@ -1705,9 +1806,147 @@ class TestWhatsAppBackend:
         }
         with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
             assert backend.ingest_message(cid, ack, 1700000000) is True
-            assert backend.ingest_message(cid, image, 1700000001) is False
+            assert backend.ingest_message(cid, image, 1700000001) == "changed"
             mock_add.assert_called_once()
         assert len(backend.cache[cid]) == 1
+
+
+class TestWhatsAppMediaResolver:
+    def test_schedule_deduplicates_and_resolver_enqueues_image(self):
+        import time
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.get_message_media.return_value = {
+            "id": "media-1",
+            "from": "1@c.us",
+            "fromMe": False,
+            "hasMedia": True,
+            "media": {
+                "url": "https://wa.test/media-1.jpg",
+                "mimetype": "image/jpeg",
+            },
+            "timestamp": 1,
+        }
+
+        try:
+            backend._schedule_media_resolve("1@c.us", "media-1")
+            backend._schedule_media_resolve("1@c.us", "media-1")
+            with backend._media_lock:
+                assert len(backend._media_pending) == 1
+                backend._media_pending[("1@c.us", "media-1")]["next"] = 0
+
+            deadline = time.monotonic() + 2
+            events = []
+            while time.monotonic() < deadline and not events:
+                events = backend.poll_once()
+                time.sleep(0.02)
+
+            assert len(events) == 1
+            assert events[0].payload["msg_type"] == "image"
+            assert events[0].payload["attachment_id"] == "https://wa.test/media-1.jpg"
+            with backend._media_lock:
+                assert backend._media_pending == {}
+            backend._rest.get_message_media.assert_called_once_with("1@c.us", "media-1")
+        finally:
+            backend.disconnect_sync()
+
+    def test_resolver_gives_up_after_three_attempts(self):
+        import time
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.get_message_media.return_value = None
+
+        try:
+            backend._schedule_media_resolve("1@c.us", "media-missing")
+            key = ("1@c.us", "media-missing")
+            observed_attempts = -1
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                with backend._media_lock:
+                    pending = backend._media_pending.get(key)
+                    if pending is None:
+                        break
+                    if pending["attempts"] != observed_attempts:
+                        observed_attempts = pending["attempts"]
+                        pending["next"] = 0
+                time.sleep(0.02)
+
+            with backend._media_lock:
+                assert key not in backend._media_pending
+            assert backend._rest.get_message_media.call_count == 3
+            assert backend.poll_once() == []
+        finally:
+            backend.disconnect_sync()
+
+
+class TestWhatsAppMediaIdentityUpdate:
+    def test_does_not_overwrite_existing_attachment(self):
+        import backend as backend_mod
+
+        backend_mod._add_message_to_cache(
+            "1@c.us",
+            "",
+            True,
+            "You",
+            1000,
+            msg_type="image",
+            attachment_id="sent-local.jpeg",
+            protocol=PROTOCOL_WHATSAPP,
+            msg_id="media-existing",
+        )
+
+        updated = backend_mod._update_message_media_identity(
+            PROTOCOL_WHATSAPP,
+            "1@c.us",
+            "media-existing",
+            1000,
+            "https://api.test/remote.jpeg",
+            "image",
+        )
+
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            row = conn.execute(
+                "SELECT attachment_id, msg_type FROM messages WHERE msg_id = ?",
+                ("media-existing",),
+            ).fetchone()
+        assert updated is False
+        assert row == ("sent-local.jpeg", "image")
+
+    @pytest.mark.parametrize("initial_attachment", [None, ""])
+    def test_updates_missing_attachment(self, initial_attachment):
+        import backend as backend_mod
+
+        msg_id = f"media-missing-{initial_attachment!r}"
+        backend_mod._add_message_to_cache(
+            "1@c.us",
+            "",
+            True,
+            "You",
+            1000,
+            msg_type="text",
+            attachment_id=initial_attachment,
+            protocol=PROTOCOL_WHATSAPP,
+            msg_id=msg_id,
+        )
+
+        updated = backend_mod._update_message_media_identity(
+            PROTOCOL_WHATSAPP,
+            "1@c.us",
+            msg_id,
+            1000,
+            "https://api.test/remote.jpeg",
+            "image",
+        )
+
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            row = conn.execute(
+                "SELECT attachment_id, msg_type FROM messages WHERE msg_id = ?",
+                (msg_id,),
+            ).fetchone()
+        assert updated is True
+        assert row == ("https://api.test/remote.jpeg", "image")
 
 
 class TestWhatsAppWebhook:
@@ -1723,6 +1962,31 @@ class TestWhatsAppWebhook:
         backend = _make_backend("http://api.test")
         backend._rest = MagicMock()
         return backend
+
+    def test_media_race_webhook_schedules_resolver_once(self):
+        backend = self._backend()
+        payload = {
+            "id": "media-race-1",
+            "from": "1@c.us",
+            "fromMe": False,
+            "hasMedia": True,
+            "media": None,
+            "body": "",
+            "timestamp": 1,
+        }
+
+        try:
+            assert (
+                backend.handle_webhook({"event": "message", "payload": payload})
+                is False
+            )
+            assert (
+                backend.handle_webhook({"event": "message", "payload": payload})
+                is False
+            )
+            assert list(backend._media_pending) == [("1@c.us", "media-race-1")]
+        finally:
+            backend.disconnect_sync()
 
     def test_handle_webhook_enqueues_message_event(self):
         """Un envelope message webhook viene normalizzato e accodato."""
@@ -3126,6 +3390,7 @@ class TestWhatsAppWebhookRegistration:
             "message.ack",
             "message.ack.group",
             "presence.update",
+            "message.reaction",
         ]
 
     def test_configure_webhook_skips_when_already_registered(self):
@@ -3149,6 +3414,7 @@ class TestWhatsAppWebhookRegistration:
                                     "message.ack",
                                     "message.ack.group",
                                     "presence.update",
+                                    "message.reaction",
                                 ],
                             }
                         ]
@@ -3189,6 +3455,7 @@ class TestWhatsAppWebhookRegistration:
             "message.ack",
             "message.ack.group",
             "presence.update",
+            "message.reaction",
         ]
 
     def test_configure_webhook_never_raises_on_error(self):

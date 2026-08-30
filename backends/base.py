@@ -169,6 +169,22 @@ class ChatBackend(ABC):
         """
         return False
 
+    def send_reaction_sync(
+        self,
+        contact_id: str,
+        message_id: str,
+        emoji: str,
+        *,
+        target_author: str | None = None,
+    ) -> bool:
+        """Invia una reaction a un messaggio.
+
+        Bloccante: chiamare SOLO da worker thread. ``message_id`` è il
+        timestamp Signal, l'id server Telegram o il Baileys id WhatsApp.
+        Default: nessun supporto → ``False``.
+        """
+        return False
+
     async def edit_message(
         self, contact_id: str, message_id: str, new_text: str
     ) -> bool:
@@ -197,6 +213,22 @@ class ChatBackend(ABC):
         ``{"message_id", "timestamp", "old_text", "text", "is_mine"}`` quando
         ha davvero modificato qualcosa, ``None`` altrimenti (target ignoto,
         media, testo identico).  Non aggiorna mai ``timestamp`` né ``id``.
+
+        Default: ``None`` (nessun supporto).
+        """
+        return None
+
+    def apply_reaction(
+        self,
+        contact_id: str,
+        payload: dict,
+    ) -> dict | None:
+        """Applica una reazione (ricevuta o snapshot) a cache + SQLite.
+
+        Punto UNICO di mutazione lato backend per le reazioni (specchio di
+        ``apply_edit``).  Risolve il target (§3.2), applica delta/snapshot (§3.3)
+        e ritorna ``{"message_id", "timestamp", "reactions": [...]}`` per il push
+        WS, ``None`` se target ignoto o no-op.
 
         Default: ``None`` (nessun supporto).
         """

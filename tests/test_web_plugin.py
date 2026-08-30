@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -119,6 +120,21 @@ def test_emoji_uses_raw_predefined_categories(web_client):
         assert chars[0] in served["aliases"]
     raw_chars = [char for category in categories for char in category["emojis"]]
     assert any("\u200d" in char for char in raw_chars)
+
+
+def test_available_reactions_are_telegram_only():
+    backend = MagicMock()
+    backend.get_available_reactions.return_value = ["👍", "❤️"]
+    manager = FakeManager()
+    manager.get = MagicMock(return_value=backend)
+
+    with TestClient(make_app(manager)) as client:
+        telegram = client.get("/api/reactions?protocol=telegram", headers=AUTH)
+        signal = client.get("/api/reactions?protocol=signal", headers=AUTH)
+
+    assert telegram.json() == {"emojis": ["👍", "❤️"]}
+    assert signal.json() == {"emojis": []}
+    backend.get_available_reactions.assert_called_once_with()
 
 
 def test_send_requires_bearer_token():
@@ -1331,7 +1347,10 @@ def test_web_ui_static_contracts():
     assert "state.replyTo = null" in source
 
     index = Path("web/static/index.html").read_text()
-    assert '<script src="/app.js?v=46" defer></script>' in index
+    # Le risorse statiche usano cache-busting (?v=N): il test non deve
+    # dipendere dal numero specifico, solo dalla presenza del versioning.
+    assert re.search(r'<script src="/app\.js\?v=\d+" defer></script>', index)
+    assert re.search(r'<link rel="stylesheet" href="/style\.css\?v=\d+">', index)
 
     css = Path("web/static/style.css").read_text()
     assert ".contact-copy { min-width: 0; overflow: hidden; }" in css

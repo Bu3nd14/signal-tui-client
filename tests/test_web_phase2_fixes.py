@@ -6,13 +6,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 import backend as backend_mod
 from backends.signal import SignalBackend
 from backends.telegram import TelegramBackend
 from backends.whatsapp import WhatsAppBackend
 from models import ChatContact, ChatEvent
 from tui.events import EventHandlingMixin
-from web.api import _messages
+from web.api import _messages, create_api_router
 
 
 def _db(monkeypatch, tmp_path: Path) -> Path:
@@ -33,6 +37,31 @@ def _media_data(attachment_id: str) -> dict:
         "attachment_info": None,
         "attachment_id": attachment_id,
     }
+
+
+@pytest.mark.parametrize(
+    ("protocol", "expected_calls"),
+    [("telegram", 1), ("signal", 0), ("whatsapp", 0)],
+)
+def test_messages_refreshes_only_telegram_history(protocol, expected_calls):
+    telegram = SimpleNamespace(fetch_history=MagicMock(return_value=[{}, {}]))
+    manager = SimpleNamespace(
+        get=MagicMock(return_value=telegram),
+        list_contacts=MagicMock(return_value=[]),
+    )
+    app = FastAPI()
+    app.state.manager = manager
+    app.include_router(create_api_router())
+
+    with patch("web.api._messages", return_value=[]), TestClient(app) as client:
+        response = client.get(
+            "/api/messages", params={"proto": protocol, "contact_id": "42"}
+        )
+
+    assert response.status_code == 200
+    assert telegram.fetch_history.call_count == expected_calls
+    if expected_calls:
+        telegram.fetch_history.assert_called_once_with("42", 20)
 
 
 def test_telegram_attachment_upgrade_works_in_both_event_orders(monkeypatch, tmp_path):
@@ -150,6 +179,34 @@ def test_telegram_persists_content_type_and_api_marks_tgref_as_image(
         connection.execute("UPDATE messages SET content_type = NULL")
         connection.commit()
     assert _messages("telegram", "42")[0]["attachment"]["type"] == "image/*"
+
+
+def test_web_api_does_not_use_mimetype_as_caption(monkeypatch, tmp_path):
+    """attachment_info che contiene solo un mimetype (es. 'image/jpeg', reperto
+    live WAHA su immagini inviate) non deve diventare la caption della bolla."""
+    _db(monkeypatch, tmp_path)
+    from backend import _add_message_to_cache
+
+    for info in ("image/jpeg", "video/mp4"):
+        _add_message_to_cache(
+            "555",
+            "",
+            is_mine=True,
+            sender="You",
+            timestamp=1_000,
+            msg_type="image",
+            attachment_info=info,
+            attachment_id="http://localhost:3000/api/files/default/true_555@lid_ABC.jpeg",
+            content_type=None,
+            protocol="whatsapp",
+            msg_id=f"true_555@lid_ABC_{info}",
+        )
+    result = _messages("whatsapp", "555")
+    assert len(result) == 2
+    for message in result:
+        assert message["text"] == ""
+        assert message["attachment"] is not None
+        assert message["attachment"]["type"] in ("image/jpeg", "image/*")
 
 
 def test_push_on_attachment_upgrade():
@@ -319,7 +376,7 @@ def test_whatsapp_echo_first_is_upgraded_to_sent_attachment(monkeypatch, tmp_pat
     backend.media_dir = str(media_dir)
 
     assert backend.ingest_message("42", _media_data("waha-media-id"), 1000)
-    assert not backend.ingest_message("42", _media_data(mirrored.name), 1001)
+    assert backend.ingest_message("42", _media_data(mirrored.name), 1001) == "changed"
     assert backend.cache["42"][0]["attachment_id"] == mirrored.name
     with sqlite3.connect(db_file) as connection:
         assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (
@@ -710,7 +767,9 @@ globalThis.elements = {
   messageInput: { value: "hello", focus() {} },
 };
 globalThis.closeEmojiPicker = () => {};
+globalThis.closeReactionPicker = () => {};
 globalThis.cancelReply = () => {};
+globalThis.updateTelegramRefreshTimer = () => {};
 globalThis.protocolIcon = () => "";
 globalThis.renderContacts = () => {};
 globalThis.document = { createElement: node };

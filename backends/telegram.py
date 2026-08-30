@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import queue
 import shutil
 import sqlite3
@@ -54,6 +55,8 @@ _MAX_CACHE_PER_CONTACT = 50
 
 # Dedup window (ms) for incoming messages from the same (contact, text).
 _INCOMING_DEDUP_WINDOW_MS = 2000
+
+_AVAILABLE_REACTIONS_TTL_S = 600
 
 # Prefix for lazy-download media references (``tgref:<chat_id>:<msg_id>``).
 _TGREF_PREFIX = "tgref:"
@@ -201,6 +204,9 @@ class TelegramBackend(ChatBackend):
         # Address book (rubrica completa) — cache + TTL
         self._address_book: list[ChatContact] | None = None
         self._address_book_ts: float = 0.0
+
+        self._available_reactions: list[str] | None = None
+        self._available_reactions_ts: float = 0.0
 
         # Protocol-aware message cache (contact_id → list[dict])
         self.cache: dict[str, list[dict]] = {}
@@ -372,6 +378,45 @@ class TelegramBackend(ChatBackend):
             loop=self._loop,
         )
 
+        # Register before connecting so updates delivered while Telethon catches
+        # up the session state are not lost during contact loading.
+        @self._client.on(events.NewMessage)
+        async def _on_new_message(event: Any) -> None:
+            await self._handle_new_message(event)
+
+        @self._client.on(events.MessageEdited)
+        async def _on_message_edited(event: Any) -> None:
+            await self._handle_message_edited(event)
+
+        @self._client.on(events.Raw)
+        async def _on_raw(update: Any) -> None:
+            from telethon.tl.types import (
+                UpdateChannelUserTyping,
+                UpdateChatUserTyping,
+                UpdateMessageReactions,
+                UpdateReadHistoryOutbox,
+                UpdateUserTyping,
+            )
+
+            if isinstance(update, UpdateReadHistoryOutbox):
+                await self._handle_read_receipt(update)
+            elif isinstance(update, UpdateMessageReactions):
+                reactions = getattr(update, "reactions", None)
+                logger.debug(
+                    "Telegram reaction update: peer=%s msg_id=%s results=%d",
+                    type(getattr(update, "peer", None)).__name__,
+                    getattr(update, "msg_id", None),
+                    len(getattr(reactions, "results", None) or []),
+                )
+                await self._handle_reactions_update(update)
+            elif isinstance(
+                update,
+                (UpdateUserTyping, UpdateChatUserTyping, UpdateChannelUserTyping),
+            ):
+                await self._handle_typing_update(update)
+            else:
+                logger.debug("Telegram raw: %s", type(update).__name__)
+
         try:
             self._loop.run_until_complete(self._client.connect())
         except Exception:
@@ -386,6 +431,13 @@ class TelegramBackend(ChatBackend):
             self._connected = False
             return
 
+        try:
+            self._loop.run_until_complete(self._configure_reaction_notify())
+        except Exception:
+            logger.debug(
+                "Telegram reactions notify configuration failed", exc_info=True
+            )
+
         self._connected = True
         try:
             self._loop.run_until_complete(self._load_contacts())
@@ -395,34 +447,6 @@ class TelegramBackend(ChatBackend):
             self._contacts_by_id = {}
         logger.info("Telegram: loaded %d contacts", len(self.contacts))
 
-        # Register Telethon event handlers
-        @self._client.on(events.NewMessage)
-        async def _on_new_message(event: Any) -> None:
-            await self._handle_new_message(event)
-
-        @self._client.on(events.MessageEdited)
-        async def _on_message_edited(event: Any) -> None:
-            await self._handle_message_edited(event)
-
-        @self._client.on(events.Raw)
-        async def _on_raw(update: Any) -> None:
-            from telethon.tl.types import (
-                UpdateChannelUserTyping,
-                UpdateChatUserTyping,
-                UpdateReadHistoryOutbox,
-                UpdateUserTyping,
-            )
-
-            if isinstance(update, UpdateReadHistoryOutbox):
-                await self._handle_read_receipt(update)
-            elif isinstance(
-                update,
-                (UpdateUserTyping, UpdateChatUserTyping, UpdateChannelUserTyping),
-            ):
-                await self._handle_typing_update(update)
-            else:
-                logger.debug("Telegram raw: %s", type(update).__name__)
-
         self._running = True
         self._loop_thread = threading.Thread(
             target=self._run_event_loop,
@@ -431,6 +455,43 @@ class TelegramBackend(ChatBackend):
         )
         self._loop_thread.start()
         logger.info("Telegram: connected, %d contacts", len(self.contacts))
+
+    async def _configure_reaction_notify(self) -> None:
+        from telethon.tl.functions.account import (
+            GetReactionsNotifySettingsRequest,
+            SetReactionsNotifySettingsRequest,
+        )
+        from telethon.tl.types import (
+            ReactionNotificationsFromAll,
+            ReactionsNotifySettings,
+        )
+
+        settings = await self._client(GetReactionsNotifySettingsRequest())
+        current = settings.messages_notify_from
+        logger.info("Telegram reactions notify settings: %s", current)
+
+        enabled = os.environ.get("TELEGRAM_REACTIONS_NOTIFY", "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not enabled:
+            logger.info("Telegram reactions notify: disabled by environment")
+            return
+        if isinstance(current, ReactionNotificationsFromAll):
+            logger.info("Telegram reactions notify: already enabled for all")
+            return
+
+        updated = ReactionsNotifySettings(
+            sound=settings.sound,
+            show_previews=settings.show_previews,
+            messages_notify_from=ReactionNotificationsFromAll(),
+            stories_notify_from=settings.stories_notify_from,
+            poll_votes_notify_from=settings.poll_votes_notify_from,
+        )
+        await self._client(SetReactionsNotifySettingsRequest(settings=updated))
+        logger.info("Telegram reactions notify: enabled for all")
 
     def _run_event_loop(self) -> None:
         """Run the asyncio event loop forever (called in daemon thread)."""
@@ -627,6 +688,40 @@ class TelegramBackend(ChatBackend):
         except Exception:
             logger.exception("Telegram fetch_recent_history failed")
             return 0
+
+    def fetch_history(self, contact_id: str, limit: int = 20) -> list[dict]:
+        """Fetch and ingest recent messages for one Telegram chat."""
+        if self._client is None or self._loop is None or not self._connected:
+            return []
+        try:
+            entity_id = int(contact_id)
+        except (ValueError, TypeError):
+            return []
+
+        async def _fetch() -> list[dict]:
+            entity = await self._client.get_input_entity(entity_id)
+            messages = await self._client.get_messages(entity, limit=limit)
+            fetched = []
+            for msg in messages:
+                if msg is None or not msg.date:
+                    continue
+                event = self._message_to_chat_event(msg)
+                if event is None:
+                    continue
+                self.ingest_message(
+                    contact_id,
+                    event.payload,
+                    event.payload.get("timestamp", 0),
+                )
+                fetched.append(event.payload)
+            return fetched
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_fetch(), self._loop)
+            return future.result(timeout=120)
+        except Exception:
+            logger.exception("Telegram fetch_history failed for %s", contact_id)
+            return []
 
     def _identify_contact(self, contact_id: str) -> ChatContact | None:
         """Resolve a Telegram user id to a known ``ChatContact``."""
@@ -988,6 +1083,83 @@ class TelegramBackend(ChatBackend):
         future = asyncio.run_coroutine_threadsafe(_edit(), self._loop)
         return future.result(timeout=30)
 
+    def send_reaction_sync(
+        self,
+        contact_id: str,
+        message_id: str,
+        emoji: str,
+        *,
+        target_author: str | None = None,
+    ) -> bool:
+        if self._loop is None or self._client is None:
+            return False
+        try:
+            entity_id = int(contact_id)
+            target_id = int(message_id)
+        except (TypeError, ValueError):
+            return False
+        if target_id <= 0:
+            return False
+
+        async def _send_reaction() -> bool:
+            from telethon.tl.functions.messages import SendReactionRequest
+            from telethon.tl.types import ReactionEmoji
+
+            entity = await self._resolve_input_entity(entity_id)
+            await self._client(
+                SendReactionRequest(
+                    peer=entity,
+                    msg_id=target_id,
+                    reaction=[ReactionEmoji(emoticon=emoji)],
+                )
+            )
+            return True
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_send_reaction(), self._loop)
+            return future.result(timeout=30)
+        except Exception:
+            logger.debug("Telegram reaction send failed", exc_info=True)
+            return False
+
+    def get_available_reactions(self) -> list[str]:
+        now = time.monotonic()
+        if (
+            self._available_reactions is not None
+            and now - self._available_reactions_ts < _AVAILABLE_REACTIONS_TTL_S
+        ):
+            return list(self._available_reactions)
+        if self._loop is None or self._client is None:
+            return []
+
+        async def _fetch() -> list[str]:
+            from telethon.tl.functions.messages import GetAvailableReactionsRequest
+            from telethon.tl.types import ReactionEmoji
+
+            result = await self._client(GetAvailableReactionsRequest(hash=0))
+            emojis: list[str] = []
+            for available in getattr(result, "reactions", []) or []:
+                reaction = getattr(available, "reaction", None)
+                if isinstance(reaction, ReactionEmoji):
+                    emoticon = reaction.emoticon
+                elif isinstance(reaction, str):
+                    emoticon = reaction
+                else:
+                    continue
+                if emoticon:
+                    emojis.append(emoticon)
+            return emojis
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_fetch(), self._loop)
+            emojis = future.result(timeout=20)
+        except Exception:
+            logger.debug("Telegram available reactions fetch failed", exc_info=True)
+            return []
+        self._available_reactions = list(emojis)
+        self._available_reactions_ts = now
+        return list(emojis)
+
     @staticmethod
     def _validated_reply_to_message_id(reply_to_message_id: str | None) -> int | None:
         """Return a valid Telegram reply id, rejecting invalid reply targets."""
@@ -1169,6 +1341,15 @@ class TelegramBackend(ChatBackend):
                     quote_content_type = m.get("content_type")
                     break
 
+        if (
+            text == ""
+            and not any(
+                (msg.photo, msg.document, msg.sticker, msg.video, msg.voice, msg.audio)
+            )
+            and not msg.reply_to
+        ):
+            return None
+
         payload: dict[str, Any] = {
             "id": str(msg.id),
             "text": text,
@@ -1186,12 +1367,18 @@ class TelegramBackend(ChatBackend):
             "contact": self._identify_contact(chat_id),
         }
 
-        return ChatEvent(
+        event = ChatEvent(
             type="message",
             protocol=PROTOCOL_TELEGRAM,
             contact_id=chat_id,
             payload=payload,
         )
+
+        reaction_event = self._reactions_event_from_msg(msg, chat_id)
+        if reaction_event is not None:
+            self._events.put(reaction_event)
+
+        return event
 
     async def _handle_read_receipt(self, update: Any) -> None:
         """Translate ``UpdateReadHistoryOutbox`` into a generic receipt event.
@@ -1237,6 +1424,148 @@ class TelegramBackend(ChatBackend):
                     payload={"message_ids": message_ids, "is_read": True},
                 )
             )
+
+    async def _handle_reactions_update(self, update: Any) -> None:
+        """Translate a Telegram reaction snapshot into a generic chat event."""
+        from telethon.tl.types import PeerChannel, PeerChat, PeerUser
+
+        peer = update.peer
+        if isinstance(peer, PeerUser):
+            contact_id = str(peer.user_id)
+        elif isinstance(peer, PeerChat):
+            contact_id = str(-peer.chat_id)
+        elif isinstance(peer, PeerChannel):
+            contact_id = str(-1000000000000 - peer.channel_id)
+        else:
+            return
+
+        reactions = getattr(update, "reactions", None)
+        if reactions is None:
+            logger.debug(
+                "Telegram reaction update without snapshot: peer=%s msg_id=%s",
+                type(peer).__name__,
+                getattr(update, "msg_id", None),
+            )
+            return
+        snapshot = self._build_reactions_snapshot(reactions)
+        timestamp = int(time.time() * 1000)
+        self._events.put(
+            ChatEvent(
+                type="reaction_update",
+                protocol=PROTOCOL_TELEGRAM,
+                contact_id=contact_id,
+                payload={
+                    "mode": "snapshot",
+                    "snapshot": snapshot,
+                    "target_message_id": str(update.msg_id),
+                    "target_timestamp": None,
+                    "timestamp": timestamp,
+                    "contact": self._identify_contact(contact_id),
+                },
+            )
+        )
+
+    def _reactions_event_from_msg(self, msg: Any, chat_id: str) -> ChatEvent | None:
+        """Build a reaction snapshot event from a Telethon message."""
+        reactions = getattr(msg, "reactions", None)
+        results = getattr(reactions, "results", None) or []
+        if not results:
+            return None
+
+        logger.debug(
+            "Telegram reaction from msg: msg_id=%s results=%d",
+            getattr(msg, "id", None),
+            len(results),
+        )
+        return ChatEvent(
+            type="reaction_update",
+            protocol=PROTOCOL_TELEGRAM,
+            contact_id=chat_id,
+            payload={
+                "mode": "snapshot",
+                "snapshot": self._build_reactions_snapshot(reactions),
+                "target_message_id": str(msg.id),
+                "target_timestamp": None,
+                "timestamp": int(time.time() * 1000),
+                "contact": self._identify_contact(chat_id),
+            },
+        )
+
+    def _build_reactions_snapshot(self, reactions: Any) -> list[dict[str, Any]]:
+        """Convert Telethon reaction counts into a renderable snapshot."""
+        from telethon.tl.types import (
+            PeerChannel,
+            PeerChat,
+            PeerUser,
+            ReactionCustomEmoji,
+            ReactionEmoji,
+        )
+
+        all_recent_reactions = reactions.recent_reactions or []
+        recent_reactions = (
+            reactions.recent_reactions if reactions.can_see_list else []
+        ) or []
+        snapshot: list[dict[str, Any]] = []
+
+        for reaction_count in reactions.results or []:
+            reaction = reaction_count.reaction
+            if isinstance(reaction, ReactionCustomEmoji):
+                logger.debug(
+                    "Telegram: skipping custom emoji reaction document_id=%s",
+                    reaction.document_id,
+                )
+                continue
+            if not isinstance(reaction, ReactionEmoji):
+                continue
+
+            emoticon = reaction.emoticon
+            matching_recent_reactions = [
+                peer_reaction
+                for peer_reaction in all_recent_reactions
+                if isinstance(peer_reaction.reaction, ReactionEmoji)
+                and peer_reaction.reaction.emoticon == emoticon
+            ]
+            authors: list[str] = []
+            for peer_reaction in recent_reactions:
+                recent = peer_reaction.reaction
+                if not isinstance(recent, ReactionEmoji):
+                    continue
+                if recent.emoticon != emoticon:
+                    continue
+
+                author_peer = peer_reaction.peer_id
+                if isinstance(author_peer, PeerUser):
+                    peer_id = author_peer.user_id
+                    author_contact_id = str(peer_id)
+                elif isinstance(author_peer, PeerChat):
+                    peer_id = author_peer.chat_id
+                    author_contact_id = str(-peer_id)
+                elif isinstance(author_peer, PeerChannel):
+                    peer_id = author_peer.channel_id
+                    author_contact_id = str(-1000000000000 - peer_id)
+                else:
+                    continue
+
+                contact = self._contacts_by_id.get(peer_id) or self._identify_contact(
+                    author_contact_id
+                )
+                author = contact.display_name if contact is not None else str(peer_id)
+                if author and author not in authors:
+                    authors.append(author)
+
+            snapshot.append(
+                {
+                    "emoji": emoticon,
+                    "count": reaction_count.count,
+                    "is_mine": reaction_count.chosen_order is not None
+                    or any(
+                        getattr(peer_reaction, "my", False)
+                        for peer_reaction in matching_recent_reactions
+                    ),
+                    "authors": authors,
+                }
+            )
+        return snapshot
 
     async def _handle_typing_update(self, update: Any) -> None:
         """Translate MTProto typing updates into a generic ``ChatEvent``.
@@ -1605,6 +1934,102 @@ class TelegramBackend(ChatBackend):
                 "is_mine": bool(msg.get("is_mine")),
             }
         return None
+
+    def apply_reaction(self, contact_id: str, payload: dict) -> dict | None:
+        """Persist a complete Telegram reaction snapshot."""
+        if payload.get("mode") != "snapshot":
+            return None
+
+        from backend import (
+            _reactions_for_contact,
+            _replace_reactions_snapshot,
+            _resolve_reaction_target_row,
+        )
+
+        target_message_id = str(payload.get("target_message_id") or "")
+        if not target_message_id:
+            return None
+
+        target_ts: int | None = None
+        target_resolved = False
+        for msg in self.cache.get(contact_id, []):
+            if str(msg.get("id")) == target_message_id:
+                target_ts = int(msg.get("timestamp") or 0)
+                target_resolved = True
+                break
+        if target_ts is None:
+            target = _resolve_reaction_target_row(
+                PROTOCOL_TELEGRAM,
+                contact_id,
+                target_message_id,
+                None,
+            )
+            if target is not None:
+                target_ts = int(target.get("timestamp") or 0)
+                target_resolved = True
+            else:
+                target_ts = int(payload.get("target_timestamp") or 0) or None
+
+        entries = [
+            {
+                "emoji": item["emoji"],
+                "count": int(item["count"]),
+                "is_mine": bool(item["is_mine"]),
+                "author": ", ".join(item.get("authors") or []),
+                "author_key": f"__agg__:{item['emoji']}",
+            }
+            for item in payload.get("snapshot") or []
+        ]
+        changed = _replace_reactions_snapshot(
+            protocol=PROTOCOL_TELEGRAM,
+            contact=contact_id,
+            target_msg_id=target_message_id,
+            target_ts=target_ts,
+            entries=entries,
+            ts=int(payload.get("timestamp") or time.time() * 1000),
+        )
+        if not changed or not target_resolved:
+            return None
+
+        aggregate: dict[str, dict[str, Any]] = {}
+        for row in _reactions_for_contact(PROTOCOL_TELEGRAM, contact_id):
+            if str(row.get("target_msg_id") or "") != target_message_id:
+                continue
+            emoji = row["emoji"]
+            item = aggregate.setdefault(
+                emoji,
+                {
+                    "emoji": emoji,
+                    "count": 0,
+                    "is_mine": False,
+                    "authors": [],
+                    "timestamp": int(row.get("timestamp") or 0),
+                },
+            )
+            item["count"] += int(row.get("count") or 0)
+            item["is_mine"] = item["is_mine"] or bool(row.get("is_mine"))
+            item["timestamp"] = min(item["timestamp"], int(row.get("timestamp") or 0))
+            author = row.get("author") or ""
+            if author and author not in item["authors"]:
+                item["authors"].append(author)
+
+        ordered = sorted(
+            aggregate.values(), key=lambda item: (-item["count"], item["timestamp"])
+        )
+        reactions = [
+            {
+                "emoji": item["emoji"],
+                "count": item["count"],
+                "is_mine": item["is_mine"],
+                "authors": item["authors"],
+            }
+            for item in ordered
+        ]
+        return {
+            "message_id": target_message_id,
+            "timestamp": target_ts,
+            "reactions": reactions,
+        }
 
     # ─── Pairing ───────────────────────────────────────────────────────────
 

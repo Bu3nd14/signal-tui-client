@@ -174,6 +174,40 @@ def _init_db():
                     edited INTEGER NOT NULL DEFAULT 0
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS reactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    protocol TEXT NOT NULL,
+                    contact_number TEXT NOT NULL,
+                    target_msg_id TEXT,
+                    target_timestamp INTEGER,
+                    emoji TEXT NOT NULL,
+                    author_key TEXT NOT NULL DEFAULT '',
+                    author TEXT NOT NULL DEFAULT '',
+                    is_mine INTEGER NOT NULL DEFAULT 0,
+                    count INTEGER NOT NULL DEFAULT 1,
+                    timestamp INTEGER NOT NULL
+                )
+            """)
+            reaction_indexes = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'index' AND tbl_name = 'reactions'"
+                ).fetchall()
+            }
+            if "idx_reactions_identity" not in reaction_indexes:
+                conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_reactions_identity
+                    ON reactions(protocol, contact_number,
+                                 IFNULL(target_msg_id, ''),
+                                 IFNULL(target_timestamp, 0), author_key)
+                """)
+            if "idx_reactions_contact" not in reaction_indexes:
+                conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_reactions_contact
+                    ON reactions(protocol, contact_number)
+                """)
             # Upgrade a pre-existing legacy DB in place (idempotent).
             _migrate_protocol_schema(conn)
             conn.commit()
@@ -418,6 +452,46 @@ def _update_message_attachment_id(
             conn.close()
 
 
+def _update_message_media_identity(
+    protocol: str,
+    contact_number: str,
+    msg_id: str | None,
+    timestamp: int,
+    attachment_id: str,
+    msg_type: str,
+) -> bool:
+    """Attach a real media identity (attachment_id + msg_type) to an existing row.
+
+    Ripara le righe "media race": quando un messaggio media viene ingerito
+    senza attachment (webhook WAHA partito prima del download → hasMedia=true
+    ma media=null), la riga resta vuota finché non arriva il media reale (echo
+    o fetch_history).  Questo helper aggiorna in place attachment_id e msg_type
+    così la bolla compare senza duplicati.  Ritorna True se ha aggiornato.
+    """
+    if not msg_id:
+        return False
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
+                "AND msg_id = ? ORDER BY ABS(timestamp - ?) ASC, rowid ASC LIMIT 1",
+                (protocol, contact_number, str(msg_id), timestamp),
+            ).fetchone()
+            if row is None:
+                return False
+            cursor = conn.execute(
+                "UPDATE messages SET attachment_id = ?, msg_type = ? "
+                "WHERE id = ? AND (attachment_id IS NULL OR attachment_id = '')",
+                (attachment_id, msg_type, row[0]),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
 def _fill_message_quote_fields(
     protocol: str,
     contact_number: str,
@@ -463,6 +537,188 @@ def _fill_message_quote_fields(
             )
             conn.commit()
             return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
+def _apply_reaction_delta(
+    protocol: str,
+    contact: str,
+    target_msg_id: str | None,
+    target_ts: int | None,
+    emoji: str,
+    author_key: str,
+    author: str,
+    is_mine: bool,
+    is_remove: bool,
+    ts: int,
+) -> bool:
+    """Apply an author-scoped reaction add, change, or removal."""
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            cursor = conn.execute(
+                "DELETE FROM reactions WHERE protocol = ? AND contact_number = ? "
+                "AND IFNULL(target_msg_id, '') = IFNULL(?, '') "
+                "AND IFNULL(target_timestamp, 0) = IFNULL(?, 0) "
+                "AND author_key = ?",
+                (protocol, contact, target_msg_id, target_ts, author_key),
+            )
+            changed = cursor.rowcount > 0
+            if not is_remove:
+                conn.execute(
+                    "INSERT INTO reactions "
+                    "(protocol, contact_number, target_msg_id, target_timestamp, "
+                    "emoji, author_key, author, is_mine, count, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                    (
+                        protocol,
+                        contact,
+                        target_msg_id,
+                        target_ts,
+                        emoji,
+                        author_key,
+                        author,
+                        int(is_mine),
+                        ts,
+                    ),
+                )
+                changed = True
+            conn.commit()
+            return changed
+        finally:
+            conn.close()
+
+
+def _replace_reactions_snapshot(
+    protocol: str,
+    contact: str,
+    target_msg_id: str | None,
+    target_ts: int | None,
+    entries: list[dict],
+    ts: int,
+) -> bool:
+    """Replace aggregate reaction rows with a complete protocol snapshot."""
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            cursor = conn.execute(
+                "DELETE FROM reactions WHERE protocol = ? AND contact_number = ? "
+                "AND IFNULL(target_msg_id, '') = IFNULL(?, '') "
+                "AND IFNULL(target_timestamp, 0) = IFNULL(?, 0) "
+                "AND author_key LIKE '__agg__%'",
+                (protocol, contact, target_msg_id, target_ts),
+            )
+            changed = cursor.rowcount > 0
+            for entry in entries:
+                conn.execute(
+                    "INSERT INTO reactions "
+                    "(protocol, contact_number, target_msg_id, target_timestamp, "
+                    "emoji, author_key, author, is_mine, count, timestamp) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        protocol,
+                        contact,
+                        target_msg_id,
+                        target_ts,
+                        entry["emoji"],
+                        entry["author_key"],
+                        entry["author"],
+                        int(entry["is_mine"]),
+                        entry["count"],
+                        ts,
+                    ),
+                )
+                changed = True
+            conn.commit()
+            return changed
+        finally:
+            conn.close()
+
+
+def _reactions_for_contact(protocol: str, contact: str) -> list[dict]:
+    """Return all persisted reactions for a protocol contact."""
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM reactions WHERE protocol = ? AND contact_number = ? "
+                "ORDER BY id",
+                (protocol, contact),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
+
+
+def _resolve_reaction_target_row(
+    protocol: str,
+    contact: str,
+    target_msg_id: str | None,
+    target_ts: int | None,
+) -> dict | None:
+    """Resolve a reaction target to its cached message identity."""
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            conn.row_factory = sqlite3.Row
+            if protocol == "signal":
+                row = conn.execute(
+                    "SELECT id, msg_id, timestamp FROM messages "
+                    "WHERE protocol = ? AND contact_number = ? "
+                    "AND (msg_id = ? OR (msg_id IS NULL AND ? IS NOT NULL "
+                    "AND timestamp = ?)) "
+                    "ORDER BY CASE WHEN msg_id = ? THEN 0 ELSE 1 END LIMIT 1",
+                    (
+                        protocol,
+                        contact,
+                        target_msg_id,
+                        target_ts,
+                        target_ts,
+                        target_msg_id,
+                    ),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT id, msg_id, timestamp FROM messages "
+                    "WHERE protocol = ? AND contact_number = ? AND msg_id = ? "
+                    "ORDER BY rowid LIMIT 1",
+                    (protocol, contact, target_msg_id),
+                ).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
+
+def _prune_orphan_reactions() -> int:
+    """Delete reactions whose target message is no longer cached."""
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(_backend.DB_FILE)
+        try:
+            cursor = conn.execute(
+                """
+                DELETE FROM reactions
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM messages m
+                    WHERE m.protocol = reactions.protocol
+                      AND m.contact_number = reactions.contact_number
+                      AND (
+                          (m.msg_id IS NOT NULL AND m.msg_id != ''
+                           AND m.msg_id = reactions.target_msg_id)
+                          OR (m.msg_id IS NULL
+                              AND m.timestamp = reactions.target_timestamp)
+                      )
+                )
+                """
+            )
+            conn.commit()
+            return cursor.rowcount
         finally:
             conn.close()
 
@@ -513,6 +769,10 @@ def _prune_cache(limit: int | None = None, *, now_ms: int | None = None) -> int:
             )
             deleted = cursor.rowcount
             conn.commit()
+            try:
+                _prune_orphan_reactions()
+            except Exception:
+                logger.debug("Reaction orphan prune failed", exc_info=True)
             if deleted > 0:
                 try:
                     conn.execute("VACUUM")

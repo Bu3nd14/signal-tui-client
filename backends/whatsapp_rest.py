@@ -21,6 +21,26 @@ import backends.whatsapp as _wa
 logger = logging.getLogger(__name__)
 
 _DATA_URL_RE = re.compile(r"data:[^;,\s]+;base64,[A-Za-z0-9+/=_-]+", re.IGNORECASE)
+_MEDIA_FILE_EXTENSIONS = (
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".webp",
+    ".gif",
+    ".mp4",
+    ".mp3",
+    ".pdf",
+    ".opus",
+    ".ogg",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".txt",
+    ".zip",
+)
 
 
 class WhatsAppRESTClient:
@@ -438,6 +458,21 @@ class WhatsAppRESTClient:
             {"text": text, "linkPreview": True},
         )
 
+    def get_message_media(self, chat_id: str, message_id: str) -> dict | None:
+        """WAHA ``GET`` for one message with ``downloadMedia=true``.
+
+        Forces media download and returns the complete message, including its
+        media URL and mimetype.  Returns ``None`` on error, per ``_request``.
+        """
+        from urllib.parse import quote
+
+        result = self._request(
+            "GET",
+            f"/api/{self.session_name}/chats/{quote(chat_id, safe='')}"
+            f"/messages/{quote(message_id, safe='')}?downloadMedia=true",
+        )
+        return result if isinstance(result, dict) else None
+
     def list_messages(self, chat_id: str, limit: int = 1) -> list[dict]:
         """Fetch recent messages of a chat via ``GET /api/messages``.
 
@@ -515,13 +550,13 @@ class WhatsAppRESTClient:
         Resolution order:
         1. If *media_id_or_url* looks like a URL (starts with ``http``) →
            rewrite container-internal ``localhost:3000`` to the real host port
-           and fetch with API key auth.
+           and fetch with API key auth; on failure, extract its media id.
         2. Try WAHA Core binary endpoint ``/api/{session}/{id}/download``.
         3. Fall back to legacy JSON endpoint → redirect URL → fetch.
 
         Returns the raw bytes on success, ``None`` on any error.
         """
-        from urllib.parse import quote, urlparse
+        from urllib.parse import quote, unquote, urlparse
 
         # 0) Direct URL (WAHA media.url is often a full HTTP link).
         if media_id_or_url.startswith(("http://", "https://")):
@@ -553,7 +588,22 @@ class WhatsAppRESTClient:
                     data = resp.read()
                     return data
             except (urllib.error.HTTPError, urllib.error.URLError, OSError):
-                return None
+                # URL non più servito da WAHA (es. media.url datato o storage
+                # purgato): NON arrendersi — estrai l'id dal path e prova i
+                # fallback per id sotto, che usano la forma canonica.
+                logger.debug(
+                    "WAHA media URL fetch failed, falling back to id endpoints: %s",
+                    safe_url,
+                )
+                # Estrai l'id dal path ORIGINALE (non da safe_url, che è già
+                # percent-encoded): l'id va ri-encodato una sola volta sotto.
+                media_name = Path(unquote(urlparse(media_id_or_url).path)).name
+                media_name_lower = media_name.lower()
+                for extension in _MEDIA_FILE_EXTENSIONS:
+                    if media_name_lower.endswith(extension):
+                        media_name = media_name[: -len(extension)]
+                        break
+                media_id_or_url = media_name
         # 1) WAHA Core: direct binary endpoint — percent-encode the id
         #    so @lid / @c.us / @g.us don't become userinfo in the URL.
         encoded = quote(media_id_or_url, safe="")

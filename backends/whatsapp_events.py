@@ -330,6 +330,22 @@ def _event_from_message(
     single-element list (or an empty list when the payload is invalid).
     """
 
+    data = raw.get("_data") or {}
+    nested_message = data.get("message") if isinstance(data, dict) else None
+    reaction_message = (
+        nested_message.get("reactionMessage")
+        if isinstance(nested_message, dict)
+        else None
+    )
+    if (
+        str(raw.get("type") or "").lower() == "reaction"
+        or reaction_message is not None
+        or (
+            raw.get("reaction") is not None and not (raw.get("body") or raw.get("text"))
+        )
+    ):
+        return []
+
     is_mine = bool(raw.get("fromMe") or raw.get("isMe") or raw.get("outgoing"))
 
     # Fix: for outgoing messages (fromMe=True) the ``from`` field holds the
@@ -360,7 +376,7 @@ def _event_from_message(
             or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
         )
     if not chat_jid:
-        return None
+        return []
 
     # Gli status (storie) arrivano con JID "status@broadcast": non sono
     # messaggi di chat, li ignoriamo del tutto (niente ingestione in cache/DB).
@@ -571,6 +587,14 @@ def _event_from_message(
             )
         return events
 
+    # Un messaggio senza testo E senza media è una bolla vuota (es. media in
+    # download in corso su WAHA che arriva con hasMedia=true ma media=null, o
+    # ghost/servizio): mai creare bolle vuote.  Il messaggio viene ri-ingerito
+    # con il media alla prossima fetch_history (apertura chat nel TUI).
+    if not text.strip() and not media_items:
+        logger.debug("whatsapp: skip empty text message without media (id=%s)", msg_id)
+        return []
+
     # No media: pure text message (or sticker from msg_type).
     return [
         ChatEvent(
@@ -690,6 +714,74 @@ def _event_from_ack(raw: dict) -> ChatEvent | None:
     )
 
 
+def _event_from_reaction(
+    raw: dict, contacts_by_jid: dict | None = None
+) -> ChatEvent | None:
+    """Normalize a WAHA ``message.reaction`` into a reaction delta event."""
+    content = raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
+    is_mine = bool(content.get("fromMe"))
+    if is_mine:
+        chat_jid = _jid_string(
+            content.get("to") or content.get("chatId") or content.get("remoteJid")
+        )
+    else:
+        chat_jid = _jid_string(
+            content.get("from")
+            or content.get("chatId")
+            or content.get("remoteJid")
+            or content.get("chat")
+        )
+    if not chat_jid:
+        return None
+
+    reaction = content.get("reaction")
+    if not isinstance(reaction, dict):
+        return None
+    target_message_id = reaction.get("messageId")
+    if target_message_id is None or str(target_message_id) == "":
+        return None
+
+    participant = _jid_string(content.get("participant"))
+    if is_mine:
+        # Una reaction propria (anche quella inviata via WAHA API) arriva con
+        # ``fromMe=True`` ma ``participant`` può comunque contenere il nostro
+        # LID: per coerenza con gli altri protocolli l'autore è sempre "me".
+        author_key = "me"
+        author = "You"
+    else:
+        author_key = participant or _jid_string(content.get("from"))
+        author = _resolve_sender_name(author_key, contacts_by_jid)
+    if not author_key:
+        return None
+    emoji = str(reaction.get("text") or "")
+
+    ts = content.get("timestamp")
+    ts_ms = 0
+    if isinstance(ts, (int, float)):
+        ts_ms = int(ts * 1000) if ts < 10**12 else int(ts)
+    elif isinstance(ts, str) and ts.isdigit():
+        value = int(ts)
+        ts_ms = value * 1000 if value < 10**12 else value
+
+    return ChatEvent(
+        type="reaction_update",
+        protocol=PROTOCOL_WHATSAPP,
+        contact_id=chat_jid,
+        payload={
+            "target_message_id": str(target_message_id),
+            "target_timestamp": None,
+            "mode": "delta",
+            "emoji": emoji,
+            "is_remove": emoji == "",
+            "author": author,
+            "author_key": author_key,
+            "is_mine": is_mine,
+            "timestamp": ts_ms,
+            "contact": None,
+        },
+    )
+
+
 def _event_from_typing(raw: dict) -> ChatEvent | None:
     """Normalize a typing/presence indicator into a ``ChatEvent`` (type 'typing').
 
@@ -785,6 +877,9 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> list[Chat
         "messages/upsert",
     ):
         return _event_from_message(content, contacts_by_jid)
+    if evt == "message.reaction":
+        event = _event_from_reaction(content, contacts_by_jid)
+        return [event] if event is not None else []
     if evt in (
         "typing",
         "presence.update",

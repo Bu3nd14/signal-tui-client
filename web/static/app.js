@@ -3,6 +3,16 @@
 const TOKEN_KEY = "signal-tui-web-token";
 const PROTOCOL_KEY = "signal-tui-web-proto";
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
+const REACTION_EMOJIS = [
+  "👍", "❤️", "😂", "😮", "😢", "🙏",
+  "🔥", "🎉", "👏", "💯", "😍", "🤔",
+  "😎", "🤝", "🥰", "😅", "🤣", "💪",
+  "👎", "😡", "🤗", "✅", "🚀", "👀",
+  "😃", "😄", "😁", "😆", "😊", "😇",
+  "🥹", "😱", "😴", "🤯", "🫡", "🫠",
+  "🥳", "😳", "🤤", "🥶", "🫶", "😜",
+  "🤩", "😈", "💀", "🐶", "🌹", "⭐"
+];
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   contacts: [],
@@ -37,6 +47,10 @@ const state = {
   emojiRequest: null,
   emojiFailed: false,
   emojiCategory: 0,
+  reactionPicker: null,
+  telegramRefreshTimer: null,
+  telegramReactions: [],
+  userScrolledUp: false,
 };
 
 const elements = {
@@ -96,6 +110,7 @@ function requestToken(invalid = false) {
 }
 
 function handleUnauthorized() {
+  clearTelegramRefreshTimer();
   disconnectSocket();
   requestToken(true);
 }
@@ -705,6 +720,8 @@ function appendRenderedQuote(bubble, item) {
 
 function renderMessages(messages, protocol) {
   pruneOrphanObjectUrls();
+  const prevScrollTop = elements.messages.scrollTop;
+  const wasAtBottom = !state.userScrolledUp;
   elements.messages.replaceChildren();
   state.messageNodes ??= new Map();
   state.messageNodes.clear();
@@ -751,8 +768,8 @@ function renderMessages(messages, protocol) {
     empty.className = "empty-state";
     empty.textContent = "Nessun messaggio archiviato in questa conversazione.";
     elements.messages.append(empty);
-    scrollThreadToBottom();
-    requestAnimationFrame(scrollThreadToBottom);
+    if (wasAtBottom) scrollThreadToBottom();
+    else elements.messages.scrollTop = Math.min(prevScrollTop, elements.messages.scrollHeight);
     return;
   }
   for (const item of displayed) {
@@ -820,6 +837,7 @@ function renderMessages(messages, protocol) {
       }
     }
     bubble.append(time);
+    const reactionsEl = item.reactions?.length ? appendReactionChips(bubble, item) : null;
     message.append(bubble);
     if (!item.optimistic_id) {
       const reply = document.createElement("button");
@@ -830,6 +848,15 @@ function renderMessages(messages, protocol) {
       reply.title = "Rispondi";
       reply.addEventListener("click", () => startReply(item));
       message.append(reply);
+
+      const reaction = document.createElement("button");
+      reaction.type = "button";
+      reaction.className = "message-reaction";
+      reaction.textContent = "🙂";
+      reaction.setAttribute("aria-label", "Reagisci al messaggio");
+      reaction.title = "Reagisci";
+      reaction.addEventListener("click", (event) => startReaction(item, event));
+      if (item.direction === "in") message.append(reaction);
     }
     if (item.direction === "out" && item.edit_id && !item.optimistic_id && item.text) {
       const edit = document.createElement("button");
@@ -850,11 +877,120 @@ function renderMessages(messages, protocol) {
       status: item.status,
       edited: Boolean(item.edited),
       direction: item.direction,
+      reactionsEl,
+      reactions: copyReactions(item.reactions),
     });
     elements.messages.append(message);
+    // Bollone lungo: i bottoni action vanno centrati verticalmente rispetto
+    // alla bolla (per quelle corte restano ancorati in cima, dove non sforano).
+    if (bubble.offsetHeight > 72) message.classList.add("tall");
   }
-  scrollThreadToBottom();
-  requestAnimationFrame(scrollThreadToBottom);
+  if (wasAtBottom) scrollThreadToBottom();
+  else elements.messages.scrollTop = Math.min(prevScrollTop, elements.messages.scrollHeight);
+}
+
+function copyReactions(reactions) {
+  return (reactions || []).map((reaction) => ({
+    ...reaction,
+    authors: [...(reaction.authors || [])],
+  }));
+}
+
+function buildReactionChips(container, reactions) {
+  container.replaceChildren();
+  const labels = [];
+  for (const reaction of reactions || []) {
+    const emoji = String(reaction.emoji || "");
+    const count = Number(reaction.count) || 1;
+    const chip = document.createElement("span");
+    chip.className = `reaction-chip${reaction.is_mine ? " mine" : ""}`;
+    chip.textContent = emoji;
+    const authors = Array.isArray(reaction.authors) ? reaction.authors.filter(Boolean) : [];
+    chip.title = authors.length ? authors.join(", ") : emoji;
+    if (count > 1) {
+      const countEl = document.createElement("span");
+      countEl.className = "reaction-count";
+      countEl.textContent = String(count);
+      chip.append(countEl);
+    }
+    container.append(chip);
+    labels.push(`${emoji}${count > 1 ? ` ${count}` : ""}`);
+  }
+  container.setAttribute("aria-label", `Reazioni: ${labels.join(", ")}`);
+}
+
+function appendReactionChips(bubble, item) {
+  if (item.optimistic_id || !item.reactions?.length) return null;
+  const container = document.createElement("div");
+  container.className = "message-reactions";
+  container.setAttribute("role", "group");
+  buildReactionChips(container, item.reactions);
+  bubble.append(container);
+  return container;
+}
+
+function closeReactionPicker() {
+  state.reactionPicker?.picker.remove();
+  state.reactionPicker = null;
+}
+
+function startReaction(item, event) {
+  event?.stopPropagation();
+  const anchor = event?.currentTarget;
+  if (!anchor || item.optimistic_id) return;
+  if (state.reactionPicker?.anchor === anchor) {
+    closeReactionPicker();
+    return;
+  }
+  closeReactionPicker();
+  const picker = document.createElement("div");
+  picker.className = "reaction-picker";
+  picker.setAttribute("role", "dialog");
+  picker.setAttribute("aria-label", "Scegli una reazione");
+  const reactionEmojis = state.active?.protocol === "telegram" && state.telegramReactions?.length
+    ? state.telegramReactions
+    : REACTION_EMOJIS;
+  for (const emoji of reactionEmojis) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = emoji;
+    button.setAttribute("aria-label", `Reagisci con ${emoji}`);
+    button.addEventListener("click", (clickEvent) => {
+      clickEvent.stopPropagation();
+      closeReactionPicker();
+      sendReaction(item, emoji);
+    });
+    picker.append(button);
+  }
+  anchor.append(picker);
+  state.reactionPicker = { anchor, picker };
+  picker.children[0]?.focus();
+}
+
+async function sendReaction(item, emoji) {
+  if (!state.active || item.optimistic_id) return;
+  try {
+    const response = await apiFetch("/api/messages/reaction", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        protocol: state.active.protocol,
+        contact_id: state.active.id,
+        message_id: String(item.id),
+        emoji,
+      }),
+    });
+    const data = await response.json();
+    applyReactionUpdate({
+      protocol: state.active.protocol,
+      contact_id: state.active.id,
+      message_id: String(item.id),
+      timestamp: item.timestamp,
+      reactions: data.reactions,
+    });
+  } catch (error) {
+    if (error.message !== "unauthorized") showError("Reazione non riuscita.");
+  }
 }
 
 const STATUS_RANK = { pending: 0, failed: 0, sent: 1, delivered: 2, read: 3 };
@@ -891,7 +1027,6 @@ async function loadMessages() {
     if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
       state.messages = messages;
       renderMessages(messages, active.protocol);
-      scrollThreadToBottom();
     }
   } catch (error) {
     if (error.name !== "AbortError" && error.message !== "unauthorized") showError("Errore di rete durante il caricamento dei messaggi.");
@@ -1062,6 +1197,34 @@ function applyRemoteEdit(payload) {
   }
 }
 
+function applyReactionUpdate(payload) {
+  if (!state.active || state.active.protocol !== payload?.protocol || state.active.id !== String(payload?.contact_id)) return;
+  let entry = state.messageNodes?.get(String(payload.message_id));
+  if (!entry) {
+    entry = [...(state.messageNodes?.values() || [])].find((candidate) =>
+      timestampMilliseconds(candidate.ts) === timestampMilliseconds(payload.timestamp));
+  }
+  const item = state.messages.find((message) =>
+    String(message.id) === String(payload.message_id)
+    || timestampMilliseconds(message.timestamp) === timestampMilliseconds(payload.timestamp));
+  const reactions = copyReactions(Array.isArray(payload.reactions) ? payload.reactions : []);
+  if (item) item.reactions = copyReactions(reactions);
+  if (!entry) return;
+  entry.reactions = copyReactions(reactions);
+  if (!reactions.length) {
+    entry.reactionsEl?.remove();
+    entry.reactionsEl = null;
+    return;
+  }
+  if (!entry.reactionsEl) {
+    const bubble = entry.timeEl?.parentNode;
+    if (!bubble) return;
+    entry.reactionsEl = appendReactionChips(bubble, { reactions });
+    return;
+  }
+  buildReactionChips(entry.reactionsEl, reactions);
+}
+
 function markRead(protocol, contactId) {
   const key = `${protocol}:${contactId}`;
   // Persistenza DB immediata (i badge tornano azzerati dopo un refresh).
@@ -1085,11 +1248,42 @@ function markRead(protocol, contactId) {
   }, 3000));
 }
 
+function clearTelegramRefreshTimer() {
+  if (state.telegramRefreshTimer === null) return;
+  window.clearInterval(state.telegramRefreshTimer);
+  state.telegramRefreshTimer = null;
+}
+
+function updateTelegramRefreshTimer() {
+  clearTelegramRefreshTimer();
+  if (state.active?.protocol === "telegram") {
+    state.telegramRefreshTimer = window.setInterval(loadMessages, 15000);
+  }
+}
+
+async function loadTelegramReactions() {
+  if (state.active?.protocol !== "telegram") return;
+  try {
+    const response = await apiFetch("/api/reactions?protocol=telegram");
+    const data = await response.json();
+    state.telegramReactions = Array.isArray(data.emojis) ? data.emojis : [];
+  } catch (error) {
+    state.telegramReactions = [];
+    if (error.message !== "unauthorized") {
+      console.debug("[web] telegram reactions unavailable", error);
+    }
+  }
+}
+
 function openThread(contact) {
   closeEmojiPicker({ focus: false });
+  closeReactionPicker();
   cancelReply();
   if (state.editing) cancelEdit();
   state.active = contact;
+  state.userScrolledUp = false;
+  updateTelegramRefreshTimer();
+  if (contact.protocol === "telegram") void loadTelegramReactions();
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
   elements.app.classList.add("thread-open");
@@ -1467,6 +1661,9 @@ function connectSocket() {
         case "message_edit":
           applyRemoteEdit(update.payload);
           break;
+        case "reaction_update":
+          applyReactionUpdate(update.payload);
+          break;
       }
     } catch {
       showError("Aggiornamento live non valido ricevuto dal server.");
@@ -1485,8 +1682,18 @@ function connectSocket() {
 
 document.querySelector("#refresh-contacts").addEventListener("click", () => loadContacts());
 document.querySelector("#open-token").addEventListener("click", () => requestToken());
-document.querySelector("#back-button").addEventListener("click", () => elements.app.classList.remove("thread-open"));
+document.querySelector("#back-button").addEventListener("click", () => {
+  clearTelegramRefreshTimer();
+  elements.app.classList.remove("thread-open");
+});
 document.querySelector("#dismiss-error").addEventListener("click", () => { elements.errorBanner.hidden = true; });
+elements.messages.addEventListener("scroll", () => {
+  state.userScrolledUp = (
+    elements.messages.scrollHeight
+    - elements.messages.scrollTop
+    - elements.messages.clientHeight
+  ) > 80;
+});
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   state.editing ? submitEdit() : submitMessage();
@@ -1539,9 +1746,19 @@ elements.emojiPicker.addEventListener("keydown", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || elements.emojiPicker.hidden) return;
-  event.preventDefault();
-  closeEmojiPicker();
+  if (event.key !== "Escape") return;
+  if (state.reactionPicker) {
+    event.preventDefault();
+    closeReactionPicker();
+  } else if (!elements.emojiPicker.hidden) {
+    event.preventDefault();
+    closeEmojiPicker();
+  }
+});
+document.addEventListener("click", (event) => {
+  if (state.reactionPicker && !state.reactionPicker.picker.contains(event.target)) {
+    closeReactionPicker();
+  }
 });
 elements.composer.addEventListener("paste", (event) => {
   const item = [...(event.clipboardData?.items || [])]
@@ -1634,11 +1851,13 @@ document.querySelector("#token-form").addEventListener("submit", (event) => {
   localStorage.setItem(TOKEN_KEY, token);
   elements.tokenError.hidden = true;
   elements.tokenDialog.close();
+  updateTelegramRefreshTimer();
   loadContacts();
   connectSocket();
 });
 
 window.addEventListener("beforeunload", () => {
+  clearTelegramRefreshTimer();
   disconnectSocket();
   abortMediaRequests();
   clearStagedAttachment();
