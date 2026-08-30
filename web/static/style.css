@@ -293,6 +293,11 @@ h2 { font-size: 1.05rem; }
   left: auto;
   right: -38px;
 }
+/* Bolle lunghe: coppia di bottoni centrata verticalmente rispetto alla bolla
+   (reply sopra, secondo bottone sotto). Le bolle corte restano ancorate in cima. */
+.message.tall .message-reply { top: 50%; transform: translateY(-130%); }
+.message.tall .message-reaction { top: 50%; transform: translateY(30%); }
+.message.tall .message-edit { top: 50%; transform: translateY(30%); }
 .message:hover .message-reply,
 .message:hover .message-edit,
 .message:hover .message-reaction,
@@ -304,8 +309,8 @@ h2 { font-size: 1.05rem; }
 .message-reaction:focus-visible { opacity: 1; }
 .reaction-picker {
   position: absolute;
-  right: 0;
-  bottom: -2px;
+  left: 100%;
+  top: 0;
   z-index: 80;
   display: grid;
   grid-template-columns: repeat(6, 40px);
@@ -318,7 +323,6 @@ h2 { font-size: 1.05rem; }
   background: var(--panel);
   box-shadow: 0 10px 30px #0009;
 }
-.message.in .reaction-picker { right: auto; left: 0; }
 .reaction-picker button {
   display: grid;
   width: 40px;

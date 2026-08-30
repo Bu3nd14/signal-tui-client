@@ -881,6 +881,9 @@ function renderMessages(messages, protocol) {
       reactions: copyReactions(item.reactions),
     });
     elements.messages.append(message);
+    // Bollone lungo: i bottoni action vanno centrati verticalmente rispetto
+    // alla bolla (per quelle corte restano ancorati in cima, dove non sforano).
+    if (bubble.offsetHeight > 72) message.classList.add("tall");
   }
   if (wasAtBottom) scrollThreadToBottom();
   else elements.messages.scrollTop = Math.min(prevScrollTop, elements.messages.scrollHeight);
@@ -959,7 +962,7 @@ function startReaction(item, event) {
     });
     picker.append(button);
   }
-  anchor.parentNode.append(picker);
+  anchor.append(picker);
   state.reactionPicker = { anchor, picker };
   picker.children[0]?.focus();
 }
