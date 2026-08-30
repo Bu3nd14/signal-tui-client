@@ -749,6 +749,40 @@ class SignalBackend(ChatBackend):
             _send_subprocess(new_text, contact_id, edit_timestamp=target_ts)
         return True
 
+    def send_reaction_sync(
+        self,
+        contact_id: str,
+        message_id: str,
+        emoji: str,
+        *,
+        target_author: str | None = None,
+    ) -> bool:
+        try:
+            target_ts = int(message_id)
+        except (TypeError, ValueError):
+            return False
+
+        author = target_author
+        if not author:
+            target = next(
+                (
+                    message
+                    for message in self.cache.get(contact_id, [])
+                    if str(message.get("id") or message.get("timestamp"))
+                    == str(message_id)
+                    or int(message.get("timestamp") or 0) == target_ts
+                ),
+                None,
+            )
+            author = self.user_number if target and target.get("is_mine") else contact_id
+        if not self._use_daemon or not self._rpc:
+            return False
+        try:
+            return self._rpc.send_reaction(contact_id, emoji, author, target_ts)
+        except Exception:
+            logger.debug("Signal reaction send failed", exc_info=True)
+            return False
+
     async def mark_read(self, contact_id: str) -> None:
         await asyncio.to_thread(_mark_as_read, contact_id)
 

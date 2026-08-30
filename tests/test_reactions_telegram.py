@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -53,6 +54,25 @@ def _update(
     )
 
 
+def _message(reactions=None):
+    return SimpleNamespace(
+        chat_id=42,
+        text="hello",
+        out=False,
+        sender=SimpleNamespace(first_name="Ada", last_name="", id=7),
+        date=datetime.now(UTC),
+        photo=None,
+        document=None,
+        sticker=None,
+        video=None,
+        voice=None,
+        audio=None,
+        reply_to=None,
+        id=99,
+        reactions=reactions,
+    )
+
+
 @pytest.fixture
 def tmp_db(tmp_path):
     db_file = tmp_path / "messages.db"
@@ -95,6 +115,60 @@ def test_handle_reactions_update_enqueues_renderable_snapshot_only():
         {"emoji": "👍", "count": 3, "is_mine": True, "authors": ["Ada"]},
         {"emoji": "❤️", "count": 2, "is_mine": True, "authors": ["8"]},
     ]
+
+
+def test_message_reactions_enqueues_renderable_snapshot_only():
+    backend = _backend()
+    reactions = MessageReactions(
+        results=[
+            ReactionCount(reaction=ReactionEmoji("👍"), count=3, chosen_order=0),
+            ReactionCount(reaction=ReactionCustomEmoji(document_id=1234), count=1),
+        ]
+    )
+
+    message_event = backend._message_to_chat_event(_message(reactions))
+
+    assert message_event is not None
+    events = backend.poll_once()
+    assert len(events) == 1
+    assert events[0].type == "reaction_update"
+    assert events[0].contact_id == "42"
+    assert events[0].payload["target_message_id"] == "99"
+    assert events[0].payload["snapshot"] == [
+        {"emoji": "👍", "count": 3, "is_mine": True, "authors": []}
+    ]
+
+
+def test_message_without_reactions_enqueues_no_extra_event():
+    backend = _backend()
+
+    assert backend._message_to_chat_event(_message()) is not None
+    assert backend.poll_once() == []
+
+
+def test_message_reactions_payload_persists_aggregate_rows(tmp_db):
+    backend_mod._add_message_to_cache(
+        "42",
+        "message",
+        False,
+        "Ada",
+        1000,
+        protocol=PROTOCOL_TELEGRAM,
+        msg_id="99",
+    )
+    backend = _backend()
+    backend.cache = {"42": [{"id": "99", "timestamp": 1000}]}
+    reactions = MessageReactions(
+        results=[ReactionCount(reaction=ReactionEmoji("👍"), count=3)]
+    )
+
+    backend._message_to_chat_event(_message(reactions))
+    event = backend.poll_once()[0]
+    result = backend.apply_reaction(event.contact_id, event.payload)
+
+    assert result is not None
+    rows = backend_mod._reactions_for_contact(PROTOCOL_TELEGRAM, "42")
+    assert {row["author_key"]: row["count"] for row in rows} == {"__agg__:👍": 3}
 
 
 @pytest.mark.parametrize(
@@ -294,3 +368,66 @@ def test_on_raw_dispatches_reaction_update(monkeypatch):
         backend._loop = None
 
     handle.assert_awaited_once_with(update)
+
+
+def test_reaction_catchup_during_connect_is_enqueued_and_persisted(
+    monkeypatch, tmp_db
+):
+    update = _update(PeerChat(chat_id=123))
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.handlers = {}
+
+        def on(self, _event):
+            def register(handler):
+                self.handlers[handler.__name__] = handler
+                return handler
+
+            return register
+
+        async def connect(self):
+            await self.handlers["_on_raw"](update)
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_dialogs(self, limit):
+            return []
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+        def is_alive(self):
+            return False
+
+    backend_mod._add_message_to_cache(
+        "-123",
+        "message",
+        False,
+        "Ada",
+        1000,
+        protocol=PROTOCOL_TELEGRAM,
+        msg_id="99",
+    )
+    backend = _backend()
+    monkeypatch.setattr("telethon.TelegramClient", FakeClient)
+    monkeypatch.setattr("backends.telegram.threading.Thread", FakeThread)
+
+    backend._connect_sync()
+    try:
+        event = backend.poll_once()[0]
+        assert event.contact_id == "-123"
+        result = backend.apply_reaction(event.contact_id, event.payload)
+    finally:
+        backend._loop.close()
+        backend._loop = None
+
+    assert result is not None
+    assert result["message_id"] == "99"
+    rows = backend_mod._reactions_for_contact(PROTOCOL_TELEGRAM, "-123")
+    assert {row["emoji"]: row["count"] for row in rows} == {"👍": 3, "❤️": 2}

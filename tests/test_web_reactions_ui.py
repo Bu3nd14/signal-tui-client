@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -65,6 +67,10 @@ assert.equal(reactionGroup.children[0].title, "Giovanni, You");
 assert.equal(reactionGroup.children[0].children[0].className, "reaction-count");
 assert.equal(reactionGroup.children[0].children[0].textContent, "2");
 assert.equal(reactionGroup.children[1].children.length, 0);
+assert.equal(elements.messages.children[0].children[1].className, "message-reply");
+assert.equal(elements.messages.children[0].children[2].className, "message-reaction");
+assert.equal(elements.messages.children[1].children[1].className, "message-reply");
+assert.equal(elements.messages.children[1].children[2].className, "message-reaction");
 assert.equal(elements.messages.children[1].children[0].children.at(-1).className, "message-time");
 assert.equal(elements.messages.children[2].children[0].children.at(-1).className, "message-time");
 assert.deepEqual(state.messageNodes.get("1").reactions, reactions);
@@ -166,3 +172,18 @@ def test_websocket_dispatches_reaction_updates():
         'case "reaction_update":\n          applyReactionUpdate(update.payload);'
         in source
     )
+
+
+def test_reaction_button_picker_and_send_flow_are_wired():
+    source = Path("web/static/app.js").read_text(encoding="utf-8")
+    match = re.search(r"const REACTION_EMOJIS = (\[.*?\]);", source, re.DOTALL)
+    assert match is not None
+    emojis = json.loads(match.group(1))
+    assert 'reaction.className = "message-reaction";' in source
+    assert 'reaction.title = "Reagisci";' in source
+    assert 'startReaction(item, event)' in source
+    assert len(emojis) > 6
+    assert {"👍", "❤️", "😂", "🔥", "🎉", "💯", "🤣", "💪"} <= set(emojis)
+    assert "for (const emoji of REACTION_EMOJIS)" in source
+    assert 'apiFetch("/api/messages/reaction"' in source
+    assert "applyReactionUpdate({" in source

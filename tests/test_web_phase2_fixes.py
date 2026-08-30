@@ -738,6 +738,7 @@ globalThis.elements = {
   messageInput: { value: "hello", focus() {} },
 };
 globalThis.closeEmojiPicker = () => {};
+globalThis.closeReactionPicker = () => {};
 globalThis.cancelReply = () => {};
 globalThis.protocolIcon = () => "";
 globalThis.renderContacts = () => {};

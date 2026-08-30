@@ -1428,6 +1428,29 @@ class WhatsAppBackend(ChatBackend):
             return False
         return self._rest.edit_message(contact_id, message_id, new_text) is not None
 
+    def send_reaction_sync(
+        self,
+        contact_id: str,
+        message_id: str,
+        emoji: str,
+        *,
+        target_author: str | None = None,
+    ) -> bool:
+        if not self._rest:
+            return False
+        return (
+            self._rest._request(
+                "PUT",
+                "/api/reaction",
+                {
+                    "messageId": message_id,
+                    "reaction": emoji,
+                    "session": self.session_name,
+                },
+            )
+            is not None
+        )
+
     async def mark_read(self, contact_id: str) -> None:
         """Async mark-read (interface contract)."""
         await self._mark_read_thread(contact_id)

@@ -169,6 +169,22 @@ class ChatBackend(ABC):
         """
         return False
 
+    def send_reaction_sync(
+        self,
+        contact_id: str,
+        message_id: str,
+        emoji: str,
+        *,
+        target_author: str | None = None,
+    ) -> bool:
+        """Invia una reaction a un messaggio.
+
+        Bloccante: chiamare SOLO da worker thread. ``message_id`` è il
+        timestamp Signal, l'id server Telegram o il Baileys id WhatsApp.
+        Default: nessun supporto → ``False``.
+        """
+        return False
+
     async def edit_message(
         self, contact_id: str, message_id: str, new_text: str
     ) -> bool:

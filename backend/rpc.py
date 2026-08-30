@@ -405,6 +405,32 @@ class SignalRPCClient:
             params["attachments"] = attachments
         return self._call("send", params)
 
+    def send_reaction(
+        self,
+        recipient: str,
+        emoji: str,
+        target_author: str,
+        target_timestamp: int,
+    ) -> bool:
+        """Send a reaction and report whether signal-cli accepted it."""
+        response = self._call(
+            "sendReaction",
+            {
+                "recipient": [recipient],
+                "emoji": emoji,
+                "targetAuthor": target_author,
+                "targetTimestamp": target_timestamp,
+            },
+        )
+        if "error" in response:
+            return False
+        result = response.get("result")
+        results = result.get("results", []) if isinstance(result, dict) else []
+        return any(
+            isinstance(item, dict) and item.get("type") == "SUCCESS"
+            for item in results
+        )
+
     def receive(self) -> list[dict]:
         """Receive messages (legacy polling method, prefer listen_events for real-time)."""
         result = self._call("receive")

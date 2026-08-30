@@ -9,6 +9,7 @@ import re
 import sqlite3
 import tempfile
 import threading
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -156,6 +157,49 @@ def _message_row_for_edit(
 
             logger.exception(
                 "Web edit lookup database error: protocol=%s contact=%s",
+                protocol,
+                contact_id,
+            )
+            raise HTTPException(status_code=500, detail="Database error") from None
+    return dict(row) if row else None
+
+
+def _message_row_for_reaction(
+    protocol: str, contact_id: str, message_id: str
+) -> dict[str, Any] | None:
+    import backend
+    from backend.db import _DB_LOCK
+
+    with _DB_LOCK:
+        try:
+            connection = sqlite3.connect(backend.DB_FILE)
+            connection.row_factory = sqlite3.Row
+            try:
+                row = connection.execute(
+                    "SELECT id, msg_id, is_mine, timestamp, protocol FROM messages "
+                    "WHERE protocol = ? AND contact_number = ? AND "
+                    "(msg_id = ? "
+                    "OR (? = 'signal' AND timestamp = CAST(? AS INTEGER)) "
+                    "OR (? = 'signal' AND id = CAST(? AS INTEGER))) "
+                    "ORDER BY CASE WHEN msg_id = ? THEN 0 ELSE 1 END LIMIT 1",
+                    (
+                        protocol,
+                        contact_id,
+                        message_id,
+                        protocol,
+                        message_id,
+                        protocol,
+                        message_id,
+                        message_id,
+                    ),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            from fastapi import HTTPException
+
+            logger.exception(
+                "Web reaction lookup database error: protocol=%s contact=%s",
                 protocol,
                 contact_id,
             )
@@ -414,6 +458,54 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
         if reactions:
             message["reactions"] = reactions
     return messages
+
+
+def _telegram_reaction_snapshot(
+    contact_id: str, message_id: str, reaction_emoji: str
+) -> list[dict[str, Any]]:
+    message = next(
+        (
+            item
+            for item in _messages("telegram", contact_id)
+            if str(item["id"]) == message_id
+        ),
+        {},
+    )
+    snapshot: list[dict[str, Any]] = []
+    for reaction in message.get("reactions", []):
+        count = int(reaction.get("count") or 0)
+        authors = [
+            author
+            for author in reaction.get("authors", [])
+            if author not in {"You", "Tu"}
+        ]
+        if reaction.get("is_mine"):
+            count -= 1
+        if count > 0:
+            snapshot.append(
+                {
+                    "emoji": str(reaction.get("emoji") or ""),
+                    "count": count,
+                    "is_mine": False,
+                    "authors": authors,
+                }
+            )
+
+    selected = next(
+        (item for item in snapshot if item["emoji"] == reaction_emoji), None
+    )
+    if selected is None:
+        selected = {
+            "emoji": reaction_emoji,
+            "count": 0,
+            "is_mine": False,
+            "authors": [],
+        }
+        snapshot.append(selected)
+    selected["count"] += 1
+    selected["is_mine"] = True
+    selected["authors"].append("You")
+    return snapshot
 
 
 def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
@@ -1291,6 +1383,108 @@ def create_api_router() -> Any:
             }
         )
         return {"ok": True}
+
+    @router.post("/messages/reaction")
+    async def messages_reaction(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        protocol = payload.get("protocol")
+        contact_id = payload.get("contact_id")
+        message_id = payload.get("message_id")
+        reaction_emoji = payload.get("emoji")
+        if (
+            not isinstance(protocol, str)
+            or protocol not in _PROTOCOLS
+            or not isinstance(contact_id, str)
+            or not contact_id.strip()
+            or not isinstance(message_id, str)
+            or not message_id.strip()
+            or not isinstance(reaction_emoji, str)
+            or not reaction_emoji
+            or len(reaction_emoji) > 8
+        ):
+            raise HTTPException(status_code=400, detail="Invalid request")
+        import emoji
+
+        if not emoji.is_emoji(reaction_emoji):
+            raise HTTPException(status_code=400, detail="Invalid request")
+
+        contact_id = contact_id.strip()
+        message_id = message_id.strip()
+        manager = request.app.state.manager
+        backend = manager.get(protocol)
+        if backend is None:
+            raise HTTPException(status_code=404, detail="Backend not found")
+        row = _message_row_for_reaction(protocol, contact_id, message_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+
+        target_timestamp = int(row["timestamp"])
+        target_author = None
+        backend_message_id = message_id
+        if protocol == "signal":
+            backend_message_id = str(target_timestamp)
+            target_author = (
+                str(getattr(backend, "user_number", ""))
+                if row["is_mine"]
+                else contact_id
+            )
+        try:
+            sent = await asyncio.to_thread(
+                backend.send_reaction_sync,
+                contact_id,
+                backend_message_id,
+                reaction_emoji,
+                target_author=target_author,
+            )
+        except Exception:  # noqa: BLE001
+            sent = False
+        if not sent:
+            raise HTTPException(status_code=502, detail="Reaction send failed")
+
+        event_timestamp = int(time.time() * 1000)
+        reaction_payload: dict[str, Any] = {
+            "mode": "snapshot" if protocol == "telegram" else "delta",
+            "target_message_id": str(row["msg_id"] or backend_message_id),
+            "target_timestamp": target_timestamp,
+            "emoji": reaction_emoji,
+            "is_mine": True,
+            "author_key": "me",
+            "author": "You",
+            "is_remove": False,
+            "timestamp": event_timestamp,
+        }
+        if protocol == "telegram":
+            reaction_payload["snapshot"] = _telegram_reaction_snapshot(
+                contact_id, message_id, reaction_emoji
+            )
+        aggregate = await asyncio.to_thread(
+            backend.apply_reaction, contact_id, reaction_payload
+        )
+        reactions = aggregate.get("reactions", []) if aggregate else []
+        resolved_message_id = (
+            str(aggregate["message_id"])
+            if aggregate and aggregate.get("message_id") is not None
+            else str(row["msg_id"] or backend_message_id)
+        )
+        resolved_timestamp = (
+            int(aggregate["timestamp"])
+            if aggregate and aggregate.get("timestamp") is not None
+            else target_timestamp
+        )
+        push_event(
+            {
+                "type": "reaction_update",
+                "payload": {
+                    "protocol": protocol,
+                    "contact_id": contact_id,
+                    "message_id": resolved_message_id,
+                    "timestamp": resolved_timestamp,
+                    "reactions": reactions,
+                },
+            }
+        )
+        return {"ok": True, "reactions": reactions}
 
     @router.get("/media/{proto}/{attachment_id:path}")
     def media(

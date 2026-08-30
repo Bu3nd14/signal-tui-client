@@ -57,8 +57,10 @@ assert.equal(state.messageNodes.get("2").tickEl.textContent, "🕓");
 assert.equal(state.messageNodes.get("3").tickEl, null);
 const editable = { id: "4", edit_id: "edit-4", direction: "out", text: "edit", timestamp: 4, status: "sent" };
 renderMessages([editable], "signal");
-assert.equal(elements.messages.children[0].children[2].className, "message-edit");
-assert.equal(elements.messages.children[0].children[2].textContent, "✎");
+assert.equal(elements.messages.children[0].children[2].className, "message-reaction");
+assert.equal(elements.messages.children[0].children[2].textContent, "🙂");
+assert.equal(elements.messages.children[0].children[3].className, "message-edit");
+assert.equal(elements.messages.children[0].children[3].textContent, "✎");
 """)
 
 

@@ -3,6 +3,12 @@
 const TOKEN_KEY = "signal-tui-web-token";
 const PROTOCOL_KEY = "signal-tui-web-proto";
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
+const REACTION_EMOJIS = [
+  "👍", "❤️", "😂", "😮", "😢", "🙏",
+  "🔥", "🎉", "👏", "💯", "😍", "🤔",
+  "😎", "🤝", "🥰", "😅", "🤣", "💪",
+  "👎", "😡", "🤗", "✅", "🚀", "👀"
+];
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   contacts: [],
@@ -37,6 +43,7 @@ const state = {
   emojiRequest: null,
   emojiFailed: false,
   emojiCategory: 0,
+  reactionPicker: null,
 };
 
 const elements = {
@@ -831,6 +838,15 @@ function renderMessages(messages, protocol) {
       reply.title = "Rispondi";
       reply.addEventListener("click", () => startReply(item));
       message.append(reply);
+
+      const reaction = document.createElement("button");
+      reaction.type = "button";
+      reaction.className = "message-reaction";
+      reaction.textContent = "🙂";
+      reaction.setAttribute("aria-label", "Reagisci al messaggio");
+      reaction.title = "Reagisci";
+      reaction.addEventListener("click", (event) => startReaction(item, event));
+      message.append(reaction);
     }
     if (item.direction === "out" && item.edit_id && !item.optimistic_id && item.text) {
       const edit = document.createElement("button");
@@ -898,6 +914,67 @@ function appendReactionChips(bubble, item) {
   buildReactionChips(container, item.reactions);
   bubble.append(container);
   return container;
+}
+
+function closeReactionPicker() {
+  state.reactionPicker?.picker.remove();
+  state.reactionPicker = null;
+}
+
+function startReaction(item, event) {
+  event?.stopPropagation();
+  const anchor = event?.currentTarget;
+  if (!anchor || item.optimistic_id) return;
+  if (state.reactionPicker?.anchor === anchor) {
+    closeReactionPicker();
+    return;
+  }
+  closeReactionPicker();
+  const picker = document.createElement("div");
+  picker.className = "reaction-picker";
+  picker.setAttribute("role", "dialog");
+  picker.setAttribute("aria-label", "Scegli una reazione");
+  for (const emoji of REACTION_EMOJIS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = emoji;
+    button.setAttribute("aria-label", `Reagisci con ${emoji}`);
+    button.addEventListener("click", (clickEvent) => {
+      clickEvent.stopPropagation();
+      closeReactionPicker();
+      sendReaction(item, emoji);
+    });
+    picker.append(button);
+  }
+  anchor.parentNode.append(picker);
+  state.reactionPicker = { anchor, picker };
+  picker.children[0]?.focus();
+}
+
+async function sendReaction(item, emoji) {
+  if (!state.active || item.optimistic_id) return;
+  try {
+    const response = await apiFetch("/api/messages/reaction", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        protocol: state.active.protocol,
+        contact_id: state.active.id,
+        message_id: String(item.id),
+        emoji,
+      }),
+    });
+    const data = await response.json();
+    applyReactionUpdate({
+      protocol: state.active.protocol,
+      contact_id: state.active.id,
+      message_id: String(item.id),
+      timestamp: item.timestamp,
+      reactions: data.reactions,
+    });
+  } catch (error) {
+    if (error.message !== "unauthorized") showError("Reazione non riuscita.");
+  }
 }
 
 const STATUS_RANK = { pending: 0, failed: 0, sent: 1, delivered: 2, read: 3 };
@@ -1158,6 +1235,7 @@ function markRead(protocol, contactId) {
 
 function openThread(contact) {
   closeEmojiPicker({ focus: false });
+  closeReactionPicker();
   cancelReply();
   if (state.editing) cancelEdit();
   state.active = contact;
@@ -1613,9 +1691,19 @@ elements.emojiPicker.addEventListener("keydown", (event) => {
   }
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || elements.emojiPicker.hidden) return;
-  event.preventDefault();
-  closeEmojiPicker();
+  if (event.key !== "Escape") return;
+  if (state.reactionPicker) {
+    event.preventDefault();
+    closeReactionPicker();
+  } else if (!elements.emojiPicker.hidden) {
+    event.preventDefault();
+    closeEmojiPicker();
+  }
+});
+document.addEventListener("click", (event) => {
+  if (state.reactionPicker && !state.reactionPicker.picker.contains(event.target)) {
+    closeReactionPicker();
+  }
 });
 elements.composer.addEventListener("paste", (event) => {
   const item = [...(event.clipboardData?.items || [])]
