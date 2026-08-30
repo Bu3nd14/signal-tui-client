@@ -47,6 +47,7 @@ from .whatsapp_events import (
     _event_from_ack,  # noqa: F401  re-export for tests
     _event_from_message,
     _event_from_raw,
+    _event_from_reaction,  # noqa: F401  re-export for tests
     _event_from_receipt,  # noqa: F401  re-export for tests
     _event_from_typing,  # noqa: F401  re-export for tests
     _jid_string,
@@ -551,6 +552,7 @@ class WhatsAppBackend(ChatBackend):
                 "message.ack",
                 "message.ack.group",
                 "presence.update",
+                "message.reaction",
             ]
             if webhook in urls:
                 # URL già registrato — controlla se anche gli eventi sono
@@ -1948,6 +1950,137 @@ class WhatsAppBackend(ChatBackend):
             "old_text": old_text,
             "text": new_text,
             "is_mine": bool(target.get("is_mine")),
+        }
+
+    def apply_reaction(self, contact_id: str, payload: dict) -> dict | None:
+        """Apply a WAHA reaction delta and aggregate it for a known target."""
+        if payload.get("mode") != "delta":
+            return None
+        target_message_id = payload.get("target_message_id")
+        if target_message_id is None or not payload.get("author_key"):
+            return None
+
+        from backend import (
+            _apply_reaction_delta,
+            _load_cache,
+            _reactions_for_contact,
+            _resolve_reaction_target_row,
+        )
+
+        requested_id = str(target_message_id)
+        target = next(
+            (
+                message
+                for message in self.cache.get(contact_id, [])
+                if str(message.get("id") or "") == requested_id
+            ),
+            None,
+        )
+        if target is None:
+            requested_canonical = canonical_msg_id(requested_id)
+            if requested_canonical:
+                target = next(
+                    (
+                        message
+                        for message in self.cache.get(contact_id, [])
+                        if canonical_msg_id(str(message.get("id") or ""))
+                        == requested_canonical
+                    ),
+                    None,
+                )
+
+        row = _resolve_reaction_target_row(
+            PROTOCOL_WHATSAPP,
+            contact_id,
+            str(target.get("id"))
+            if target is not None and target.get("id")
+            else requested_id,
+            payload.get("target_timestamp"),
+        )
+        if row is None and target is None:
+            requested_canonical = canonical_msg_id(requested_id)
+            persisted = _load_cache(protocol=PROTOCOL_WHATSAPP).get(contact_id, [])
+            canonical_target = next(
+                (
+                    message
+                    for message in persisted
+                    if requested_canonical
+                    and canonical_msg_id(str(message.get("id") or ""))
+                    == requested_canonical
+                ),
+                None,
+            )
+            if canonical_target is not None:
+                row = _resolve_reaction_target_row(
+                    PROTOCOL_WHATSAPP,
+                    contact_id,
+                    str(canonical_target.get("id")),
+                    payload.get("target_timestamp"),
+                )
+        if row is not None:
+            target = row
+        target_resolved = target is not None
+        resolved_id = (
+            str(target.get("msg_id") or target.get("id") or requested_id)
+            if target_resolved
+            else requested_id
+        )
+        target_ts = int(
+            (target.get("timestamp") if target_resolved else None)
+            or payload.get("target_timestamp")
+            or 0
+        )
+        changed = _apply_reaction_delta(
+            PROTOCOL_WHATSAPP,
+            contact_id,
+            resolved_id,
+            target_ts or None,
+            str(payload.get("emoji") or ""),
+            str(payload["author_key"]),
+            str(payload.get("author") or ""),
+            bool(payload.get("is_mine")),
+            bool(payload.get("is_remove")),
+            int(payload.get("timestamp") or 0),
+        )
+        if not changed or not target_resolved:
+            return None
+
+        grouped: dict[str, dict] = {}
+        for reaction in _reactions_for_contact(PROTOCOL_WHATSAPP, contact_id):
+            if str(reaction.get("target_msg_id") or "") != resolved_id and reaction.get(
+                "target_timestamp"
+            ) != (target_ts or None):
+                continue
+            emoji = str(reaction.get("emoji") or "")
+            aggregate = grouped.setdefault(
+                emoji,
+                {
+                    "emoji": emoji,
+                    "count": 0,
+                    "is_mine": False,
+                    "authors": set(),
+                    "timestamp": int(reaction.get("timestamp") or 0),
+                },
+            )
+            aggregate["count"] += int(reaction.get("count") or 0)
+            aggregate["is_mine"] = aggregate["is_mine"] or bool(reaction.get("is_mine"))
+            author = str(reaction.get("author") or "").strip()
+            if author:
+                aggregate["authors"].add(author)
+            aggregate["timestamp"] = min(
+                aggregate["timestamp"], int(reaction.get("timestamp") or 0)
+            )
+
+        reactions = sorted(
+            grouped.values(), key=lambda item: (-item["count"], item["timestamp"])
+        )
+        for reaction in reactions:
+            reaction["authors"] = sorted(reaction["authors"])
+            reaction.pop("timestamp")
+        return {
+            "message_id": resolved_id,
+            "timestamp": target_ts,
+            "reactions": reactions,
         }
 
     def process_receipt(self, envelope: dict) -> list[dict]:

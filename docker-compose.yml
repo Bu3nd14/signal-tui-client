@@ -45,8 +45,8 @@ services:
       WAHA_WEBHOOK_URL: "http://host.docker.internal:${CLIENT_WEBHOOK_PORT:-8088}/webhook"
       # Name legacy + attuale: le versioni recenti di WAHA leggono
       # WHATSAPP_HOOK_EVENTS; WAHA_WEBHOOK_EVENTS è mantenuto per retrocompatibilità.
-      WAHA_WEBHOOK_EVENTS: "message,message.ack,presence.update"
-      WHATSAPP_HOOK_EVENTS: "message,message.ack,presence.update"
+      WAHA_WEBHOOK_EVENTS: "message,message.any,message.ack,message.ack.group,presence.update,message.reaction"
+      WHATSAPP_HOOK_EVENTS: "message,message.any,message.ack,message.ack.group,presence.update,message.reaction"
     extra_hosts:
       # On Linux, the container cannot resolve host.docker.internal unless it is
       # explicitly mapped to the host gateway.  This is required for WAHA to

@@ -409,12 +409,15 @@ class TelegramBackend(ChatBackend):
             from telethon.tl.types import (
                 UpdateChannelUserTyping,
                 UpdateChatUserTyping,
+                UpdateMessageReactions,
                 UpdateReadHistoryOutbox,
                 UpdateUserTyping,
             )
 
             if isinstance(update, UpdateReadHistoryOutbox):
                 await self._handle_read_receipt(update)
+            elif isinstance(update, UpdateMessageReactions):
+                await self._handle_reactions_update(update)
             elif isinstance(
                 update,
                 (UpdateUserTyping, UpdateChatUserTyping, UpdateChannelUserTyping),
@@ -1169,6 +1172,15 @@ class TelegramBackend(ChatBackend):
                     quote_content_type = m.get("content_type")
                     break
 
+        if (
+            text == ""
+            and not any(
+                (msg.photo, msg.document, msg.sticker, msg.video, msg.voice, msg.audio)
+            )
+            and not msg.reply_to
+        ):
+            return None
+
         payload: dict[str, Any] = {
             "id": str(msg.id),
             "text": text,
@@ -1237,6 +1249,109 @@ class TelegramBackend(ChatBackend):
                     payload={"message_ids": message_ids, "is_read": True},
                 )
             )
+
+    async def _handle_reactions_update(self, update: Any) -> None:
+        """Translate a Telegram reaction snapshot into a generic chat event."""
+        from telethon.tl.types import (
+            PeerChannel,
+            PeerChat,
+            PeerUser,
+            ReactionCustomEmoji,
+            ReactionEmoji,
+        )
+
+        peer = update.peer
+        if isinstance(peer, PeerUser):
+            contact_id = str(peer.user_id)
+        elif isinstance(peer, PeerChat):
+            contact_id = str(-peer.chat_id)
+        elif isinstance(peer, PeerChannel):
+            contact_id = str(-1000000000000 - peer.channel_id)
+        else:
+            return
+
+        reactions = update.reactions
+        all_recent_reactions = reactions.recent_reactions or []
+        recent_reactions = (
+            reactions.recent_reactions if reactions.can_see_list else []
+        ) or []
+        snapshot: list[dict[str, Any]] = []
+
+        for reaction_count in reactions.results or []:
+            reaction = reaction_count.reaction
+            if isinstance(reaction, ReactionCustomEmoji):
+                logger.debug(
+                    "Telegram: skipping custom emoji reaction document_id=%s",
+                    reaction.document_id,
+                )
+                continue
+            if not isinstance(reaction, ReactionEmoji):
+                continue
+
+            emoticon = reaction.emoticon
+            matching_recent_reactions = [
+                peer_reaction
+                for peer_reaction in all_recent_reactions
+                if isinstance(peer_reaction.reaction, ReactionEmoji)
+                and peer_reaction.reaction.emoticon == emoticon
+            ]
+            authors: list[str] = []
+            for peer_reaction in recent_reactions:
+                recent = peer_reaction.reaction
+                if not isinstance(recent, ReactionEmoji):
+                    continue
+                if recent.emoticon != emoticon:
+                    continue
+
+                author_peer = peer_reaction.peer_id
+                if isinstance(author_peer, PeerUser):
+                    peer_id = author_peer.user_id
+                    author_contact_id = str(peer_id)
+                elif isinstance(author_peer, PeerChat):
+                    peer_id = author_peer.chat_id
+                    author_contact_id = str(-peer_id)
+                elif isinstance(author_peer, PeerChannel):
+                    peer_id = author_peer.channel_id
+                    author_contact_id = str(-1000000000000 - peer_id)
+                else:
+                    continue
+
+                contact = self._contacts_by_id.get(peer_id) or self._identify_contact(
+                    author_contact_id
+                )
+                author = contact.display_name if contact is not None else str(peer_id)
+                if author and author not in authors:
+                    authors.append(author)
+
+            snapshot.append(
+                {
+                    "emoji": emoticon,
+                    "count": reaction_count.count,
+                    "is_mine": reaction_count.chosen_order is not None
+                    or any(
+                        getattr(peer_reaction, "my", False)
+                        for peer_reaction in matching_recent_reactions
+                    ),
+                    "authors": authors,
+                }
+            )
+
+        timestamp = int(time.time() * 1000)
+        self._events.put(
+            ChatEvent(
+                type="reaction_update",
+                protocol=PROTOCOL_TELEGRAM,
+                contact_id=contact_id,
+                payload={
+                    "mode": "snapshot",
+                    "snapshot": snapshot,
+                    "target_message_id": str(update.msg_id),
+                    "target_timestamp": None,
+                    "timestamp": timestamp,
+                    "contact": self._identify_contact(contact_id),
+                },
+            )
+        )
 
     async def _handle_typing_update(self, update: Any) -> None:
         """Translate MTProto typing updates into a generic ``ChatEvent``.
@@ -1605,6 +1720,102 @@ class TelegramBackend(ChatBackend):
                 "is_mine": bool(msg.get("is_mine")),
             }
         return None
+
+    def apply_reaction(self, contact_id: str, payload: dict) -> dict | None:
+        """Persist a complete Telegram reaction snapshot."""
+        if payload.get("mode") != "snapshot":
+            return None
+
+        from backend import (
+            _reactions_for_contact,
+            _replace_reactions_snapshot,
+            _resolve_reaction_target_row,
+        )
+
+        target_message_id = str(payload.get("target_message_id") or "")
+        if not target_message_id:
+            return None
+
+        target_ts: int | None = None
+        target_resolved = False
+        for msg in self.cache.get(contact_id, []):
+            if str(msg.get("id")) == target_message_id:
+                target_ts = int(msg.get("timestamp") or 0)
+                target_resolved = True
+                break
+        if target_ts is None:
+            target = _resolve_reaction_target_row(
+                PROTOCOL_TELEGRAM,
+                contact_id,
+                target_message_id,
+                None,
+            )
+            if target is not None:
+                target_ts = int(target.get("timestamp") or 0)
+                target_resolved = True
+            else:
+                target_ts = int(payload.get("target_timestamp") or 0) or None
+
+        entries = [
+            {
+                "emoji": item["emoji"],
+                "count": int(item["count"]),
+                "is_mine": bool(item["is_mine"]),
+                "author": ", ".join(item.get("authors") or []),
+                "author_key": f"__agg__:{item['emoji']}",
+            }
+            for item in payload.get("snapshot") or []
+        ]
+        changed = _replace_reactions_snapshot(
+            protocol=PROTOCOL_TELEGRAM,
+            contact=contact_id,
+            target_msg_id=target_message_id,
+            target_ts=target_ts,
+            entries=entries,
+            ts=int(payload.get("timestamp") or time.time() * 1000),
+        )
+        if not changed or not target_resolved:
+            return None
+
+        aggregate: dict[str, dict[str, Any]] = {}
+        for row in _reactions_for_contact(PROTOCOL_TELEGRAM, contact_id):
+            if str(row.get("target_msg_id") or "") != target_message_id:
+                continue
+            emoji = row["emoji"]
+            item = aggregate.setdefault(
+                emoji,
+                {
+                    "emoji": emoji,
+                    "count": 0,
+                    "is_mine": False,
+                    "authors": [],
+                    "timestamp": int(row.get("timestamp") or 0),
+                },
+            )
+            item["count"] += int(row.get("count") or 0)
+            item["is_mine"] = item["is_mine"] or bool(row.get("is_mine"))
+            item["timestamp"] = min(item["timestamp"], int(row.get("timestamp") or 0))
+            author = row.get("author") or ""
+            if author and author not in item["authors"]:
+                item["authors"].append(author)
+
+        ordered = sorted(
+            aggregate.values(), key=lambda item: (-item["count"], item["timestamp"])
+        )
+        reactions = [
+            {
+                "emoji": item["emoji"],
+                "count": item["count"],
+                "is_mine": item["is_mine"],
+                "authors": item["authors"],
+            }
+            for item in ordered
+        ]
+        return {
+            "message_id": target_message_id,
+            "timestamp": target_ts,
+            "reactions": reactions,
+        }
 
     # ─── Pairing ───────────────────────────────────────────────────────────
 

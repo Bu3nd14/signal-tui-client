@@ -1098,6 +1098,65 @@ class SignalBackend(ChatBackend):
         sent = (envelope.get("syncMessage") or {}).get("sentMessage") or {}
         return "editMessage" in sent
 
+    def _has_reaction_content(self, envelope: dict) -> bool:
+        """Return True if *envelope* carries a reaction in either Signal shape."""
+        data = envelope.get("dataMessage") or {}
+        if "reaction" in data:
+            return True
+        sent = (envelope.get("syncMessage") or {}).get("sentMessage") or {}
+        return "reaction" in sent
+
+    def _reaction_envelope_to_event(self, envelope: dict) -> ChatEvent | None:
+        """Normalize incoming and sync Signal reactions into a delta event."""
+        is_mine = False
+        data = envelope.get("dataMessage") or {}
+        reaction = data.get("reaction")
+        if not isinstance(reaction, dict):
+            data = (envelope.get("syncMessage") or {}).get("sentMessage") or {}
+            reaction = data.get("reaction")
+            is_mine = isinstance(reaction, dict)
+        if not isinstance(reaction, dict):
+            return None
+
+        target = reaction.get("targetSentTimestamp")
+        emoji = reaction.get("emoji")
+        is_remove = bool(reaction.get("isRemove") or False)
+        if (
+            target is None
+            or not isinstance(emoji, str)
+            or (not emoji and not is_remove)
+        ):
+            return None
+        try:
+            target_ts = int(target)
+            event_ts = int(envelope.get("timestamp") or data.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            return None
+
+        contact = self._identify_contact_for_envelope(envelope)
+        if contact is None:
+            return None
+
+        source_key = envelope.get("sourceNumber") or envelope.get("source", "")
+        sender = "You" if is_mine else envelope.get("sourceName") or source_key
+        return ChatEvent(
+            type="reaction_update",
+            protocol=self.protocol,
+            contact_id=contact.id,
+            payload={
+                "target_message_id": str(target),
+                "target_timestamp": target_ts,
+                "mode": "delta",
+                "emoji": emoji,
+                "is_remove": is_remove,
+                "author": sender,
+                "author_key": "me" if is_mine else source_key,
+                "is_mine": is_mine,
+                "timestamp": event_ts,
+                "contact": contact,
+            },
+        )
+
     def envelope_to_event(self, envelope: dict) -> list[ChatEvent]:
         """Classify a Signal envelope into zero or more ``ChatEvent`` objects.
 
@@ -1111,6 +1170,11 @@ class SignalBackend(ChatBackend):
         if self._has_edit_content(envelope):
             # An edit envelope must never fall through to normal parsing and
             # produce a spurious empty "message" bubble.
+            return []
+        reaction_event = self._reaction_envelope_to_event(envelope)
+        if reaction_event is not None:
+            return [reaction_event]
+        if self._has_reaction_content(envelope):
             return []
 
         # Typing indicator
@@ -1518,6 +1582,142 @@ class SignalBackend(ChatBackend):
                 "is_mine": bool(msg.get("is_mine")),
             }
         return None
+
+    def apply_reaction(self, contact_id: str, payload: dict) -> dict | None:
+        """Apply a Signal reaction delta and return the target's aggregate.
+
+        Deltas for unknown targets are persisted without producing a WebSocket
+        aggregate.
+        """
+        from backend import (
+            _apply_reaction_delta,
+            _reactions_for_contact,
+            _resolve_reaction_target_row,
+        )
+
+        if payload.get("mode") != "delta":
+            return None
+
+        raw_target_id = payload.get("target_message_id")
+        target_msg_id = str(raw_target_id) if raw_target_id is not None else None
+        try:
+            target_ts = (
+                int(payload["target_timestamp"])
+                if payload.get("target_timestamp") is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            target_ts = None
+        if target_msg_id is None and target_ts is None:
+            return None
+
+        target_row: dict | None = None
+        for msg in self.cache.get(contact_id, []):
+            msg_id = msg.get("id")
+            if msg_id is not None:
+                if target_msg_id is None or str(msg_id) != target_msg_id:
+                    continue
+            else:
+                try:
+                    matches_ts = (
+                        target_ts is not None and int(msg["timestamp"]) == target_ts
+                    )
+                except (KeyError, TypeError, ValueError):
+                    matches_ts = False
+                if not matches_ts:
+                    continue
+            target_row = {
+                "msg_id": msg_id,
+                "timestamp": int(msg["timestamp"]),
+            }
+            break
+
+        if target_row is None:
+            target_row = _resolve_reaction_target_row(
+                protocol=self.protocol,
+                contact=contact_id,
+                target_msg_id=target_msg_id,
+                target_ts=target_ts,
+            )
+        emoji = payload.get("emoji")
+        is_remove = bool(payload.get("is_remove"))
+        if not isinstance(emoji, str) or (not emoji and not is_remove):
+            return None
+        author = payload.get("author")
+        author_key = payload.get("author_key")
+        try:
+            event_ts = int(payload.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            return None
+        changed = _apply_reaction_delta(
+            protocol=self.protocol,
+            contact=contact_id,
+            target_msg_id=target_msg_id,
+            target_ts=target_ts,
+            emoji=emoji,
+            author_key=str(author_key or ""),
+            author=str(author or ""),
+            is_mine=bool(payload.get("is_mine")),
+            is_remove=is_remove,
+            ts=event_ts,
+        )
+        if not changed or target_row is None:
+            return None
+
+        row_timestamp = int(target_row["timestamp"])
+        row_msg_id = target_row.get("msg_id")
+        grouped: dict[str, dict] = {}
+        for reaction in _reactions_for_contact(self.protocol, contact_id):
+            reaction_msg_id = reaction.get("target_msg_id")
+            matches_id = reaction_msg_id is not None and str(reaction_msg_id) in {
+                str(row_msg_id) if row_msg_id is not None else "",
+                str(row_timestamp),
+            }
+            matches_ts = reaction.get("target_timestamp") == row_timestamp
+            if not matches_id and not matches_ts:
+                continue
+            reaction_emoji = reaction["emoji"]
+            entry = grouped.setdefault(
+                reaction_emoji,
+                {
+                    "emoji": reaction_emoji,
+                    "count": 0,
+                    "is_mine": False,
+                    "authors": set(),
+                    "first_timestamp": int(reaction["timestamp"]),
+                },
+            )
+            entry["count"] += int(reaction.get("count") or 0)
+            entry["is_mine"] = entry["is_mine"] or bool(reaction.get("is_mine"))
+            if reaction.get("author"):
+                entry["authors"].add(str(reaction["author"]))
+            entry["first_timestamp"] = min(
+                entry["first_timestamp"], int(reaction["timestamp"])
+            )
+
+        ordered = sorted(
+            grouped.values(),
+            key=lambda entry: (-entry["count"], entry["first_timestamp"]),
+        )
+        reactions = [
+            {
+                "emoji": entry["emoji"],
+                "count": entry["count"],
+                "is_mine": entry["is_mine"],
+                "authors": sorted(entry["authors"]),
+            }
+            for entry in ordered
+        ]
+        message_id = (
+            target_msg_id
+            or (str(row_msg_id) if row_msg_id is not None else None)
+            or str(row_timestamp)
+        )
+        return {
+            "message_id": message_id,
+            "timestamp": row_timestamp,
+            "reactions": reactions,
+        }
 
     # ─── Receive loop (SSE real-time) ───────────────────────────────────
 

@@ -3126,6 +3126,7 @@ class TestWhatsAppWebhookRegistration:
             "message.ack",
             "message.ack.group",
             "presence.update",
+            "message.reaction",
         ]
 
     def test_configure_webhook_skips_when_already_registered(self):
@@ -3149,6 +3150,7 @@ class TestWhatsAppWebhookRegistration:
                                     "message.ack",
                                     "message.ack.group",
                                     "presence.update",
+                                    "message.reaction",
                                 ],
                             }
                         ]
@@ -3189,6 +3191,7 @@ class TestWhatsAppWebhookRegistration:
             "message.ack",
             "message.ack.group",
             "presence.update",
+            "message.reaction",
         ]
 
     def test_configure_webhook_never_raises_on_error(self):

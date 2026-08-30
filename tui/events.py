@@ -34,6 +34,8 @@ class EventHandlingMixin:
             return self._handle_receipt_event(event)
         if event.type == "message_edit":
             return self._handle_edit_event(event)
+        if event.type == "reaction_update":
+            return self._handle_reaction_event(event)
         if event.type == "message":
             return self._handle_message_event(event)
         return False
@@ -294,6 +296,35 @@ class EventHandlingMixin:
         # leggerà il testo già aggiornato dalla cache).
         if self.selected_contact and self.selected_contact.cache_key == cache_key:
             self.call_from_thread(self._update_edited_widget, info, new_text)
+        return True
+
+    def _handle_reaction_event(self, event: ChatEvent) -> bool:
+        """Applica una reaction ricevuta senza creare un nuovo messaggio."""
+        backend = self.manager.get(event.protocol)
+        if backend is None:
+            return False
+        apply_reaction = getattr(backend, "apply_reaction", None)
+        if apply_reaction is None:
+            return False
+        info = apply_reaction(event.contact_id, event.payload)
+        if not info:
+            return False
+
+        if getattr(self, "_web_enabled", False):
+            from web.bridge import push_event
+
+            push_event(
+                {
+                    "type": "reaction_update",
+                    "payload": {
+                        "protocol": event.protocol,
+                        "contact_id": event.contact_id,
+                        "message_id": str(info["message_id"]),
+                        "timestamp": int(info["timestamp"]),
+                        "reactions": info["reactions"],
+                    },
+                }
+            )
         return True
 
     def _update_edited_widget(self, info: dict, new_text: str) -> None:

@@ -239,6 +239,21 @@ h2 { font-size: 1.05rem; }
 .tick-read { color: var(--accent); }
 .tick-failed { color: var(--danger); }
 .message-edited { color: #c3cedaaa; font-size: .66rem; opacity: .72; }
+.message-reactions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border: 1px solid #ffffff1f;
+  border-radius: 11px;
+  background: #ffffff14;
+  font-size: .78rem;
+  line-height: 1.5;
+}
+.reaction-chip.mine { border-color: #4c9aff66; background: #4c9aff2e; }
+.reaction-count { color: #c3ceda; font-size: .66rem; }
+.reaction-chip:empty { display: none; }
 .message-reply {
   position: absolute;
   top: calc(50% - 15px);

@@ -820,6 +820,7 @@ function renderMessages(messages, protocol) {
       }
     }
     bubble.append(time);
+    const reactionsEl = item.reactions?.length ? appendReactionChips(bubble, item) : null;
     message.append(bubble);
     if (!item.optimistic_id) {
       const reply = document.createElement("button");
@@ -850,11 +851,53 @@ function renderMessages(messages, protocol) {
       status: item.status,
       edited: Boolean(item.edited),
       direction: item.direction,
+      reactionsEl,
+      reactions: copyReactions(item.reactions),
     });
     elements.messages.append(message);
   }
   scrollThreadToBottom();
   requestAnimationFrame(scrollThreadToBottom);
+}
+
+function copyReactions(reactions) {
+  return (reactions || []).map((reaction) => ({
+    ...reaction,
+    authors: [...(reaction.authors || [])],
+  }));
+}
+
+function buildReactionChips(container, reactions) {
+  container.replaceChildren();
+  const labels = [];
+  for (const reaction of reactions || []) {
+    const emoji = String(reaction.emoji || "");
+    const count = Number(reaction.count) || 1;
+    const chip = document.createElement("span");
+    chip.className = `reaction-chip${reaction.is_mine ? " mine" : ""}`;
+    chip.textContent = emoji;
+    const authors = Array.isArray(reaction.authors) ? reaction.authors.filter(Boolean) : [];
+    chip.title = authors.length ? authors.join(", ") : emoji;
+    if (count > 1) {
+      const countEl = document.createElement("span");
+      countEl.className = "reaction-count";
+      countEl.textContent = String(count);
+      chip.append(countEl);
+    }
+    container.append(chip);
+    labels.push(`${emoji}${count > 1 ? ` ${count}` : ""}`);
+  }
+  container.setAttribute("aria-label", `Reazioni: ${labels.join(", ")}`);
+}
+
+function appendReactionChips(bubble, item) {
+  if (item.optimistic_id || !item.reactions?.length) return null;
+  const container = document.createElement("div");
+  container.className = "message-reactions";
+  container.setAttribute("role", "group");
+  buildReactionChips(container, item.reactions);
+  bubble.append(container);
+  return container;
 }
 
 const STATUS_RANK = { pending: 0, failed: 0, sent: 1, delivered: 2, read: 3 };
@@ -1060,6 +1103,34 @@ function applyRemoteEdit(payload) {
     item.text = payload.text;
     item.edited = true;
   }
+}
+
+function applyReactionUpdate(payload) {
+  if (!state.active || state.active.protocol !== payload?.protocol || state.active.id !== String(payload?.contact_id)) return;
+  let entry = state.messageNodes?.get(String(payload.message_id));
+  if (!entry) {
+    entry = [...(state.messageNodes?.values() || [])].find((candidate) =>
+      timestampMilliseconds(candidate.ts) === timestampMilliseconds(payload.timestamp));
+  }
+  const item = state.messages.find((message) =>
+    String(message.id) === String(payload.message_id)
+    || timestampMilliseconds(message.timestamp) === timestampMilliseconds(payload.timestamp));
+  const reactions = copyReactions(Array.isArray(payload.reactions) ? payload.reactions : []);
+  if (item) item.reactions = copyReactions(reactions);
+  if (!entry) return;
+  entry.reactions = copyReactions(reactions);
+  if (!reactions.length) {
+    entry.reactionsEl?.remove();
+    entry.reactionsEl = null;
+    return;
+  }
+  if (!entry.reactionsEl) {
+    const bubble = entry.timeEl?.parentNode;
+    if (!bubble) return;
+    entry.reactionsEl = appendReactionChips(bubble, { reactions });
+    return;
+  }
+  buildReactionChips(entry.reactionsEl, reactions);
 }
 
 function markRead(protocol, contactId) {
@@ -1466,6 +1537,9 @@ function connectSocket() {
           break;
         case "message_edit":
           applyRemoteEdit(update.payload);
+          break;
+        case "reaction_update":
+          applyReactionUpdate(update.payload);
           break;
       }
     } catch {

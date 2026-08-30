@@ -54,6 +54,7 @@ A terminal-based (TUI) multi-protocol messaging client built with [Textual](http
 |---|---|---|
 | Unified multi-protocol inbox | Signal, WhatsApp, and Telegram contacts and chats in a single list, with real-time send/receive on all three protocols | [Usage](#usage) |
 | **Message editing** *(new)* | Edit your own text messages after sending; incoming edits update the bubble in place | [Message editing](#message-editing) |
+| **Emoji reactions in the Web UI** *(new)* | View Signal, WhatsApp, and Telegram reactions, updated live over WebSocket | [Web UI](#web-ui) |
 | **Replies with quoted media** *(new)* | Quote an image in a reply (`Alt+R` or Alt+click); incoming media quotes are displayed with caption or typed label | [Replies and quoted media](#replies-and-quoted-media) |
 | **Multi-line message input** *(new)* | `Enter` sends, `Shift+Enter` / `Ctrl+Enter` / `Ctrl+J` insert a newline | [Composing messages](#composing-messages) |
 | **Full address book search** *(new)* | `Ctrl+S` searches the complete address book of all three backends — including contacts with no existing chat — and can open-or-create the conversation | [Contact search and address book](#contact-search-and-address-book) |
@@ -611,6 +612,9 @@ The Bearer token lives in `config.json` under `web.token`; the web server also a
 ### Web UI
 
 The optional web reader gives read-only access to conversations and attachments from a browser:
+Emoji reactions from Signal, WhatsApp, and Telegram are shown on message bubbles and update live over
+WebSocket. Legacy empty reaction bubbles can be removed with `migrate_reactions_cleanup.py` (dry-run by
+default; pass `--apply` to apply the cleanup).
 
 ![Web UI — contact list](assets/screenshots/web-contacts.png)
 

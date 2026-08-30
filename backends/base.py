@@ -202,6 +202,22 @@ class ChatBackend(ABC):
         """
         return None
 
+    def apply_reaction(
+        self,
+        contact_id: str,
+        payload: dict,
+    ) -> dict | None:
+        """Applica una reazione (ricevuta o snapshot) a cache + SQLite.
+
+        Punto UNICO di mutazione lato backend per le reazioni (specchio di
+        ``apply_edit``).  Risolve il target (§3.2), applica delta/snapshot (§3.3)
+        e ritorna ``{"message_id", "timestamp", "reactions": [...]}`` per il push
+        WS, ``None`` se target ignoto o no-op.
+
+        Default: ``None`` (nessun supporto).
+        """
+        return None
+
     # ─── Address book (rubrica completa) ──────────────────────────────
 
     def list_address_book_sync(self, force: bool = False) -> list[ChatContact]:

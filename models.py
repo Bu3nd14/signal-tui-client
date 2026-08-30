@@ -260,6 +260,13 @@ class ChatEvent:
       payload: ``{"edit_message_id": str, "text": str, "timestamp": int (ts ORIGINALE),
       "edit_timestamp": int|None, "is_mine": bool, "sender": str,
       "contact": ChatContact|None, "msg_type": "text"}``.
+    - ``"reaction_update"``: aggiornamento reazioni a un messaggio.
+      payload: ``{"target_message_id": str|None, "target_timestamp": int|None,
+      "mode": "delta"|"snapshot", "emoji": str, "is_remove": bool,
+      "author": str, "author_key": str, "is_mine": bool,
+      "snapshot": [{"emoji": str, "count": int, "is_mine": bool,
+      "authors": list[str]}]|None, "timestamp": int,
+      "contact": ChatContact|None}``.
     - ``"typing"``: a typing indicator (payload: ``{"action": "STARTED"|"STOPPED"}``).
     - ``"receipt"``: a delivery/read receipt (payload: list of updated messages).
     - ``"contact_update"``: contact metadata changed (payload: ``ChatContact`` dict).

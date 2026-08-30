@@ -192,9 +192,70 @@ def _persist_message_edit(
             connection.close()
 
 
+def _aggregate_reactions(
+    message_rows: list[sqlite3.Row], reaction_rows: list[dict[str, Any]]
+) -> dict[int, list[dict[str, Any]]]:
+    """Aggregate persisted reactions for each matching message row."""
+    result: dict[int, list[dict[str, Any]]] = {}
+    for message_row in message_rows:
+        message_timestamp = int(message_row["timestamp"])
+        message_ids = {str(message_timestamp)}
+        if message_row["msg_id"] is not None:
+            message_ids.add(str(message_row["msg_id"]))
+
+        grouped: dict[str, dict[str, Any]] = {}
+        for reaction_row in reaction_rows:
+            target_msg_id = reaction_row.get("target_msg_id")
+            matches_id = target_msg_id is not None and str(target_msg_id) in message_ids
+            matches_timestamp = (
+                reaction_row.get("target_timestamp") == message_timestamp
+            )
+            if not matches_id and not matches_timestamp:
+                continue
+
+            emoji = str(reaction_row["emoji"])
+            reaction_timestamp = int(reaction_row["timestamp"])
+            aggregate = grouped.setdefault(
+                emoji,
+                {
+                    "emoji": emoji,
+                    "count": 0,
+                    "is_mine": False,
+                    "authors": set(),
+                    "first_timestamp": reaction_timestamp,
+                },
+            )
+            aggregate["count"] += int(reaction_row.get("count") or 0)
+            aggregate["is_mine"] = aggregate["is_mine"] or bool(
+                reaction_row.get("is_mine")
+            )
+            author = str(reaction_row.get("author") or "").strip()
+            if author:
+                aggregate["authors"].add(author)
+            aggregate["first_timestamp"] = min(
+                aggregate["first_timestamp"], reaction_timestamp
+            )
+
+        if grouped:
+            ordered = sorted(
+                grouped.values(),
+                key=lambda item: (-item["count"], item["first_timestamp"]),
+            )
+            result[int(message_row["id"])] = [
+                {
+                    "emoji": item["emoji"],
+                    "count": item["count"],
+                    "is_mine": item["is_mine"],
+                    "authors": sorted(item["authors"]),
+                }
+                for item in ordered
+            ]
+    return result
+
+
 def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
     import backend
-    from backend.db import _DB_LOCK
+    from backend.db import _DB_LOCK, _reactions_for_contact
 
     with _DB_LOCK:
         try:
@@ -340,6 +401,14 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 "edit_id": _message_edit_id(row),
             }
         )
+
+    reactions_by_message = _aggregate_reactions(
+        rows, _reactions_for_contact(protocol, contact_id)
+    )
+    for row, message in zip(rows, messages):
+        reactions = reactions_by_message.get(int(row["id"]))
+        if reactions:
+            message["reactions"] = reactions
     return messages
 
 
