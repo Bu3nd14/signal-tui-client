@@ -515,9 +515,7 @@ class TestAliasIsolation:
         script = tmp_path / "install.sh"
         shutil.copy(INSTALL_SCRIPT, script)
         text = script.read_text(encoding="utf-8")
-        line = next(
-            ln for ln in text.splitlines() if "alias web-signal-tui-bg=" in ln
-        )
+        line = next(ln for ln in text.splitlines() if "alias web-signal-tui-bg=" in ln)
         marker = 'python3 -c "'
         start = line.index(marker) + len(marker)
         # Il codice finisce alla prima " non preceduta da backslash.
