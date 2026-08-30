@@ -68,7 +68,8 @@ assert.equal(reactionGroup.children[0].children[0].className, "reaction-count");
 assert.equal(reactionGroup.children[0].children[0].textContent, "2");
 assert.equal(reactionGroup.children[1].children.length, 0);
 assert.equal(elements.messages.children[0].children[1].className, "message-reply");
-assert.equal(elements.messages.children[0].children[2].className, "message-reaction");
+// I messaggi OUT non hanno il bottone reaction (solo reply); IN sì.
+assert.equal(elements.messages.children[0].children.length, 2);
 assert.equal(elements.messages.children[1].children[1].className, "message-reply");
 assert.equal(elements.messages.children[1].children[2].className, "message-reaction");
 assert.equal(elements.messages.children[1].children[0].children.at(-1).className, "message-time");
@@ -172,6 +173,51 @@ def test_websocket_dispatches_reaction_updates():
         'case "reaction_update":\n          applyReactionUpdate(update.payload);'
         in source
     )
+
+
+def test_open_thread_starts_refresh_timer_only_for_telegram():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const start = app.indexOf("function clearTelegramRefreshTimer(");
+const end = app.indexOf("\nfunction normalizeEmojiSearch", start);
+const intervals = [];
+const cleared = [];
+globalThis.window = {
+  setInterval(callback, delay) { intervals.push({ callback, delay }); return intervals.length; },
+  clearInterval(id) { cleared.push(id); },
+};
+globalThis.state = { active: null, editing: null, messages: [], telegramRefreshTimer: null };
+globalThis.loadMessages = () => {};
+globalThis.closeEmojiPicker = () => {};
+globalThis.closeReactionPicker = () => {};
+globalThis.cancelReply = () => {};
+globalThis.cancelEdit = () => {};
+globalThis.protocolIcon = () => "";
+globalThis.renderContacts = () => {};
+globalThis.markRead = () => {};
+globalThis.abortMediaRequests = () => {};
+globalThis.document = { createElement: () => ({ className: "", textContent: "" }) };
+const appClasses = { add() {} };
+globalThis.elements = {
+  threadName: {}, threadMeta: {}, app: { classList: appClasses }, composerShell: {},
+  messages: { replaceChildren() {}, append() {} },
+};
+vm.runInThisContext(app.slice(start, end));
+
+openThread({ id: "42", protocol: "telegram", display_name: "Telegram" });
+assert.equal(intervals.length, 1);
+assert.equal(intervals[0].callback, loadMessages);
+assert.equal(intervals[0].delay, 20000);
+assert.equal(state.telegramRefreshTimer, 1);
+
+openThread({ id: "alice", protocol: "signal", display_name: "Signal" });
+assert.deepEqual(cleared, [1]);
+assert.equal(intervals.length, 1);
+assert.equal(state.telegramRefreshTimer, null);
+""")
 
 
 def test_reaction_button_picker_and_send_flow_are_wired():

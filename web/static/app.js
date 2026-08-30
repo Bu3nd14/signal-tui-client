@@ -44,6 +44,7 @@ const state = {
   emojiFailed: false,
   emojiCategory: 0,
   reactionPicker: null,
+  telegramRefreshTimer: null,
 };
 
 const elements = {
@@ -103,6 +104,7 @@ function requestToken(invalid = false) {
 }
 
 function handleUnauthorized() {
+  clearTelegramRefreshTimer();
   disconnectSocket();
   requestToken(true);
 }
@@ -846,7 +848,7 @@ function renderMessages(messages, protocol) {
       reaction.setAttribute("aria-label", "Reagisci al messaggio");
       reaction.title = "Reagisci";
       reaction.addEventListener("click", (event) => startReaction(item, event));
-      message.append(reaction);
+      if (item.direction === "in") message.append(reaction);
     }
     if (item.direction === "out" && item.edit_id && !item.optimistic_id && item.text) {
       const edit = document.createElement("button");
@@ -1233,12 +1235,26 @@ function markRead(protocol, contactId) {
   }, 3000));
 }
 
+function clearTelegramRefreshTimer() {
+  if (state.telegramRefreshTimer === null) return;
+  window.clearInterval(state.telegramRefreshTimer);
+  state.telegramRefreshTimer = null;
+}
+
+function updateTelegramRefreshTimer() {
+  clearTelegramRefreshTimer();
+  if (state.active?.protocol === "telegram") {
+    state.telegramRefreshTimer = window.setInterval(loadMessages, 20000);
+  }
+}
+
 function openThread(contact) {
   closeEmojiPicker({ focus: false });
   closeReactionPicker();
   cancelReply();
   if (state.editing) cancelEdit();
   state.active = contact;
+  updateTelegramRefreshTimer();
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
   elements.app.classList.add("thread-open");
@@ -1637,7 +1653,10 @@ function connectSocket() {
 
 document.querySelector("#refresh-contacts").addEventListener("click", () => loadContacts());
 document.querySelector("#open-token").addEventListener("click", () => requestToken());
-document.querySelector("#back-button").addEventListener("click", () => elements.app.classList.remove("thread-open"));
+document.querySelector("#back-button").addEventListener("click", () => {
+  clearTelegramRefreshTimer();
+  elements.app.classList.remove("thread-open");
+});
 document.querySelector("#dismiss-error").addEventListener("click", () => { elements.errorBanner.hidden = true; });
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1796,11 +1815,13 @@ document.querySelector("#token-form").addEventListener("submit", (event) => {
   localStorage.setItem(TOKEN_KEY, token);
   elements.tokenError.hidden = true;
   elements.tokenDialog.close();
+  updateTelegramRefreshTimer();
   loadContacts();
   connectSocket();
 });
 
 window.addEventListener("beforeunload", () => {
+  clearTelegramRefreshTimer();
   disconnectSocket();
   abortMediaRequests();
   clearStagedAttachment();

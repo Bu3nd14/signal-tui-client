@@ -267,7 +267,7 @@ h2 { font-size: 1.05rem; }
 .reaction-chip:empty { display: none; }
 .message-reply, .message-edit, .message-reaction {
   position: absolute;
-  top: 50%;
+  top: 0;
   right: -38px;
   width: 30px;
   height: 30px;
@@ -279,9 +279,9 @@ h2 { font-size: 1.05rem; }
   cursor: pointer;
   transition: opacity .15s ease, background-color .15s ease, color .15s ease;
 }
-.message-reply { transform: translateY(-110%); }
-.message-reaction { transform: translateY(10%); }
-.message-edit { transform: translateY(-230%); }
+.message-reply { top: 0; }
+.message-reaction { top: 34px; }
+.message-edit { top: 68px; }
 .message.in .message-reply,
 .message.in .message-edit,
 .message.in .message-reaction {
