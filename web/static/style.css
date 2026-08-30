@@ -269,8 +269,8 @@ h2 { font-size: 1.05rem; }
   position: absolute;
   top: 0;
   right: -38px;
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   border: 1px solid var(--line);
   border-radius: 50%;
   background: var(--panel-raised);
@@ -280,8 +280,8 @@ h2 { font-size: 1.05rem; }
   transition: opacity .15s ease, background-color .15s ease, color .15s ease;
 }
 .message-reply { top: 0; }
-.message-reaction { top: 34px; }
-.message-edit { top: 68px; }
+.message-reaction { top: 28px; }
+.message-edit { top: 56px; }
 .message.in .message-reply,
 .message.in .message-edit,
 .message.in .message-reaction {
