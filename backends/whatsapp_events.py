@@ -376,7 +376,7 @@ def _event_from_message(
             or (raw.get("chat") if isinstance(raw.get("chat"), dict) else None)
         )
     if not chat_jid:
-        return None
+        return []
 
     # Gli status (storie) arrivano con JID "status@broadcast": non sono
     # messaggi di chat, li ignoriamo del tutto (niente ingestione in cache/DB).

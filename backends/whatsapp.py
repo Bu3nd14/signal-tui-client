@@ -171,6 +171,10 @@ class WhatsAppBackend(ChatBackend):
         #: doppio un messaggio (il dedup definitivo avviene in ``ingest_message``).
         self._seen_message_keys: set[tuple[str, ...]] = set()
         self._history_unfetchable: set[str] = set()
+        self._media_pending: dict[tuple[str, str], dict] = {}
+        self._media_lock = threading.Lock()
+        self._media_resolver_thread: threading.Thread | None = None
+        self._media_resolver_stop = False
 
         # ── Address book (rubrica completa) ────────────────────────────
         self._address_book: list[ChatContact] | None = None
@@ -219,11 +223,13 @@ class WhatsAppBackend(ChatBackend):
         # event by (contact, id, text) so WAHA retries are not enqueued twice.
         ack_msg_event = None
         evt_name = raw.get("event", "")
-        if "ack" in str(evt_name).lower():
+        is_ack_event = "ack" in str(evt_name).lower()
+        if is_ack_event:
             content = (
                 raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
             )
-            if content.get("fromMe") and content.get("id"):
+            ack_id = content.get("id") or (content.get("key") or {}).get("id")
+            if content.get("fromMe") and ack_id:
                 # WAHA may nest remoteJid inside "key" (same envelope as
                 # /api/messages).  Without it group outgoing messages fail.
                 ack_contact = _jid_string(
@@ -241,14 +247,29 @@ class WhatsAppBackend(ChatBackend):
                         int(content.get("timestamp") or 0) * 1000
                     )  # WAHA uses seconds, we use ms
                     ack_text = content.get("body") or content.get("text") or ""
-                    ack_id = content.get("id")
+                    ack_has_media = bool(content.get("hasMedia"))
+                    ack_media = content.get("media")
+                    skip_ack_message = (
+                        ack_has_media
+                        and not (
+                            isinstance(ack_media, dict) and ack_media.get("url")
+                        )
+                    ) or (not ack_has_media and not str(ack_text).strip())
 
                     # ── Edit detection (message.ack with a new body) ──────
                     # An outgoing edit arrives as message.ack with the SAME id
                     # and a NEW body.  Detect it against the cache and emit a
                     # message_edit event instead of a synthetic "message" (which
                     # would mount a duplicate bubble).
-                    if ack_id and self._detect_edit(
+                    if skip_ack_message:
+                        if ack_has_media:
+                            self._schedule_media_resolve(ack_contact, str(ack_id))
+                        logger.debug(
+                            "Skipping empty synthetic WhatsApp ack: id=%s hasMedia=%s",
+                            ack_id,
+                            ack_has_media,
+                        )
+                    elif ack_id and self._detect_edit(
                         ack_contact, str(ack_id), ack_text, True, ack_ts
                     ):
                         ack_key = (
@@ -290,30 +311,26 @@ class WhatsAppBackend(ChatBackend):
                         ack_msg_type = "text"
                         ack_attachment_id = None
                         ack_attachment_info = None
-                        if content.get("hasMedia"):
-                            media = content.get("media")
-                            if isinstance(media, dict):
-                                mime = (media.get("mimetype") or "").lower()
-                                if mime.startswith("image/"):
-                                    ack_msg_type = "image"
-                                elif any(
-                                    mime.startswith(p)
-                                    for p in ("video/", "audio/", "application/")
-                                ):
-                                    ack_msg_type = "attachment"
-                                ack_attachment_id = media.get("url") or content.get(
-                                    "id"
-                                )
-                                ack_attachment_info = (
-                                    content.get("caption")
-                                    or str(
-                                        content.get("body") or content.get("text") or ""
-                                    ).strip()
-                                    or media.get("caption")
-                                    or media.get("filename")
-                                    or mime
-                                    or "Media"
-                                )
+                        if ack_has_media and isinstance(ack_media, dict):
+                            mime = (ack_media.get("mimetype") or "").lower()
+                            if mime.startswith("image/"):
+                                ack_msg_type = "image"
+                            elif any(
+                                mime.startswith(p)
+                                for p in ("video/", "audio/", "application/")
+                            ):
+                                ack_msg_type = "attachment"
+                            ack_attachment_id = ack_media.get("url")
+                            ack_attachment_info = (
+                                content.get("caption")
+                                or str(
+                                    content.get("body") or content.get("text") or ""
+                                ).strip()
+                                or ack_media.get("caption")
+                                or ack_media.get("filename")
+                                or mime
+                                or "Media"
+                            )
 
                         # Dedup by (contact, id, normalized text) so a retry of the
                         # same ack does not enqueue the synthetic message twice.
@@ -345,6 +362,31 @@ class WhatsAppBackend(ChatBackend):
                                     "attachment_info": ack_attachment_info,
                                 },
                             )
+
+        if not is_ack_event:
+            content = (
+                raw.get("payload") if isinstance(raw.get("payload"), dict) else raw
+            )
+            media = content.get("media")
+            if content.get("hasMedia") and not (
+                isinstance(media, dict) and media.get("url")
+            ):
+                key = content.get("key") or {}
+                is_mine = bool(
+                    content.get("fromMe")
+                    or content.get("isMe")
+                    or content.get("outgoing")
+                )
+                chat = _jid_string(
+                    content.get("chatId")
+                    or content.get("remoteJid")
+                    or key.get("remoteJid")
+                    or (content.get("to") if is_mine else content.get("from"))
+                    or content.get("from")
+                )
+                msg_id = content.get("id") or key.get("id")
+                if chat and msg_id:
+                    self._schedule_media_resolve(chat, str(msg_id))
 
         events = _event_from_raw(raw, self._contacts_by_jid)
         if not events:
@@ -587,6 +629,10 @@ class WhatsAppBackend(ChatBackend):
         """Synchronous disconnect; stops the receiver threads."""
         self._polling_active = False
         self._connected = False
+        self._media_resolver_stop = True
+        thread = self._media_resolver_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
 
     # ─── Contacts / active chats (one-shot discovery, no polling) ────
     # La ricezione degli eventi è tutta PUSH via webhook (handle_webhook).  I
@@ -1048,6 +1094,13 @@ class WhatsAppBackend(ChatBackend):
         read_ids: set[str] = set()
         delivered_ids: set[str] = set()
         for m in msgs:
+            media = m.get("media")
+            if m.get("hasMedia") and not (
+                isinstance(media, dict) and media.get("url")
+            ):
+                msg_id = m.get("id") or (m.get("key") or {}).get("id")
+                if msg_id:
+                    self._schedule_media_resolve(contact_id, str(msg_id))
             events = _event_from_message(m, self._contacts_by_jid)
             for event in events:
                 payload = event.payload
@@ -1466,6 +1519,118 @@ class WhatsAppBackend(ChatBackend):
                 pass
             self._events.put(event)
 
+    def _schedule_media_resolve(self, contact_id: str, msg_id: str) -> None:
+        """Schedule one unresolved WAHA media message, deduplicated by identity."""
+        if not contact_id or not msg_id or self._media_resolver_stop:
+            return
+        key = (contact_id, msg_id)
+        with self._media_lock:
+            if key in self._media_pending:
+                return
+            timestamp = next(
+                (
+                    int(message.get("timestamp") or 0)
+                    for message in self.cache.get(contact_id, [])
+                    if str(message.get("id") or "") == msg_id
+                ),
+                0,
+            )
+            self._media_pending[key] = {
+                "attempts": 0,
+                "next": time.time() + 2.0,
+                "ts": timestamp or int(time.time() * 1000),
+            }
+        self._start_media_resolver()
+
+    def _start_media_resolver(self) -> None:
+        """Start the WAHA media resolver thread once."""
+        with self._media_lock:
+            if self._media_resolver_stop:
+                return
+            thread = self._media_resolver_thread
+            if thread is not None and thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._media_resolve_loop,
+                name="wa-media-resolver",
+                daemon=True,
+            )
+            self._media_resolver_thread = thread
+            thread.start()
+
+    def _media_resolve_loop(self) -> None:
+        """Resolve pending media downloads without blocking webhook handling."""
+        delays = (2.0, 5.0, 15.0)
+        while not self._media_resolver_stop:
+            try:
+                now = time.time()
+                with self._media_lock:
+                    due = [
+                        key
+                        for key, pending in self._media_pending.items()
+                        if pending["next"] <= now
+                    ]
+
+                for key in due:
+                    if self._media_resolver_stop:
+                        break
+                    with self._media_lock:
+                        pending = self._media_pending.get(key)
+                        if pending is None or pending["next"] > time.time():
+                            continue
+                        pending["attempts"] += 1
+                        attempts = pending["attempts"]
+                        fallback_ts = pending["ts"]
+
+                    contact_id, msg_id = key
+                    events: list[ChatEvent] = []
+                    try:
+                        message = (
+                            self._rest.get_message_media(contact_id, msg_id)
+                            if self._rest
+                            else None
+                        )
+                        if isinstance(message, dict):
+                            normalized = dict(message)
+                            normalized.setdefault("chatId", contact_id)
+                            normalized.setdefault("id", msg_id)
+                            normalized.setdefault("timestamp", fallback_ts)
+                            events = _event_from_message(
+                                normalized, self._contacts_by_jid
+                            )
+                    except Exception:
+                        logger.debug(
+                            "WhatsApp media resolve failed: chat=%s id=%s attempt=%s",
+                            contact_id,
+                            msg_id,
+                            attempts,
+                            exc_info=True,
+                        )
+
+                    if events:
+                        for event in events:
+                            self._enqueue_event(event)
+                        with self._media_lock:
+                            self._media_pending.pop(key, None)
+                        continue
+
+                    with self._media_lock:
+                        pending = self._media_pending.get(key)
+                        if pending is None:
+                            continue
+                        if attempts < 3:
+                            pending["next"] = time.time() + delays[attempts - 1]
+                        else:
+                            self._media_pending.pop(key, None)
+                            logger.debug(
+                                "WhatsApp media resolve give up: chat=%s id=%s",
+                                contact_id,
+                                msg_id,
+                            )
+            except Exception:
+                logger.debug("WhatsApp media resolver loop failed", exc_info=True)
+            time.sleep(0.5)
+
     # ─── Event consumption (for the TUI poll worker) ──────────────────
 
     def poll_once(self) -> list[ChatEvent]:
@@ -1646,7 +1811,7 @@ class WhatsAppBackend(ChatBackend):
 
     def _upgrade_outgoing_attachment(
         self, contact_id: str, message: dict, data: dict, ts: int
-    ) -> None:
+    ) -> bool:
         from backend import (
             _update_message_attachment_id,
             _update_message_media_identity,
@@ -1655,7 +1820,7 @@ class WhatsAppBackend(ChatBackend):
         current_id = message.get("attachment_id")
         incoming_id = data.get("attachment_id")
         if not incoming_id:
-            return
+            return False
         # Media race: la riga è stata creata senza attachment (webhook WAHA
         # partito prima del download → media=null, o riga text vuota).  Echo o
         # fetch_history successivi portano il media REALE (URL WAHA o sent-*):
@@ -1672,7 +1837,7 @@ class WhatsAppBackend(ChatBackend):
                 incoming_id,
                 message["msg_type"],
             )
-            return
+            return True
         media_dir = self._ensure_media_dir()
         current_path = media_dir / Path(current_id).name if current_id else None
         incoming_path = media_dir / Path(incoming_id).name if incoming_id else None
@@ -1685,7 +1850,7 @@ class WhatsAppBackend(ChatBackend):
                 incoming_path=incoming_path,
             )
         ):
-            return
+            return False
         message["attachment_id"] = incoming_id
         _update_message_attachment_id(
             PROTOCOL_WHATSAPP,
@@ -1694,6 +1859,7 @@ class WhatsAppBackend(ChatBackend):
             int(message.get("timestamp", ts)),
             incoming_id,
         )
+        return True
 
     def _reuse_failed_db_row(
         self, contact_id: str, data: dict, text: str, msg_id: str, ts: int
@@ -1784,14 +1950,15 @@ class WhatsAppBackend(ChatBackend):
 
     def ingest_message(
         self, contact_id: str, data: dict, ts: int, persist: bool = True
-    ) -> bool:
+    ) -> bool | str:
         """Save an incoming/outgoing message to the DB cache and in-memory cache.
 
         When ``persist=False`` the in-memory cache is still seeded (dedup
         keeps working on the UI thread) but the SQLite write is skipped;
         the caller is responsible for calling ``_persist_message`` later.
 
-        Returns ``True`` if newly added, ``False`` if it was a duplicate.
+        Returns ``True`` if newly added, ``"changed"`` if healed in place,
+        and ``False`` if it was an unchanged duplicate.
         """
         from backend import _fill_message_quote_fields, _update_message_id
 
@@ -1848,8 +2015,10 @@ class WhatsAppBackend(ChatBackend):
                     quote_author=data.get("quote_author"),
                     reply_to_message_id=data.get("reply_to_message_id"),
                 )
-            self._upgrade_outgoing_attachment(contact_id, existing, data, ts)
-            return False
+            attachment_changed = self._upgrade_outgoing_attachment(
+                contact_id, existing, data, ts
+            )
+            return "changed" if attachment_changed else False
 
         # Fallback DB post-send (bug #44): un messaggio failed può avere la sua
         # riga id-less nel DB ma NON in self.cache.  Prima di inserire una nuova

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from backends import SignalBackend
 from backends.telegram import TelegramBackend
+from backends.whatsapp import WhatsAppBackend
 from backends.whatsapp_events import _event_from_message
 from models import PROTOCOL_SIGNAL, ChatContact
 
@@ -191,6 +192,44 @@ class TestWhatsAppReactionIngestFilter:
         )
 
         assert len(events) == 1
+        assert events[0].payload["msg_type"] == "image"
+
+    def test_missing_chat_jid_returns_empty_list(self):
+        assert _event_from_message({"id": "message-without-chat", "body": "Ciao"}) == []
+
+    def test_media_ack_without_downloaded_media_is_not_enqueued(self):
+        backend = WhatsAppBackend(api_url="http://api.test")
+        payload = {
+            "fromMe": True,
+            "id": "true_391234567890@c.us_ABC",
+            "to": "391234567890@c.us",
+            "hasMedia": True,
+            "media": None,
+            "body": "",
+        }
+
+        assert backend.handle_webhook({"event": "message.ack", "payload": payload}) is False
+        assert backend.poll_once() == []
+        assert backend._seen_message_keys == set()
+
+    def test_media_ack_with_downloaded_media_is_enqueued_as_image(self):
+        backend = WhatsAppBackend(api_url="http://api.test")
+        payload = {
+            "fromMe": True,
+            "id": "true_391234567890@c.us_ABC",
+            "to": "391234567890@c.us",
+            "hasMedia": True,
+            "media": {
+                "url": "http://api.test/api/files/default/photo.jpeg",
+                "mimetype": "image/jpeg",
+            },
+            "body": "",
+        }
+
+        assert backend.handle_webhook({"event": "message.ack", "payload": payload}) is True
+        events = backend.poll_once()
+        assert len(events) == 1
+        assert events[0].type == "message"
         assert events[0].payload["msg_type"] == "image"
 
 

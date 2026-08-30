@@ -1,7 +1,7 @@
 # DESIGN — Reazioni (emoji reactions) nella web UI
 
-> **Stato:** BOZZA COMPLETA — design architetturale completo, **pronto per implementazione** (task numerati in §9). Basato su ricognizione del codice, del DB reale, del jar signal-cli 0.14.7, della libreria Telethon 1.44 installata e della documentazione WAHA.
-> Data: 29/08/2026.
+> **Stato:** IMPLEMENTATA (MVP display-only) — task §9 completati. Sezione "Reperti live post-implementazione" (§12) registra i bug trovati in testing reale e le relative fix. Basato su ricognizione del codice, del DB reale, del jar signal-cli 0.14.7, della libreria Telethon 1.44 installata e della documentazione WAHA.
+> Data: 29/08/2026; aggiornato 30/08/2026.
 
 ## 1. Obiettivo
 Visualizzare nella web UI le **reazioni emoji** ai messaggi (es. 👍 su un proprio messaggio), per i tre backend (Signal, WhatsApp, Telegram), con aggiornamento live via WebSocket. **Fuori scope per l'MVP:** invio di reazioni (nessun optimistic send), rendering nella TUI, custom emoji Telegram, reazioni alle storie.
@@ -24,7 +24,7 @@ Righe `text=''`/`NULL` con `attachment_id IS NULL` — le "mezze bolle" osservat
 
 ### Formati on-wire (verificati)
 - **Signal** (jar `bin/signal-cli-0.14.7/lib/signal-cli-0.14.7.jar`, record `org.asamk.signal.json.JsonReaction`): `dataMessage.reaction` = `{emoji, targetAuthor, targetAuthorNumber, targetAuthorUuid, targetSentTimestamp, isRemove}`. `JsonSyncDataMessage` incapsula un `JsonDataMessage` completo → la stessa `reaction` arriva anche in `syncMessage.sentMessage` (nostre reazioni da altro device). Oggi `backends/signal.py:_extract_message_data` (915-1004) ignora `reaction`: con `message` assente produce `text=''` → la riga vuota.
-- **WhatsApp** (doc WAHA `how-to/events#message.reaction`): evento `message.reaction` con `payload.reaction.text` (emoji; **stringa vuota = rimozione**), `payload.reaction.messageId` (id del messaggio target), `payload.fromMe`, `payload.participant` (gruppi: chi ha reagito). Oggi l'evento **non è sottoscritto**: `desired_events` in `backends/whatsapp.py:540-546` = `["message", "message.any", "message.ack", "message.ack.group", "presence.update"]`; docker-compose `WAHA_WEBHOOK_EVENTS` idem. Le 40 righe vuote suggeriscono che WEBJS consegni le reaction anche come `message`/`message.any` ([DA CONFERMARE #1]).
+- **WhatsApp** (doc WAHA `how-to/events#message.reaction`): evento `message.reaction` con `payload.reaction.text` (emoji; **stringa vuota = rimozione**), `payload.reaction.messageId` (id del messaggio target), `payload.fromMe`, `payload.participant` (gruppi: chi ha reagito). Oggi l'evento **non è sottoscritto**: `desired_events` in `backends/whatsapp.py:540-546` = `["message", "message.any", "message.ack", "message.ack.group", "presence.update"]`; docker-compose `WAHA_WEBHOOK_EVENTS` idem. Le 40 righe vuote erano un **mix** di reaction consegnate come `message`/`message.any` ([DA CONFERMARE #1], in parte confermato §12) e di **media race** (webhook `hasMedia=true` con `media=null`, §12.2).
 - **Telegram** (Telethon 1.44 `.venv`, `telethon/tl/types/__init__.py:46669`): `UpdateMessageReactions(peer, msg_id, reactions: MessageReactions)`; `MessageReactions.results: [ReactionCount(reaction, count, chosen_order)]`, `recent_reactions: [MessagePeerReaction(peer_id, date, reaction, big, my)]`; `reaction` è `ReactionEmoji(emoticon)` o `ReactionCustomEmoji(document_id)`. Le reazioni **non** creano messaggi: nessuna "mezza bolla" da reaction; il punto di intercettazione è `_on_raw` (`backends/telegram.py:389-406`).
 
 ## 3. Modello dati (schema SQL) e ciclo di vita
@@ -336,15 +336,37 @@ Sequenza critica: **1 prima di 10** (mai bonificare senza filtro attivo); 7-9 po
 ## 11. Note / rischi / [DA CONFERMARE]
 
 ### [DA CONFERMARE] — verifiche a runtime obbligatorie durante i task
-1. **WA reaction come `message`/`message.any` (WEBJS)**: confermare la forma esatta che ha generato le 40 righe vuote (`type:"reaction"`? `_data.message.reactionMessage`?). Metodo: log debug del payload grezzo in `handle_webhook` reagendo da telefono. Il filtro del task 1 copre le tre forme candidate; il test va adeguato al reperto.
-2. **WAHA 2026.8.1 `message.reaction`**: forma reale di `reaction.messageId` (serializzato completo vs hex) e presenza di `participant` nei gruppi — la doc citata è generale, non pinned alla build in uso. Adeguare il match §3.2 (fallback `canonical_msg_id` già previsto).
-3. **Signal sync di reaction nostre**: confermare che `syncMessage.sentMessage` trasporti `reaction` reagendo da un secondo device, e che il **change** arrivi come nuova reaction (senza remove esplicito) — la semantica delta §3.3 lo gestisce, ma va osservato un payload reale.
-4. **Telegram `UpdateMessageReactions` nelle 1:1**: confermare che `_on_raw` lo riceva per cloud private chat (non solo canali/gruppi) e se `recent_reactions` sia popolato o serva fallback "solo counts" (`can_see_list=False`).
-5. **Origine delle 3 righe text vuote Telegram**: ipotesi service/unsupported message (es. gift, geo, poll, web-page-only). Il filtro empty-text le blocca a prescindere; loggare una volta il payload grezzo per classificarla (evita falsi positivi del filtro).
-6. **Emoji multi-codepoint**: nessuna normalizzazione lato nostro; 👍🏽 e 👍 producono badge distinti. Verificare in E2E che il comportamento sia accettabile (documentato §10).
+1. **WA reaction come `message`/`message.any` (WEBJS)** — ✅ **PARZIALMENTE CONFERMATO** (§12): le righe vuote WA erano un mix di reaction consegnate come messaggi E di **media race** (`hasMedia=true, media=null`). Il filtro del task 1 copre le tre forme reaction-shaped; il filtro "mai bolle vuote" (§12.3) copre la race.
+2. **WAHA 2026.8.1 `message.reaction`** — ✅ **CONFERMATO CON REPERTO** (§12.1): le reaction proprie arrivano con `fromMe=true` ma `participant` = **nostro LID** → l'autore deve essere forzato a `"me"` (fix `2c3cbf6`). `reaction.messageId` = id serializzato completo; fallback `canonical_msg_id` già previsto.
+3. **Signal sync di reaction nostre**: ⏳ **DA CONFERMARE** — la reaction inviata via daemon **non genera echo SSE verso se stesso** (§12.4); serve un secondo device per osservare `syncMessage.sentMessage.reaction`.
+4. **Telegram `UpdateMessageReactions` nelle 1:1**: ⏳ **DA CONFERMARE** — l'utente segnala che le reaction Telegram non arrivano (§12.5, follow-up aperto).
+5. **Origine delle 3 righe text vuote Telegram**: ⏳ ipotesi service/unsupported message; il filtro empty-text le blocca a prescindere.
+6. **Emoji multi-codepoint**: nessuna normalizzazione; 👍🏽 e 👍 producono badge distinti (accettato, §10).
 
 ### Rischi
 - **Match Signal su messaggi nostri**: la doppia identità ts-ottimistico/`msg_id`-reale è il punto più delicato; coperto da test dedicato (§8.1) e dalla forma di match già collaudata in `_message_row_for_edit`.
 - **WAHA retry webhook**: `_seen_message_keys` non deduplica `message.reaction` (chiavi per `message`); l'idempotenza è affidata al vincolo UNIQUE + semantica delete/insert (§3.3).
 - **Pannello contatti**: le reaction **non** toccano `last_message_ts` né i badge unread (una reaction non è un messaggio nuovo): `_handle_reaction_event` non deve marcare `_contact_list_dirty` — diverso da `_handle_message_event`.
 - **Pruning**: reazioni orfane dopo il cap 200/contatto — `_prune_orphan_reactions` (task 2) le allinea alla stessa retention.
+
+## 12. Reperti live post-implementazione (30/08/2026)
+
+### 12.1 Reaction proprie WhatsApp attribuite al contatto sbagliato
+WAHA 2026.8.1 consegna le reaction proprie con `fromMe=true` ma `participant` = **il nostro LID** (e `_data.message` vuoto). Il parser usava `participant` come autore → la reaction finiva attribuita a un contatto con quel LID. Fix: per `fromMe=true` l'autore è sempre `"me"` (`author_key="me"`, `author="You"`). Commit `2c3cbf6`.
+
+### 12.2 Media race WAHA (hasMedia=true, media=null)
+Il webhook `message`/`message.ack` può precedere il download del media: `hasMedia=true` ma `media=null`. Il parser creava una riga `text=''` → bolla vuota (foto invisibile). Tre livelli di fix:
+- **Niente bolle vuote** (`9ec70c1`): `_event_from_message` salta i messaggi senza testo e senza media; stesso predicato esteso al path sintetico `message.ack`.
+- **Self-heal in place** (`6050de5`): se la riga esiste senza attachment, l'echo/fetch successivo aggiorna `attachment_id`+`msg_type` (helper `_update_message_media_identity`, con guardia SQL anti-sovrascrittura). Prima l'upgrade accettava solo file locali `sent-*` e rifiutava l'URL WAHA.
+- **Media resolver** (`downloadMedia=true`): per i casi in race il backend programma un retry con backoff (2s/5s/15s, max 3) su `GET /api/{session}/chats/{chatId}/messages/{messageId}?downloadMedia=true`, ri-ingesta il messaggio col media e `ingest_message` ritorna `"changed"` → push WS → la web UI si aggiorna live.
+- **Caption mimetype** (`5447d67`): `attachment_info` = solo mimetype (es. `image/jpeg`) non deve diventare la caption; fallback download per-id quando `media.url` non risponde.
+- **Operativo**: `WHATSAPP_FILES_LIFETIME=0` nel docker-compose (default 180s: i media WAHA sparivano dopo 3 minuti).
+
+### 12.3 Regola "mai bolle vuote" (tutti i protocolli)
+Un messaggio senza testo e senza media non deve mai essere persistito: Signal (guardia reaction/empty), WhatsApp (skip in `_event_from_message` + path ack), Telegram (filtro empty-text in `_message_to_chat_event`). La bonifica §3.4 è sicura SOLO con filtro e heal attivi (le righe race rientrano con il media al fetch successivo).
+
+### 12.4 Echo SSE Signal delle proprie reaction
+La reaction inviata via daemon (JSON-RPC `sendReaction`) viene consegnata al destinatario ma **non ritorna via SSE verso lo stesso daemon** (nessun `syncMessage.sentMessage.reaction` in self-echo; verificato anche per il send normale). Per testare il path Signal serve una reaction da un **secondo device** (sync). In mancanza, la riga può essere iniettata via `_apply_reaction_delta` per la demo (is_mine=True).
+
+### 12.5 Follow-up aperto: reaction Telegram non arrivate
+L'utente segnala che le reaction Telegram non compaiono. Da investigare: ricezione di `UpdateMessageReactions` nelle chat 1:1 da `_on_raw`, popolamento di `recent_reactions`, e convenzioni `peer→contact_id`. (Registrato come follow-up dopo la validazione di questo fix.)

@@ -347,7 +347,7 @@ def test_whatsapp_echo_first_is_upgraded_to_sent_attachment(monkeypatch, tmp_pat
     backend.media_dir = str(media_dir)
 
     assert backend.ingest_message("42", _media_data("waha-media-id"), 1000)
-    assert not backend.ingest_message("42", _media_data(mirrored.name), 1001)
+    assert backend.ingest_message("42", _media_data(mirrored.name), 1001) == "changed"
     assert backend.cache["42"][0]["attachment_id"] == mirrored.name
     with sqlite3.connect(db_file) as connection:
         assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (

@@ -24,6 +24,7 @@ COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yml"
 
 # Mapping expected by WAHA to reach the host's webhook server on Linux.
 HOST_GATEWAY = "host.docker.internal:host-gateway"
+FILES_LIFETIME = 'WHATSAPP_FILES_LIFETIME: "0"'
 
 
 def _service_block(text: str, service: str) -> str:
@@ -65,3 +66,10 @@ def test_whatsapp_service_extra_hosts_host_gateway() -> None:
     # 3) Sanity: the webhook URL must still target host.docker.internal, so the
     #    alias and the target stay consistent.
     assert "host.docker.internal" in block
+
+
+def test_whatsapp_media_files_do_not_expire() -> None:
+    text = COMPOSE_FILE.read_text(encoding="utf-8")
+    block = _service_block(text, "whatsapp")
+
+    assert FILES_LIFETIME in block

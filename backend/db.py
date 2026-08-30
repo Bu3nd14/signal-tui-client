@@ -482,7 +482,8 @@ def _update_message_media_identity(
             if row is None:
                 return False
             cursor = conn.execute(
-                "UPDATE messages SET attachment_id = ?, msg_type = ? WHERE id = ?",
+                "UPDATE messages SET attachment_id = ?, msg_type = ? "
+                "WHERE id = ? AND (attachment_id IS NULL OR attachment_id = '')",
                 (attachment_id, msg_type, row[0]),
             )
             conn.commit()
