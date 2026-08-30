@@ -268,7 +268,7 @@ h2 { font-size: 1.05rem; }
 .message-reply, .message-edit, .message-reaction {
   position: absolute;
   top: 0;
-  right: -38px;
+  left: -38px;
   width: 26px;
   height: 26px;
   border: 1px solid var(--line);
@@ -281,12 +281,12 @@ h2 { font-size: 1.05rem; }
 }
 .message-reply { top: 0; }
 .message-reaction { top: 28px; }
-.message-edit { top: 56px; }
+.message-edit { top: 28px; }
 .message.in .message-reply,
 .message.in .message-edit,
 .message.in .message-reaction {
-  right: auto;
-  left: -38px;
+  left: auto;
+  right: -38px;
 }
 .message:hover .message-reply,
 .message:hover .message-edit,
