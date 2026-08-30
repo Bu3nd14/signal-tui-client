@@ -250,7 +250,7 @@ h2 { font-size: 1.05rem; }
   gap: 4px;
   max-width: 100%;
 }
-.message.out .message-reactions { right: 8px; }
+.message.out .message-reactions { right: auto; left: 8px; }
 .reaction-chip {
   display: inline-flex;
   align-items: center;

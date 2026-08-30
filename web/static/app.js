@@ -1244,7 +1244,7 @@ function clearTelegramRefreshTimer() {
 function updateTelegramRefreshTimer() {
   clearTelegramRefreshTimer();
   if (state.active?.protocol === "telegram") {
-    state.telegramRefreshTimer = window.setInterval(loadMessages, 20000);
+    state.telegramRefreshTimer = window.setInterval(loadMessages, 15000);
   }
 }
 

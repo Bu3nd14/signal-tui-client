@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -1331,7 +1332,10 @@ def test_web_ui_static_contracts():
     assert "state.replyTo = null" in source
 
     index = Path("web/static/index.html").read_text()
-    assert '<script src="/app.js?v=46" defer></script>' in index
+    # Le risorse statiche usano cache-busting (?v=N): il test non deve
+    # dipendere dal numero specifico, solo dalla presenza del versioning.
+    assert re.search(r'<script src="/app\.js\?v=\d+" defer></script>', index)
+    assert re.search(r'<link rel="stylesheet" href="/style\.css\?v=\d+">', index)
 
     css = Path("web/static/style.css").read_text()
     assert ".contact-copy { min-width: 0; overflow: hidden; }" in css

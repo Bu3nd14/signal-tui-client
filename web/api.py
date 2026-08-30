@@ -1230,11 +1230,28 @@ def create_api_router() -> Any:
         return {"status": "ok"}
 
     @router.get("/messages")
-    def messages(
+    async def messages(
         request: Request,
         proto: Literal["signal", "whatsapp", "telegram"],
         contact_id: str,
     ) -> list[dict[str, Any]]:
+        if proto == "telegram":
+            try:
+                backend = request.app.state.manager.get(proto)
+                refreshed = await asyncio.to_thread(
+                    backend.fetch_history, contact_id, 20
+                )
+                logger.debug(
+                    "telegram reactions refresh: %s -> %d",
+                    contact_id,
+                    len(refreshed),
+                )
+            except Exception:
+                logger.debug(
+                    "telegram reactions refresh failed: %s",
+                    contact_id,
+                    exc_info=True,
+                )
         result = _messages(proto, contact_id)
         is_group = contact_id.endswith("@g.us")
         if not is_group:

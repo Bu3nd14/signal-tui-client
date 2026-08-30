@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import queue
 import shutil
 import sqlite3
@@ -425,6 +426,13 @@ class TelegramBackend(ChatBackend):
             self._connected = False
             return
 
+        try:
+            self._loop.run_until_complete(self._configure_reaction_notify())
+        except Exception:
+            logger.debug(
+                "Telegram reactions notify configuration failed", exc_info=True
+            )
+
         self._connected = True
         try:
             self._loop.run_until_complete(self._load_contacts())
@@ -442,6 +450,43 @@ class TelegramBackend(ChatBackend):
         )
         self._loop_thread.start()
         logger.info("Telegram: connected, %d contacts", len(self.contacts))
+
+    async def _configure_reaction_notify(self) -> None:
+        from telethon.tl.functions.account import (
+            GetReactionsNotifySettingsRequest,
+            SetReactionsNotifySettingsRequest,
+        )
+        from telethon.tl.types import (
+            ReactionNotificationsFromAll,
+            ReactionsNotifySettings,
+        )
+
+        settings = await self._client(GetReactionsNotifySettingsRequest())
+        current = settings.messages_notify_from
+        logger.info("Telegram reactions notify settings: %s", current)
+
+        enabled = os.environ.get("TELEGRAM_REACTIONS_NOTIFY", "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not enabled:
+            logger.info("Telegram reactions notify: disabled by environment")
+            return
+        if isinstance(current, ReactionNotificationsFromAll):
+            logger.info("Telegram reactions notify: already enabled for all")
+            return
+
+        updated = ReactionsNotifySettings(
+            sound=settings.sound,
+            show_previews=settings.show_previews,
+            messages_notify_from=ReactionNotificationsFromAll(),
+            stories_notify_from=settings.stories_notify_from,
+            poll_votes_notify_from=settings.poll_votes_notify_from,
+        )
+        await self._client(SetReactionsNotifySettingsRequest(settings=updated))
+        logger.info("Telegram reactions notify: enabled for all")
 
     def _run_event_loop(self) -> None:
         """Run the asyncio event loop forever (called in daemon thread)."""
@@ -638,6 +683,40 @@ class TelegramBackend(ChatBackend):
         except Exception:
             logger.exception("Telegram fetch_recent_history failed")
             return 0
+
+    def fetch_history(self, contact_id: str, limit: int = 20) -> list[dict]:
+        """Fetch and ingest recent messages for one Telegram chat."""
+        if self._client is None or self._loop is None or not self._connected:
+            return []
+        try:
+            entity_id = int(contact_id)
+        except (ValueError, TypeError):
+            return []
+
+        async def _fetch() -> list[dict]:
+            entity = await self._client.get_input_entity(entity_id)
+            messages = await self._client.get_messages(entity, limit=limit)
+            fetched = []
+            for msg in messages:
+                if msg is None or not msg.date:
+                    continue
+                event = self._message_to_chat_event(msg)
+                if event is None:
+                    continue
+                self.ingest_message(
+                    contact_id,
+                    event.payload,
+                    event.payload.get("timestamp", 0),
+                )
+                fetched.append(event.payload)
+            return fetched
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_fetch(), self._loop)
+            return future.result(timeout=120)
+        except Exception:
+            logger.exception("Telegram fetch_history failed for %s", contact_id)
+            return []
 
     def _identify_contact(self, contact_id: str) -> ChatContact | None:
         """Resolve a Telegram user id to a known ``ChatContact``."""

@@ -210,7 +210,7 @@ vm.runInThisContext(app.slice(start, end));
 openThread({ id: "42", protocol: "telegram", display_name: "Telegram" });
 assert.equal(intervals.length, 1);
 assert.equal(intervals[0].callback, loadMessages);
-assert.equal(intervals[0].delay, 20000);
+assert.equal(intervals[0].delay, 15000);
 assert.equal(state.telegramRefreshTimer, 1);
 
 openThread({ id: "alice", protocol: "signal", display_name: "Signal" });

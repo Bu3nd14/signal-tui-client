@@ -9,15 +9,23 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from telethon.tl.functions.account import (
+    GetReactionsNotifySettingsRequest,
+    SetReactionsNotifySettingsRequest,
+)
 from telethon.tl.types import (
     MessagePeerReaction,
     MessageReactions,
+    NotificationSoundDefault,
     PeerChannel,
     PeerChat,
     PeerUser,
     ReactionCount,
     ReactionCustomEmoji,
     ReactionEmoji,
+    ReactionNotificationsFromAll,
+    ReactionNotificationsFromContacts,
+    ReactionsNotifySettings,
     UpdateMessageReactions,
 )
 
@@ -144,6 +152,46 @@ def test_message_without_reactions_enqueues_no_extra_event():
 
     assert backend._message_to_chat_event(_message()) is not None
     assert backend.poll_once() == []
+
+
+def test_configure_reaction_notify_enables_all_by_default(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_REACTIONS_NOTIFY", raising=False)
+    settings = ReactionsNotifySettings(
+        sound=NotificationSoundDefault(),
+        show_previews=True,
+        messages_notify_from=ReactionNotificationsFromContacts(),
+    )
+    client = AsyncMock(side_effect=[settings, settings])
+    backend = _backend()
+    backend._client = client
+
+    asyncio.run(backend._configure_reaction_notify())
+
+    assert isinstance(client.await_args_list[0].args[0], GetReactionsNotifySettingsRequest)
+    request = client.await_args_list[1].args[0]
+    assert isinstance(request, SetReactionsNotifySettingsRequest)
+    assert isinstance(
+        request.settings.messages_notify_from, ReactionNotificationsFromAll
+    )
+    assert request.settings.sound is settings.sound
+    assert request.settings.show_previews is True
+
+
+def test_configure_reaction_notify_does_not_set_when_disabled(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_REACTIONS_NOTIFY", "off")
+    settings = ReactionsNotifySettings(
+        sound=NotificationSoundDefault(),
+        show_previews=True,
+        messages_notify_from=ReactionNotificationsFromContacts(),
+    )
+    client = AsyncMock(return_value=settings)
+    backend = _backend()
+    backend._client = client
+
+    asyncio.run(backend._configure_reaction_notify())
+
+    client.assert_awaited_once()
+    assert isinstance(client.await_args.args[0], GetReactionsNotifySettingsRequest)
 
 
 def test_message_reactions_payload_persists_aggregate_rows(tmp_db):

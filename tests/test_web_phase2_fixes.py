@@ -6,13 +6,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 import backend as backend_mod
 from backends.signal import SignalBackend
 from backends.telegram import TelegramBackend
 from backends.whatsapp import WhatsAppBackend
 from models import ChatContact, ChatEvent
 from tui.events import EventHandlingMixin
-from web.api import _messages
+from web.api import _messages, create_api_router
 
 
 def _db(monkeypatch, tmp_path: Path) -> Path:
@@ -33,6 +37,31 @@ def _media_data(attachment_id: str) -> dict:
         "attachment_info": None,
         "attachment_id": attachment_id,
     }
+
+
+@pytest.mark.parametrize(
+    ("protocol", "expected_calls"),
+    [("telegram", 1), ("signal", 0), ("whatsapp", 0)],
+)
+def test_messages_refreshes_only_telegram_history(protocol, expected_calls):
+    telegram = SimpleNamespace(fetch_history=MagicMock(return_value=[{}, {}]))
+    manager = SimpleNamespace(
+        get=MagicMock(return_value=telegram),
+        list_contacts=MagicMock(return_value=[]),
+    )
+    app = FastAPI()
+    app.state.manager = manager
+    app.include_router(create_api_router())
+
+    with patch("web.api._messages", return_value=[]), TestClient(app) as client:
+        response = client.get(
+            "/api/messages", params={"proto": protocol, "contact_id": "42"}
+        )
+
+    assert response.status_code == 200
+    assert telegram.fetch_history.call_count == expected_calls
+    if expected_calls:
+        telegram.fetch_history.assert_called_once_with("42", 20)
 
 
 def test_telegram_attachment_upgrade_works_in_both_event_orders(monkeypatch, tmp_path):
@@ -740,6 +769,7 @@ globalThis.elements = {
 globalThis.closeEmojiPicker = () => {};
 globalThis.closeReactionPicker = () => {};
 globalThis.cancelReply = () => {};
+globalThis.updateTelegramRefreshTimer = () => {};
 globalThis.protocolIcon = () => "";
 globalThis.renderContacts = () => {};
 globalThis.document = { createElement: node };
