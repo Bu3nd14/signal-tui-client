@@ -228,6 +228,7 @@ class TestSendPersistOffthread:
 
         ts = app._cache[contact.cache_key][0]["timestamp"]
         echo_payload = {
+            "id": "ts-1",  # gli echo Signal is_mine hanno sempre payload["id"]
             "text": "ciao",
             "is_mine": True,
             "sender": "You",
