@@ -129,9 +129,7 @@ def test_available_reactions_are_telegram_only():
     manager.get = MagicMock(return_value=backend)
 
     with TestClient(make_app(manager)) as client:
-        telegram = client.get(
-            "/api/reactions?protocol=telegram", headers=AUTH
-        )
+        telegram = client.get("/api/reactions?protocol=telegram", headers=AUTH)
         signal = client.get("/api/reactions?protocol=signal", headers=AUTH)
 
     assert telegram.json() == {"emojis": ["👍", "❤️"]}
