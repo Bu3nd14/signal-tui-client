@@ -391,13 +391,76 @@ globalThis.scrollThreadToBottom = () => {
   bottomCalls += 1;
   elements.messages.scrollTop = elements.messages.scrollHeight;
 };
-elements.messages.scrollHeight = 1500;
-elements.messages.scrollTop = 1050;
-elements.messages.clientHeight = 340;
 vm.runInThisContext(app.slice(start, end));
+
+elements.messages.scrollHeight = 1200;
+elements.messages.scrollTop = 600;
+elements.messages.clientHeight = 600;
 renderMessages([], "telegram");
 assert.equal(bottomCalls, 1);
-assert.equal(elements.messages.scrollTop, 1500);
+assert.equal(elements.messages.scrollTop, 1200);
+""")
+
+
+def test_image_load_sticks_to_bottom_only_when_user_was_at_bottom():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const start = app.indexOf("function renderMessages(");
+const end = app.indexOf("\nfunction copyReactions", start);
+let bottomCalls = 0;
+let capturedOnLoad = "not-set";
+globalThis.state = {
+  optimistic: [], active: { protocol: "signal", id: "42" }, userScrolledUp: false,
+  messageNodes: new Map(),
+};
+globalThis.imageAttachment = (_attachment, _protocol, _direction, onLoad) => {
+  capturedOnLoad = onLoad;
+  return { className: "attachment" };
+};
+globalThis.scrollThreadToBottom = () => { bottomCalls += 1; };
+globalThis.pruneOrphanObjectUrls = () => {};
+globalThis.timestampMilliseconds = Number;
+globalThis.formatTimestamp = () => "10:00";
+globalThis.appendRenderedQuote = () => {};
+globalThis.startReply = () => {};
+globalThis.copyReactions = (reactions) => reactions || [];
+function node() {
+  return {
+    className: "", textContent: "", children: [], parentNode: null,
+    append(...children) { for (const child of children) { child.parentNode = this; this.children.push(child); } },
+    replaceChildren() { this.children = []; }, setAttribute() {}, addEventListener() {},
+  };
+}
+globalThis.document = { createElement: node };
+globalThis.elements = { messages: node() };
+globalThis.window = { SignalTuiReconcile: {
+  reconcileOptimisticMessages: () => ({ optimistic: [], visible: [] }),
+  messageDisplayText: (item) => item.text || "",
+} };
+vm.runInThisContext(app.slice(start, end));
+
+const item = { id: "1", timestamp: 1, direction: "in", text: "", attachment: { type: "image/jpeg", name: "f.jpg", attachment_id: "f.jpg" } };
+// utente a fondo: renderMessages passa un onLoad che riancora al fondo
+elements.messages.scrollHeight = 1200;
+elements.messages.scrollTop = 600;
+elements.messages.clientHeight = 600;
+renderMessages([item], "signal");
+assert.equal(bottomCalls, 1); // lo scroll a fondo del render stesso
+assert.equal(typeof capturedOnLoad, "function");
+capturedOnLoad(); // il load dell'immagine riancora di nuovo
+assert.equal(bottomCalls, 2);
+
+// utente risalito (e non a fondo): nessun onLoad -> nessuno yank durante il lazy load
+bottomCalls = 0;
+capturedOnLoad = "not-set";
+state.userScrolledUp = true;
+elements.messages.scrollTop = 200;
+renderMessages([item], "signal");
+assert.equal(capturedOnLoad, null);
+assert.equal(bottomCalls, 0);
 """)
 
 

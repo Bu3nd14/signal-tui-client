@@ -496,7 +496,7 @@ async function openImageModal(path, alt) {
   }
 }
 
-async function loadImage(container, image, path, attachmentId, direction) {
+async function loadImage(container, image, path, attachmentId, direction, onLoad) {
   const key = String(attachmentId);
   if (state.mediaFailures.has(key)) {
     showImageFallback(container);
@@ -512,6 +512,7 @@ async function loadImage(container, image, path, attachmentId, direction) {
     if (!url) return;
     image.addEventListener("load", () => {
       container.querySelector(".attachment-loading")?.remove();
+      onLoad?.();
     }, { once: true });
     image.src = url;
   } catch (error) {
@@ -524,7 +525,7 @@ async function loadImage(container, image, path, attachmentId, direction) {
   }
 }
 
-function imageAttachment(attachment, protocol, direction) {
+function imageAttachment(attachment, protocol, direction, onLoad) {
   const container = document.createElement("div");
   container.className = "attachment";
   const loading = document.createElement("div");
@@ -555,11 +556,12 @@ function imageAttachment(attachment, protocol, direction) {
     state.mediaCache.set(attachmentId, cachedUrl);
     image.addEventListener("load", () => {
       loading.remove();
+      onLoad?.();
     }, { once: true });
     image.src = cachedUrl;
     return container;
   }
-  const load = () => loadImage(container, image, path, attachmentId, direction);
+  const load = () => loadImage(container, image, path, attachmentId, direction, onLoad);
   const observer = mediaObserver();
   if (observer) {
     container._loadMedia = load;
@@ -796,6 +798,14 @@ function renderMessages(messages, protocol) {
   const prevScrollTop = elements.messages.scrollTop;
   const geometricallyAtBottom = (elements.messages.scrollHeight - prevScrollTop - elements.messages.clientHeight) <= 80;
   const wasAtBottom = !state.userScrolledUp || geometricallyAtBottom;
+  // Quando l'utente è a fondo, le immagini appena ricreate crescono di altezza
+  // DOPO il render (min-height 90px -> fino a 220px) spostando il fondo giù:
+  // senza un riallineamento la chat "scatta in su" all'invio. Riancoriamo al
+  // fondo al load di ogni immagine, MA solo se l'utente non ha fatto scroll up
+  // nel frattempo (altrimenti verrebbe trascinato giù mentre sfoglia la cronologia).
+  const stickToBottom = wasAtBottom
+    ? () => { if (!state.userScrolledUp) scrollThreadToBottom(); }
+    : null;
   elements.messages.replaceChildren();
   state.messageNodes ??= new Map();
   state.messageNodes.clear();
@@ -872,7 +882,7 @@ function renderMessages(messages, protocol) {
         preview.append(image);
         bubble.append(preview);
       } else {
-        bubble.append(imageAttachment(item.attachment, protocol, item.direction));
+        bubble.append(imageAttachment(item.attachment, protocol, item.direction, stickToBottom));
       }
     } else if (item.attachment) {
       bubble.append(fileAttachment(item.attachment, protocol, item.direction));
