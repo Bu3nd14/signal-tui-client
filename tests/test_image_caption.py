@@ -332,3 +332,21 @@ class TestCaptionBubbleCache:
         assert isinstance(widgets[0], ImageWidget)
         assert isinstance(widgets[1], MessageWidget)
         assert widgets[1]._msg_text == "guarda!"
+
+    def test_cached_gif_caption_matches_image_caption(self):
+        app = SignalTUI()
+        widgets = app._build_message_widgets(
+            PROTOCOL_SIGNAL,
+            False,
+            _image_message(
+                text="guarda la GIF!",
+                attachment_info="animation.gif",
+                content_type="image/gif",
+                media_kind="gif",
+            ),
+        )
+
+        assert len(widgets) == 2
+        assert isinstance(widgets[0], ImageWidget)
+        assert isinstance(widgets[1], MessageWidget)
+        assert widgets[1]._msg_text == "guarda la GIF!"

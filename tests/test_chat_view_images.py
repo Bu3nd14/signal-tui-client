@@ -22,10 +22,14 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import PROTOCOL_SIGNAL
 from tui.app import SignalTUI
-from tui.chat_view import _is_scrolled_to_bottom
+from tui.chat_view import (
+    _effective_media_kind,
+    _is_scrolled_to_bottom,
+    _media_display_text,
+)
 from tui.images.detect import ImageSupport
 from tui.images.kitty_renderer import KittyRenderer
-from ui_components import ImageWidget
+from ui_components import ImageWidget, MessageWidget
 
 
 def _make_png_bytes(width: int = 16, height: int = 32) -> bytes:
@@ -254,6 +258,112 @@ class TestNativePlaceholder:
         assert isinstance(widget, ImageWidget)
         assert widget.content == ""
         assert app.run_worker.call_count == 1
+
+
+class TestMediaKindRendering:
+    def test_effective_kind_supports_legacy_rows(self):
+        assert _effective_media_kind({"media_kind": "voice"}) == "voice"
+        assert (
+            _effective_media_kind({"msg_type": "image", "content_type": "image/gif"})
+            == "gif"
+        )
+        assert _effective_media_kind({"msg_type": "sticker"}) == "sticker"
+        assert _effective_media_kind({"msg_type": "attachment"}) is None
+
+    def test_media_display_text_uses_kind_icons_and_legacy_fallback(self):
+        assert _media_display_text("", None, "attachment", "voice") == "🎤 [Voice]"
+        assert (
+            _media_display_text("", "clip.mp4", "attachment", "video") == "🎬 clip.mp4"
+        )
+        assert _media_display_text("", None, "attachment") == "📎 [File]"
+
+    def test_cached_gif_uses_image_widget(self):
+        app = SignalTUI()
+        widgets = app._build_message_widgets(
+            PROTOCOL_SIGNAL,
+            False,
+            {
+                "text": "",
+                "msg_type": "attachment",
+                "media_kind": "gif",
+                "attachment_id": "gif-1",
+                "attachment_info": "animation.gif",
+            },
+        )
+
+        assert isinstance(widgets[0], ImageWidget)
+
+    def test_cached_downloadable_sticker_is_small_image_without_caption(self):
+        app = SignalTUI()
+        widgets = app._build_message_widgets(
+            PROTOCOL_SIGNAL,
+            False,
+            {
+                "text": "caption must not become a bubble",
+                "msg_type": "sticker",
+                "media_kind": "sticker",
+                "attachment_id": "sticker-1",
+                "attachment_info": "sticker.webp",
+            },
+        )
+
+        assert len(widgets) == 1
+        assert isinstance(widgets[0], ImageWidget)
+        assert widgets[0].has_class("msg-sticker")
+        assert widgets[0]._msg_type == "sticker"
+
+    def test_cached_signal_sticker_without_attachment_stays_text(self):
+        app = SignalTUI()
+        widgets = app._build_message_widgets(
+            PROTOCOL_SIGNAL,
+            False,
+            {
+                "text": "",
+                "msg_type": "sticker",
+                "media_kind": "sticker",
+                "attachment_info": None,
+            },
+        )
+
+        assert isinstance(widgets[0], MessageWidget)
+        assert widgets[0]._msg_text == "🎨 [Sticker]"
+
+    def test_non_image_media_widget_has_openable_reference(self):
+        app = SignalTUI()
+        widgets = app._build_message_widgets(
+            PROTOCOL_SIGNAL,
+            False,
+            {
+                "text": "",
+                "msg_type": "attachment",
+                "media_kind": "document",
+                "attachment_id": "doc-1",
+                "attachment_info": "manual.pdf",
+            },
+        )
+
+        assert isinstance(widgets[0], MessageWidget)
+        assert widgets[0]._attachment_ref == ("doc-1", PROTOCOL_SIGNAL)
+
+    def test_non_image_worker_only_resolves_path_then_opens(self, tmp_path):
+        app = SignalTUI()
+        app.manager = MagicMock()
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+        app._open_media_path = MagicMock()
+        path = tmp_path / "manual.pdf"
+        app.manager.get_attachment_path.return_value = path
+        widget = MessageWidget(
+            "📎 manual.pdf", attachment_ref=("doc-1", PROTOCOL_SIGNAL)
+        )
+        widget._is_mounted = True
+
+        app._resolve_media_path_worker(PROTOCOL_SIGNAL, "doc-1", widget)
+
+        app.manager.get_attachment_path.assert_called_once_with(
+            PROTOCOL_SIGNAL, "doc-1"
+        )
+        assert widget.attachment_path == path
+        app._open_media_path.assert_called_once_with(path)
 
 
 class _ScrollFakeChatLog:

@@ -94,7 +94,6 @@ class _FakeChatLog:
         ("attachment", "Video caption", "📎 Video caption"),
         ("attachment", "audio/ogg", "📎 audio/ogg"),
         ("attachment", "report.pdf", "📎 report.pdf"),
-        ("sticker", "sticker/webp", "🎨 sticker/webp"),
     ],
 )
 def test_media_rendering_uses_attachment_info_not_canonical_identity(

@@ -1,6 +1,9 @@
 """Download mode (Ctrl+D): serve text/attachments via HTTP."""
 
 import logging
+import shutil
+import subprocess
+from pathlib import Path
 
 from textual.containers import Horizontal
 from textual.widgets import Static
@@ -16,12 +19,130 @@ from ui_components import (
     DownloadLinkWidget,
     ImageModalScreen,
     ImageWidget,
+    MessageWidget,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class DownloadModeMixin:
+    _MEDIA_OPEN_STARTUP_TIMEOUT = 0.5
+
+    def _open_media_path(self, path: Path) -> None:
+        """Open a local media file with the Linux desktop handler."""
+        opener = shutil.which("xdg-open")
+        if opener is None:
+            self._status(f"📎 File available at: {path}")
+            return
+        try:
+            process = subprocess.Popen(
+                [opener, str(path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            self.run_worker(
+                lambda: self._check_media_opener_worker(process, path),
+                thread=True,
+                exclusive=False,
+            )
+        except OSError:
+            logger.debug("Unable to launch xdg-open", exc_info=True)
+            self._status(f"📎 File available at: {path}")
+
+    def _check_media_opener_worker(self, process: subprocess.Popen, path: Path) -> None:
+        """Report an opener that exits unsuccessfully during startup."""
+        try:
+            return_code = process.wait(timeout=self._MEDIA_OPEN_STARTUP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return
+        except OSError:
+            logger.debug("Unable to wait for xdg-open", exc_info=True)
+            self.call_from_thread(self._status, f"📎 File available at: {path}")
+            return
+        if return_code != 0:
+            self.call_from_thread(self._status, f"📎 File available at: {path}")
+
+    def on_message_widget_media_open_requested(
+        self, event: MessageWidget.MediaOpenRequested
+    ) -> None:
+        """Resolve and open non-image media, or serve it in download mode."""
+        if self._download_mode:
+            if event.path is None and event.widget is not None:
+                self.run_worker(
+                    lambda: self._resolve_media_download_path_worker(
+                        event.protocol, event.attachment_id, event.widget
+                    ),
+                    thread=True,
+                    exclusive=False,
+                )
+                return
+            if event.path is not None and event.widget is not None:
+                event.widget.update_media_path(event.path)
+            self._start_download(
+                text=event.path.name if event.path else "attachment",
+                attachment_id=event.attachment_id,
+                protocol=event.protocol,
+                attachment_path=event.path,
+            )
+            return
+        if event.path is not None:
+            if event.widget is not None:
+                event.widget.update_media_path(event.path)
+            self._open_media_path(event.path)
+            return
+        if event.widget is None:
+            self._status("❌ Attachment file not found on server")
+            return
+        self.run_worker(
+            lambda: self._resolve_media_path_worker(
+                event.protocol, event.attachment_id, event.widget
+            ),
+            thread=True,
+            exclusive=False,
+        )
+
+    def _resolve_media_download_path_worker(
+        self,
+        protocol: str,
+        attachment_id: str,
+        widget: MessageWidget,
+    ) -> None:
+        """Resolve non-image media for HTTP serving without blocking the UI."""
+        path = self.manager.get_attachment_path(protocol, attachment_id)
+        self.call_from_thread(
+            self._finish_media_download_path_resolve,
+            protocol,
+            attachment_id,
+            widget,
+            path,
+        )
+
+    def _finish_media_download_path_resolve(
+        self,
+        protocol: str,
+        attachment_id: str,
+        widget: MessageWidget,
+        path: Path | None,
+    ) -> None:
+        """Cache resolved media on its widget and serve it when available."""
+        widget.update_media_path(path)
+        if not widget.is_mounted:
+            return
+        if path is None:
+            self._status(
+                f"❌ ERROR: Attachment file not found (id={attachment_id[:80]})"
+            )
+            self._download_mode = False
+            self._update_download_bar()
+            return
+        self._start_download(
+            text=path.name,
+            attachment_id=attachment_id,
+            protocol=protocol,
+            attachment_path=path,
+        )
+
     def action_download_mode(self) -> None:
         """Toggle download mode on/off (Ctrl+D).
 
@@ -51,6 +172,7 @@ class DownloadModeMixin:
         attachment_id: str | None = None,
         timestamp: int = 0,
         protocol: str | None = None,
+        attachment_path: Path | None = None,
     ) -> None:
         """Start a temporary HTTP server to serve the message content.
 
@@ -63,9 +185,11 @@ class DownloadModeMixin:
         from backend import _serve_file_path
 
         if attachment_id:
-            resolved = self.manager.get_attachment_path(
-                protocol or PROTOCOL_SIGNAL, attachment_id
-            )
+            resolved = attachment_path
+            if resolved is None:
+                resolved = self.manager.get_attachment_path(
+                    protocol or PROTOCOL_SIGNAL, attachment_id
+                )
             if resolved is not None and resolved.is_file():
                 url = _serve_file_path(resolved)
             else:
@@ -118,6 +242,8 @@ class DownloadModeMixin:
                 att_path = self.manager.get_attachment_path(
                     protocol, event.attachment_id
                 )
+                if event.widget is not None:
+                    event.widget.attachment_path = att_path
 
         if self._download_mode:
             text = att_path.name if att_path else "attachment"
@@ -126,6 +252,7 @@ class DownloadModeMixin:
                 text=text,
                 attachment_id=event.attachment_id,
                 protocol=protocol,
+                attachment_path=att_path,
             )
             return
 
