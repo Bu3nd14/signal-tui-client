@@ -100,7 +100,10 @@ MEDIA_KIND_VALUES = frozenset(
     {"image", "gif", "video", "voice", "audio", "document", "sticker"}
 )
 
-def media_kind_from_mime(mime: str | None, *, is_gif=False, is_voice=False) -> str | None:
+
+def media_kind_from_mime(
+    mime: str | None, *, is_gif=False, is_voice=False
+) -> str | None:
     """Map a mime type (+ protocol hints) to a ``media_kind``. None se vuoto."""
     m = (mime or "").lower().split(";", 1)[0].strip()
     if not m:
@@ -115,9 +118,12 @@ def media_kind_from_mime(mime: str | None, *, is_gif=False, is_voice=False) -> s
         return "voice" if is_voice else "audio"
     return "document"
 
+
 def msg_type_for_media_kind(kind: str) -> str:
-    if kind in ("image", "gif"): return "image"
-    if kind == "sticker": return "sticker"
+    if kind in ("image", "gif"):
+        return "image"
+    if kind == "sticker":
+        return "sticker"
     return "attachment"
 ```
 
@@ -182,14 +188,20 @@ def _tg_media_kind(msg) -> tuple[str | None, str | None, str | None]:
         elif name == "DocumentAttributeVoice":
             voice = True
         elif name == "DocumentAttributeAudio":
-            if getattr(attr, "voice", False): voice = True
-            else: audio = True
-    if sticker:   return "sticker", filename, mime
-    if animated:  return "gif", filename, mime
-    if voice:     return "voice", filename, mime
-    if video:     return "video", filename, mime
+            if getattr(attr, "voice", False):
+                voice = True
+            else:
+                audio = True
+    if sticker:
+        return "sticker", filename, mime
+    if animated:
+        return "gif", filename, mime
+    if voice:
+        return "voice", filename, mime
+    if video:
+        return "video", filename, mime
     if audio or mime.startswith("audio/"):
-                  return "audio", filename, mime
+        return "audio", filename, mime
     kind = media_kind_from_mime(mime) or "document"
     return kind, filename, mime
 ```
@@ -200,9 +212,9 @@ def _tg_media_kind(msg) -> tuple[str | None, str | None, str | None]:
 kind, fname, mime = _tg_media_kind(msg)
 if kind:
     msg_type = msg_type_for_media_kind(kind)
-    attachment_info = text or _tg_label_for(kind, fname)   # caption prioritaria
+    attachment_info = text or _tg_label_for(kind, fname)  # caption prioritaria
     if kind != "image":
-        text = "" if kind == "sticker" else text           # regole esistenti
+        text = "" if kind == "sticker" else text  # regole esistenti
     content_type = mime or None
 ```
 
@@ -367,19 +379,30 @@ La UI non deve mai richiedere `media_kind` non nullo. Helper in
 ```python
 def _effective_media_kind(msg) -> str | None:
     kind = msg.get("media_kind")
-    if kind: return kind
+    if kind:
+        return kind
     mt, ct = msg.get("msg_type"), msg.get("content_type")
-    if mt == "sticker": return "sticker"
-    if mt == "image":   return media_kind_from_mime(ct) or "image"   # gif se ct=gif
-    if mt == "attachment": return media_kind_from_mime(ct) or None   # None ⇒ placeholder 📎 storico
+    if mt == "sticker":
+        return "sticker"
+    if mt == "image":
+        return media_kind_from_mime(ct) or "image"  # gif se ct=gif
+    if mt == "attachment":
+        return media_kind_from_mime(ct) or None  # None ⇒ placeholder 📎 storico
     return None
 ```
 
 ### 4.2 `_media_display_text` (`chat_view.py:38-44`)
 
 ```python
-_KIND_ICON = {"video": "🎬", "voice": "🎤", "audio": "🎵",
-              "document": "📎", "sticker": "🎨", "gif": "🎞️"}
+_KIND_ICON = {
+    "video": "🎬",
+    "voice": "🎤",
+    "audio": "🎵",
+    "document": "📎",
+    "sticker": "🎨",
+    "gif": "🎞️",
+}
+
 
 def _media_display_text(text, attachment_info, msg_type, media_kind=None):
     kind = media_kind  # risolto dal chiamante via _effective_media_kind
@@ -469,12 +492,17 @@ _MAX_BYTES_BY_KIND = {
     "document": 50 * 1024 * 1024,
 }
 _EXTENSIONS_BY_MIME = {
-    "image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"},
-    "image/gif": {".gif"}, "image/webp": {".webp"},
-    "video/mp4": {".mp4", ".m4v"}, "video/quicktime": {".mov"},
+    "image/png": {".png"},
+    "image/jpeg": {".jpg", ".jpeg"},
+    "image/gif": {".gif"},
+    "image/webp": {".webp"},
+    "video/mp4": {".mp4", ".m4v"},
+    "video/quicktime": {".mov"},
     "video/webm": {".webm"},
-    "audio/mpeg": {".mp3"}, "audio/ogg": {".ogg", ".opus"},
-    "audio/mp4": {".m4a"}, "audio/wav": {".wav"},
+    "audio/mpeg": {".mp3"},
+    "audio/ogg": {".ogg", ".opus"},
+    "audio/mp4": {".m4a"},
+    "audio/wav": {".wav"},
     "application/pdf": {".pdf"},
     # zip-based (docx/xlsx/pptx): PK\x03\x04 → kind document, estensione whitelist
 }
