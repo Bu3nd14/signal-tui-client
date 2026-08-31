@@ -105,6 +105,35 @@ class MockTelethonMessage:
         self.reply_to = reply_to
 
 
+class MockTelethonDocument:
+    """Mimics telethon.tl.types.Document."""
+
+    def __init__(self, *, attributes=None, mime_type: str = ""):
+        self.attributes = attributes or []
+        self.mime_type = mime_type
+
+
+class DocumentAttributeSticker:
+    pass
+
+
+class DocumentAttributeFilename:
+    def __init__(self, file_name: str):
+        self.file_name = file_name
+
+
+class DocumentAttributeVideo:
+    pass
+
+
+class DocumentAttributeVoice:
+    pass
+
+
+class DocumentAttributeAudio:
+    pass
+
+
 class MockReplyTo:
     """Mimics telethon.tl.types.MessageReplyHeader."""
 
@@ -255,20 +284,26 @@ class TestMessageMapping:
         msg = MockTelethonMessage(
             id=4,
             chat_id=111,
-            sticker=True,
+            document=MockTelethonDocument(
+                attributes=[DocumentAttributeSticker()], mime_type="image/webp"
+            ),
             out=False,
             sender=MockTelethonUser(id=111, first_name="Mario"),
             date=MockTelethonDate(1700000000000),
         )
         evt = backend._message_to_chat_event(msg)
         assert evt.payload["msg_type"] == "sticker"
+        assert evt.payload["attachment_id"] == "tgref:111:4"
 
     def test_message_document_type(self):
         backend = _make_backend()
         msg = MockTelethonMessage(
             id=5,
             chat_id=111,
-            document=True,
+            document=MockTelethonDocument(
+                attributes=[DocumentAttributeFilename("report.pdf")],
+                mime_type="application/pdf",
+            ),
             out=False,
             sender=MockTelethonUser(id=111, first_name="Mario"),
             date=MockTelethonDate(1700000000000),
@@ -279,18 +314,25 @@ class TestMessageMapping:
 
     def test_message_video_audio_types(self):
         backend = _make_backend()
-        for media in ("video", "audio", "voice"):
-            kwargs = {
-                "id": 7,
-                "chat_id": 111,
-                media: True,
-                "out": False,
-                "sender": MockTelethonUser(id=111, first_name="Mario"),
-                "date": MockTelethonDate(1700000000000),
-            }
-            msg = MockTelethonMessage(**kwargs)
+        media_attributes = (
+            ("video", DocumentAttributeVideo(), "video/mp4"),
+            ("audio", DocumentAttributeAudio(), "audio/mpeg"),
+            ("voice", DocumentAttributeVoice(), "audio/ogg"),
+        )
+        for media, attribute, mime_type in media_attributes:
+            msg = MockTelethonMessage(
+                id=7,
+                chat_id=111,
+                document=MockTelethonDocument(
+                    attributes=[attribute], mime_type=mime_type
+                ),
+                out=False,
+                sender=MockTelethonUser(id=111, first_name="Mario"),
+                date=MockTelethonDate(1700000000000),
+            )
             evt = backend._message_to_chat_event(msg)
             assert evt.payload["msg_type"] == "attachment", media
+            assert evt.payload["attachment_id"] == "tgref:111:7", media
 
     def test_message_sender_fallback_to_id(self):
         backend = _make_backend()
