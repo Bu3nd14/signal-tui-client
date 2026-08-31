@@ -65,10 +65,12 @@
         <div id="attachment-preview" class="attachment-preview" hidden>
           <img id="attachment-preview-image" alt="Anteprima immagine da inviare">
           <span id="attachment-preview-name"></span>
-          <button id="remove-attachment" type="button" aria-label="Rimuovi immagine">×</button>
+          <button id="remove-attachment" type="button" aria-label="Rimuovi allegato">×</button>
         </div>
         <div class="composer-controls">
           <textarea id="message-input" rows="1" maxlength="65536" placeholder="Scrivi un messaggio" aria-label="Messaggio"></textarea>
+          <input id="file-input" type="file" hidden accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip,.txt">
+          <button id="attach-button" class="composer-icon-button" type="button" aria-label="Allega file" aria-controls="file-input" title="Allega file">📎</button>
           <button id="emoji-toggle" class="composer-icon-button" type="button" aria-label="Apri selettore emoji" aria-expanded="false" aria-controls="emoji-picker" title="Emoji (Ctrl+Shift+X)">😀</button>
           <button id="send-message" class="send-button" type="submit" disabled aria-label="Invia messaggio">
             <span class="send-icon" aria-hidden="true">➤</span>
@@ -102,6 +104,6 @@
   </dialog>
 
   <script src="/reconcile.js?v=5" defer></script>
-  <script src="/app.js?v=60" defer></script>
+  <script src="/app.js?v=63" defer></script>
 </body>
 </html>

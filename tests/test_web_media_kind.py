@@ -147,6 +147,46 @@ assert.equal(state.fileTabUrls.get("blob:authenticated-media"), tabs.at(-1))
 const fallbackName = fileAttachment({ attachment_id: "path/report.pdf", media_kind: "document" }, "signal", "out")
 assert.equal(fallbackName.children[1].textContent, "report.pdf")
 })().catch((error) => { console.error(error); process.exitCode = 1 })
+    """)
+
+
+def test_file_attachment_shows_unavailable_whatsapp_media_on_404():
+    _run_node(r"""
+const assert = require("node:assert/strict")
+const fs = require("node:fs")
+const vm = require("node:vm")
+const app = fs.readFileSync("./web/static/app.js", "utf8")
+const start = app.indexOf("function attachmentName(")
+const end = app.indexOf("\nfunction replyAuthor", start)
+const errors = []
+function node() {
+  return {
+    className: "", textContent: "", children: [], listeners: {},
+    append(...children) { this.children.push(...children) },
+    setAttribute() {},
+    addEventListener(name, callback) { this.listeners[name] = callback },
+  }
+}
+globalThis.document = { createElement: node }
+globalThis.window = { open: () => ({
+  document: { title: "", write() {}, close() {} },
+  close() {},
+}) }
+globalThis.state = { objectUrls: new Set(), fileTabUrls: new Map() }
+globalThis.apiFetch = async () => {
+  const error = new Error("HTTP 404")
+  error.status = 404
+  throw error
+}
+globalThis.showError = (message) => errors.push(message)
+vm.runInThisContext(app.slice(start, end))
+
+;(async () => {
+  const card = fileAttachment({ attachment_id: "old.oga", media_kind: "voice" }, "whatsapp", "in")
+  card.listeners.click()
+  await new Promise(setImmediate)
+  assert.deepEqual(errors, ["Media non più disponibile su WhatsApp."])
+})().catch((error) => { console.error(error); process.exitCode = 1 })
 """)
 
 

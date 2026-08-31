@@ -90,6 +90,8 @@ const elements = {
   emojiTabs: document.querySelector("#emoji-tabs"),
   emojiSearch: document.querySelector("#emoji-search"),
   emojiGrid: document.querySelector("#emoji-grid"),
+  attachButton: document.querySelector("#attach-button"),
+  fileInput: document.querySelector("#file-input"),
 };
 
 function showError(message) {
@@ -618,7 +620,12 @@ function fileAttachment(attachment, protocol, direction) {
         tab.location.href = url
       } catch (error) {
         tab.close()
-        if (error.message !== "unauthorized") showError("Impossibile aprire il file.")
+        if (error.message !== "unauthorized") {
+          const message = error.status === 404
+            ? (protocol === "whatsapp" ? "Media non più disponibile su WhatsApp." : "Media non più disponibile.")
+            : "Impossibile aprire il file."
+          showError(message)
+        }
       }
     })()
   }
@@ -1523,61 +1530,77 @@ function updateComposer() {
   elements.sendSpinner.hidden = !busy;
 }
 
+function mediaKindFromMime(mime) {
+  const normalized = String(mime || "").toLowerCase().split(";", 1)[0].trim();
+  if (normalized === "image/gif") return "gif";
+  if (normalized.startsWith("image/")) return "image";
+  if (normalized.startsWith("video/")) return "video";
+  if (normalized.startsWith("audio/")) return "audio";
+  return "document";
+}
+
 function clearStagedAttachment({ revoke = true } = {}) {
-  if (state.stagedAttachment && revoke) URL.revokeObjectURL(state.stagedAttachment.previewUrl);
+  if (state.stagedAttachment?.previewUrl && revoke) URL.revokeObjectURL(state.stagedAttachment.previewUrl);
   state.stagedAttachment = null;
   elements.attachmentPreview.hidden = true;
+  elements.attachmentPreviewImage.hidden = false;
   elements.attachmentPreviewImage.removeAttribute("src");
   elements.attachmentPreviewName.textContent = "";
   updateComposer();
 }
 
 async function stageAttachment(file) {
-  if (!file || !file.type.startsWith("image/") || state.sending) return;
+  if (!file || state.sending) return;
+  const isImage = file.type.startsWith("image/");
+  const mediaKind = mediaKindFromMime(file.type);
   const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
-  if (!extensions[file.type]) {
-    showError("Formato immagine non supportato.");
-    return;
-  }
-  if (file.type === "image/jpeg" || file.type === "image/png") {
-    let bitmap;
-    try {
-      bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
-      if (Math.max(bitmap.width, bitmap.height) > 2048 || (file.type === "image/png" && file.size > 512 * 1024)) {
-        const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-        const context = canvas.getContext("2d");
-        context.fillStyle = "#fff";
-        context.fillRect(0, 0, canvas.width, canvas.height);
-        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-        const blob = await new Promise((resolve, reject) => {
-          canvas.toBlob((result) => result ? resolve(result) : reject(new Error("JPEG encoding failed")), "image/jpeg", 0.85);
-        });
-        file = new File(
-          [blob],
-          file.name.replace(/\.[a-z0-9]+$/i, ".jpg"),
-          { type: "image/jpeg" },
-        );
+  if (isImage) {
+    if (!extensions[file.type]) {
+      showError("Formato immagine non supportato.");
+      return;
+    }
+    if (file.type === "image/jpeg" || file.type === "image/png") {
+      let bitmap;
+      try {
+        bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+        if (Math.max(bitmap.width, bitmap.height) > 2048 || (file.type === "image/png" && file.size > 512 * 1024)) {
+          const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+          canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+          const context = canvas.getContext("2d");
+          context.fillStyle = "#fff";
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          const blob = await new Promise((resolve, reject) => {
+            canvas.toBlob((result) => result ? resolve(result) : reject(new Error("JPEG encoding failed")), "image/jpeg", 0.85);
+          });
+          file = new File(
+            [blob],
+            file.name.replace(/\.[a-z0-9]+$/i, ".jpg"),
+            { type: "image/jpeg" },
+          );
+        }
+      } catch {
+      } finally {
+        bitmap?.close?.();
       }
-    } catch {
-    } finally {
-      bitmap?.close?.();
     }
   }
   if (state.sending) return;
-  if (file.size > 20 * 1024 * 1024) {
-    showError("L'immagine supera il limite di 20 MiB.");
+  const maxMiB = { image: 20, gif: 20, video: 100, audio: 50, document: 50 }[mediaKind];
+  if (file.size > maxMiB * 1024 * 1024) {
+    showError(`Il file supera il limite di ${maxMiB} MiB.`);
     return;
   }
   clearStagedAttachment();
-  const extension = extensions[file.type];
-  const filename = `clipboard-${Date.now()}.${extension}`;
-  const previewUrl = URL.createObjectURL(file);
+  const filename = file.name || `clipboard-${Date.now()}`;
+  const previewUrl = isImage ? URL.createObjectURL(file) : null;
   state.stagedAttachment = { file, filename, previewUrl };
-  elements.attachmentPreviewImage.src = previewUrl;
-  elements.attachmentPreviewName.textContent = filename;
+  elements.attachmentPreviewImage.hidden = !isImage;
+  if (isImage) elements.attachmentPreviewImage.src = previewUrl;
+  const icon = { video: "🎬", voice: "🎤", audio: "🎵", document: "📎" }[mediaKind] || "📎";
+  elements.attachmentPreviewName.textContent = isImage ? filename : `${icon} ${filename}`;
   elements.attachmentPreview.hidden = false;
   updateComposer();
 }
@@ -1620,7 +1643,12 @@ async function submitMessage() {
     }
   }
   if (attachment) {
-    optimistic.attachment = { type: attachment.file.type, name: attachment.filename, attachment_id: attachment.filename };
+    optimistic.attachment = {
+      type: attachment.file.type,
+      name: attachment.filename,
+      attachment_id: attachment.filename,
+      media_kind: mediaKindFromMime(attachment.file.type),
+    };
     optimistic.localPreviewUrl = attachment.previewUrl;
   }
   console.debug("[web] optimistic", { protocol: active.protocol, optimistic_id: optimistic.optimistic_id, attachment_id: attachment?.filename, hasPreview: !!optimistic.localPreviewUrl });
@@ -1867,6 +1895,16 @@ elements.composer.addEventListener("paste", (event) => {
   if (!item) return;
   event.preventDefault();
   stageAttachment(item.getAsFile());
+});
+elements.attachButton.addEventListener("click", () => {
+  elements.fileInput.value = "";
+  elements.fileInput.click();
+});
+elements.fileInput.addEventListener("change", () => {
+  const file = elements.fileInput.files?.[0];
+  if (!file) return;
+  elements.fileInput.value = "";
+  stageAttachment(file);
 });
 elements.removeAttachment.addEventListener("click", () => clearStagedAttachment());
 elements.cancelReply.addEventListener("click", cancelReply);
