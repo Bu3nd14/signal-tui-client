@@ -29,10 +29,13 @@ from typing import Literal
 from PIL import Image
 
 from models import (
+    MEDIA_QUOTE_PLACEHOLDERS,
     PROTOCOL_SIGNAL,
     ChatContact,
     ChatEvent,
+    media_kind_from_mime,
     media_quote_placeholder,
+    msg_type_for_media_kind,
 )
 
 from .base import ChatBackend
@@ -848,28 +851,43 @@ class SignalBackend(ChatBackend):
 
         def _classify_attachments(
             attachments: list,
-        ) -> list[tuple[str, str, str | None, str | None]]:
+        ) -> list[tuple[str, str, str | None, str | None, str]]:
             """Classify every attachment in *attachments*, returning one
-            ``(msg_type, info, att_id, content_type)`` tuple for each element."""
-            result: list[tuple[str, str, str | None, str | None]] = []
+            ``(msg_type, info, att_id, content_type, media_kind)`` tuple."""
+            result: list[tuple[str, str, str | None, str | None, str]] = []
             for att in attachments:
                 content_type = att.get("contentType", "") or ""
                 ct = content_type or None
+                is_voice = bool(att.get("voiceNote"))
+                kind = (
+                    media_kind_from_mime(content_type, is_voice=is_voice) or "document"
+                )
+                msg_type = msg_type_for_media_kind(kind)
                 fname = att.get("filename", "") or ""
                 caption = att.get("caption", "") or ""
                 att_id = att.get("id") or att.get("attachmentId") or None
-                if content_type.startswith("image/"):
+                if kind in ("image", "gif"):
                     info = caption or (f"Image: {fname}" if fname else "🖼️ Image")
-                    result.append(("image", info, att_id, ct))
-                elif content_type.startswith("video/"):
-                    info = caption or (f"Video: {fname}" if fname else "🎬 Video")
-                    result.append(("attachment", info, att_id, ct))
-                elif content_type.startswith("audio/"):
-                    info = caption or (f"Audio: {fname}" if fname else "🎵 Audio")
-                    result.append(("attachment", info, att_id, ct))
+                elif kind == "video":
+                    info = caption or (
+                        f"Video: {fname}"
+                        if fname
+                        else MEDIA_QUOTE_PLACEHOLDERS["video"]
+                    )
+                elif kind in ("voice", "audio"):
+                    info = caption or (
+                        f"Audio: {fname}"
+                        if fname
+                        else MEDIA_QUOTE_PLACEHOLDERS["audio"]
+                    )
                 else:
-                    info = caption or fname or content_type or "📎 File"
-                    result.append(("attachment", info, att_id, ct))
+                    info = (
+                        caption
+                        or fname
+                        or content_type
+                        or MEDIA_QUOTE_PLACEHOLDERS["attachment"]
+                    )
+                result.append((msg_type, info, att_id, ct, kind))
             return result
 
         def _extract_sticker(sticker: dict | None) -> tuple[str, str] | None:
@@ -896,9 +914,13 @@ class SignalBackend(ChatBackend):
             classified = _classify_attachments(attachments)
             if classified:
                 msgs: list[dict] = []
-                for i, (msg_type, att_info, att_id, content_type) in enumerate(
-                    classified
-                ):
+                for i, (
+                    msg_type,
+                    att_info,
+                    att_id,
+                    content_type,
+                    media_kind,
+                ) in enumerate(classified):
                     if i == 0 and text and msg_type == "image":
                         att_info = text
                     if i == 0 and text:
@@ -925,6 +947,7 @@ class SignalBackend(ChatBackend):
                             "attachment_info": att_info,
                             "attachment_id": att_id,
                             "content_type": content_type,
+                            "media_kind": media_kind,
                             "quote_attachment_id": quote_attachment_id,
                             "quote_attachment_path": quote_attachment_path,
                             "quote_content_type": quote_content_type,
@@ -943,6 +966,7 @@ class SignalBackend(ChatBackend):
                     "attachment_info": None,
                     "attachment_id": None,
                     "content_type": None,
+                    "media_kind": None,
                     "quote_attachment_id": quote_attachment_id,
                     "quote_attachment_path": quote_attachment_path,
                     "quote_content_type": quote_content_type,
@@ -975,6 +999,7 @@ class SignalBackend(ChatBackend):
                         "msg_type": msg_type,
                         "attachment_info": att_info,
                         "content_type": None,
+                        "media_kind": "sticker",
                         "quote_attachment_id": quote_attachment_id,
                         "quote_attachment_path": quote_attachment_path,
                         "quote_content_type": quote_content_type,
@@ -1020,6 +1045,7 @@ class SignalBackend(ChatBackend):
                         "msg_type": msg_type,
                         "attachment_info": att_info,
                         "content_type": None,
+                        "media_kind": "sticker",
                         "quote_attachment_id": quote_attachment_id,
                         "quote_attachment_path": quote_attachment_path,
                         "quote_content_type": quote_content_type,
@@ -1388,6 +1414,7 @@ class SignalBackend(ChatBackend):
             attachment_info=data["attachment_info"],
             attachment_id=data.get("attachment_id"),
             content_type=data.get("content_type"),
+            media_kind=data.get("media_kind"),
             status=data.get("status"),
             protocol=data.get("protocol", PROTOCOL_SIGNAL),
             msg_id=data.get("id"),

@@ -763,6 +763,8 @@ class TestWhatsAppEvents:
         assert ev.payload["msg_type"] == "image"
         assert ev.payload["attachment_id"] == "https://wa.to/img/abc123.jpg"
         assert ev.payload["attachment_info"] == "Guarda!"  # caption
+        assert ev.payload["media_kind"] == "image"
+        assert ev.payload["content_type"] == "image/jpeg"
 
     def test_hasMedia_caption_in_body(self):
         """WAHA reale: la caption dei media arriva nel campo `body` (non `caption`)."""
@@ -826,6 +828,8 @@ class TestWhatsAppEvents:
         assert ev.payload["msg_type"] == "attachment"
         assert ev.payload["attachment_id"] == "https://wa.to/vid/vid.mp4"
         assert ev.payload["attachment_info"] == "video/mp4"
+        assert ev.payload["media_kind"] == "video"
+        assert ev.payload["content_type"] == "video/mp4"
 
     def test_hasMedia_audio(self):
         """WAHA audio message via hasMedia/media fields."""
@@ -844,6 +848,91 @@ class TestWhatsAppEvents:
         )
         assert ev is not None
         assert ev.payload["msg_type"] == "attachment"
+        assert ev.payload["media_kind"] == "audio"
+        assert ev.payload["content_type"] == "audio/ogg"
+
+    def test_attachments_without_mime_fall_back_to_document(self):
+        ev = _msg(
+            {
+                "id": "legacy-document",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "attachments": [{"id": "media-1"}],
+            }
+        )
+
+        assert ev.payload["msg_type"] == "attachment"
+        assert ev.payload["media_kind"] == "document"
+
+    def test_hasMedia_without_mime_falls_back_to_document(self):
+        ev = _msg(
+            {
+                "id": "flat-document",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "hasMedia": True,
+                "media": {"url": "https://wa.to/media/blob"},
+            }
+        )
+
+        assert ev.payload["msg_type"] == "attachment"
+        assert ev.payload["media_kind"] == "document"
+
+    def test_ack_media_without_mime_falls_back_to_document(self):
+        backend = _make_backend()
+        handled = backend.handle_webhook(
+            {
+                "event": "message.ack",
+                "payload": {
+                    "fromMe": True,
+                    "id": "outgoing-document",
+                    "to": "3912345678@c.us",
+                    "timestamp": 1700000000,
+                    "hasMedia": True,
+                    "media": {"url": "https://wa.to/media/blob"},
+                },
+            }
+        )
+
+        events = backend.poll_once()
+        assert handled is True
+        assert len(events) == 1
+        assert events[0].payload["msg_type"] == "attachment"
+        assert events[0].payload["media_kind"] == "document"
+
+    @pytest.mark.parametrize(
+        ("media_key", "media", "expected_kind", "expected_type"),
+        [
+            (
+                "audioMessage",
+                {"mimetype": "audio/ogg", "ptt": True},
+                "voice",
+                "attachment",
+            ),
+            (
+                "videoMessage",
+                {"mimetype": "video/mp4", "gifPlayback": True},
+                "gif",
+                "image",
+            ),
+            ("documentMessage", {"mimetype": "image/png"}, "document", "attachment"),
+        ],
+    )
+    def test_nested_media_kind_protocol_hints(
+        self, media_key, media, expected_kind, expected_type
+    ):
+        ev = _msg(
+            {
+                "id": "nested-media",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "message": {media_key: media},
+            }
+        )
+
+        assert ev.payload["media_kind"] == expected_kind
+        assert ev.payload["msg_type"] == expected_type
+        assert ev.payload["content_type"] == media["mimetype"]
 
     def test_media_synthetic_text_uses_url_then_parent_part_identity(self):
         events = _event_from_message(

@@ -30,7 +30,9 @@ from models import (
     PROTOCOL_TELEGRAM,
     ChatContact,
     ChatEvent,
+    media_kind_from_mime,
     media_quote_placeholder,
+    msg_type_for_media_kind,
 )
 
 from .base import ChatBackend, should_upgrade_outgoing_attachment
@@ -60,6 +62,63 @@ _AVAILABLE_REACTIONS_TTL_S = 600
 
 # Prefix for lazy-download media references (``tgref:<chat_id>:<msg_id>``).
 _TGREF_PREFIX = "tgref:"
+
+
+def _tg_media_kind(msg: Any) -> tuple[str | None, str | None, str | None]:
+    """Return ``(media_kind, filename, mime)`` for a Telethon message."""
+    if getattr(msg, "photo", None):
+        return "image", None, "image/jpeg"
+    document = getattr(msg, "document", None)
+    if document is None:
+        return None, None, None
+
+    mime = (getattr(document, "mime_type", "") or "").lower()
+    filename = None
+    sticker = animated = video = voice = audio = False
+    for attr in getattr(document, "attributes", None) or []:
+        name = type(attr).__name__
+        if name == "DocumentAttributeFilename":
+            filename = getattr(attr, "file_name", None) or filename
+        elif name == "DocumentAttributeSticker":
+            sticker = True
+        elif name == "DocumentAttributeAnimated":
+            animated = True
+        elif name == "DocumentAttributeVideo":
+            video = True
+        elif name == "DocumentAttributeVoice":
+            voice = True
+        elif name == "DocumentAttributeAudio":
+            if getattr(attr, "voice", False):
+                voice = True
+            else:
+                audio = True
+
+    if sticker:
+        return "sticker", filename, mime
+    if animated:
+        return "gif", filename, mime
+    if voice:
+        return "voice", filename, mime
+    if video:
+        return "video", filename, mime
+    if audio or mime.startswith("audio/"):
+        return "audio", filename, mime
+    return media_kind_from_mime(mime) or "document", filename, mime
+
+
+def _tg_label_for(kind: str, filename: str | None) -> str:
+    """Return Telegram's canonical attachment label for a media kind."""
+    if filename:
+        return f"📎 {filename}"
+    return {
+        "image": "Photo",
+        "gif": "📎 Document",
+        "video": "🎬 Video",
+        "voice": "🎤 Voice",
+        "audio": "🎵 Audio",
+        "document": "📎 Document",
+        "sticker": "🎨 Sticker",
+    }[kind]
 
 
 #: Maps Telegram's fine-grained attachment labels (set by
@@ -1292,31 +1351,14 @@ class TelegramBackend(ChatBackend):
         msg_type = "text"
         att_id = attachment_id  # use downloaded path if available
         attachment_info: str | None = None
-
-        if msg.photo:
-            msg_type = "image"
-            attachment_info = text or "Photo"
-            text = ""
-        elif msg.document:
-            msg_type = "attachment"
-            attachment_info = "📎 Document"
-            for attr in getattr(msg.document, "attributes", []):
-                name = getattr(attr, "file_name", None)
-                if name:
-                    attachment_info = f"📎 {name}"
-                    break
-        elif msg.sticker:
-            msg_type = "sticker"
-            attachment_info = "🎨 Sticker"
-        elif msg.video:
-            msg_type = "attachment"
-            attachment_info = "🎬 Video"
-        elif msg.voice:
-            msg_type = "attachment"
-            attachment_info = "🎤 Voice"
-        elif msg.audio:
-            msg_type = "attachment"
-            attachment_info = "🎵 Audio"
+        kind, filename, mime = _tg_media_kind(msg)
+        content_type: str | None = None
+        if kind:
+            msg_type = msg_type_for_media_kind(kind)
+            attachment_info = text or _tg_label_for(kind, filename)
+            if kind in ("image", "sticker"):
+                text = ""
+            content_type = mime or None
 
         # Lazy-download fallback: photos and documents without a downloaded
         # path (history fetch, failed live download) get a ``tgref:`` reference.
@@ -1363,6 +1405,8 @@ class TelegramBackend(ChatBackend):
             "msg_type": msg_type,
             "attachment_info": attachment_info,
             "attachment_id": att_id,
+            "media_kind": kind,
+            "content_type": content_type,
             "protocol": PROTOCOL_TELEGRAM,
             "contact": self._identify_contact(chat_id),
         }
@@ -1727,6 +1771,7 @@ class TelegramBackend(ChatBackend):
             attachment_info=data.get("attachment_info"),
             attachment_id=data.get("attachment_id"),
             content_type=data.get("content_type"),
+            media_kind=data.get("media_kind"),
             protocol=PROTOCOL_TELEGRAM,
             msg_id=data.get("id"),
             status=data.get("status"),

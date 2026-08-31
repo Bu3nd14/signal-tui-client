@@ -29,6 +29,8 @@ from models import (
     PROTOCOL_WHATSAPP,
     ChatContact,
     ChatEvent,
+    media_kind_from_mime,
+    msg_type_for_media_kind,
 )
 
 from .base import ChatBackend, should_upgrade_outgoing_attachment
@@ -309,15 +311,13 @@ class WhatsAppBackend(ChatBackend):
                         ack_msg_type = "text"
                         ack_attachment_id = None
                         ack_attachment_info = None
+                        ack_content_type = None
+                        ack_media_kind = None
                         if ack_has_media and isinstance(ack_media, dict):
                             mime = (ack_media.get("mimetype") or "").lower()
-                            if mime.startswith("image/"):
-                                ack_msg_type = "image"
-                            elif any(
-                                mime.startswith(p)
-                                for p in ("video/", "audio/", "application/")
-                            ):
-                                ack_msg_type = "attachment"
+                            ack_content_type = mime or None
+                            ack_media_kind = media_kind_from_mime(mime) or "document"
+                            ack_msg_type = msg_type_for_media_kind(ack_media_kind)
                             ack_attachment_id = ack_media.get("url")
                             ack_attachment_info = (
                                 content.get("caption")
@@ -358,6 +358,8 @@ class WhatsAppBackend(ChatBackend):
                                     "msg_type": ack_msg_type,
                                     "attachment_id": ack_attachment_id,
                                     "attachment_info": ack_attachment_info,
+                                    "content_type": ack_content_type,
+                                    "media_kind": ack_media_kind,
                                 },
                             )
 
@@ -1381,6 +1383,9 @@ class WhatsAppBackend(ChatBackend):
         mime_type: str | None = None,
     ) -> None:
         is_attachment = attachment_path is not None
+        media_kind = (
+            media_kind_from_mime(mime_type) or "document" if is_attachment else None
+        )
         msg_type = (
             "image"
             if is_attachment and (mime_type or "").startswith("image/")
@@ -1413,6 +1418,7 @@ class WhatsAppBackend(ChatBackend):
                     "attachment_info": text or None if is_attachment else None,
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
+                    "media_kind": media_kind,
                 },
             )
         )
@@ -1817,6 +1823,8 @@ class WhatsAppBackend(ChatBackend):
             msg_type=data.get("msg_type", "text"),
             attachment_info=data.get("attachment_info"),
             attachment_id=data.get("attachment_id"),
+            content_type=data.get("content_type"),
+            media_kind=data.get("media_kind"),
             protocol=PROTOCOL_WHATSAPP,
             msg_id=data.get("id"),
             status=data.get("status"),
@@ -1848,6 +1856,7 @@ class WhatsAppBackend(ChatBackend):
         if not current_id:
             message["attachment_id"] = incoming_id
             message["msg_type"] = data.get("msg_type", message.get("msg_type", "text"))
+            message["media_kind"] = data.get("media_kind")
             _update_message_media_identity(
                 PROTOCOL_WHATSAPP,
                 contact_id,
@@ -1855,6 +1864,7 @@ class WhatsAppBackend(ChatBackend):
                 int(message.get("timestamp", ts)),
                 incoming_id,
                 message["msg_type"],
+                message["media_kind"],
             )
             return True
         media_dir = self._ensure_media_dir()

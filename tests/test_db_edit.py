@@ -317,14 +317,14 @@ class TestEditedColumnMigration:
     """🛠️ Migrazione v2→v3: colonna ``edited`` aggiunta in modo idempotente."""
 
     def test_v2_to_v3_adds_edited_column(self, tmp_db):
-        """DB legacy (v2) senza colonna → ``edited`` aggiunta, user_version=3."""
+        """DB legacy (v2) senza colonna → ``edited`` aggiunta, user_version=4."""
         _make_v2_db(tmp_db)
         assert _user_version(tmp_db) == 2
         assert "edited" not in _table_columns(tmp_db)
 
         backend_mod._init_db()
 
-        assert _user_version(tmp_db) == 3
+        assert _user_version(tmp_db) == 4
         assert "edited" in _table_columns(tmp_db)
 
     def test_v2_existing_rows_get_edited_zero(self, tmp_db):
@@ -342,7 +342,7 @@ class TestEditedColumnMigration:
 
         cols = _table_columns(tmp_db)
         assert cols.count("edited") == 1
-        assert _user_version(tmp_db) == 3
+        assert _user_version(tmp_db) == 4
         assert _db_rows(tmp_db) == [("ciao", 0, "signal", "+391234567890", None, 1000)]
 
     def test_v3_db_missing_edited_column_still_gets_column(self, tmp_db):

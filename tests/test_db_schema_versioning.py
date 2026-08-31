@@ -7,7 +7,7 @@ write (index churn on the UI thread).  The fix gates the migration behind
 ``PRAGMA user_version`` so the DROP/CREATE runs exactly once per database.
 
 These tests verify:
-  T1a: a legacy DB is migrated to ``user_version == 1`` and the SECOND
+  T1a: a legacy DB is migrated to ``user_version == 4`` and the SECOND
        ``_init_db()`` call does NOT run DROP/CREATE INDEX.
   T1b: after init the index is ``(protocol, contact_number, timestamp)`` and
        the ``messages`` table carries ``protocol`` and ``msg_id``.
@@ -127,16 +127,17 @@ class TestSchemaVersioning:
     """🧱 T1a-d — versioning dello schema via ``PRAGMA user_version``."""
 
     def test_init_db_migrates_legacy_and_sets_user_version(self, tmp_db):
-        """(a) ``_init_db()`` su DB legacy imposta ``user_version == 1``."""
+        """(a) ``_init_db()`` su DB legacy imposta ``user_version == 4``."""
         _make_legacy_db(tmp_db)
         assert _user_version(tmp_db) == 0  # legacy DB is unversioned
 
         backend_mod._init_db()
 
-        assert _user_version(tmp_db) == 3
+        assert _user_version(tmp_db) == 4
         assert "protocol" in _table_columns(tmp_db)
         assert "msg_id" in _table_columns(tmp_db)
         assert "reply_to_message_id" in _table_columns(tmp_db)
+        assert "media_kind" in _table_columns(tmp_db)
 
     def test_second_init_does_not_churn_index(self, tmp_db):
         """(a) la SECONDA ``_init_db()`` NON esegue DROP/CREATE INDEX."""
@@ -168,9 +169,10 @@ class TestSchemaVersioning:
         cols = _table_columns(tmp_db)
         assert "protocol" in cols
         assert "msg_id" in cols
+        assert "media_kind" in cols
 
     def test_migrate_on_versioned_connection_is_noop(self, tmp_db):
-        """(c) ``_migrate_protocol_schema`` con ``user_version=1`` non tocca schema."""
+        """(c) Una migrazione già a v4 non modifica nuovamente lo schema."""
         backend_mod._init_db()  # fresh, already versioned
 
         conn = sqlite3.connect(tmp_db)
@@ -194,6 +196,31 @@ class TestSchemaVersioning:
             or "ALTER TABLE" in s.upper()
         ]
         assert churn == [], f"schema mutation on versioned connection: {churn}"
+
+    def test_v4_connection_still_ensures_media_kind_column(self, tmp_db):
+        conn = sqlite3.connect(tmp_db)
+        conn.execute(
+            """
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                edited INTEGER NOT NULL DEFAULT 0,
+                content_type TEXT,
+                quote_attachment_id TEXT,
+                quote_content_type TEXT,
+                quote_attachment_path TEXT
+            )
+            """
+        )
+        conn.execute("PRAGMA user_version = 4")
+        statements: list[str] = []
+
+        db_mod._migrate_protocol_schema(_SpyConnection(conn, statements))
+
+        assert "media_kind" in {
+            row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        assert any("ADD COLUMN media_kind TEXT" in sql for sql in statements)
+        conn.close()
 
     def test_init_db_fast_on_populated_migrated_db(self, tmp_db):
         """(d) su DB popolato già migrato ``_init_db()`` resta veloce (<5ms mediana)."""

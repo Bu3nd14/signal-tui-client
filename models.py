@@ -56,6 +56,40 @@ def contact_cache_key(protocol: str, contact_id: str) -> str:
     return f"{protocol}:{contact_id}"
 
 
+# ─── Media kinds ──────────────────────────────────────────────────────────────
+
+MEDIA_KIND_VALUES = frozenset(
+    {"image", "gif", "video", "voice", "audio", "document", "sticker"}
+)
+
+
+def media_kind_from_mime(
+    mime: str | None, *, is_gif: bool = False, is_voice: bool = False
+) -> str | None:
+    """Map a mime type and protocol hints to a normalized media kind."""
+    normalized = (mime or "").lower().split(";", 1)[0].strip()
+    if not normalized:
+        return None
+    if normalized == "image/gif" or is_gif:
+        return "gif"
+    if normalized.startswith("image/"):
+        return "image"
+    if normalized.startswith("video/"):
+        return "video"
+    if normalized.startswith("audio/"):
+        return "voice" if is_voice else "audio"
+    return "document"
+
+
+def msg_type_for_media_kind(kind: str) -> str:
+    """Return the backwards-compatible message type for a media kind."""
+    if kind in ("image", "gif"):
+        return "image"
+    if kind == "sticker":
+        return "sticker"
+    return "attachment"
+
+
 # ─── Media quote placeholders ────────────────────────────────────────────────
 
 #: Canonical typed placeholders for a quoted media message (bug #37).  When a
@@ -247,6 +281,7 @@ class ChatMessage:
     quote_attachment_id: str | None = None
     quote_attachment_path: str | None = None
     quote_content_type: str | None = None
+    media_kind: str | None = None
 
 
 @dataclass
