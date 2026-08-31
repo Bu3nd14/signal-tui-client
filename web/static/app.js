@@ -1555,37 +1555,42 @@ async function stageAttachment(file) {
   const isImage = file.type.startsWith("image/");
   const mediaKind = mediaKindFromMime(file.type);
   const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
+  let previewBlob = null;
   if (isImage) {
     if (!extensions[file.type]) {
       showError("Formato immagine non supportato.");
       return;
     }
-    if (file.type === "image/jpeg" || file.type === "image/png") {
-      let bitmap;
-      try {
-        bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
-        if (Math.max(bitmap.width, bitmap.height) > 2048 || (file.type === "image/png" && file.size > 512 * 1024)) {
-          const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
-          const canvas = document.createElement("canvas");
-          canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-          canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-          const context = canvas.getContext("2d");
-          context.fillStyle = "#fff";
-          context.fillRect(0, 0, canvas.width, canvas.height);
-          context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-          const blob = await new Promise((resolve, reject) => {
-            canvas.toBlob((result) => result ? resolve(result) : reject(new Error("JPEG encoding failed")), "image/jpeg", 0.85);
-          });
-          file = new File(
-            [blob],
-            file.name.replace(/\.[a-z0-9]+$/i, ".jpg"),
-            { type: "image/jpeg" },
-          );
-        }
-      } catch {
-      } finally {
-        bitmap?.close?.();
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+      const longestSide = Math.max(bitmap.width, bitmap.height);
+      const scale = Math.min(1, 2048 / longestSide);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      previewBlob = await new Promise((resolve, reject) => {
+        canvas.toBlob((result) => result ? resolve(result) : reject(new Error("JPEG encoding failed")), "image/jpeg", 0.85);
+      });
+      if (
+        (file.type === "image/jpeg" || file.type === "image/png")
+        && (longestSide > 2048 || (file.type === "image/png" && file.size > 512 * 1024))
+      ) {
+        file = new File(
+          [previewBlob],
+          file.name.replace(/\.[a-z0-9]+$/i, ".jpg"),
+          { type: "image/jpeg" },
+        );
       }
+    } catch {
+      showError("Impossibile elaborare l'immagine.");
+      return;
+    } finally {
+      bitmap?.close?.();
     }
   }
   if (state.sending) return;
@@ -1596,7 +1601,7 @@ async function stageAttachment(file) {
   }
   clearStagedAttachment();
   const filename = file.name || `clipboard-${Date.now()}`;
-  const previewUrl = isImage ? URL.createObjectURL(file) : null;
+  const previewUrl = isImage && previewBlob ? URL.createObjectURL(previewBlob) : null;
   state.stagedAttachment = { file, filename, previewUrl };
   elements.attachmentPreview.classList?.toggle("attachment-preview-file", !isImage);
   elements.attachmentPreviewImage.hidden = !isImage;
