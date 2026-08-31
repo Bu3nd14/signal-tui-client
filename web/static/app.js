@@ -98,6 +98,7 @@ function showError(message) {
 
 function scrollThreadToBottom() {
   elements.messages.scrollTop = elements.messages.scrollHeight;
+  state.userScrolledUp = false;
 }
 
 function requestToken(invalid = false) {
@@ -721,7 +722,8 @@ function appendRenderedQuote(bubble, item) {
 function renderMessages(messages, protocol) {
   pruneOrphanObjectUrls();
   const prevScrollTop = elements.messages.scrollTop;
-  const wasAtBottom = !state.userScrolledUp;
+  const geometricallyAtBottom = (elements.messages.scrollHeight - prevScrollTop - elements.messages.clientHeight) <= 80;
+  const wasAtBottom = !state.userScrolledUp || geometricallyAtBottom;
   elements.messages.replaceChildren();
   state.messageNodes ??= new Map();
   state.messageNodes.clear();
@@ -1434,8 +1436,14 @@ async function toggleEmojiPicker() {
 }
 
 function resizeComposer() {
+  const wasAtBottom = !state.userScrolledUp;
   elements.messageInput.style.height = "auto";
   elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, 160)}px`;
+  if (wasAtBottom) {
+    requestAnimationFrame(() => {
+      if (!state.userScrolledUp) scrollThreadToBottom();
+    });
+  }
 }
 
 function updateComposer() {

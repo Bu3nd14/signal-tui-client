@@ -280,7 +280,9 @@ const app = fs.readFileSync("./web/static/app.js", "utf8");
 const start = app.indexOf("function renderMessages(");
 const end = app.indexOf("\nfunction copyReactions", start);
 let bottomCalls = 0;
-globalThis.state = { optimistic: [], active: { protocol: "telegram", id: "42" }, userScrolledUp: true };
+globalThis.state = {
+  optimistic: [], active: { protocol: "telegram", id: "42" }, userScrolledUp: true,
+};
 globalThis.window = { SignalTuiReconcile: {
   reconcileOptimisticMessages: () => ({ optimistic: [], visible: [] }),
   messageDisplayText: (item) => item.text || "",
@@ -302,10 +304,151 @@ globalThis.document = { createElement: node };
 globalThis.elements = { messages: node() };
 elements.messages.scrollTop = 240;
 elements.messages.scrollHeight = 1200;
+elements.messages.clientHeight = 600;
 vm.runInThisContext(app.slice(start, end));
 renderMessages([], "telegram");
 assert.equal(bottomCalls, 0);
 assert.equal(elements.messages.scrollTop, 240);
+""")
+
+
+def test_render_messages_scrolls_to_bottom_when_user_is_at_bottom():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const start = app.indexOf("function renderMessages(");
+const end = app.indexOf("\nfunction copyReactions", start);
+let bottomCalls = 0;
+globalThis.state = {
+  optimistic: [], active: { protocol: "telegram", id: "42" }, userScrolledUp: false,
+};
+globalThis.window = { SignalTuiReconcile: {
+  reconcileOptimisticMessages: () => ({ optimistic: [], visible: [] }),
+  messageDisplayText: (item) => item.text || "",
+} };
+globalThis.pruneOrphanObjectUrls = () => {};
+globalThis.timestampMilliseconds = Number;
+globalThis.formatTimestamp = () => "10:00";
+globalThis.appendRenderedQuote = () => {};
+globalThis.startReply = () => {};
+function node() {
+  return {
+    className: "", textContent: "", children: [], parentNode: null,
+    append(...children) { for (const child of children) { child.parentNode = this; this.children.push(child); } },
+    replaceChildren() { this.children = []; }, setAttribute() {}, addEventListener() {},
+  };
+}
+globalThis.document = { createElement: node };
+globalThis.elements = { messages: node() };
+globalThis.scrollThreadToBottom = () => {
+  bottomCalls += 1;
+  elements.messages.scrollTop = elements.messages.scrollHeight;
+};
+vm.runInThisContext(app.slice(start, end));
+
+elements.messages.scrollHeight = 1200;
+elements.messages.scrollTop = 600;
+elements.messages.clientHeight = 600;
+renderMessages([], "telegram");
+assert.equal(bottomCalls, 1);
+assert.equal(elements.messages.scrollTop, 1200);
+""")
+
+
+def test_render_messages_scrolls_to_bottom_after_composer_layout_change():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const start = app.indexOf("function renderMessages(");
+const end = app.indexOf("\nfunction copyReactions", start);
+let bottomCalls = 0;
+globalThis.state = {
+  optimistic: [], active: { protocol: "telegram", id: "42" }, userScrolledUp: false,
+};
+globalThis.window = { SignalTuiReconcile: {
+  reconcileOptimisticMessages: () => ({ optimistic: [], visible: [] }),
+  messageDisplayText: (item) => item.text || "",
+} };
+globalThis.pruneOrphanObjectUrls = () => {};
+globalThis.timestampMilliseconds = Number;
+globalThis.formatTimestamp = () => "10:00";
+globalThis.appendRenderedQuote = () => {};
+globalThis.startReply = () => {};
+function node() {
+  return {
+    className: "", textContent: "", children: [], parentNode: null,
+    append(...children) { for (const child of children) { child.parentNode = this; this.children.push(child); } },
+    replaceChildren() { this.children = []; }, setAttribute() {}, addEventListener() {},
+  };
+}
+globalThis.document = { createElement: node };
+globalThis.elements = { messages: node() };
+globalThis.scrollThreadToBottom = () => {
+  bottomCalls += 1;
+  elements.messages.scrollTop = elements.messages.scrollHeight;
+};
+elements.messages.scrollHeight = 1500;
+elements.messages.scrollTop = 1050;
+elements.messages.clientHeight = 340;
+vm.runInThisContext(app.slice(start, end));
+renderMessages([], "telegram");
+assert.equal(bottomCalls, 1);
+assert.equal(elements.messages.scrollTop, 1500);
+""")
+
+
+def test_render_messages_bottom_threshold_is_inclusive():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const start = app.indexOf("function renderMessages(");
+const end = app.indexOf("\nfunction copyReactions", start);
+let bottomCalls = 0;
+globalThis.state = {
+  optimistic: [], active: { protocol: "telegram", id: "42" }, userScrolledUp: true,
+};
+globalThis.window = { SignalTuiReconcile: {
+  reconcileOptimisticMessages: () => ({ optimistic: [], visible: [] }),
+  messageDisplayText: (item) => item.text || "",
+} };
+globalThis.pruneOrphanObjectUrls = () => {};
+globalThis.timestampMilliseconds = Number;
+globalThis.formatTimestamp = () => "10:00";
+globalThis.appendRenderedQuote = () => {};
+globalThis.startReply = () => {};
+function node() {
+  return {
+    className: "", textContent: "", children: [], parentNode: null,
+    append(...children) { for (const child of children) { child.parentNode = this; this.children.push(child); } },
+    replaceChildren() { this.children = []; }, setAttribute() {}, addEventListener() {},
+  };
+}
+globalThis.document = { createElement: node };
+globalThis.elements = { messages: node() };
+globalThis.scrollThreadToBottom = () => {
+  bottomCalls += 1;
+  elements.messages.scrollTop = elements.messages.scrollHeight;
+};
+vm.runInThisContext(app.slice(start, end));
+
+elements.messages.scrollHeight = 1200;
+elements.messages.clientHeight = 600;
+elements.messages.scrollTop = 520;
+renderMessages([], "telegram");
+assert.equal(bottomCalls, 1);
+assert.equal(elements.messages.scrollTop, 1200);
+
+bottomCalls = 0;
+elements.messages.scrollTop = 519;
+renderMessages([], "telegram");
+assert.equal(bottomCalls, 0);
+assert.equal(elements.messages.scrollTop, 519);
 """)
 
 
