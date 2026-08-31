@@ -600,7 +600,14 @@ function fileAttachment(attachment, protocol, direction) {
     const tab = window.open("", "_blank")
     if (!tab) return
     tab.document.title = "Caricamento allegato…"
-    tab.document.body.textContent = "Caricamento…"
+    tab.document.write(`<!doctype html>
+<html lang="it"><head><meta charset="utf-8"><title>Caricamento allegato…</title></head>
+<body style="margin:0;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:#000;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+  <div style="width:44px;height:44px;border:4px solid #333;border-top-color:#4f8cff;border-radius:50%;animation:spin 0.9s linear infinite"></div>
+  <div style="font-size:15px;letter-spacing:.5px">Loading...</div>
+  <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+</body></html>`)
+    tab.document.close()
     void (async () => {
       try {
         const response = await apiFetch(mediaPath)

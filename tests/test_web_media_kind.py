@@ -76,7 +76,13 @@ globalThis.window = { open: (path, target) => {
   events.push(["open", path, target])
   const tab = {
     closed: false,
-    document: { title: "", body: { textContent: "" } },
+    writtenHtml: "",
+    document: {
+      title: "",
+      body: { textContent: "" },
+      write(html) { this.title = "Caricamento allegato…"; tab.writtenHtml = html; },
+      close() {},
+    },
     location: { href: "" },
     close() { this.closed = true },
   }
@@ -119,7 +125,9 @@ for (const [kind, expected] of Object.entries(icons)) {
       ["fetch", "/api/media/telegram/folder/video%20report.bin"],
     ])
     assert.equal(tabs[0].document.title, "Caricamento allegato…")
-    assert.equal(tabs[0].document.body.textContent, "Caricamento…")
+    assert.match(tabs[0].writtenHtml, /Loading\.\.\./)
+    assert.match(tabs[0].writtenHtml, /@keyframes spin/)
+    assert.match(tabs[0].writtenHtml, /background:#000/)
     assert.equal(tabs[0].location.href, "")
     await Promise.resolve()
     resolveBlob({ media: true })
