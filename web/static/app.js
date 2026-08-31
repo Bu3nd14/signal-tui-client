@@ -1708,6 +1708,11 @@ elements.messageInput.addEventListener("keydown", (event) => {
     cancelEdit();
     return;
   }
+  if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "x") {
+    event.preventDefault();
+    toggleEmojiPicker();
+    return;
+  }
   if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
   if (!state.sending && !state.editSending) {
@@ -1738,6 +1743,11 @@ elements.emojiGrid.addEventListener("keydown", (event) => {
   }
 });
 elements.emojiPicker.addEventListener("keydown", (event) => {
+  if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "x") {
+    event.preventDefault();
+    toggleEmojiPicker();
+    return;
+  }
   const searchShortcut = event.key === "/" && event.target !== elements.emojiSearch;
   const findShortcut = event.ctrlKey && event.key.toLocaleLowerCase() === "f";
   if (searchShortcut || findShortcut) {
@@ -1755,11 +1765,27 @@ document.addEventListener("keydown", (event) => {
     closeEmojiPicker();
   }
 });
-document.addEventListener("click", (event) => {
-  if (state.reactionPicker && !state.reactionPicker.picker.contains(event.target)) {
-    closeReactionPicker();
-  }
-});
+document.addEventListener(
+  "pointerdown",
+  (event) => {
+    if (!state.reactionPicker && elements.emojiPicker.hidden) return;
+    const target = event.target;
+    // Picker reazioni: chiude se il click è fuori dal picker e dal bottone
+    if (state.reactionPicker) {
+      const { anchor, picker } = state.reactionPicker;
+      if (!picker.contains(target) && anchor !== target && !anchor.contains(target)) {
+        closeReactionPicker();
+      }
+    }
+    // Emoji picker dell'editor: chiude se il click è fuori dal picker e dal toggle
+    if (!elements.emojiPicker.hidden) {
+      if (!elements.emojiPicker.contains(target) && elements.emojiToggle !== target && !elements.emojiToggle.contains(target)) {
+        closeEmojiPicker({ focus: false });
+      }
+    }
+  },
+  true
+);
 elements.composer.addEventListener("paste", (event) => {
   const item = [...(event.clipboardData?.items || [])]
     .find((candidate) => candidate.type.startsWith("image/"));
