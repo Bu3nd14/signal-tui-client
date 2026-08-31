@@ -15,6 +15,7 @@ from backends.config import thumbnail_max_cols, thumbnail_max_lines
 from models import (
     PROTOCOL_SIGNAL,
     is_media_quote_placeholder,
+    media_kind_from_mime,
 )
 from tui.images.detect import ImageSupport
 from ui_components import (
@@ -35,10 +36,53 @@ def _status_rank(status: str | None) -> int:
     return _STATUS_RANK.get(status, 0)
 
 
-def _media_display_text(text: str, attachment_info: str | None, msg_type: str) -> str:
-    """Return the user-facing label for non-image media."""
+_KIND_ICON = {
+    "video": "🎬",
+    "voice": "🎤",
+    "audio": "🎵",
+    "document": "📎",
+    "sticker": "🎨",
+    "gif": "🎞️",
+}
+_KIND_FALLBACK = {
+    "video": "[Video]",
+    "voice": "[Voice]",
+    "audio": "[Audio]",
+    "document": "[File]",
+    "sticker": "[Sticker]",
+    "gif": "[GIF]",
+}
+_OPENABLE_MEDIA_KINDS = frozenset({"video", "voice", "audio", "document"})
+
+
+def _effective_media_kind(msg) -> str | None:
+    """Return normalized media kind, deriving it for legacy cache rows."""
+    kind = msg.get("media_kind")
+    if kind:
+        return kind
+    msg_type, content_type = msg.get("msg_type"), msg.get("content_type")
     if msg_type == "sticker":
+        return "sticker"
+    if msg_type == "image":
+        return media_kind_from_mime(content_type) or "image"
+    if msg_type == "attachment":
+        return media_kind_from_mime(content_type) or None
+    return None
+
+
+def _media_display_text(
+    text: str,
+    attachment_info: str | None,
+    msg_type: str,
+    media_kind: str | None = None,
+) -> str:
+    """Return the user-facing label for non-image media."""
+    if media_kind == "sticker":
         return f"🎨 {attachment_info or '[Sticker]'}"
+    if media_kind in _KIND_ICON:
+        return (
+            f"{_KIND_ICON[media_kind]} {attachment_info or _KIND_FALLBACK[media_kind]}"
+        )
     if msg_type == "attachment":
         return f"📎 {attachment_info or '[File]'}"
     return text
@@ -179,6 +223,7 @@ class ChatViewMixin:
         quote_attachment_path: Path | None = None,
         quote_content_type: str | None = None,
         quote_timestamp: int | None = None,
+        media_kind: str | None = None,
     ):
         """Add a message to the chat with correct alignment.
 
@@ -203,6 +248,14 @@ class ChatViewMixin:
 
         if protocol is None and self.selected_contact is not None:
             protocol = self.selected_contact.protocol
+
+        kind = _effective_media_kind(
+            {
+                "media_kind": media_kind,
+                "msg_type": msg_type,
+                "content_type": content_type,
+            }
+        )
 
         # Render-level de-dup: never mount the same real message twice in the
         # current view, regardless of _seen_timestamps state.  Info messages
@@ -248,7 +301,7 @@ class ChatViewMixin:
             self._maybe_resolve_quote_thumbnail(quote_widget)
 
         # ── Image messages: render inline via async worker ──────────────
-        if msg_type == "image":
+        if msg_type == "image" or kind == "gif":
             caption = _image_caption(text, attachment_info, attachment_id, protocol)
             info_for_placeholder = attachment_info or text
             if caption and (info_for_placeholder or "").strip() == caption:
@@ -264,6 +317,7 @@ class ChatViewMixin:
                 message_id=message_id,
                 caption=caption,
                 content_type=content_type,
+                media_kind=kind,
             )
             if caption:
                 is_group = bool(
@@ -283,8 +337,23 @@ class ChatViewMixin:
                 chat_log.scroll_end(animate=False)
             return
 
+        if kind == "sticker" and attachment_id:
+            self._render_image_in_chat(
+                attachment_id=attachment_id,
+                attachment_info=attachment_info or "Sticker",
+                is_mine=is_mine,
+                chat_log=chat_log,
+                protocol=protocol,
+                timestamp=timestamp,
+                sender=sender,
+                message_id=message_id,
+                content_type=content_type,
+                media_kind="sticker",
+            )
+            return
+
         # ── Non-image messages ──────────────────────────────────────────
-        display_text = _media_display_text(text, attachment_info, msg_type)
+        display_text = _media_display_text(text, attachment_info, msg_type, kind)
 
         if is_info:
             if self.selected_contact is not None:
@@ -317,6 +386,9 @@ class ChatViewMixin:
                 sender_color=sender_color,
                 message_id=message_id,
                 edited=edited,
+                attachment_ref=(attachment_id, protocol or PROTOCOL_SIGNAL)
+                if kind in _OPENABLE_MEDIA_KINDS and attachment_id
+                else None,
             )
 
         chat_log.mount(widget)
@@ -334,6 +406,7 @@ class ChatViewMixin:
         is_group: bool = False,
         message_id: str | None = None,
         edited: bool = False,
+        attachment_ref: tuple[str, str] | None = None,
     ) -> Static:
         """Build a message widget without mounting it.
 
@@ -360,6 +433,7 @@ class ChatViewMixin:
             sender_color=sender_color,
             message_id=message_id,
             edited=edited,
+            attachment_ref=attachment_ref,
         )
 
     def _native_placeholder(self, text: str, *, attachment_id: str | None) -> str:
@@ -390,6 +464,7 @@ class ChatViewMixin:
         message_id: str | None = None,
         caption: str | None = None,
         content_type: str | None = None,
+        media_kind: str | None = None,
     ):
         """Mount a clickable ``ImageWidget`` placeholder immediately and
         resolve the attachment path in a worker thread.
@@ -407,12 +482,19 @@ class ChatViewMixin:
         carrying the message metadata (bug #37).
         """
         resolved_protocol = protocol or PROTOCOL_SIGNAL
+        is_sticker = media_kind == "sticker"
+        media_label = "🎨 Sticker" if is_sticker else "🖼️ Image"
+        widget_classes = (
+            f"{'msg-right' if is_mine else 'msg-left'} msg-sticker"
+            if is_sticker
+            else ("msg-right" if is_mine else "msg-left")
+        )
 
         if not attachment_id:
             widget = ImageWidget(
                 attachment_path=None,
                 attachment_id="",
-                fallback_text=f"[🖼️ Image: {attachment_info}]",
+                fallback_text=f"[{media_label}: {attachment_info}]",
                 timestamp=timestamp,
                 sender=sender,
                 is_mine=is_mine,
@@ -421,8 +503,9 @@ class ChatViewMixin:
                 attachment_info=attachment_info,
                 protocol=resolved_protocol,
                 content_type=content_type,
+                msg_type="sticker" if is_sticker else "image",
             )
-            widget.classes = "msg-right" if is_mine else "msg-left"
+            widget.classes = widget_classes
             chat_log.mount(widget)
             chat_log.scroll_end(animate=False)
             return
@@ -431,7 +514,7 @@ class ChatViewMixin:
             attachment_path=None,
             attachment_id=attachment_id,
             fallback_text=self._native_placeholder(
-                f"[🖼️ Image: {attachment_info} — loading…]",
+                f"[{media_label}: {attachment_info} — loading…]",
                 attachment_id=attachment_id,
             ),
             timestamp=timestamp,
@@ -442,8 +525,9 @@ class ChatViewMixin:
             attachment_info=attachment_info,
             protocol=resolved_protocol,
             content_type=content_type,
+            msg_type="sticker" if is_sticker else "image",
         )
-        widget.classes = "msg-right" if is_mine else "msg-left"
+        widget.classes = widget_classes
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
 
@@ -466,6 +550,28 @@ class ChatViewMixin:
             thread=True,
             exclusive=False,
         )
+
+    def _resolve_media_path_worker(
+        self,
+        protocol: str,
+        attachment_id: str,
+        widget: MessageWidget,
+    ) -> None:
+        """Resolve non-image media without decoding it, then request opening."""
+        path = self.manager.get_attachment_path(protocol, attachment_id)
+        self.call_from_thread(self._finish_media_path_resolve, widget, path)
+
+    def _finish_media_path_resolve(
+        self, widget: MessageWidget, path: Path | None
+    ) -> None:
+        """Persist a resolved media path on the widget and open it when found."""
+        widget.update_media_path(path)
+        if not widget.is_mounted:
+            return
+        if path is None:
+            self._status("❌ Attachment file not found on server")
+            return
+        self._open_media_path(path)
 
     def _resolve_attachment_worker(
         self,
@@ -563,10 +669,12 @@ class ChatViewMixin:
         if not widget.is_mounted:
             return
         if path is None:
-            widget.update_attachment(None, f"[🖼️ Image: {attachment_info}]")
+            label = "🎨 Sticker" if widget._msg_type == "sticker" else "🖼️ Image"
+            widget.update_attachment(None, f"[{label}: {attachment_info}]")
         else:
+            label = "Sticker" if widget._msg_type == "sticker" else "Image"
             widget.update_attachment(
-                path, f"[🖼️ Image: {path.name} — Click Enter to View]"
+                path, f"[{label}: {path.name} — Click Enter to View]"
             )
 
     def _finish_native_thumbnail(
@@ -1289,6 +1397,7 @@ class ChatViewMixin:
         is_mine = msg.get("is_mine", False)
         quote_text = msg.get("quote_text")
         msg_type = msg.get("msg_type", "text")
+        kind = _effective_media_kind(msg)
         attachment_info = msg.get("attachment_info")
         attachment_id = msg.get("attachment_id")
         content_type = msg.get("content_type")
@@ -1320,7 +1429,7 @@ class ChatViewMixin:
                 )
             )
 
-        if msg_type == "image":
+        if msg_type == "image" or kind == "gif":
             caption = _image_caption(text, attachment_info, attachment_id, protocol)
             display = attachment_info or text or "Photo"
             if caption and display.strip() == caption:
@@ -1358,8 +1467,29 @@ class ChatViewMixin:
                         message_id=message_id,
                     )
                 )
+        elif kind == "sticker" and attachment_id:
+            sticker_widget = ImageWidget(
+                attachment_path=None,
+                attachment_id=attachment_id,
+                fallback_text=self._native_placeholder(
+                    f"[🎨 Sticker: {attachment_info or 'Sticker'}]",
+                    attachment_id=attachment_id,
+                ),
+                timestamp=ts,
+                sender=sender,
+                is_mine=is_mine,
+                message_id=message_id,
+                msg_type="sticker",
+                caption=None,
+                attachment_info=attachment_info,
+                protocol=protocol,
+                content_type=content_type,
+            )
+            alignment = "msg-right" if is_mine else "msg-left"
+            sticker_widget.classes = f"{alignment} msg-sticker"
+            widgets.append(sticker_widget)
         else:
-            display_text = _media_display_text(text, attachment_info, msg_type)
+            display_text = _media_display_text(text, attachment_info, msg_type, kind)
             widgets.append(
                 self._make_message_widget(
                     text=display_text,
@@ -1371,6 +1501,9 @@ class ChatViewMixin:
                     is_group=is_group,
                     message_id=message_id,
                     edited=msg.get("edited", False),
+                    attachment_ref=(attachment_id, protocol)
+                    if kind in _OPENABLE_MEDIA_KINDS and attachment_id
+                    else None,
                 )
             )
         return widgets
@@ -1428,6 +1561,7 @@ class ChatViewMixin:
                 attachment_info=attachment_info,
                 attachment_id=attachment_id,
                 content_type=msg.get("content_type"),
+                media_kind=msg.get("media_kind"),
                 timestamp=ts,
                 sender=sender,
                 status=status,
@@ -1513,6 +1647,7 @@ class ChatViewMixin:
                     attachment_info=attachment_info,
                     attachment_id=attachment_id,
                     content_type=msg.get("content_type"),
+                    media_kind=msg.get("media_kind"),
                     timestamp=ts,
                     sender=sender,
                     status=status,

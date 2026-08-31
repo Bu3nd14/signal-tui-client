@@ -145,6 +145,36 @@ class TestMessageWidget:
         assert "<:>" not in rendered
         assert "Ciao!" in rendered
 
+    def test_media_click_posts_open_requested(self, tmp_path):
+        path = tmp_path / "clip.mp4"
+        widget = MessageWidget(
+            "🎬 clip.mp4",
+            attachment_ref=("video-1", "telegram"),
+            attachment_path=path,
+        )
+        posted = []
+        widget.post_message = posted.append
+
+        widget.on_click()
+
+        assert len(posted) == 1
+        event = posted[0]
+        assert isinstance(event, MessageWidget.MediaOpenRequested)
+        assert event.attachment_id == "video-1"
+        assert event.protocol == "telegram"
+        assert event.path == path
+        assert event.widget is widget
+
+    def test_media_enter_posts_open_requested(self):
+        widget = MessageWidget("🎵 audio.ogg", attachment_ref=("audio-1", "signal"))
+        posted = []
+        widget.post_message = posted.append
+
+        widget.key_enter()
+
+        assert isinstance(posted[0], MessageWidget.MediaOpenRequested)
+        assert posted[0].path is None
+
 
 class TestMessageWidgetEditing:
     """✏️ MessageWidget — editing (Fase 6): suffix, Alt+click/Alt+e, update_text."""

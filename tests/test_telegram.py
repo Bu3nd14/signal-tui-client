@@ -60,6 +60,32 @@ def _message(**overrides):
     return SimpleNamespace(**fields)
 
 
+class DocumentAttributeSticker:
+    pass
+
+
+class DocumentAttributeFilename:
+    def __init__(self, file_name):
+        self.file_name = file_name
+
+
+class DocumentAttributeVideo:
+    pass
+
+
+class DocumentAttributeVoice:
+    pass
+
+
+class DocumentAttributeAudio:
+    def __init__(self, *, voice=False):
+        self.voice = voice
+
+
+class DocumentAttributeAnimated:
+    pass
+
+
 class TestTelegramContacts:
     def test_attachment_path_returns_existing_file_only(self, tmp_path):
         backend = _backend()
@@ -326,6 +352,8 @@ class TestTelegramMessages:
             "msg_type": "text",
             "attachment_info": None,
             "attachment_id": None,
+            "media_kind": None,
+            "content_type": None,
             "protocol": PROTOCOL_TELEGRAM,
             "contact": contact,
         }
@@ -362,24 +390,34 @@ class TestTelegramMessages:
         assert event.payload["quote_content_type"] == "image/png"
 
     @pytest.mark.parametrize(
-        ("field", "expected_type", "expected_info", "extra"),
+        ("kind", "attribute", "mime", "expected_info"),
         [
-            ("photo", "image", "Photo", {"text": ""}),
-            ("sticker", "sticker", "🎨 Sticker", {}),
-            ("video", "attachment", "🎬 Video", {}),
-            ("voice", "attachment", "🎤 Voice", {}),
-            ("audio", "attachment", "🎵 Audio", {}),
+            ("sticker", DocumentAttributeSticker(), "image/webp", "🎨 Sticker"),
+            ("video", DocumentAttributeVideo(), "video/mp4", "🎬 Video"),
+            ("voice", DocumentAttributeVoice(), "audio/ogg", "🎤 Voice"),
+            ("audio", DocumentAttributeAudio(), "audio/mpeg", "🎵 Audio"),
+            ("gif", DocumentAttributeAnimated(), "video/mp4", "📎 Document"),
         ],
     )
     def test_message_to_event_normalizes_media(
-        self, field, expected_type, expected_info, extra
+        self, kind, attribute, mime, expected_info
     ):
         backend = _backend()
+        document = SimpleNamespace(mime_type=mime, attributes=[attribute])
         event = backend._message_to_chat_event(
-            _message(**{field: object(), **extra}), "/tmp/media"
+            _message(document=document, text=""), "/tmp/media"
         )
 
+        expected_type = (
+            "sticker"
+            if kind == "sticker"
+            else "image"
+            if kind == "gif"
+            else "attachment"
+        )
         assert event.payload["msg_type"] == expected_type
+        assert event.payload["media_kind"] == kind
+        assert event.payload["content_type"] == mime
         assert event.payload["attachment_info"] == expected_info
         assert event.payload["attachment_id"] == "/tmp/media"
 
@@ -419,9 +457,12 @@ class TestTelegramMessages:
 
     def test_message_to_event_uses_document_filename_and_id_fallback(self):
         backend = _backend()
-        document = SimpleNamespace(attributes=[SimpleNamespace(file_name="report.pdf")])
+        document = SimpleNamespace(
+            attributes=[DocumentAttributeFilename("report.pdf")],
+            mime_type="application/pdf",
+        )
 
-        event = backend._message_to_chat_event(_message(document=document))
+        event = backend._message_to_chat_event(_message(document=document, text=""))
 
         assert event.payload["msg_type"] == "attachment"
         assert event.payload["attachment_info"] == "📎 report.pdf"
@@ -585,6 +626,69 @@ class TestTelegramTyping:
 
 
 class TestTelegramBackendOperations:
+    def test_voice_attachment_sets_voice_note(self, monkeypatch, tmp_path):
+        backend = _backend()
+        backend._loop = MagicMock()
+        uploaded = SimpleNamespace(name="original voice.ogg")
+        backend._client = SimpleNamespace(
+            upload_file=AsyncMock(return_value=uploaded),
+            send_file=AsyncMock(return_value=SimpleNamespace(id=77)),
+        )
+        backend._resolve_input_entity = AsyncMock(return_value="entity")
+
+        class CompletedFuture:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self, timeout):
+                return self.value
+
+        monkeypatch.setattr(
+            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            lambda coro, _loop: CompletedFuture(asyncio.run(coro)),
+        )
+
+        result = backend.send_attachment_sync(
+            "42",
+            tmp_path / "voice.ogg",
+            mime_type="audio/ogg",
+            media_kind="voice",
+            filename="original voice.ogg",
+        )
+
+        assert result == "77"
+        backend._client.upload_file.assert_awaited_once_with(
+            str(tmp_path / "voice.ogg"), file_name="original voice.ogg"
+        )
+        backend._client.send_file.assert_awaited_once_with(
+            "entity",
+            uploaded,
+            caption=None,
+            reply_to=None,
+            force_document=False,
+            voice_note=True,
+        )
+
+    def test_attachment_mirror_uses_original_filename(self, monkeypatch, tmp_path):
+        media_dir = tmp_path / "telegram-media"
+        monkeypatch.setattr("backends.telegram._media_dir", lambda: media_dir)
+        upload = tmp_path / "upload-uabsa_a2.pdf"
+        upload.write_bytes(b"pdf")
+        backend = _backend()
+
+        backend.enqueue_sent_message(
+            "42",
+            "77",
+            "",
+            attachment_path=upload,
+            mime_type="application/pdf",
+            filename="Round3 relazione.pdf",
+        )
+
+        event = backend.poll_once()[0]
+        assert event.payload["attachment_info"] == "Round3 relazione.pdf"
+        assert "upload-" not in event.payload["attachment_info"]
+
     def test_attachment_send_timeout_is_120_and_configurable(
         self, monkeypatch, tmp_path
     ):

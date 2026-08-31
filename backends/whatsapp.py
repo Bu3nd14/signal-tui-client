@@ -24,11 +24,14 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from models import (
     PROTOCOL_WHATSAPP,
     ChatContact,
     ChatEvent,
+    media_kind_from_mime,
+    msg_type_for_media_kind,
 )
 
 from .base import ChatBackend, should_upgrade_outgoing_attachment
@@ -62,6 +65,25 @@ _FETCHABLE_JID_RE = re.compile(r"^[0-9][0-9-]*@(c\.us|lid|g\.us)$")
 
 def _is_fetchable_jid(jid: str) -> bool:
     return bool(_FETCHABLE_JID_RE.fullmatch(jid))
+
+
+def _resolve_wa_media_chat_id(attachment_id: str) -> tuple[str | None, str]:
+    """Extract the chat JID and extensionless WAHA media name."""
+    if attachment_id.startswith(("http://", "https://")):
+        media_name = Path(unquote(urlparse(attachment_id).path)).name
+    else:
+        media_name = unquote(attachment_id)
+
+    suffix = Path(media_name).suffix
+    if suffix and not re.search(r"@(c|g)\.us$", media_name, re.IGNORECASE):
+        media_name = media_name[: -len(suffix)]
+
+    match = re.fullmatch(
+        r"(?:true|false)_(?P<jid>[0-9][0-9-]*@(?:lid|c\.us|g\.us)(?:_.+)?)",
+        media_name,
+        re.IGNORECASE,
+    )
+    return (match.group("jid") if match else None, media_name)
 
 
 def _jid_digits(jid: str) -> str:
@@ -309,15 +331,13 @@ class WhatsAppBackend(ChatBackend):
                         ack_msg_type = "text"
                         ack_attachment_id = None
                         ack_attachment_info = None
+                        ack_content_type = None
+                        ack_media_kind = None
                         if ack_has_media and isinstance(ack_media, dict):
                             mime = (ack_media.get("mimetype") or "").lower()
-                            if mime.startswith("image/"):
-                                ack_msg_type = "image"
-                            elif any(
-                                mime.startswith(p)
-                                for p in ("video/", "audio/", "application/")
-                            ):
-                                ack_msg_type = "attachment"
+                            ack_content_type = mime or None
+                            ack_media_kind = media_kind_from_mime(mime) or "document"
+                            ack_msg_type = msg_type_for_media_kind(ack_media_kind)
                             ack_attachment_id = ack_media.get("url")
                             ack_attachment_info = (
                                 content.get("caption")
@@ -358,6 +378,8 @@ class WhatsAppBackend(ChatBackend):
                                     "msg_type": ack_msg_type,
                                     "attachment_id": ack_attachment_id,
                                     "attachment_info": ack_attachment_info,
+                                    "content_type": ack_content_type,
+                                    "media_kind": ack_media_kind,
                                 },
                             )
 
@@ -1348,22 +1370,58 @@ class WhatsAppBackend(ChatBackend):
         quote_author: str | None = None,
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
+        media_kind: str | None = None,
+        filename: str | None = None,
     ) -> str | None:
         if not self._rest:
             raise RuntimeError("WhatsApp API is not configured")
         send_chat_id = self._resolve_send_chat_id(contact_id)
-        result = self._rest.send_image(
-            send_chat_id,
-            file_path,
-            caption=caption,
-            reply_to_message_id=reply_to_message_id,
-            mime_type=mime_type,
+        kind = media_kind or media_kind_from_mime(mime_type) or "document"
+        send_method = (
+            self._rest.send_image
+            if kind in {"image", "gif"}
+            else self._rest.send_video
+            if kind == "video"
+            else self._rest.send_file
         )
+        endpoint = (
+            "sendImage"
+            if kind in {"image", "gif"}
+            else "sendVideo"
+            if kind == "video"
+            else "sendFile"
+        )
+        kwargs = {
+            "caption": caption,
+            "reply_to_message_id": reply_to_message_id,
+            "mime_type": mime_type,
+        }
+        if filename is not None:
+            kwargs["filename"] = filename
+        result = send_method(send_chat_id, file_path, **kwargs)
+        if (
+            result is None
+            and endpoint != "sendFile"
+            and self._rest.last_status
+            in {
+                404,
+                501,
+            }
+        ):
+            endpoint = "sendFile"
+            result = self._rest.send_file(
+                send_chat_id,
+                file_path,
+                caption=caption,
+                reply_to_message_id=reply_to_message_id,
+                mime_type=mime_type,
+                **({"filename": filename} if filename is not None else {}),
+            )
         if result is None:
             status = self._rest.last_status
             detail = self._rest.last_error or "unreachable"
             raise RuntimeError(
-                f"WhatsApp API sendImage failed (status={status}): {detail}"
+                f"WhatsApp API {endpoint} failed (status={status}): {detail}"
             )
         return self._extract_message_id(result)
 
@@ -1379,15 +1437,16 @@ class WhatsAppBackend(ChatBackend):
         reply_to_message_id: str | None = None,
         attachment_path: Path | None = None,
         mime_type: str | None = None,
+        media_kind: str | None = None,
+        filename: str | None = None,
     ) -> None:
         is_attachment = attachment_path is not None
-        msg_type = (
-            "image"
-            if is_attachment and (mime_type or "").startswith("image/")
-            else "attachment"
+        media_kind = (
+            media_kind or media_kind_from_mime(mime_type) or "document"
             if is_attachment
-            else "text"
+            else None
         )
+        msg_type = msg_type_for_media_kind(media_kind) if media_kind else "text"
         media_text = "" if msg_type == "image" else text
         attachment_id = None
         if attachment_path is not None:
@@ -1410,9 +1469,12 @@ class WhatsAppBackend(ChatBackend):
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
                     "msg_type": msg_type,
-                    "attachment_info": text or None if is_attachment else None,
+                    "attachment_info": (filename or text or None)
+                    if is_attachment
+                    else None,
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
+                    "media_kind": media_kind,
                 },
             )
         )
@@ -1489,7 +1551,9 @@ class WhatsAppBackend(ChatBackend):
            ``Path`` immediately (fast path).
         2. Otherwise, attempt a lazy download from the WAHA REST API, save
            the bytes, and return the resulting ``Path``.
-        3. If the download or save fails, return ``None`` — the UI shows a
+        3. If WAHA purged its cached file, force the message media download
+           and retry with the refreshed URL.
+        4. If the download or save fails, return ``None`` — the UI shows a
            fallback placeholder and the user can retry by clicking again.
 
         This mirrors the Signal backend's behaviour where signal-cli
@@ -1511,7 +1575,23 @@ class WhatsAppBackend(ChatBackend):
             return None
         raw = self._rest.download_media(attachment_id)
         if not raw:
-            return None
+            chat_id, media_name = _resolve_wa_media_chat_id(attachment_id)
+            if chat_id:
+                try:
+                    message = self._rest.get_message_media(chat_id, media_name)
+                    media = message.get("media") if isinstance(message, dict) else None
+                    fresh_url = media.get("url") if isinstance(media, dict) else None
+                    if fresh_url:
+                        raw = self._rest.download_media(str(fresh_url))
+                except Exception:
+                    logger.debug(
+                        "WhatsApp forced media re-download failed: chat=%s id=%s",
+                        chat_id,
+                        media_name,
+                        exc_info=True,
+                    )
+            if not raw:
+                return None
 
         try:
             candidate.write_bytes(raw)
@@ -1759,10 +1839,16 @@ class WhatsAppBackend(ChatBackend):
             # diverso).  Il match per id DEVE precedere quello sul testo, altrimenti
             # l'evento ack sintetico viene ingerito come nuovo messaggio di testo.
             cached_attachment_id = msg.get("attachment_id")
+            outgoing_mirror = bool(
+                is_mine
+                and cached_attachment_id
+                and Path(str(cached_attachment_id)).name.startswith("sent-")
+            )
             same_attachment = (
                 not attachment_id
                 or not cached_attachment_id
                 or cached_attachment_id == attachment_id
+                or outgoing_mirror
             )
             if (
                 is_mine
@@ -1817,6 +1903,8 @@ class WhatsAppBackend(ChatBackend):
             msg_type=data.get("msg_type", "text"),
             attachment_info=data.get("attachment_info"),
             attachment_id=data.get("attachment_id"),
+            content_type=data.get("content_type"),
+            media_kind=data.get("media_kind"),
             protocol=PROTOCOL_WHATSAPP,
             msg_id=data.get("id"),
             status=data.get("status"),
@@ -1848,6 +1936,7 @@ class WhatsAppBackend(ChatBackend):
         if not current_id:
             message["attachment_id"] = incoming_id
             message["msg_type"] = data.get("msg_type", message.get("msg_type", "text"))
+            message["media_kind"] = data.get("media_kind")
             _update_message_media_identity(
                 PROTOCOL_WHATSAPP,
                 contact_id,
@@ -1855,6 +1944,7 @@ class WhatsAppBackend(ChatBackend):
                 int(message.get("timestamp", ts)),
                 incoming_id,
                 message["msg_type"],
+                message["media_kind"],
             )
             return True
         media_dir = self._ensure_media_dir()

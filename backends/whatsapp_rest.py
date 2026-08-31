@@ -420,26 +420,94 @@ class WhatsAppRESTClient:
         caption: str | None = None,
         reply_to_message_id: str | None = None,
         mime_type: str | None = None,
+        filename: str | None = None,
     ) -> dict | None:
         """Send a local image via WAHA ``/api/sendImage``."""
+        return self._send_media(
+            "/api/sendImage",
+            chat_id,
+            file_path,
+            caption=caption,
+            reply_to_message_id=reply_to_message_id,
+            mime_type=mime_type,
+            default_mime_type="image/jpeg",
+            filename=filename,
+        )
+
+    def send_video(
+        self,
+        chat_id: str,
+        file_path: Path,
+        caption: str | None = None,
+        reply_to_message_id: str | None = None,
+        mime_type: str | None = None,
+        filename: str | None = None,
+    ) -> dict | None:
+        """Send a local video via WAHA ``/api/sendVideo``."""
+        return self._send_media(
+            "/api/sendVideo",
+            chat_id,
+            file_path,
+            caption=caption,
+            reply_to_message_id=reply_to_message_id,
+            mime_type=mime_type,
+            default_mime_type="video/mp4",
+            filename=filename,
+        )
+
+    def send_file(
+        self,
+        chat_id: str,
+        file_path: Path,
+        caption: str | None = None,
+        reply_to_message_id: str | None = None,
+        mime_type: str | None = None,
+        filename: str | None = None,
+    ) -> dict | None:
+        """Send a local file via WAHA ``/api/sendFile``."""
+        return self._send_media(
+            "/api/sendFile",
+            chat_id,
+            file_path,
+            caption=caption,
+            reply_to_message_id=reply_to_message_id,
+            mime_type=mime_type,
+            default_mime_type="application/octet-stream",
+            filename=filename,
+        )
+
+    def _send_media(
+        self,
+        endpoint: str,
+        chat_id: str,
+        file_path: Path,
+        *,
+        caption: str | None,
+        reply_to_message_id: str | None,
+        mime_type: str | None,
+        default_mime_type: str,
+        filename: str | None,
+    ) -> dict | None:
         import base64
         import mimetypes
 
         path = Path(file_path)
-        detected_type = mime_type or mimetypes.guess_type(path.name)[0] or "image/jpeg"
+        detected_type = (
+            mime_type or mimetypes.guess_type(path.name)[0] or default_mime_type
+        )
         payload = {
             "session": self.session_name,
             "chatId": chat_id,
             "file": {
                 "mimetype": detected_type,
-                "filename": path.name,
+                "filename": filename or path.name,
                 "data": base64.b64encode(path.read_bytes()).decode("ascii"),
             },
             "caption": caption or "",
         }
         if reply_to_message_id is not None:
             payload["reply_to"] = reply_to_message_id
-        return self._request("POST", "/api/sendImage", payload)
+        return self._request("POST", endpoint, payload)
 
     def edit_message(self, chat_id: str, message_id: str, text: str) -> dict | None:
         """WAHA ``PUT /api/{session}/chats/{chatId}/messages/{messageId}``.

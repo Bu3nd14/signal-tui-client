@@ -34,7 +34,7 @@ _ECHO_MATCH_WINDOW_MS = 600_000  # 10 minuti
 
 # Current schema version, persisted via ``PRAGMA user_version`` so the legacy
 # migration below is skipped once the schema is known to be up to date.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 
 # ─── Message cache (SQLite) ─────────────────────────────────────────────────
@@ -87,6 +87,93 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
     if "content_type" not in columns:
         conn.execute("ALTER TABLE messages ADD COLUMN content_type TEXT")
 
+    if "media_kind" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN media_kind TEXT")
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+    correction_columns = {"media_kind", "attachment_id", "attachment_info"}
+    has_correction_candidate = False
+    if correction_columns <= columns:
+        candidate_conditions = [
+            "media_kind='document'",
+            (
+                "(media_kind IS NULL AND (attachment_id IS NOT NULL "
+                "OR attachment_info IS NOT NULL))"
+            ),
+        ]
+        if "msg_type" in columns:
+            candidate_conditions.append(
+                "(media_kind IS NULL AND msg_type='attachment')"
+            )
+        has_correction_candidate = (
+            conn.execute(
+                "SELECT 1 FROM messages WHERE "
+                + " OR ".join(candidate_conditions)
+                + " LIMIT 1"
+            ).fetchone()
+            is not None
+        )
+
+    if correction_columns <= columns and has_correction_candidate:
+        conn.execute(
+            "UPDATE messages SET media_kind='audio' WHERE media_kind='document' "
+            "AND (LOWER(COALESCE(attachment_id, '')) LIKE '%.oga' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.ogg' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.opus' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.mp3' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.aac' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.m4a' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.wav' "
+            "OR LOWER(LTRIM(COALESCE(content_type, ''))) LIKE 'audio/%' "
+            "OR LOWER(LTRIM(COALESCE(attachment_info, ''))) LIKE 'audio/%')"
+        )
+        conn.execute(
+            "UPDATE messages SET media_kind='audio' WHERE media_kind IS NULL "
+            "AND (LOWER(COALESCE(attachment_id, '')) LIKE '%.oga' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.ogg' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.opus' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.mp3' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.aac' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.m4a' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.wav' "
+            "OR LOWER(LTRIM(COALESCE(content_type, ''))) LIKE 'audio/%' "
+            "OR LOWER(LTRIM(COALESCE(attachment_info, ''))) LIKE 'audio/%')"
+        )
+        conn.execute(
+            "UPDATE messages SET media_kind='video' WHERE media_kind IS NULL "
+            "AND (LOWER(COALESCE(attachment_id, '')) LIKE '%.mp4' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.mov' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.mkv' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.webm' "
+            "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.avi' "
+            "OR LOWER(LTRIM(COALESCE(content_type, ''))) LIKE 'video/%' "
+            "OR LOWER(LTRIM(COALESCE(attachment_info, ''))) LIKE 'video/%' "
+            "OR LTRIM(COALESCE(attachment_info, '')) LIKE 'Video:%' "
+            "OR LTRIM(COALESCE(attachment_info, '')) LIKE '🎬%' "
+            "OR LTRIM(COALESCE(attachment_info, '')) LIKE 'videoMessage%')"
+        )
+        if "msg_type" in columns:
+            conn.execute(
+                "UPDATE messages SET media_kind='image' WHERE media_kind IS NULL "
+                "AND COALESCE(msg_type, '') != 'image' "
+                "AND (LOWER(COALESCE(attachment_id, '')) LIKE '%.jpg' "
+                "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.jpeg' "
+                "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.png' "
+                "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.webp' "
+                "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.heic' "
+                "OR LOWER(LTRIM(COALESCE(attachment_info, ''))) LIKE 'image/%')"
+            )
+            if _current_schema_version(conn) >= _SCHEMA_VERSION:
+                conn.execute(
+                    "UPDATE messages SET media_kind='document' "
+                    "WHERE media_kind IS NULL "
+                    "AND COALESCE(msg_type, '') != 'image' "
+                    "AND (msg_type='attachment' OR attachment_id IS NOT NULL) "
+                    "AND LOWER(COALESCE(content_type, '')) NOT LIKE 'image/%' "
+                    "AND LOWER(LTRIM(COALESCE(attachment_info, ''))) "
+                    "NOT LIKE 'image/%'"
+                )
+
     # Quoted-media thumbnail metadata (DESIGN_QUOTE_THUMBNAIL, additive).  The
     # resolved path is deliberately NOT persisted: it is derived lazily in the
     # UI via ``get_attachment_path`` (transient local file).
@@ -133,6 +220,76 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
         "ON messages(protocol, contact_number, timestamp)"
     )
 
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+    if "msg_type" in columns:
+        conn.execute(
+            "UPDATE messages SET media_kind='sticker' "
+            "WHERE media_kind IS NULL AND msg_type='sticker'"
+        )
+    if "content_type" in columns:
+        conn.execute(
+            "UPDATE messages SET media_kind='gif' "
+            "WHERE media_kind IS NULL AND content_type='image/gif'"
+        )
+    if "msg_type" in columns:
+        conn.execute(
+            "UPDATE messages SET media_kind='image' "
+            "WHERE media_kind IS NULL AND msg_type='image'"
+        )
+    if {"msg_type", "content_type"} <= columns:
+        conn.execute(
+            "UPDATE messages SET media_kind='video' WHERE media_kind IS NULL "
+            "AND msg_type='attachment' AND content_type LIKE 'video/%'"
+        )
+        conn.execute(
+            "UPDATE messages SET media_kind='audio' WHERE media_kind IS NULL "
+            "AND msg_type='attachment' AND content_type LIKE 'audio/%'"
+        )
+        conn.execute(
+            "UPDATE messages SET media_kind='image' WHERE media_kind IS NULL "
+            "AND msg_type='attachment' AND content_type LIKE 'image/%'"
+        )
+    if {"msg_type", "attachment_info"} <= columns:
+        conn.execute(
+            "UPDATE messages SET media_kind='video' WHERE media_kind IS NULL "
+            "AND msg_type='attachment' AND (attachment_info LIKE '🎬%' "
+            "OR attachment_info LIKE 'Video:%' "
+            "OR attachment_info LIKE 'videoMessage%')"
+        )
+        conn.execute(
+            "UPDATE messages SET media_kind='audio' WHERE media_kind IS NULL "
+            "AND msg_type='attachment' AND (attachment_info LIKE '🎵%' "
+            "OR attachment_info LIKE '🎤%' OR attachment_info LIKE 'Audio:%' "
+            "OR attachment_info LIKE 'audioMessage%' "
+            "OR LOWER(LTRIM(attachment_info)) LIKE 'audio/%')"
+        )
+    if {"msg_type", "attachment_id"} <= columns:
+        conn.execute(
+            "UPDATE messages SET media_kind='video' WHERE media_kind IS NULL "
+            "AND msg_type='attachment' AND (attachment_id LIKE '%.mp4' "
+            "OR attachment_id LIKE '%.mov' OR attachment_id LIKE '%.mkv' "
+            "OR attachment_id LIKE '%.webm' OR attachment_id LIKE '%.avi')"
+        )
+        conn.execute(
+            "UPDATE messages SET media_kind='audio' WHERE media_kind IS NULL "
+            "AND msg_type='attachment' AND (attachment_id LIKE '%.mp3' "
+            "OR attachment_id LIKE '%.oga' OR attachment_id LIKE '%.ogg' "
+            "OR attachment_id LIKE '%.opus' "
+            "OR attachment_id LIKE '%.aac' OR attachment_id LIKE '%.m4a' "
+            "OR attachment_id LIKE '%.wav')"
+        )
+        conn.execute(
+            "UPDATE messages SET media_kind='image' WHERE media_kind IS NULL "
+            "AND msg_type='attachment' AND (attachment_id LIKE '%.jpg' "
+            "OR attachment_id LIKE '%.jpeg' OR attachment_id LIKE '%.png' "
+            "OR attachment_id LIKE '%.webp' OR attachment_id LIKE '%.heic')"
+        )
+    if "msg_type" in columns:
+        conn.execute(
+            "UPDATE messages SET media_kind='document' "
+            "WHERE media_kind IS NULL AND msg_type='attachment'"
+        )
+
     conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
 
 
@@ -162,6 +319,7 @@ def _init_db():
                     attachment_info TEXT,
                     attachment_id TEXT,
                     content_type TEXT,
+                    media_kind TEXT,
                     quote_attachment_id TEXT,
                     quote_attachment_path TEXT,
                     quote_content_type TEXT,
@@ -295,6 +453,7 @@ def _add_message_to_cache(
     quote_attachment_id: str | None = None,
     quote_attachment_path: str | None = None,
     quote_content_type: str | None = None,
+    media_kind: str | None = None,
 ):
     """Add a message to the SQLite cache (incremental INSERT).
     msg_type: "text", "image", "sticker", "attachment"
@@ -302,6 +461,7 @@ def _add_message_to_cache(
     attachment_id: signal-cli attachment UUID for resolving the file on disk.
     content_type: mime type of a media attachment (e.g. "image/png"), persisted
         so a Signal quote can rebuild its ``quoteAttachments`` thumbnail.
+    media_kind: normalized media taxonomy value (e.g. "voice", "document").
     protocol: source protocol ("signal", "whatsapp", ...). Defaults to signal
         for backward compatibility.
     msg_id: stable per-message id (e.g. the Baileys WhatsApp message id).
@@ -338,9 +498,10 @@ def _add_message_to_cache(
                 """INSERT INTO messages
                    (protocol, contact_number, text, is_mine, sender, timestamp,
                      quote_text, msg_type, attachment_info, attachment_id, content_type,
+                     media_kind,
                      quote_attachment_id, quote_attachment_path, quote_content_type,
-                      read, status, msg_id, quote_timestamp, quote_author, reply_to_message_id)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       read, status, msg_id, quote_timestamp, quote_author, reply_to_message_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     protocol,
                     contact_number,
@@ -353,6 +514,7 @@ def _add_message_to_cache(
                     attachment_info,
                     attachment_id,
                     content_type,
+                    media_kind,
                     quote_attachment_id,
                     quote_attachment_path,
                     quote_content_type,
@@ -459,8 +621,9 @@ def _update_message_media_identity(
     timestamp: int,
     attachment_id: str,
     msg_type: str,
+    media_kind: str | None = None,
 ) -> bool:
-    """Attach a real media identity (attachment_id + msg_type) to an existing row.
+    """Attach a real media identity and classification to an existing row.
 
     Ripara le righe "media race": quando un messaggio media viene ingerito
     senza attachment (webhook WAHA partito prima del download → hasMedia=true
@@ -482,9 +645,9 @@ def _update_message_media_identity(
             if row is None:
                 return False
             cursor = conn.execute(
-                "UPDATE messages SET attachment_id = ?, msg_type = ? "
+                "UPDATE messages SET attachment_id = ?, msg_type = ?, media_kind = ? "
                 "WHERE id = ? AND (attachment_id IS NULL OR attachment_id = '')",
-                (attachment_id, msg_type, row[0]),
+                (attachment_id, msg_type, media_kind, row[0]),
             )
             conn.commit()
             return cursor.rowcount > 0

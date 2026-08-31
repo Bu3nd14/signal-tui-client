@@ -114,6 +114,11 @@ Screen {
     color: $success;
 }
 
+.msg-sticker {
+    height: 8;
+    max-height: 8;
+}
+
 .msg-pending {
     color: $text-muted;
 }

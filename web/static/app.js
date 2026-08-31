@@ -31,6 +31,7 @@ const state = {
   mediaLoads: new Map(),
   mediaFailures: new Set(),
   objectUrls: new Set(),
+  fileTabUrls: new Map(),
   pinnedUrls: new Set(),
   modalObjectUrl: null,
   mediaCache: new Map(),
@@ -89,6 +90,8 @@ const elements = {
   emojiTabs: document.querySelector("#emoji-tabs"),
   emojiSearch: document.querySelector("#emoji-search"),
   emojiGrid: document.querySelector("#emoji-grid"),
+  attachButton: document.querySelector("#attach-button"),
+  fileInput: document.querySelector("#file-input"),
 };
 
 function showError(message) {
@@ -286,8 +289,13 @@ function abortMediaRequests() {
 function pruneOrphanObjectUrls() {
   const cachedUrls = new Set(state.mediaCache.values());
   const optimisticUrls = new Set(state.optimistic.map((item) => item.localPreviewUrl).filter(Boolean));
+  const fileTabUrls = new Set();
+  for (const [url, tab] of state.fileTabUrls || []) {
+    if (tab.closed) state.fileTabUrls.delete(url);
+    else fileTabUrls.add(url);
+  }
   for (const url of state.objectUrls) {
-    if (cachedUrls.has(url) || optimisticUrls.has(url) || state.pinnedUrls.has(url) || url === state.modalObjectUrl) continue;
+    if (cachedUrls.has(url) || optimisticUrls.has(url) || fileTabUrls.has(url) || state.pinnedUrls.has(url) || url === state.modalObjectUrl) continue;
     URL.revokeObjectURL(url);
     state.objectUrls.delete(url);
   }
@@ -567,6 +575,70 @@ function attachmentName(item) {
   return item.attachment?.name || attachmentId.split("?", 1)[0].split("/").filter(Boolean).pop() || "Allegato";
 }
 
+function fileAttachment(attachment, protocol, direction) {
+  const container = document.createElement("div");
+  container.className = "attachment-file";
+  container.setAttribute("role", "button");
+  container.tabIndex = 0;
+  const icon = document.createElement("span");
+  icon.className = "attachment-file-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = {
+    video: "🎬",
+    voice: "🎤",
+    audio: "🎵",
+    document: "📎",
+    sticker: "🎨",
+    gif: "🎞️",
+  }[attachment.media_kind] || "📎";
+  const name = document.createElement("span");
+  name.className = "attachment-file-name";
+  name.textContent = attachmentName({ attachment });
+  container.append(icon, name);
+  const attachmentId = String(attachment.attachment_id);
+  const mediaPath = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+  const open = () => {
+    // L'apertura deve restare sincrona con il gesto utente.
+    const tab = window.open("", "_blank")
+    if (!tab) return
+    tab.document.title = "Caricamento allegato…"
+    tab.document.write(`<!doctype html>
+<html lang="it"><head><meta charset="utf-8"><title>Caricamento allegato…</title></head>
+<body style="margin:0;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:#000;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+  <div style="width:44px;height:44px;border:4px solid #333;border-top-color:#4f8cff;border-radius:50%;animation:spin 0.9s linear infinite"></div>
+  <div style="font-size:15px;letter-spacing:.5px">Loading...</div>
+  <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+</body></html>`)
+    tab.document.close()
+    void (async () => {
+      try {
+        const response = await apiFetch(mediaPath)
+        const blob = await response.blob()
+        const url = URL.createObjectURL(blob)
+        state.objectUrls.add(url)
+        state.fileTabUrls.set(url, tab)
+        tab.location.href = url
+      } catch (error) {
+        tab.close()
+        if (error.message !== "unauthorized") {
+          const message = error.status === 404
+            ? (protocol === "whatsapp" ? "Media non più disponibile su WhatsApp." : "Media non più disponibile.")
+            : "Impossibile aprire il file."
+          showError(message)
+        }
+      }
+    })()
+  }
+  container.addEventListener("click", open);
+  container.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open();
+    }
+  });
+  return container;
+}
+
 function replyAuthor(item) {
   return item.direction === "out" ? "Tu" : (state.active?.display_name || state.active?.id || "Contatto");
 }
@@ -802,12 +874,14 @@ function renderMessages(messages, protocol) {
       } else {
         bubble.append(imageAttachment(item.attachment, protocol, item.direction));
       }
+    } else if (item.attachment) {
+      bubble.append(fileAttachment(item.attachment, protocol, item.direction));
     }
     const safeText = window.SignalTuiReconcile.messageDisplayText(item);
     // Le immagini con caption reale (il server la espone in item.text) la
     // mostrano sotto l'allegato; messageDisplayText le azzera.
     const caption = isImage && item.text ? item.text : "";
-    const displayText = safeText || caption || (item.attachment && !isImage ? attachmentName(item) : "");
+    const displayText = safeText || caption;
     let textEl = null;
     if (displayText) {
       textEl = document.createElement("div");
@@ -1456,61 +1530,84 @@ function updateComposer() {
   elements.sendSpinner.hidden = !busy;
 }
 
+function mediaKindFromMime(mime) {
+  const normalized = String(mime || "").toLowerCase().split(";", 1)[0].trim();
+  if (normalized === "image/gif") return "gif";
+  if (normalized.startsWith("image/")) return "image";
+  if (normalized.startsWith("video/")) return "video";
+  if (normalized.startsWith("audio/")) return "audio";
+  return "document";
+}
+
 function clearStagedAttachment({ revoke = true } = {}) {
-  if (state.stagedAttachment && revoke) URL.revokeObjectURL(state.stagedAttachment.previewUrl);
+  if (state.stagedAttachment?.previewUrl && revoke) URL.revokeObjectURL(state.stagedAttachment.previewUrl);
   state.stagedAttachment = null;
   elements.attachmentPreview.hidden = true;
+  elements.attachmentPreview.classList?.remove("attachment-preview-file");
+  elements.attachmentPreviewImage.hidden = false;
   elements.attachmentPreviewImage.removeAttribute("src");
   elements.attachmentPreviewName.textContent = "";
   updateComposer();
 }
 
 async function stageAttachment(file) {
-  if (!file || !file.type.startsWith("image/") || state.sending) return;
+  if (!file || state.sending) return;
+  const isImage = file.type.startsWith("image/");
+  const mediaKind = mediaKindFromMime(file.type);
   const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
-  if (!extensions[file.type]) {
-    showError("Formato immagine non supportato.");
-    return;
-  }
-  if (file.type === "image/jpeg" || file.type === "image/png") {
+  let previewBlob = null;
+  if (isImage) {
+    if (!extensions[file.type]) {
+      showError("Formato immagine non supportato.");
+      return;
+    }
     let bitmap;
     try {
       bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
-      if (Math.max(bitmap.width, bitmap.height) > 2048 || (file.type === "image/png" && file.size > 512 * 1024)) {
-        const scale = Math.min(1, 2048 / Math.max(bitmap.width, bitmap.height));
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-        canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-        const context = canvas.getContext("2d");
-        context.fillStyle = "#fff";
-        context.fillRect(0, 0, canvas.width, canvas.height);
-        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-        const blob = await new Promise((resolve, reject) => {
-          canvas.toBlob((result) => result ? resolve(result) : reject(new Error("JPEG encoding failed")), "image/jpeg", 0.85);
-        });
+      const longestSide = Math.max(bitmap.width, bitmap.height);
+      const scale = Math.min(1, 2048 / longestSide);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      previewBlob = await new Promise((resolve, reject) => {
+        canvas.toBlob((result) => result ? resolve(result) : reject(new Error("JPEG encoding failed")), "image/jpeg", 0.85);
+      });
+      if (
+        (file.type === "image/jpeg" || file.type === "image/png")
+        && (longestSide > 2048 || (file.type === "image/png" && file.size > 512 * 1024))
+      ) {
         file = new File(
-          [blob],
+          [previewBlob],
           file.name.replace(/\.[a-z0-9]+$/i, ".jpg"),
           { type: "image/jpeg" },
         );
       }
     } catch {
+      showError("Impossibile elaborare l'immagine.");
+      return;
     } finally {
       bitmap?.close?.();
     }
   }
   if (state.sending) return;
-  if (file.size > 20 * 1024 * 1024) {
-    showError("L'immagine supera il limite di 20 MiB.");
+  const maxMiB = { image: 20, gif: 20, video: 100, audio: 50, document: 50 }[mediaKind];
+  if (file.size > maxMiB * 1024 * 1024) {
+    showError(`Il file supera il limite di ${maxMiB} MiB.`);
     return;
   }
   clearStagedAttachment();
-  const extension = extensions[file.type];
-  const filename = `clipboard-${Date.now()}.${extension}`;
-  const previewUrl = URL.createObjectURL(file);
+  const filename = file.name || `clipboard-${Date.now()}`;
+  const previewUrl = isImage && previewBlob ? URL.createObjectURL(previewBlob) : null;
   state.stagedAttachment = { file, filename, previewUrl };
-  elements.attachmentPreviewImage.src = previewUrl;
-  elements.attachmentPreviewName.textContent = filename;
+  elements.attachmentPreview.classList?.toggle("attachment-preview-file", !isImage);
+  elements.attachmentPreviewImage.hidden = !isImage;
+  if (isImage) elements.attachmentPreviewImage.src = previewUrl;
+  const icon = { video: "🎬", voice: "🎤", audio: "🎵", document: "📎" }[mediaKind] || "📎";
+  elements.attachmentPreviewName.textContent = isImage ? filename : `${icon} ${filename}`;
   elements.attachmentPreview.hidden = false;
   updateComposer();
 }
@@ -1553,7 +1650,12 @@ async function submitMessage() {
     }
   }
   if (attachment) {
-    optimistic.attachment = { type: attachment.file.type, name: attachment.filename, attachment_id: attachment.filename };
+    optimistic.attachment = {
+      type: attachment.file.type,
+      name: attachment.filename,
+      attachment_id: attachment.filename,
+      media_kind: mediaKindFromMime(attachment.file.type),
+    };
     optimistic.localPreviewUrl = attachment.previewUrl;
   }
   console.debug("[web] optimistic", { protocol: active.protocol, optimistic_id: optimistic.optimistic_id, attachment_id: attachment?.filename, hasPreview: !!optimistic.localPreviewUrl });
@@ -1800,6 +1902,16 @@ elements.composer.addEventListener("paste", (event) => {
   if (!item) return;
   event.preventDefault();
   stageAttachment(item.getAsFile());
+});
+elements.attachButton.addEventListener("click", () => {
+  elements.fileInput.value = "";
+  elements.fileInput.click();
+});
+elements.fileInput.addEventListener("change", () => {
+  const file = elements.fileInput.files?.[0];
+  if (!file) return;
+  elements.fileInput.value = "";
+  stageAttachment(file);
 });
 elements.removeAttachment.addEventListener("click", () => clearStagedAttachment());
 elements.cancelReply.addEventListener("click", cancelReply);

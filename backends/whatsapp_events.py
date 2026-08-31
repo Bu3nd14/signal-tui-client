@@ -16,7 +16,9 @@ from models import (
     PROTOCOL_WHATSAPP,
     ChatEvent,
     embedded_media_quote_placeholder,
+    media_kind_from_mime,
     media_quote_placeholder,
+    msg_type_for_media_kind,
 )
 
 logger = logging.getLogger(__name__)
@@ -411,8 +413,8 @@ def _event_from_message(
     # 1. Flat:  top-level "attachments" array  (legacy / v1 API) — may carry multiple
     # 2. Nested: raw["message"]["imageMessage"] / ["videoMessage"] / …  (WAHA Core)
     # 3. Flat hasMedia / media fields  (current WAHA Core)
-    media_items: list[tuple[str | None, str | None, str]] = []
-    # (attachment_id, attachment_info, msg_type_override)
+    media_items: list[tuple[str | None, str | None, str, str | None, str | None]] = []
+    # (attachment_id, attachment_info, msg_type_override, media_kind, content_type)
 
     # Try top-level attachments first (legacy format — supports multiples).
     attachments = raw.get("attachments") or []
@@ -426,32 +428,44 @@ def _event_from_message(
                 )[0]
                 or ""
             )
-            if mime.startswith("image/"):
-                att_type = "image"
-            elif mime.startswith(("video/", "audio/", "application/")):
-                att_type = "attachment"
-            else:
-                att_type = msg_type if msg_type != "text" else "attachment"
+            kind = media_kind_from_mime(mime) or "document"
+            att_type = msg_type_for_media_kind(kind)
             att_info = (
                 caption or att.get("caption") or att.get("filename") or mime or "Media"
             )
-            media_items.append((att_id, att_info, att_type))
+            media_items.append((att_id, att_info, att_type, kind, mime or None))
 
     # If still no media, look inside the nested "message" object (WAHA Core).
     if not media_items:
         nested = raw.get("message")
         if isinstance(nested, dict):
-            media_keys = [
-                ("imageMessage", "image"),
-                ("videoMessage", "attachment"),
-                ("audioMessage", "attachment"),
-                ("documentMessage", "attachment"),
-                ("stickerMessage", "sticker"),
-            ]
-            for media_key, fallback_type in media_keys:
+            media_keys = (
+                "imageMessage",
+                "videoMessage",
+                "audioMessage",
+                "documentMessage",
+                "stickerMessage",
+            )
+            for media_key in media_keys:
                 media = nested.get(media_key)
                 if isinstance(media, dict):
-                    att_type = fallback_type if msg_type == "text" else msg_type
+                    mime = media.get("mimetype") or ""
+                    if media_key == "imageMessage":
+                        kind = "image"
+                    elif media_key == "videoMessage":
+                        kind = "gif" if media.get("gifPlayback") else "video"
+                    elif media_key == "audioMessage":
+                        kind = "voice" if media.get("ptt") else "audio"
+                    elif media_key == "stickerMessage":
+                        kind = "sticker"
+                    else:
+                        detected = media_kind_from_mime(mime)
+                        kind = (
+                            detected
+                            if detected not in {"image", "gif", None}
+                            else "document"
+                        )
+                    att_type = msg_type_for_media_kind(kind)
                     att_id = media.get("id") or media.get("url")
                     att_info = (
                         caption
@@ -464,7 +478,7 @@ def _event_from_message(
                             else f"{media_key}"
                         )
                     )
-                    media_items.append((att_id, att_info, att_type))
+                    media_items.append((att_id, att_info, att_type, kind, mime or None))
                     break
 
     # If still no media, look at WAHA's flat hasMedia / media fields (current WAHA Core).
@@ -472,14 +486,11 @@ def _event_from_message(
         media = raw.get("media")
         if isinstance(media, dict):
             mime = (media.get("mimetype") or "").lower()
-            if mime.startswith("image/"):
-                att_type = "image"
-            elif mime.startswith(("video/", "audio/", "application/")):
-                att_type = "attachment"
-            elif raw.get("stickerMessage") is not None:
-                att_type = "sticker"
-            else:
-                att_type = "attachment"
+            kind = media_kind_from_mime(mime)
+            if kind is None and raw.get("stickerMessage") is not None:
+                kind = "sticker"
+            kind = kind or "document"
+            att_type = msg_type_for_media_kind(kind)
             att_id = media.get("id") or media.get("url")
             att_info = (
                 caption
@@ -488,7 +499,7 @@ def _event_from_message(
                 or mime
                 or "Media"
             )
-            media_items.append((att_id, att_info, att_type))
+            media_items.append((att_id, att_info, att_type, kind, mime or None))
 
     # Rileva se la chat è un gruppo WhatsApp (JID termina con @g.us).
     is_group = chat_jid.endswith("@g.us")
@@ -558,7 +569,13 @@ def _event_from_message(
     ack_val = _ack_value(raw)
     if media_items:
         events: list[ChatEvent] = []
-        for i, (att_id, att_info, att_type) in enumerate(media_items):
+        for i, (
+            att_id,
+            att_info,
+            att_type,
+            media_kind,
+            content_type,
+        ) in enumerate(media_items):
             media_identity = att_id or f"{msg_id}:{i + 1}"
             msg_text = "" if att_type == "image" else f"Media: {media_identity}"
             events.append(
@@ -580,6 +597,8 @@ def _event_from_message(
                         "msg_type": att_type,
                         "attachment_info": att_info,
                         "attachment_id": att_id,
+                        "media_kind": media_kind,
+                        "content_type": content_type,
                         "ack": ack_val,
                         "contact": None,
                     },
@@ -615,6 +634,8 @@ def _event_from_message(
                 "msg_type": msg_type,
                 "attachment_info": None,
                 "attachment_id": None,
+                "media_kind": None,
+                "content_type": None,
                 "ack": ack_val,
                 "contact": None,
             },

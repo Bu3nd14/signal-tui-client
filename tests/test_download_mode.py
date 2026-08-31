@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from tui.download import DownloadModeMixin
-from ui_components import DownloadLinkWidget, ImageWidget
+from ui_components import DownloadLinkWidget, ImageWidget, MessageWidget
 
 
 def _bar_app(download_mode: bool = False, reply_to=None):
@@ -23,6 +23,24 @@ def _bar_app(download_mode: bool = False, reply_to=None):
 
 
 class TestDownloadMode:
+    def test_open_media_reports_path_when_xdg_open_exits_unsuccessfully(self, tmp_path):
+        path = tmp_path / "manual.pdf"
+        process = MagicMock()
+        process.wait.return_value = 1
+        app = DownloadModeMixin()
+        app._status = MagicMock()
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *args: fn(*args))
+        app.run_worker = MagicMock(side_effect=lambda work, **_kwargs: work())
+
+        with (
+            patch("tui.download.shutil.which", return_value="/usr/bin/xdg-open"),
+            patch("tui.download.subprocess.Popen", return_value=process),
+        ):
+            app._open_media_path(path)
+
+        process.wait.assert_called_once_with(timeout=0.5)
+        app._status.assert_called_once_with(f"📎 File available at: {path}")
+
     def test_action_download_mode_toggles_and_updates_bar(self):
         app = SimpleNamespace(_download_mode=False, _update_download_bar=MagicMock())
 
@@ -104,6 +122,55 @@ class TestDownloadMode:
         serve.assert_called_once_with(attachment)
         assert isinstance(chat_log.mount.call_args.args[0], DownloadLinkWidget)
 
+    def test_start_download_uses_cached_attachment_path(self, tmp_path):
+        attachment = tmp_path / "cached.mp4"
+        attachment.write_text("video")
+        manager = MagicMock()
+        app = SimpleNamespace(
+            manager=manager,
+            chat_log=MagicMock(),
+            _download_mode=True,
+            _status=MagicMock(),
+            _update_download_bar=MagicMock(),
+        )
+
+        with patch("backend._serve_file_path", return_value="http://x/cached.mp4"):
+            DownloadModeMixin._start_download(
+                app,
+                "cached.mp4",
+                attachment_id="att",
+                protocol="signal",
+                attachment_path=attachment,
+            )
+
+        manager.get_attachment_path.assert_not_called()
+
+    def test_media_download_resolves_once_and_caches_path(self, tmp_path):
+        attachment = tmp_path / "clip.mp4"
+        attachment.write_text("video")
+        manager = MagicMock()
+        manager.get_attachment_path.return_value = attachment
+        widget = MessageWidget("🎬 clip.mp4", attachment_ref=("att", "telegram"))
+        widget._is_mounted = True
+        event = widget._make_media_open_requested()
+        app = DownloadModeMixin()
+        app.manager = manager
+        app._download_mode = True
+        app._start_download = MagicMock()
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *args: fn(*args))
+        app.run_worker = MagicMock(side_effect=lambda work, **_kwargs: work())
+
+        app.on_message_widget_media_open_requested(event)
+
+        manager.get_attachment_path.assert_called_once_with("telegram", "att")
+        assert widget.attachment_path == attachment
+        app._start_download.assert_called_once_with(
+            text="clip.mp4",
+            attachment_id="att",
+            protocol="telegram",
+            attachment_path=attachment,
+        )
+
     def test_start_download_reports_attachment_and_server_errors(self):
         manager = MagicMock()
         manager.get_attachment_path.return_value = None
@@ -150,7 +217,10 @@ class TestDownloadMode:
 
         manager.get_attachment_path.assert_called_once_with("signal", "att")
         app._start_download.assert_called_once_with(
-            text="photo.jpg", attachment_id="att", protocol="signal"
+            text="photo.jpg",
+            attachment_id="att",
+            protocol="signal",
+            attachment_path=attachment,
         )
 
     def test_image_click_opens_modal_or_reports_missing(self, tmp_path):

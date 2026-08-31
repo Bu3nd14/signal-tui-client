@@ -42,6 +42,23 @@ _IMAGE_EXTENSIONS = {
 }
 
 
+def _effective_host(request: Any) -> str:
+    """Return the browser-facing host, trusting proxies only for HTTPS origins."""
+    forwarded = request.headers.get("x-forwarded-host")
+    origin = request.headers.get("origin", "")
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    if (
+        forwarded
+        and urlsplit(origin).scheme.lower() == "https"
+        and (
+            not forwarded_proto
+            or forwarded_proto.split(",", 1)[0].strip().lower() == "https"
+        )
+    ):
+        return forwarded.split(",", 1)[0].strip().lower()
+    return (request.headers.get("host") or "").lower()
+
+
 @lru_cache(maxsize=1)
 def _emoji_categories() -> list[dict[str, Any]]:
     import emoji
@@ -75,6 +92,24 @@ def _infer_attachment_type(attachment_id: str, content_type: str | None) -> str 
     if guessed_type and guessed_type.startswith("image/"):
         return guessed_type
     return f"image/{'jpeg' if suffix in {'.jpg', '.jpeg'} else suffix[1:]}"
+
+
+def _is_whatsapp_synthetic_text(text: str | None) -> bool:
+    stripped = (text or "").strip()
+    if not stripped.lower().startswith("media:"):
+        return False
+
+    media_identity = stripped[len("media:") :].strip()
+    if not media_identity:
+        return False
+    return bool(
+        re.fullmatch(r"https?://\S+", media_identity, re.IGNORECASE)
+        or re.fullmatch(
+            r"(?:false|true)_[^\s@]*@[^\s@]+", media_identity, re.IGNORECASE
+        )
+        or re.fullmatch(r"\d+:\d+", media_identity)
+        or re.fullmatch(r"\S+", media_identity)
+    )
 
 
 def _unread_counts() -> dict[tuple[str, str], int]:
@@ -308,7 +343,8 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             try:
                 rows = connection.execute(
                     "SELECT id, msg_id, text, is_mine, timestamp, contact_number, "
-                    "sender, attachment_id, attachment_info, content_type, protocol, msg_type, "
+                    "sender, attachment_id, attachment_info, content_type, media_kind, "
+                    "protocol, msg_type, "
                     "quote_text, quote_timestamp, quote_author, quote_attachment_id, "
                     "quote_content_type, quote_attachment_path, status, edited, read, "
                     "reply_to_message_id "
@@ -336,6 +372,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                     or ("image/*" if row["msg_type"] == "image" else None)
                     or _infer_attachment_type(attachment_id, None)
                 ),
+                "media_kind": row["media_kind"],
             }
             logger.debug(
                 "web messages proto=%s id=%s attachment_id=%s content_type=%s type=%s",
@@ -353,20 +390,34 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 # nome file e URL media WA ("Media: http://...").
                 from models import is_media_quote_placeholder
 
-                lower = text.strip().lower()
-                if (
-                    text.strip() == str(row["attachment_info"] or "").strip()
-                    or is_media_quote_placeholder(text)
-                    or lower.startswith(
-                        (
-                            "immagine:",
-                            "image:",
-                            "media:",
-                            "video:",
-                            "audio:",
-                            "file:",
+                stripped = text.strip()
+                info = str(row["attachment_info"] or "").strip()
+                prefixed_info = bool(
+                    info
+                    and any(
+                        stripped.casefold() == f"{label}: {info}".casefold()
+                        for label in (
+                            "immagine",
+                            "image",
+                            "media",
+                            "video",
+                            "audio",
+                            "file",
                         )
                     )
+                )
+                if (
+                    stripped == info
+                    or is_media_quote_placeholder(text)
+                    or prefixed_info
+                    or (protocol == "whatsapp" and _is_whatsapp_synthetic_text(text))
+                ):
+                    text = ""
+            elif protocol == "whatsapp" and text:
+                from models import is_media_quote_placeholder
+
+                if is_media_quote_placeholder(text) or _is_whatsapp_synthetic_text(
+                    text
                 ):
                     text = ""
             if not text and row["attachment_info"]:
@@ -382,7 +433,9 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                     # Un mimetype puro (es. "image/jpeg", "video/mp4") non è mai
                     # una caption: arriva da attachment_info usato come mimetype
                     # (reperto live WAHA su messaggi immagine inviati).
-                    and not re.fullmatch(r"[a-z0-9.+-]+/[a-z0-9.+-]+", info)
+                    and not re.fullmatch(
+                        r"[a-z0-9.+-]+/[a-z0-9.+-]+(?:\s*;.*)?", info.lower()
+                    )
                     and not info.lower().endswith(
                         (
                             ".png",
@@ -393,12 +446,21 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                             ".heic",
                             ".mp4",
                             ".mp3",
+                            ".oga",
+                            ".ogg",
+                            ".opus",
+                            ".aac",
+                            ".m4a",
+                            ".wav",
                             ".pdf",
                             ".doc",
                             ".docx",
                         )
                     )
                     and not is_media_quote_placeholder(info)
+                    and not (
+                        protocol == "whatsapp" and _is_whatsapp_synthetic_text(info)
+                    )
                     and info.lower()
                     not in {
                         "photo",
@@ -422,9 +484,6 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                         "🎨 sticker",
                         "📎 file",
                     }
-                    and not info.lower().startswith(
-                        ("media:", "image:", "immagine:", "video:", "audio:", "file:")
-                    )
                 ):
                     text = info
         direction = "out" if row["is_mine"] else "in"
@@ -985,7 +1044,7 @@ def create_api_router() -> Any:
         origin = request.headers.get("origin")
         if origin:
             origin_host = urlsplit(origin).netloc.lower()
-            request_host = request.headers.get("host", "").lower()
+            request_host = _effective_host(request)
             if not origin_host or origin_host != request_host:
                 raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -997,12 +1056,13 @@ def create_api_router() -> Any:
         upload_file = None
         try:
             if is_multipart:
-                from web.uploads import MAX_UPLOAD_BYTES
+                from web.uploads import _MAX_BYTES_BY_KIND
 
                 content_length = request.headers.get("content-length")
                 if (
                     content_length
-                    and int(content_length) > MAX_UPLOAD_BYTES + 1024 * 1024
+                    and int(content_length)
+                    > max(_MAX_BYTES_BY_KIND.values()) + 1024 * 1024
                 ):
                     raise HTTPException(status_code=413, detail="Upload too large")
                 form = await request.form()
@@ -1157,7 +1217,7 @@ def create_api_router() -> Any:
                     detail = (
                         "Upload too large"
                         if exc.status_code == 413
-                        else "Invalid image"
+                        else "Unsupported media type"
                     )
                     raise HTTPException(
                         status_code=exc.status_code, detail=detail
@@ -1169,6 +1229,8 @@ def create_api_router() -> Any:
                     upload.path,
                     caption=text or None,
                     mime_type=upload.mime_type,
+                    media_kind=upload.media_kind,
+                    filename=upload.filename,
                     **kwargs,
                 )
             else:

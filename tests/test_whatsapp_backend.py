@@ -31,6 +31,7 @@ from backends.whatsapp import (
     _event_from_raw,
     _event_from_receipt,
     _event_from_typing,
+    _resolve_wa_media_chat_id,
 )
 from models import PROTOCOL_WHATSAPP, contact_cache_key
 
@@ -763,6 +764,8 @@ class TestWhatsAppEvents:
         assert ev.payload["msg_type"] == "image"
         assert ev.payload["attachment_id"] == "https://wa.to/img/abc123.jpg"
         assert ev.payload["attachment_info"] == "Guarda!"  # caption
+        assert ev.payload["media_kind"] == "image"
+        assert ev.payload["content_type"] == "image/jpeg"
 
     def test_hasMedia_caption_in_body(self):
         """WAHA reale: la caption dei media arriva nel campo `body` (non `caption`)."""
@@ -826,6 +829,8 @@ class TestWhatsAppEvents:
         assert ev.payload["msg_type"] == "attachment"
         assert ev.payload["attachment_id"] == "https://wa.to/vid/vid.mp4"
         assert ev.payload["attachment_info"] == "video/mp4"
+        assert ev.payload["media_kind"] == "video"
+        assert ev.payload["content_type"] == "video/mp4"
 
     def test_hasMedia_audio(self):
         """WAHA audio message via hasMedia/media fields."""
@@ -844,6 +849,91 @@ class TestWhatsAppEvents:
         )
         assert ev is not None
         assert ev.payload["msg_type"] == "attachment"
+        assert ev.payload["media_kind"] == "audio"
+        assert ev.payload["content_type"] == "audio/ogg"
+
+    def test_attachments_without_mime_fall_back_to_document(self):
+        ev = _msg(
+            {
+                "id": "legacy-document",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "attachments": [{"id": "media-1"}],
+            }
+        )
+
+        assert ev.payload["msg_type"] == "attachment"
+        assert ev.payload["media_kind"] == "document"
+
+    def test_hasMedia_without_mime_falls_back_to_document(self):
+        ev = _msg(
+            {
+                "id": "flat-document",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "hasMedia": True,
+                "media": {"url": "https://wa.to/media/blob"},
+            }
+        )
+
+        assert ev.payload["msg_type"] == "attachment"
+        assert ev.payload["media_kind"] == "document"
+
+    def test_ack_media_without_mime_falls_back_to_document(self):
+        backend = _make_backend()
+        handled = backend.handle_webhook(
+            {
+                "event": "message.ack",
+                "payload": {
+                    "fromMe": True,
+                    "id": "outgoing-document",
+                    "to": "3912345678@c.us",
+                    "timestamp": 1700000000,
+                    "hasMedia": True,
+                    "media": {"url": "https://wa.to/media/blob"},
+                },
+            }
+        )
+
+        events = backend.poll_once()
+        assert handled is True
+        assert len(events) == 1
+        assert events[0].payload["msg_type"] == "attachment"
+        assert events[0].payload["media_kind"] == "document"
+
+    @pytest.mark.parametrize(
+        ("media_key", "media", "expected_kind", "expected_type"),
+        [
+            (
+                "audioMessage",
+                {"mimetype": "audio/ogg", "ptt": True},
+                "voice",
+                "attachment",
+            ),
+            (
+                "videoMessage",
+                {"mimetype": "video/mp4", "gifPlayback": True},
+                "gif",
+                "image",
+            ),
+            ("documentMessage", {"mimetype": "image/png"}, "document", "attachment"),
+        ],
+    )
+    def test_nested_media_kind_protocol_hints(
+        self, media_key, media, expected_kind, expected_type
+    ):
+        ev = _msg(
+            {
+                "id": "nested-media",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "message": {media_key: media},
+            }
+        )
+
+        assert ev.payload["media_kind"] == expected_kind
+        assert ev.payload["msg_type"] == expected_type
+        assert ev.payload["content_type"] == media["mimetype"]
 
     def test_media_synthetic_text_uses_url_then_parent_part_identity(self):
         events = _event_from_message(
@@ -1165,7 +1255,10 @@ class TestWhatsAppBackend:
             backend._rest, "_request", return_value={"id": "image-id"}
         ) as request:
             message_id = backend.send_attachment_sync(
-                "139153@lid", image, mime_type="image/png"
+                "139153@lid",
+                image,
+                mime_type="image/png",
+                filename="original photo.png",
             )
 
         assert message_id == "image-id"
@@ -1177,11 +1270,67 @@ class TestWhatsAppBackend:
                 "chatId": "393331234567@c.us",
                 "file": {
                     "mimetype": "image/png",
-                    "filename": "photo.png",
+                    "filename": "original photo.png",
                     "data": "cG5nLWRhdGE=",
                 },
                 "caption": "",
             },
+        )
+
+    @pytest.mark.parametrize(
+        "filename,mime,kind,endpoint",
+        [
+            ("clip.mp4", "video/mp4", "video", "/api/sendVideo"),
+            ("song.mp3", "audio/mpeg", "audio", "/api/sendFile"),
+            ("report.pdf", "application/pdf", "document", "/api/sendFile"),
+        ],
+    )
+    def test_send_attachment_sync_routes_media_kind(
+        self, tmp_path, filename, mime, kind, endpoint
+    ):
+        backend = _make_backend()
+        media = tmp_path / filename
+        media.write_bytes(b"media-data")
+        with patch.object(
+            backend._rest, "_request", return_value={"id": "media-id"}
+        ) as request:
+            message_id = backend.send_attachment_sync(
+                "1@c.us", media, mime_type=mime, media_kind=kind
+            )
+
+        assert message_id == "media-id"
+        assert request.call_args.args[:2] == ("POST", endpoint)
+        assert request.call_args.args[2]["file"] == {
+            "mimetype": mime,
+            "filename": filename,
+            "data": "bWVkaWEtZGF0YQ==",
+        }
+
+    def test_send_video_falls_back_to_send_file_on_missing_endpoint(self, tmp_path):
+        backend = _make_backend()
+        video = tmp_path / "clip.mp4"
+        video.write_bytes(b"video")
+
+        def missing_video(*args, **kwargs):
+            backend._rest.last_status = 404
+
+        with (
+            patch.object(backend._rest, "send_video", side_effect=missing_video),
+            patch.object(
+                backend._rest, "send_file", return_value={"id": "fallback-id"}
+            ) as send_file,
+        ):
+            message_id = backend.send_attachment_sync(
+                "1@c.us", video, mime_type="video/mp4"
+            )
+
+        assert message_id == "fallback-id"
+        send_file.assert_called_once_with(
+            "1@c.us",
+            video,
+            caption=None,
+            reply_to_message_id=None,
+            mime_type="video/mp4",
         )
 
     def test_send_attachment_sync_reports_waha_error(self, tmp_path, caplog):
@@ -1271,6 +1420,65 @@ class TestWhatsAppBackend:
         with patch.object(backend._rest, "download_media", return_value=None):
             p = backend.get_attachment_path("missing-media.jpg")
         assert p is None
+
+    def test_get_attachment_path_forces_redownload_after_stale_url(self, tmp_path):
+        media = tmp_path / "media"
+        media.mkdir()
+        backend = _make_backend(media_dir=str(media))
+        stale_url = (
+            "http://localhost:3000/api/files/default/"
+            "true_85328132063407@lid_3A6090013A860EEEBA75.oga"
+        )
+        fresh_url = (
+            "http://localhost:3000/api/files/default/"
+            "true_85328132063407@lid_3A6090013A860EEEBA75.opus"
+        )
+
+        with (
+            patch.object(
+                backend._rest, "download_media", side_effect=[None, b"audio"]
+            ) as download,
+            patch.object(
+                backend._rest,
+                "get_message_media",
+                return_value={"media": {"url": fresh_url, "mimetype": "audio/ogg"}},
+            ) as force_download,
+        ):
+            path = backend.get_attachment_path(stale_url)
+
+        force_download.assert_called_once_with(
+            "85328132063407@lid_3A6090013A860EEEBA75",
+            "true_85328132063407@lid_3A6090013A860EEEBA75",
+        )
+        assert download.call_args_list == [((stale_url,),), ((fresh_url,),)]
+        assert path == media / "true_85328132063407@lid_3A6090013A860EEEBA75.oga"
+        assert path.read_bytes() == b"audio"
+
+    @pytest.mark.parametrize("message", [None, {"media": {"mimetype": "video/mp4"}}])
+    def test_get_attachment_path_forced_redownload_without_url_returns_none(
+        self, tmp_path, message
+    ):
+        backend = _make_backend(media_dir=str(tmp_path))
+        attachment_id = "false_391234567890@c.us_ABC.mp4"
+        backend._rest.download_media = MagicMock(return_value=None)
+        backend._rest.get_message_media = MagicMock(return_value=message)
+
+        assert backend.get_attachment_path(attachment_id) is None
+        backend._rest.download_media.assert_called_once_with(attachment_id)
+        backend._rest.get_message_media.assert_called_once_with(
+            "391234567890@c.us_ABC", "false_391234567890@c.us_ABC"
+        )
+
+    def test_resolve_wa_media_chat_id_from_url(self):
+        attachment_id = (
+            "http://localhost:3000/api/files/default/"
+            "true_85328132063407@lid_3A6090013A860EEEBA75.oga"
+        )
+
+        assert _resolve_wa_media_chat_id(attachment_id) == (
+            "85328132063407@lid_3A6090013A860EEEBA75",
+            "true_85328132063407@lid_3A6090013A860EEEBA75",
+        )
 
     def test_get_attachment_path_no_rest_returns_none(self):
         """Without a REST client (no api_url), return None immediately."""
@@ -1658,6 +1866,60 @@ class TestWhatsAppBackend:
                 "SELECT attachment_id, msg_type FROM messages"
             ).fetchone()
             assert row == (url, "image")
+
+    def test_named_attachment_mirror_reconciles_waha_echo(self, tmp_path, monkeypatch):
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
+        media_dir = tmp_path / "whatsapp-media"
+        upload = tmp_path / "upload-8c54.pdf"
+        upload.write_bytes(b"pdf")
+        backend = _make_backend(media_dir=str(media_dir))
+        message_id = "true_391234567890@c.us_ABC"
+        timestamp = 1_788_114_863_000
+
+        backend.enqueue_sent_message(
+            "391234567890@c.us",
+            message_id,
+            "",
+            attachment_path=upload,
+            mime_type="application/pdf",
+            filename="Round3 relazione.pdf",
+        )
+        optimistic = backend.poll_once()[0]
+        optimistic.payload["timestamp"] = timestamp
+        assert backend.ingest_message(
+            optimistic.contact_id, optimistic.payload, timestamp
+        )
+
+        echo_url = (
+            "http://localhost:3000/api/files/default/true_391234567890@c.us_ABC.pdf"
+        )
+        assert not backend.ingest_message(
+            "391234567890@c.us",
+            {
+                "id": message_id,
+                "text": "Round3 relazione.pdf",
+                "is_mine": True,
+                "sender": "You",
+                "msg_type": "attachment",
+                "attachment_info": "Round3 relazione.pdf",
+                "attachment_id": echo_url,
+            },
+            timestamp,
+        )
+
+        assert len(backend.cache["391234567890@c.us"]) == 1
+        cached = backend.cache["391234567890@c.us"][0]
+        assert cached["attachment_id"].startswith("sent-")
+        assert cached["attachment_info"] == "Round3 relazione.pdf"
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            rows = conn.execute(
+                "SELECT attachment_id, attachment_info FROM messages"
+            ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0].startswith("sent-")
+        assert rows[0][1] == "Round3 relazione.pdf"
 
     def test_echo_out_of_order_picks_closest_idless(self):
         """Among id-less fallback candidates, the closest timestamp is upgraded."""

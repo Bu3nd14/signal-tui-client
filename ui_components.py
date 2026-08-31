@@ -366,6 +366,21 @@ class MessageWidget(Static):
             self.status = status
             self.message_id = message_id
 
+    class MediaOpenRequested(Message):
+        """Posted when the user activates a non-image media attachment."""
+
+        def __init__(
+            self,
+            attachment_id: str,
+            protocol: str,
+            path: Path | None = None,
+        ) -> None:
+            super().__init__()
+            self.attachment_id = attachment_id
+            self.protocol = protocol
+            self.path = path
+            self.widget: MessageWidget | None = None
+
     BINDINGS: ClassVar[list] = [
         Binding("alt+e", "request_edit", "Edit message", show=False),
     ]
@@ -382,6 +397,8 @@ class MessageWidget(Static):
         sender_color: str | None = None,
         message_id: str | None = None,
         edited: bool = False,
+        attachment_ref: tuple[str, str] | None = None,
+        attachment_path: Path | None = None,
     ) -> None:
         """Initialise the message widget.
 
@@ -419,6 +436,8 @@ class MessageWidget(Static):
         self._protocol = protocol
         self._sender_color = sender_color
         self._edited = edited
+        self._attachment_ref = attachment_ref
+        self.attachment_path = attachment_path
 
         super().__init__(self._build_content(), markup=False, classes=classes)
         self.can_focus = True
@@ -494,7 +513,7 @@ class MessageWidget(Static):
             self._apply_protocol_accent()
 
     def on_click(self, event: events.Click | None = None) -> None:
-        """Mouse click → Alt+click edits, otherwise emit ``MessageClicked``."""
+        """Mouse click → edit, open attached media, or select for reply."""
         if event is not None and event.meta:
             self.post_message(
                 self.EditRequested(
@@ -506,6 +525,9 @@ class MessageWidget(Static):
                     message_id=self._message_id,
                 )
             )
+            return
+        if self._attachment_ref is not None:
+            self.post_message(self._make_media_open_requested())
             return
         self.post_message(
             self.MessageClicked(
@@ -547,6 +569,21 @@ class MessageWidget(Static):
         self.update(self._build_content())
         self.refresh()
 
+    def update_media_path(self, path: Path | None) -> None:
+        """Store the resolved local path for a non-image attachment."""
+        self.attachment_path = path
+
+    def _make_media_open_requested(self) -> "MessageWidget.MediaOpenRequested":
+        """Build a media-open event carrying this widget's attachment state."""
+        if self._attachment_ref is None:
+            raise RuntimeError("Message widget has no media attachment")
+        attachment_id, protocol = self._attachment_ref
+        message = self.MediaOpenRequested(
+            attachment_id, protocol, path=self.attachment_path
+        )
+        message.widget = self
+        return message
+
     def on_focus(self) -> None:
         """Visual feedback when focused."""
         if not self._selected:
@@ -560,7 +597,10 @@ class MessageWidget(Static):
             self._apply_protocol_accent()
 
     def key_enter(self) -> None:
-        """Enter key → emit ``MessageClicked``."""
+        """Enter key → open attached media or emit ``MessageClicked``."""
+        if self._attachment_ref is not None:
+            self.post_message(self._make_media_open_requested())
+            return
         self.post_message(
             self.MessageClicked(
                 text=self._msg_text,
@@ -595,6 +635,7 @@ class ImageWidget(Static):
             super().__init__()
             self.attachment_path = attachment_path
             self.attachment_id = attachment_id
+            self.widget: ImageWidget | None = None
 
     class ReplyRequested(Message):
         """Posted on Alt+click / Alt+r: request to reply to this image.
@@ -730,9 +771,9 @@ class ImageWidget(Static):
             self.post_message(self._make_reply_requested())
             return
         if self.attachment_path or self.attachment_id:
-            self.post_message(
-                self.ImageClicked(self.attachment_path, self.attachment_id)
-            )
+            message = self.ImageClicked(self.attachment_path, self.attachment_id)
+            message.widget = self
+            self.post_message(message)
 
     def action_request_reply(self) -> None:
         """Alt+r → emit ``ReplyRequested``."""
@@ -811,9 +852,9 @@ class ImageWidget(Static):
     def key_enter(self) -> None:
         """Enter key → emit ``ImageClicked``."""
         if self.attachment_path or self.attachment_id:
-            self.post_message(
-                self.ImageClicked(self.attachment_path, self.attachment_id)
-            )
+            message = self.ImageClicked(self.attachment_path, self.attachment_id)
+            message.widget = self
+            self.post_message(message)
 
 
 class QuoteWidget(Horizontal):

@@ -30,7 +30,9 @@ from models import (
     PROTOCOL_TELEGRAM,
     ChatContact,
     ChatEvent,
+    media_kind_from_mime,
     media_quote_placeholder,
+    msg_type_for_media_kind,
 )
 
 from .base import ChatBackend, should_upgrade_outgoing_attachment
@@ -60,6 +62,63 @@ _AVAILABLE_REACTIONS_TTL_S = 600
 
 # Prefix for lazy-download media references (``tgref:<chat_id>:<msg_id>``).
 _TGREF_PREFIX = "tgref:"
+
+
+def _tg_media_kind(msg: Any) -> tuple[str | None, str | None, str | None]:
+    """Return ``(media_kind, filename, mime)`` for a Telethon message."""
+    if getattr(msg, "photo", None):
+        return "image", None, "image/jpeg"
+    document = getattr(msg, "document", None)
+    if document is None:
+        return None, None, None
+
+    mime = (getattr(document, "mime_type", "") or "").lower()
+    filename = None
+    sticker = animated = video = voice = audio = False
+    for attr in getattr(document, "attributes", None) or []:
+        name = type(attr).__name__
+        if name == "DocumentAttributeFilename":
+            filename = getattr(attr, "file_name", None) or filename
+        elif name == "DocumentAttributeSticker":
+            sticker = True
+        elif name == "DocumentAttributeAnimated":
+            animated = True
+        elif name == "DocumentAttributeVideo":
+            video = True
+        elif name == "DocumentAttributeVoice":
+            voice = True
+        elif name == "DocumentAttributeAudio":
+            if getattr(attr, "voice", False):
+                voice = True
+            else:
+                audio = True
+
+    if sticker:
+        return "sticker", filename, mime
+    if animated:
+        return "gif", filename, mime
+    if voice:
+        return "voice", filename, mime
+    if video:
+        return "video", filename, mime
+    if audio or mime.startswith("audio/"):
+        return "audio", filename, mime
+    return media_kind_from_mime(mime) or "document", filename, mime
+
+
+def _tg_label_for(kind: str, filename: str | None) -> str:
+    """Return Telegram's canonical attachment label for a media kind."""
+    if filename:
+        return f"📎 {filename}"
+    return {
+        "image": "Photo",
+        "gif": "📎 Document",
+        "video": "🎬 Video",
+        "voice": "🎤 Voice",
+        "audio": "🎵 Audio",
+        "document": "📎 Document",
+        "sticker": "🎨 Sticker",
+    }[kind]
 
 
 #: Maps Telegram's fine-grained attachment labels (set by
@@ -985,6 +1044,8 @@ class TelegramBackend(ChatBackend):
         quote_author: str | None = None,
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
+        media_kind: str | None = None,
+        filename: str | None = None,
     ) -> str:
         if self._loop is None or self._client is None:
             raise RuntimeError("Telegram backend not connected")
@@ -996,13 +1057,18 @@ class TelegramBackend(ChatBackend):
                 raise ValueError(f"Invalid Telegram contact id: {contact_id}")
             reply_to = self._validated_reply_to_message_id(reply_to_message_id)
             entity = await self._resolve_input_entity(eid)
-            msg = await self._client.send_file(
-                entity,
-                str(file_path),
-                caption=caption or None,
-                reply_to=reply_to,
-                force_document=False,
-            )
+            normalized_mime = mime_type.lower().split(";", 1)[0].strip()
+            kind = media_kind or media_kind_from_mime(normalized_mime) or "document"
+            kwargs = {
+                "caption": caption or None,
+                "reply_to": reply_to,
+                "force_document": kind == "document",
+                "voice_note": kind == "voice" and normalized_mime == "audio/ogg",
+            }
+            upload = str(file_path)
+            if filename is not None:
+                upload = await self._client.upload_file(upload, file_name=filename)
+            msg = await self._client.send_file(entity, upload, **kwargs)
             return str(msg.id)
 
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
@@ -1020,15 +1086,16 @@ class TelegramBackend(ChatBackend):
         reply_to_message_id: str | None = None,
         attachment_path: Path | None = None,
         mime_type: str | None = None,
+        media_kind: str | None = None,
+        filename: str | None = None,
     ) -> None:
         is_attachment = attachment_path is not None
-        msg_type = (
-            "image"
-            if is_attachment and (mime_type or "").startswith("image/")
-            else "attachment"
+        media_kind = (
+            media_kind or media_kind_from_mime(mime_type) or "document"
             if is_attachment
-            else "text"
+            else None
         )
+        msg_type = msg_type_for_media_kind(media_kind) if media_kind else "text"
         media_text = "" if msg_type == "image" else text
         attachment_id = None
         if attachment_path is not None:
@@ -1054,9 +1121,12 @@ class TelegramBackend(ChatBackend):
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
                     "msg_type": msg_type,
-                    "attachment_info": text or None if is_attachment else None,
+                    "attachment_info": (filename or text or None)
+                    if is_attachment
+                    else None,
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
+                    "media_kind": media_kind,
                 },
             )
         )
@@ -1292,31 +1362,14 @@ class TelegramBackend(ChatBackend):
         msg_type = "text"
         att_id = attachment_id  # use downloaded path if available
         attachment_info: str | None = None
-
-        if msg.photo:
-            msg_type = "image"
-            attachment_info = text or "Photo"
-            text = ""
-        elif msg.document:
-            msg_type = "attachment"
-            attachment_info = "📎 Document"
-            for attr in getattr(msg.document, "attributes", []):
-                name = getattr(attr, "file_name", None)
-                if name:
-                    attachment_info = f"📎 {name}"
-                    break
-        elif msg.sticker:
-            msg_type = "sticker"
-            attachment_info = "🎨 Sticker"
-        elif msg.video:
-            msg_type = "attachment"
-            attachment_info = "🎬 Video"
-        elif msg.voice:
-            msg_type = "attachment"
-            attachment_info = "🎤 Voice"
-        elif msg.audio:
-            msg_type = "attachment"
-            attachment_info = "🎵 Audio"
+        kind, filename, mime = _tg_media_kind(msg)
+        content_type: str | None = None
+        if kind:
+            msg_type = msg_type_for_media_kind(kind)
+            attachment_info = text or _tg_label_for(kind, filename)
+            if kind in ("image", "sticker"):
+                text = ""
+            content_type = mime or None
 
         # Lazy-download fallback: photos and documents without a downloaded
         # path (history fetch, failed live download) get a ``tgref:`` reference.
@@ -1363,6 +1416,8 @@ class TelegramBackend(ChatBackend):
             "msg_type": msg_type,
             "attachment_info": attachment_info,
             "attachment_id": att_id,
+            "media_kind": kind,
+            "content_type": content_type,
             "protocol": PROTOCOL_TELEGRAM,
             "contact": self._identify_contact(chat_id),
         }
@@ -1727,6 +1782,7 @@ class TelegramBackend(ChatBackend):
             attachment_info=data.get("attachment_info"),
             attachment_id=data.get("attachment_id"),
             content_type=data.get("content_type"),
+            media_kind=data.get("media_kind"),
             protocol=PROTOCOL_TELEGRAM,
             msg_id=data.get("id"),
             status=data.get("status"),

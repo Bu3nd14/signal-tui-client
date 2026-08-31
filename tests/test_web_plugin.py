@@ -149,6 +149,91 @@ def test_send_requires_bearer_token():
     assert manager.send_calls == []
 
 
+def test_send_accepts_origin_matching_host(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        json={"protocol": "signal", "contact_id": "alice", "text": "Ciao"},
+        headers={**AUTH, "Origin": "http://local.test", "Host": "local.test"},
+    )
+
+    assert response.status_code == 200
+    assert len(manager.send_calls) == 1
+
+
+def test_send_accepts_https_origin_matching_forwarded_host(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": "report"},
+        files={"file": ("report.pdf", b"%PDF-1.7\n", "application/pdf")},
+        headers={
+            **AUTH,
+            "Origin": "https://public.example",
+            "X-Forwarded-Host": "public.example, internal.proxy",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(manager.attachment_calls) == 1
+
+
+def test_send_rejects_public_origin_without_forwarded_host(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        json={"protocol": "signal", "contact_id": "alice", "text": "Ciao"},
+        headers={**AUTH, "Origin": "https://public.example"},
+    )
+
+    assert response.status_code == 403
+    assert manager.send_calls == []
+
+
+def test_send_rejects_forwarded_host_when_proxy_reports_http(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        json={"protocol": "signal", "contact_id": "alice", "text": "Ciao"},
+        headers={
+            **AUTH,
+            "Origin": "https://public.example",
+            "X-Forwarded-Host": "public.example",
+            "X-Forwarded-Proto": "http",
+        },
+    )
+
+    assert response.status_code == 403
+    assert manager.send_calls == []
+
+
+def test_send_rejects_origin_different_from_effective_host(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        json={"protocol": "signal", "contact_id": "alice", "text": "Ciao"},
+        headers={
+            **AUTH,
+            "Origin": "https://public.example",
+            "X-Forwarded-Host": "other.example",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+
+    assert response.status_code == 403
+    assert manager.send_calls == []
+
+
 def test_send_routes_reply_metadata_according_to_protocol():
     for protocol, reply_to_message_id in (
         ("signal", "message-1"),
@@ -282,7 +367,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
-const submit = app.slice(app.indexOf("async function submitMessage("), app.indexOf("\nfunction encodeToken"));
+const helper = app.slice(app.indexOf("function mediaKindFromMime("), app.indexOf("\nfunction clearStagedAttachment"));
+const submit = helper + "\n" + app.slice(app.indexOf("async function submitMessage("), app.indexOf("\nfunction encodeToken"));
 globalThis.state = {
   sending: false,
   active: { id: "alice", protocol: "signal" },
@@ -307,6 +393,7 @@ vm.runInThisContext(submit);
   assert.equal(state.optimistic.length, 1);
   assert.equal(state.optimistic[0].text, "la caption");
   assert.equal(state.optimistic[0].attachment.type, "image/png");
+  assert.equal(state.optimistic[0].attachment.media_kind, "image");
   assert.equal(state.optimistic[0].localPreviewUrl, "blob:photo");
   assert.equal(request.url, "/api/send");
   assert.equal(request.options.body.get("text"), "la caption");
@@ -615,6 +702,7 @@ def test_backend_manager_send_attachment_sync_routes_to_backend(tmp_path):
         quote_message="Prima",
         reply_to_message_id="reply-id",
         quote_attachments=["image/png"],
+        filename="original.png",
     )
 
     assert result == "message-id"
@@ -628,6 +716,7 @@ def test_backend_manager_send_attachment_sync_routes_to_backend(tmp_path):
         quote_message="Prima",
         reply_to_message_id="reply-id",
         quote_attachments=["image/png"],
+        filename="original.png",
     )
 
 
@@ -654,7 +743,27 @@ def test_send_multipart_image_routes_and_cleans_temporary_file(web_client):
     assert (protocol, contact_id, existed_during_send) == ("signal", "alice", True)
     assert kwargs["caption"] == "caption"
     assert kwargs["mime_type"] == "image/png"
+    assert kwargs["media_kind"] == "image"
+    assert kwargs["filename"] == "clipboard.png"
     assert not Path(path).exists()
+
+
+def test_send_multipart_pdf_routes_as_document(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": "report"},
+        files={"file": ("report.pdf", b"%PDF-1.7\n", "application/pdf")},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    kwargs = manager.attachment_calls[0][3]
+    assert kwargs["mime_type"] == "application/pdf"
+    assert kwargs["media_kind"] == "document"
+    assert kwargs["filename"] == "report.pdf"
 
 
 @pytest.mark.parametrize("multipart", [False, True])
@@ -809,6 +918,8 @@ def test_send_multipart_image_routes_quote(web_client):
     assert manager.attachment_calls[0][3] == {
         "caption": None,
         "mime_type": "image/png",
+        "media_kind": "image",
+        "filename": "reply.png",
         "quote_timestamp": 123456,
         "quote_author": "alice",
         "quote_message": "photo.png",
@@ -844,6 +955,7 @@ def test_send_multipart_rejects_non_image_magic(web_client):
     )
 
     assert response.status_code == 400
+    assert response.json()["detail"] == "Unsupported media type"
     assert manager.attachment_calls == []
 
 
@@ -1153,6 +1265,7 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
         "attachment_id": "pic",
         "name": "x.jpg",
         "type": "image/jpeg",
+        "media_kind": None,
     }
     assert body[1]["id"].isdigit()
     assert body[2]["direction"] == "out"
@@ -1403,6 +1516,16 @@ def test_messages_infers_missing_image_content_type(web_client):
                     None,
                     None,
                 ),
+                (
+                    "whatsapp",
+                    "alice",
+                    "Media: http://localhost:3000/api/files/voice-note.oga",
+                    0,
+                    5,
+                    "http://localhost:3000/api/files/voice-note.oga",
+                    "audio/ogg; codecs=opus",
+                    "audio/ogg",
+                ),
             ],
         )
 
@@ -1420,6 +1543,8 @@ def test_messages_infers_missing_image_content_type(web_client):
     assert attachments[0]["name"] == "photo.jpeg"
     assert attachments[1]["type"] is None
     assert attachments[2]["type"] == "application/custom"
+    assert messages[3]["text"] == ""
+    assert attachments[3]["type"] == "audio/ogg"
 
     # Non-WhatsApp captions starting with "Media: " must be preserved.
     response = client.get(
@@ -1429,6 +1554,63 @@ def test_messages_infers_missing_image_content_type(web_client):
     )
     assert response.status_code == 200
     assert response.json()[0]["text"] == "Media: att-1"
+
+
+@pytest.mark.parametrize(
+    ("text", "attachment_info", "expected_text"),
+    [
+        (
+            "Media: http://localhost:3000/api/files/default/false_x.oga",
+            "audio/ogg; codecs=opus",
+            "",
+        ),
+        ("Media: false_12345@lid_ABC", None, ""),
+        (
+            "AuDiO: registrazione del concerto",
+            None,
+            "AuDiO: registrazione del concerto",
+        ),
+        ("Video: il mio video", None, "Video: il mio video"),
+        ("File: documento importante", None, "File: documento importante"),
+        (
+            "Media: 42:1",
+            "Audio: registrazione del concerto",
+            "Audio: registrazione del concerto",
+        ),
+    ],
+)
+def test_whatsapp_messages_filter_only_synthetic_media_text(
+    web_client, text, attachment_info, expected_text
+):
+    client, _, db_file = web_client
+    import sqlite3
+
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            "INSERT INTO messages(protocol, contact_number, text, is_mine, "
+            "timestamp, msg_type, attachment_id, attachment_info, content_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "whatsapp",
+                "alice",
+                text,
+                0,
+                1,
+                "audio",
+                "voice-note.oga",
+                attachment_info,
+                "audio/ogg",
+            ),
+        )
+
+    response = client.get(
+        "/api/messages",
+        params={"proto": "whatsapp", "contact_id": "alice"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["text"] == expected_text
 
 
 def test_bridge_is_bounded_nonblocking_and_counts_drop():
