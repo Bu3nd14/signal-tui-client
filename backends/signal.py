@@ -28,6 +28,7 @@ from typing import Literal
 
 from PIL import Image
 
+from filename_utils import sanitize_filename
 from models import (
     MEDIA_QUOTE_PLACEHOLDERS,
     PROTOCOL_SIGNAL,
@@ -81,6 +82,8 @@ _SEND_DEDUP_WINDOW_MS = 5000
 # Prevents double-counting when signal-cli re-delivers the same envelope
 # (e.g. sync from another device) with a slightly different timestamp.
 _INCOMING_DEDUP_WINDOW_MS = 2000
+
+_MAX_SENT_ATTACHMENT_PATHS = 1024
 
 _RE_CONTACT_LINE = re.compile(
     r"Number:(?P<number>\S+)\s+"
@@ -645,12 +648,12 @@ class SignalBackend(ChatBackend):
         reply_to_message_id: str | None = None,
         quote_attachments: list[str] | None = None,
         media_kind: str | None = None,
+        filename: str | None = None,
     ) -> str:
         SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
-        attachment_id = f"sent-{uuid.uuid4().hex}{file_path.suffix.lower()}"
-        persistent_path = SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id
-        shutil.copy2(file_path, persistent_path)
-        persistent_path.chmod(0o644)
+        safe_filename = sanitize_filename(filename)
+        with self._sent_attachment_paths_lock:
+            persistent_path = self._copy_sent_attachment(file_path, safe_filename)
         try:
             message_id = self._send_message_sync(
                 contact_id,
@@ -667,7 +670,29 @@ class SignalBackend(ChatBackend):
             raise
         with self._sent_attachment_paths_lock:
             self._sent_attachment_paths[str(file_path.resolve())] = persistent_path
+            while len(self._sent_attachment_paths) > _MAX_SENT_ATTACHMENT_PATHS:
+                oldest = next(iter(self._sent_attachment_paths))
+                self._sent_attachment_paths.pop(oldest)
         return message_id
+
+    @staticmethod
+    def _copy_sent_attachment(file_path: Path, filename: str = "") -> Path:
+        if not filename:
+            filename = f"sent-{uuid.uuid4().hex}{file_path.suffix.lower()}"
+        destination = SIGNAL_CLI_ATTACHMENTS_DIR / filename
+        if destination.exists():
+            suffix = Path(filename).suffix
+            stem = filename[: -len(suffix)] if suffix else filename
+            index = 1
+            while destination.exists():
+                marker = f" ({index})"
+                max_stem_length = 255 - len(suffix) - len(marker)
+                candidate = f"{stem[:max_stem_length].rstrip(' .')}{marker}{suffix}"
+                destination = SIGNAL_CLI_ATTACHMENTS_DIR / candidate
+                index += 1
+        shutil.copy2(file_path, destination)
+        destination.chmod(0o644)
+        return destination
 
     def enqueue_sent_message(
         self,
@@ -682,6 +707,7 @@ class SignalBackend(ChatBackend):
         attachment_path: Path | None = None,
         mime_type: str | None = None,
         media_kind: str | None = None,
+        filename: str | None = None,
     ) -> None:
         try:
             ts = int(message_id)
@@ -694,21 +720,21 @@ class SignalBackend(ChatBackend):
         if attachment_path is not None:
             media_kind = media_kind or media_kind_from_mime(mime_type) or "document"
             msg_type = msg_type_for_media_kind(media_kind)
-            attachment_info = text or None
+            safe_filename = sanitize_filename(filename)
+            attachment_info = safe_filename or text or None
             with self._sent_attachment_paths_lock:
-                persistent_path = self._sent_attachment_paths.pop(
+                persistent_path = self._sent_attachment_paths.get(
                     str(attachment_path.resolve()), None
                 )
-            if persistent_path is not None:
-                attachment_id = persistent_path.name
-            else:
-                SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
-                attachment_id = (
-                    f"sent-{uuid.uuid4().hex}{attachment_path.suffix.lower()}"
-                )
-                persistent_path = SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id
-                shutil.copy2(attachment_path, persistent_path)
-                persistent_path.chmod(0o644)
+                if persistent_path is None:
+                    SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+                    persistent_path = self._copy_sent_attachment(
+                        attachment_path, safe_filename
+                    )
+                    self._sent_attachment_paths[str(attachment_path.resolve())] = (
+                        persistent_path
+                    )
+            attachment_id = persistent_path.name
 
         event_text = "" if msg_type == "image" else text or attachment_info or ""
 
@@ -1295,6 +1321,36 @@ class SignalBackend(ChatBackend):
 
     # ─── Incoming message ingestion ───────────────────────────────────
 
+    def _is_registered_sent_attachment(self, path: Path | None) -> bool:
+        if path is None:
+            return False
+        resolved = Path(path).resolve()
+        with self._sent_attachment_paths_lock:
+            return any(
+                sent_path.resolve() == resolved
+                for sent_path in self._sent_attachment_paths.values()
+            )
+
+    def _is_sent_attachment(self, attachment_id: str | None) -> bool:
+        if not attachment_id:
+            return False
+        if Path(attachment_id).name.startswith("sent-"):
+            return True
+        return self._is_registered_sent_attachment(
+            self.get_attachment_path(attachment_id)
+        )
+
+    def _outgoing_attachments_match(
+        self, current_id: str | None, incoming_id: str | None
+    ) -> bool:
+        return bool(
+            not current_id
+            or not incoming_id
+            or current_id == incoming_id
+            or self._is_sent_attachment(current_id)
+            or self._is_sent_attachment(incoming_id)
+        )
+
     def _message_already_cached(
         self,
         contact_id: str,
@@ -1323,10 +1379,8 @@ class SignalBackend(ChatBackend):
             if msg.get("is_mine") != is_mine:
                 continue
             cached_attachment_id = msg.get("attachment_id")
-            same_attachment = (
-                not attachment_id
-                or not cached_attachment_id
-                or cached_attachment_id == attachment_id
+            same_attachment = self._outgoing_attachments_match(
+                cached_attachment_id, attachment_id
             )
             if (
                 is_mine
@@ -1369,15 +1423,20 @@ class SignalBackend(ChatBackend):
         incoming_id = data.get("attachment_id")
         current_path = self.get_attachment_path(current_id) if current_id else None
         incoming_path = self.get_attachment_path(incoming_id) if incoming_id else None
-        current_is_sent = bool(current_id and Path(current_id).name.startswith("sent-"))
+        current_is_legacy_sent = bool(
+            current_id and Path(current_id).name.startswith("sent-")
+        )
+        current_is_sent = self._is_sent_attachment(current_id)
+        incoming_is_sent = self._is_sent_attachment(incoming_id)
         if (
             not incoming_id
-            or not Path(incoming_id).name.startswith("sent-")
+            or incoming_id == current_id
+            or not (current_is_sent or incoming_is_sent)
             or not data.get("is_mine")
             or incoming_path is None
             or not Path(incoming_path).is_file()
             or (
-                current_is_sent
+                current_is_legacy_sent
                 and current_path is not None
                 and Path(current_path).is_file()
             )
@@ -1471,10 +1530,8 @@ class SignalBackend(ChatBackend):
                         continue
                     cached_attachment_id = m.get("attachment_id")
                     incoming_attachment_id = data.get("attachment_id")
-                    same_attachment = (
-                        not incoming_attachment_id
-                        or not cached_attachment_id
-                        or cached_attachment_id == incoming_attachment_id
+                    same_attachment = self._outgoing_attachments_match(
+                        cached_attachment_id, incoming_attachment_id
                     )
                     id_matches_timestamp = (
                         str(m.get("id")) == str(ts) and same_attachment

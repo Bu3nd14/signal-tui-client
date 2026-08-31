@@ -1255,7 +1255,10 @@ class TestWhatsAppBackend:
             backend._rest, "_request", return_value={"id": "image-id"}
         ) as request:
             message_id = backend.send_attachment_sync(
-                "139153@lid", image, mime_type="image/png"
+                "139153@lid",
+                image,
+                mime_type="image/png",
+                filename="original photo.png",
             )
 
         assert message_id == "image-id"
@@ -1267,7 +1270,7 @@ class TestWhatsAppBackend:
                 "chatId": "393331234567@c.us",
                 "file": {
                     "mimetype": "image/png",
-                    "filename": "photo.png",
+                    "filename": "original photo.png",
                     "data": "cG5nLWRhdGE=",
                 },
                 "caption": "",
@@ -1863,6 +1866,60 @@ class TestWhatsAppBackend:
                 "SELECT attachment_id, msg_type FROM messages"
             ).fetchone()
             assert row == (url, "image")
+
+    def test_named_attachment_mirror_reconciles_waha_echo(self, tmp_path, monkeypatch):
+        import backend as backend_mod
+
+        monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
+        media_dir = tmp_path / "whatsapp-media"
+        upload = tmp_path / "upload-8c54.pdf"
+        upload.write_bytes(b"pdf")
+        backend = _make_backend(media_dir=str(media_dir))
+        message_id = "true_391234567890@c.us_ABC"
+        timestamp = 1_788_114_863_000
+
+        backend.enqueue_sent_message(
+            "391234567890@c.us",
+            message_id,
+            "",
+            attachment_path=upload,
+            mime_type="application/pdf",
+            filename="Round3 relazione.pdf",
+        )
+        optimistic = backend.poll_once()[0]
+        optimistic.payload["timestamp"] = timestamp
+        assert backend.ingest_message(
+            optimistic.contact_id, optimistic.payload, timestamp
+        )
+
+        echo_url = (
+            "http://localhost:3000/api/files/default/true_391234567890@c.us_ABC.pdf"
+        )
+        assert not backend.ingest_message(
+            "391234567890@c.us",
+            {
+                "id": message_id,
+                "text": "Round3 relazione.pdf",
+                "is_mine": True,
+                "sender": "You",
+                "msg_type": "attachment",
+                "attachment_info": "Round3 relazione.pdf",
+                "attachment_id": echo_url,
+            },
+            timestamp,
+        )
+
+        assert len(backend.cache["391234567890@c.us"]) == 1
+        cached = backend.cache["391234567890@c.us"][0]
+        assert cached["attachment_id"].startswith("sent-")
+        assert cached["attachment_info"] == "Round3 relazione.pdf"
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            rows = conn.execute(
+                "SELECT attachment_id, attachment_info FROM messages"
+            ).fetchall()
+        assert len(rows) == 1
+        assert rows[0][0].startswith("sent-")
+        assert rows[0][1] == "Round3 relazione.pdf"
 
     def test_echo_out_of_order_picks_closest_idless(self):
         """Among id-less fallback candidates, the closest timestamp is upgraded."""

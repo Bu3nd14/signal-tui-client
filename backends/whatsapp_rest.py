@@ -420,6 +420,7 @@ class WhatsAppRESTClient:
         caption: str | None = None,
         reply_to_message_id: str | None = None,
         mime_type: str | None = None,
+        filename: str | None = None,
     ) -> dict | None:
         """Send a local image via WAHA ``/api/sendImage``."""
         return self._send_media(
@@ -430,6 +431,7 @@ class WhatsAppRESTClient:
             reply_to_message_id=reply_to_message_id,
             mime_type=mime_type,
             default_mime_type="image/jpeg",
+            filename=filename,
         )
 
     def send_video(
@@ -439,6 +441,7 @@ class WhatsAppRESTClient:
         caption: str | None = None,
         reply_to_message_id: str | None = None,
         mime_type: str | None = None,
+        filename: str | None = None,
     ) -> dict | None:
         """Send a local video via WAHA ``/api/sendVideo``."""
         return self._send_media(
@@ -449,6 +452,7 @@ class WhatsAppRESTClient:
             reply_to_message_id=reply_to_message_id,
             mime_type=mime_type,
             default_mime_type="video/mp4",
+            filename=filename,
         )
 
     def send_file(
@@ -458,6 +462,7 @@ class WhatsAppRESTClient:
         caption: str | None = None,
         reply_to_message_id: str | None = None,
         mime_type: str | None = None,
+        filename: str | None = None,
     ) -> dict | None:
         """Send a local file via WAHA ``/api/sendFile``."""
         return self._send_media(
@@ -468,6 +473,7 @@ class WhatsAppRESTClient:
             reply_to_message_id=reply_to_message_id,
             mime_type=mime_type,
             default_mime_type="application/octet-stream",
+            filename=filename,
         )
 
     def _send_media(
@@ -480,6 +486,7 @@ class WhatsAppRESTClient:
         reply_to_message_id: str | None,
         mime_type: str | None,
         default_mime_type: str,
+        filename: str | None,
     ) -> dict | None:
         import base64
         import mimetypes
@@ -493,7 +500,7 @@ class WhatsAppRESTClient:
             "chatId": chat_id,
             "file": {
                 "mimetype": detected_type,
-                "filename": path.name,
+                "filename": filename or path.name,
                 "data": base64.b64encode(path.read_bytes()).decode("ascii"),
             },
             "caption": caption or "",

@@ -410,6 +410,8 @@ h2 { font-size: 1.05rem; }
 .attachment-preview img { width: 58px; height: 58px; border-radius: 8px; object-fit: cover; }
 .attachment-preview span { overflow: hidden; color: var(--muted); font-size: .8rem; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-preview button { border: 0; background: transparent; color: var(--muted); font-size: 1.25rem; cursor: pointer; }
+.attachment-preview-file { grid-template-columns: minmax(0, 1fr) 32px; }
+.attachment-preview-file span { overflow: visible; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
 .composer textarea {
   min-width: 0;
   flex: 1;

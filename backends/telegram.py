@@ -1045,6 +1045,7 @@ class TelegramBackend(ChatBackend):
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
         media_kind: str | None = None,
+        filename: str | None = None,
     ) -> str:
         if self._loop is None or self._client is None:
             raise RuntimeError("Telegram backend not connected")
@@ -1058,14 +1059,16 @@ class TelegramBackend(ChatBackend):
             entity = await self._resolve_input_entity(eid)
             normalized_mime = mime_type.lower().split(";", 1)[0].strip()
             kind = media_kind or media_kind_from_mime(normalized_mime) or "document"
-            msg = await self._client.send_file(
-                entity,
-                str(file_path),
-                caption=caption or None,
-                reply_to=reply_to,
-                force_document=kind == "document",
-                voice_note=kind == "voice" and normalized_mime == "audio/ogg",
-            )
+            kwargs = {
+                "caption": caption or None,
+                "reply_to": reply_to,
+                "force_document": kind == "document",
+                "voice_note": kind == "voice" and normalized_mime == "audio/ogg",
+            }
+            upload = str(file_path)
+            if filename is not None:
+                upload = await self._client.upload_file(upload, file_name=filename)
+            msg = await self._client.send_file(entity, upload, **kwargs)
             return str(msg.id)
 
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
@@ -1084,6 +1087,7 @@ class TelegramBackend(ChatBackend):
         attachment_path: Path | None = None,
         mime_type: str | None = None,
         media_kind: str | None = None,
+        filename: str | None = None,
     ) -> None:
         is_attachment = attachment_path is not None
         media_kind = (
@@ -1117,7 +1121,9 @@ class TelegramBackend(ChatBackend):
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
                     "msg_type": msg_type,
-                    "attachment_info": text or None if is_attachment else None,
+                    "attachment_info": (filename or text or None)
+                    if is_attachment
+                    else None,
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
                     "media_kind": media_kind,

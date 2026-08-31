@@ -1543,6 +1543,7 @@ function clearStagedAttachment({ revoke = true } = {}) {
   if (state.stagedAttachment?.previewUrl && revoke) URL.revokeObjectURL(state.stagedAttachment.previewUrl);
   state.stagedAttachment = null;
   elements.attachmentPreview.hidden = true;
+  elements.attachmentPreview.classList?.remove("attachment-preview-file");
   elements.attachmentPreviewImage.hidden = false;
   elements.attachmentPreviewImage.removeAttribute("src");
   elements.attachmentPreviewName.textContent = "";
@@ -1597,6 +1598,7 @@ async function stageAttachment(file) {
   const filename = file.name || `clipboard-${Date.now()}`;
   const previewUrl = isImage ? URL.createObjectURL(file) : null;
   state.stagedAttachment = { file, filename, previewUrl };
+  elements.attachmentPreview.classList?.toggle("attachment-preview-file", !isImage);
   elements.attachmentPreviewImage.hidden = !isImage;
   if (isImage) elements.attachmentPreviewImage.src = previewUrl;
   const icon = { video: "🎬", voice: "🎤", audio: "🎵", document: "📎" }[mediaKind] || "📎";

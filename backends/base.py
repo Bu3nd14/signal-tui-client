@@ -105,6 +105,7 @@ class ChatBackend(ABC):
         quote_author: str | None = None,
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
+        filename: str | None = None,
     ) -> str:
         """Blocking image send for callers running in a worker thread."""
         raise NotImplementedError
@@ -121,6 +122,7 @@ class ChatBackend(ABC):
         reply_to_message_id: str | None = None,
         attachment_path: Path | None = None,
         mime_type: str | None = None,
+        filename: str | None = None,
     ) -> None:
         """Publish a successful facade send through the normal receive queue."""
 

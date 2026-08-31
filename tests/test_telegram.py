@@ -629,8 +629,10 @@ class TestTelegramBackendOperations:
     def test_voice_attachment_sets_voice_note(self, monkeypatch, tmp_path):
         backend = _backend()
         backend._loop = MagicMock()
+        uploaded = SimpleNamespace(name="original voice.ogg")
         backend._client = SimpleNamespace(
-            send_file=AsyncMock(return_value=SimpleNamespace(id=77))
+            upload_file=AsyncMock(return_value=uploaded),
+            send_file=AsyncMock(return_value=SimpleNamespace(id=77)),
         )
         backend._resolve_input_entity = AsyncMock(return_value="entity")
 
@@ -651,17 +653,41 @@ class TestTelegramBackendOperations:
             tmp_path / "voice.ogg",
             mime_type="audio/ogg",
             media_kind="voice",
+            filename="original voice.ogg",
         )
 
         assert result == "77"
+        backend._client.upload_file.assert_awaited_once_with(
+            str(tmp_path / "voice.ogg"), file_name="original voice.ogg"
+        )
         backend._client.send_file.assert_awaited_once_with(
             "entity",
-            str(tmp_path / "voice.ogg"),
+            uploaded,
             caption=None,
             reply_to=None,
             force_document=False,
             voice_note=True,
         )
+
+    def test_attachment_mirror_uses_original_filename(self, monkeypatch, tmp_path):
+        media_dir = tmp_path / "telegram-media"
+        monkeypatch.setattr("backends.telegram._media_dir", lambda: media_dir)
+        upload = tmp_path / "upload-uabsa_a2.pdf"
+        upload.write_bytes(b"pdf")
+        backend = _backend()
+
+        backend.enqueue_sent_message(
+            "42",
+            "77",
+            "",
+            attachment_path=upload,
+            mime_type="application/pdf",
+            filename="Round3 relazione.pdf",
+        )
+
+        event = backend.poll_once()[0]
+        assert event.payload["attachment_info"] == "Round3 relazione.pdf"
+        assert "upload-" not in event.payload["attachment_info"]
 
     def test_attachment_send_timeout_is_120_and_configurable(
         self, monkeypatch, tmp_path

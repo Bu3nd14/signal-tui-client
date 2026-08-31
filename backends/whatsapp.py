@@ -1371,6 +1371,7 @@ class WhatsAppBackend(ChatBackend):
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
         media_kind: str | None = None,
+        filename: str | None = None,
     ) -> str | None:
         if not self._rest:
             raise RuntimeError("WhatsApp API is not configured")
@@ -1390,13 +1391,14 @@ class WhatsAppBackend(ChatBackend):
             if kind == "video"
             else "sendFile"
         )
-        result = send_method(
-            send_chat_id,
-            file_path,
-            caption=caption,
-            reply_to_message_id=reply_to_message_id,
-            mime_type=mime_type,
-        )
+        kwargs = {
+            "caption": caption,
+            "reply_to_message_id": reply_to_message_id,
+            "mime_type": mime_type,
+        }
+        if filename is not None:
+            kwargs["filename"] = filename
+        result = send_method(send_chat_id, file_path, **kwargs)
         if (
             result is None
             and endpoint != "sendFile"
@@ -1413,6 +1415,7 @@ class WhatsAppBackend(ChatBackend):
                 caption=caption,
                 reply_to_message_id=reply_to_message_id,
                 mime_type=mime_type,
+                **({"filename": filename} if filename is not None else {}),
             )
         if result is None:
             status = self._rest.last_status
@@ -1435,6 +1438,7 @@ class WhatsAppBackend(ChatBackend):
         attachment_path: Path | None = None,
         mime_type: str | None = None,
         media_kind: str | None = None,
+        filename: str | None = None,
     ) -> None:
         is_attachment = attachment_path is not None
         media_kind = (
@@ -1465,7 +1469,9 @@ class WhatsAppBackend(ChatBackend):
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
                     "msg_type": msg_type,
-                    "attachment_info": text or None if is_attachment else None,
+                    "attachment_info": (filename or text or None)
+                    if is_attachment
+                    else None,
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
                     "media_kind": media_kind,
@@ -1833,10 +1839,16 @@ class WhatsAppBackend(ChatBackend):
             # diverso).  Il match per id DEVE precedere quello sul testo, altrimenti
             # l'evento ack sintetico viene ingerito come nuovo messaggio di testo.
             cached_attachment_id = msg.get("attachment_id")
+            outgoing_mirror = bool(
+                is_mine
+                and cached_attachment_id
+                and Path(str(cached_attachment_id)).name.startswith("sent-")
+            )
             same_attachment = (
                 not attachment_id
                 or not cached_attachment_id
                 or cached_attachment_id == attachment_id
+                or outgoing_mirror
             )
             if (
                 is_mine

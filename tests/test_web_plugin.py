@@ -149,6 +149,91 @@ def test_send_requires_bearer_token():
     assert manager.send_calls == []
 
 
+def test_send_accepts_origin_matching_host(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        json={"protocol": "signal", "contact_id": "alice", "text": "Ciao"},
+        headers={**AUTH, "Origin": "http://local.test", "Host": "local.test"},
+    )
+
+    assert response.status_code == 200
+    assert len(manager.send_calls) == 1
+
+
+def test_send_accepts_https_origin_matching_forwarded_host(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": "report"},
+        files={"file": ("report.pdf", b"%PDF-1.7\n", "application/pdf")},
+        headers={
+            **AUTH,
+            "Origin": "https://public.example",
+            "X-Forwarded-Host": "public.example, internal.proxy",
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(manager.attachment_calls) == 1
+
+
+def test_send_rejects_public_origin_without_forwarded_host(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        json={"protocol": "signal", "contact_id": "alice", "text": "Ciao"},
+        headers={**AUTH, "Origin": "https://public.example"},
+    )
+
+    assert response.status_code == 403
+    assert manager.send_calls == []
+
+
+def test_send_rejects_forwarded_host_when_proxy_reports_http(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        json={"protocol": "signal", "contact_id": "alice", "text": "Ciao"},
+        headers={
+            **AUTH,
+            "Origin": "https://public.example",
+            "X-Forwarded-Host": "public.example",
+            "X-Forwarded-Proto": "http",
+        },
+    )
+
+    assert response.status_code == 403
+    assert manager.send_calls == []
+
+
+def test_send_rejects_origin_different_from_effective_host(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        json={"protocol": "signal", "contact_id": "alice", "text": "Ciao"},
+        headers={
+            **AUTH,
+            "Origin": "https://public.example",
+            "X-Forwarded-Host": "other.example",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+
+    assert response.status_code == 403
+    assert manager.send_calls == []
+
+
 def test_send_routes_reply_metadata_according_to_protocol():
     for protocol, reply_to_message_id in (
         ("signal", "message-1"),
@@ -617,6 +702,7 @@ def test_backend_manager_send_attachment_sync_routes_to_backend(tmp_path):
         quote_message="Prima",
         reply_to_message_id="reply-id",
         quote_attachments=["image/png"],
+        filename="original.png",
     )
 
     assert result == "message-id"
@@ -630,6 +716,7 @@ def test_backend_manager_send_attachment_sync_routes_to_backend(tmp_path):
         quote_message="Prima",
         reply_to_message_id="reply-id",
         quote_attachments=["image/png"],
+        filename="original.png",
     )
 
 
@@ -657,6 +744,7 @@ def test_send_multipart_image_routes_and_cleans_temporary_file(web_client):
     assert kwargs["caption"] == "caption"
     assert kwargs["mime_type"] == "image/png"
     assert kwargs["media_kind"] == "image"
+    assert kwargs["filename"] == "clipboard.png"
     assert not Path(path).exists()
 
 
@@ -675,6 +763,7 @@ def test_send_multipart_pdf_routes_as_document(web_client):
     kwargs = manager.attachment_calls[0][3]
     assert kwargs["mime_type"] == "application/pdf"
     assert kwargs["media_kind"] == "document"
+    assert kwargs["filename"] == "report.pdf"
 
 
 @pytest.mark.parametrize("multipart", [False, True])
@@ -830,6 +919,7 @@ def test_send_multipart_image_routes_quote(web_client):
         "caption": None,
         "mime_type": "image/png",
         "media_kind": "image",
+        "filename": "reply.png",
         "quote_timestamp": 123456,
         "quote_author": "alice",
         "quote_message": "photo.png",

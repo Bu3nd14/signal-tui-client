@@ -183,6 +183,7 @@ class BackendManager:
         reply_to_message_id: str | None = None,
         quote_attachments: list[str] | None = None,
         media_kind: str | None = None,
+        filename: str | None = None,
     ) -> str:
         """Send an attachment through *protocol* from a worker thread."""
         backend = self._get_or_raise(protocol)
@@ -199,6 +200,8 @@ class BackendManager:
             kwargs["quote_attachments"] = quote_attachments
         if media_kind is not None:
             kwargs["media_kind"] = media_kind
+        if filename is not None:
+            kwargs["filename"] = filename
         message_id = backend.send_attachment_sync(contact_id, file_path, **kwargs)
         self._enqueue_sent_message(
             backend,
@@ -212,6 +215,7 @@ class BackendManager:
             attachment_path=file_path,
             mime_type=mime_type,
             media_kind=media_kind,
+            filename=filename,
         )
         return message_id
 

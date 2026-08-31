@@ -200,11 +200,16 @@ def test_signal_attachment_rpc_and_echo_reuse_persistent_file(tmp_path, monkeypa
     )
 
     message_id = backend.send_attachment_sync(
-        "+391234567890", upload, caption=None, mime_type="image/png"
+        "+391234567890",
+        upload,
+        caption=None,
+        mime_type="image/png",
+        filename="foto originale.png",
     )
     persistent = Path(backend._rpc.send_message.call_args.kwargs["attachments"][0])
     assert persistent.is_file()
     assert persistent.parent == media_dir
+    assert persistent.name == "foto originale.png"
     assert stat.S_IMODE(persistent.stat().st_mode) == 0o644
 
     backend.enqueue_sent_message(
@@ -213,10 +218,93 @@ def test_signal_attachment_rpc_and_echo_reuse_persistent_file(tmp_path, monkeypa
         "",
         attachment_path=upload,
         mime_type="image/png",
+        filename="foto originale.png",
     )
     event = backend.poll_once()[0]
     assert event.payload["attachment_id"] == persistent.name
+    assert event.payload["attachment_info"] == "foto originale.png"
     assert list(media_dir.iterdir()) == [persistent]
+
+
+def test_signal_attachment_filename_is_sanitized_and_collision_safe(
+    tmp_path, monkeypatch
+):
+    media_dir = tmp_path / "signal-media"
+    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    upload = tmp_path / "upload.pdf"
+    upload.write_bytes(b"pdf")
+    backend = SignalBackend()
+    backend._send_message_sync = MagicMock(return_value="1787250931234")
+
+    backend.send_attachment_sync(
+        "42",
+        upload,
+        mime_type="application/pdf",
+        filename=r"../private/relazione?.pdf",
+    )
+    backend.send_attachment_sync(
+        "42",
+        upload,
+        mime_type="application/pdf",
+        filename=r"../private/relazione?.pdf",
+    )
+
+    sent_paths = [
+        Path(call.kwargs["attachments"][0])
+        for call in backend._send_message_sync.call_args_list
+    ]
+    assert [path.name for path in sent_paths] == [
+        "relazione_.pdf",
+        "relazione_ (1).pdf",
+    ]
+    assert all(path.parent == media_dir for path in sent_paths)
+
+
+def test_signal_named_attachment_is_upgraded_by_outgoing_echo(tmp_path, monkeypatch):
+    media_dir = tmp_path / "signal-media"
+    media_dir.mkdir()
+    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    source = tmp_path / "upload.pdf"
+    current = media_dir / "relazione.pdf"
+    incoming = media_dir / "echo-real-id"
+    source.write_bytes(b"pdf")
+    current.write_bytes(b"pdf")
+    incoming.write_bytes(b"pdf")
+    backend = SignalBackend()
+    backend._sent_attachment_paths[str(source.resolve())] = current
+    message = {
+        "id": "1787250931234",
+        "text": "relazione.pdf",
+        "is_mine": True,
+        "sender": "You",
+        "timestamp": 1787250931234,
+        "quote_text": None,
+        "msg_type": "attachment",
+        "attachment_info": "relazione.pdf",
+        "attachment_id": current.name,
+    }
+    backend.cache["42"] = [message]
+
+    with monkeypatch.context() as context:
+        update = MagicMock()
+        context.setattr("backends.signal._update_message_attachment_id", update)
+        context.setattr("backends.signal._update_message_id", MagicMock())
+        changed = backend.ingest_message(
+            "42",
+            {
+                **message,
+                "attachment_id": incoming.name,
+            },
+            1787250931234,
+            persist=False,
+        )
+
+    assert changed == "changed"
+    assert len(backend.cache["42"]) == 1
+    assert message["attachment_id"] == incoming.name
+    update.assert_called_once_with(
+        "signal", "42", "1787250931234", 1787250931234, incoming.name
+    )
 
 
 def test_signal_attachment_forwards_quote_attachments(tmp_path, monkeypatch):

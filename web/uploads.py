@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from filename_utils import sanitize_filename
+
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _MAX_BYTES_BY_KIND = {
     "image": MAX_UPLOAD_BYTES,
@@ -46,6 +48,7 @@ class UploadValidationError(ValueError):
 @dataclass(frozen=True)
 class StoredUpload:
     path: Path
+    filename: str
     mime_type: str
     media_kind: str
 
@@ -146,13 +149,14 @@ def _store_upload_sync(upload: Any) -> StoredUpload:
         mime_type, media_kind = detected
         if total > _max_bytes_for_kind(media_kind):
             raise UploadValidationError(413)
-        suffix = Path(upload.filename or "").suffix.lower()
+        filename = sanitize_filename(upload.filename)
+        suffix = Path(filename).suffix.lower()
         if suffix not in _EXTENSIONS_BY_MIME.get(mime_type, set()):
             raise UploadValidationError(400)
         final_path = temporary_path.with_suffix(suffix)
         temporary_path.replace(final_path)
         temporary_path = None
-        return StoredUpload(final_path, mime_type, media_kind)
+        return StoredUpload(final_path, filename, mime_type, media_kind)
     except Exception:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)

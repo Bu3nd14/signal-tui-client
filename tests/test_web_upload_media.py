@@ -33,7 +33,21 @@ def test_store_upload_sniffs_media_kind(monkeypatch, tmp_path, name, data, mime,
     try:
         assert stored.mime_type == mime
         assert stored.media_kind == kind
+        assert stored.filename == name
         assert stored.path.read_bytes() == data
+    finally:
+        stored.cleanup()
+
+
+def test_store_upload_sanitizes_original_filename(monkeypatch, tmp_path):
+    monkeypatch.setattr("web.uploads.upload_directory", lambda: tmp_path)
+
+    stored = _store_upload_sync(
+        _upload(r"..\private/Quarterly: report?.pdf", b"%PDF-1.7\n")
+    )
+    try:
+        assert stored.filename == "Quarterly_ report_.pdf"
+        assert stored.path.suffix == ".pdf"
     finally:
         stored.cleanup()
 

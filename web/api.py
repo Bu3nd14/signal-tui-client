@@ -42,6 +42,23 @@ _IMAGE_EXTENSIONS = {
 }
 
 
+def _effective_host(request: Any) -> str:
+    """Return the browser-facing host, trusting proxies only for HTTPS origins."""
+    forwarded = request.headers.get("x-forwarded-host")
+    origin = request.headers.get("origin", "")
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    if (
+        forwarded
+        and urlsplit(origin).scheme.lower() == "https"
+        and (
+            not forwarded_proto
+            or forwarded_proto.split(",", 1)[0].strip().lower() == "https"
+        )
+    ):
+        return forwarded.split(",", 1)[0].strip().lower()
+    return (request.headers.get("host") or "").lower()
+
+
 @lru_cache(maxsize=1)
 def _emoji_categories() -> list[dict[str, Any]]:
     import emoji
@@ -1027,7 +1044,7 @@ def create_api_router() -> Any:
         origin = request.headers.get("origin")
         if origin:
             origin_host = urlsplit(origin).netloc.lower()
-            request_host = request.headers.get("host", "").lower()
+            request_host = _effective_host(request)
             if not origin_host or origin_host != request_host:
                 raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -1213,6 +1230,7 @@ def create_api_router() -> Any:
                     caption=text or None,
                     mime_type=upload.mime_type,
                     media_kind=upload.media_kind,
+                    filename=upload.filename,
                     **kwargs,
                 )
             else:
