@@ -31,6 +31,7 @@ const state = {
   mediaLoads: new Map(),
   mediaFailures: new Set(),
   objectUrls: new Set(),
+  fileTabUrls: new Map(),
   pinnedUrls: new Set(),
   modalObjectUrl: null,
   mediaCache: new Map(),
@@ -286,8 +287,13 @@ function abortMediaRequests() {
 function pruneOrphanObjectUrls() {
   const cachedUrls = new Set(state.mediaCache.values());
   const optimisticUrls = new Set(state.optimistic.map((item) => item.localPreviewUrl).filter(Boolean));
+  const fileTabUrls = new Set();
+  for (const [url, tab] of state.fileTabUrls || []) {
+    if (tab.closed) state.fileTabUrls.delete(url);
+    else fileTabUrls.add(url);
+  }
   for (const url of state.objectUrls) {
-    if (cachedUrls.has(url) || optimisticUrls.has(url) || state.pinnedUrls.has(url) || url === state.modalObjectUrl) continue;
+    if (cachedUrls.has(url) || optimisticUrls.has(url) || fileTabUrls.has(url) || state.pinnedUrls.has(url) || url === state.modalObjectUrl) continue;
     URL.revokeObjectURL(url);
     state.objectUrls.delete(url);
   }
@@ -567,6 +573,58 @@ function attachmentName(item) {
   return item.attachment?.name || attachmentId.split("?", 1)[0].split("/").filter(Boolean).pop() || "Allegato";
 }
 
+function fileAttachment(attachment, protocol, direction) {
+  const container = document.createElement("div");
+  container.className = "attachment-file";
+  container.setAttribute("role", "button");
+  container.tabIndex = 0;
+  const icon = document.createElement("span");
+  icon.className = "attachment-file-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = {
+    video: "🎬",
+    voice: "🎤",
+    audio: "🎵",
+    document: "📎",
+    sticker: "🎨",
+    gif: "🎞️",
+  }[attachment.media_kind] || "📎";
+  const name = document.createElement("span");
+  name.className = "attachment-file-name";
+  name.textContent = attachmentName({ attachment });
+  container.append(icon, name);
+  const attachmentId = String(attachment.attachment_id);
+  const mediaPath = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+  const open = () => {
+    // L'apertura deve restare sincrona con il gesto utente.
+    const tab = window.open("", "_blank")
+    if (!tab) return
+    tab.document.title = "Caricamento allegato…"
+    tab.document.body.textContent = "Caricamento…"
+    void (async () => {
+      try {
+        const response = await apiFetch(mediaPath)
+        const blob = await response.blob()
+        const url = URL.createObjectURL(blob)
+        state.objectUrls.add(url)
+        state.fileTabUrls.set(url, tab)
+        tab.location.href = url
+      } catch (error) {
+        tab.close()
+        if (error.message !== "unauthorized") showError("Impossibile aprire il file.")
+      }
+    })()
+  }
+  container.addEventListener("click", open);
+  container.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open();
+    }
+  });
+  return container;
+}
+
 function replyAuthor(item) {
   return item.direction === "out" ? "Tu" : (state.active?.display_name || state.active?.id || "Contatto");
 }
@@ -802,12 +860,14 @@ function renderMessages(messages, protocol) {
       } else {
         bubble.append(imageAttachment(item.attachment, protocol, item.direction));
       }
+    } else if (item.attachment) {
+      bubble.append(fileAttachment(item.attachment, protocol, item.direction));
     }
     const safeText = window.SignalTuiReconcile.messageDisplayText(item);
     // Le immagini con caption reale (il server la espone in item.text) la
     // mostrano sotto l'allegato; messageDisplayText le azzera.
     const caption = isImage && item.text ? item.text : "";
-    const displayText = safeText || caption || (item.attachment && !isImage ? attachmentName(item) : "");
+    const displayText = safeText || caption;
     let textEl = null;
     if (displayText) {
       textEl = document.createElement("div");

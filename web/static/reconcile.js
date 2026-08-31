@@ -62,6 +62,17 @@ function quoteIdentityValue(message) {
 
 function messageMediaType(message) {
   if (!message.attachment) return null;
+  const kind = String(message.attachment.media_kind || "").toLowerCase();
+  const kindCategory = {
+    image: "image",
+    gif: "image",
+    video: "video",
+    voice: "audio",
+    audio: "audio",
+    document: "attachment",
+    sticker: "sticker",
+  }[kind];
+  if (kindCategory) return kindCategory;
   const explicit = message.msg_type ?? message.msgType;
   if (explicit && explicit !== "text") return String(explicit).toLowerCase();
   const mimeType = message.attachment.type;
@@ -245,6 +256,7 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
 
 const SignalTuiReconcile = {
   messageIdentity,
+  messageMediaType,
   messageDisplayText,
   reconcileOptimisticMessages,
   replyQuoteMessage,

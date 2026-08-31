@@ -77,6 +77,24 @@ def _infer_attachment_type(attachment_id: str, content_type: str | None) -> str 
     return f"image/{'jpeg' if suffix in {'.jpg', '.jpeg'} else suffix[1:]}"
 
 
+def _is_whatsapp_synthetic_text(text: str | None) -> bool:
+    stripped = (text or "").strip()
+    if not stripped.lower().startswith("media:"):
+        return False
+
+    media_identity = stripped[len("media:") :].strip()
+    if not media_identity:
+        return False
+    return bool(
+        re.fullmatch(r"https?://\S+", media_identity, re.IGNORECASE)
+        or re.fullmatch(
+            r"(?:false|true)_[^\s@]*@[^\s@]+", media_identity, re.IGNORECASE
+        )
+        or re.fullmatch(r"\d+:\d+", media_identity)
+        or re.fullmatch(r"\S+", media_identity)
+    )
+
+
 def _unread_counts() -> dict[tuple[str, str], int]:
     import backend
     from backend.db import _DB_LOCK
@@ -308,7 +326,8 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             try:
                 rows = connection.execute(
                     "SELECT id, msg_id, text, is_mine, timestamp, contact_number, "
-                    "sender, attachment_id, attachment_info, content_type, protocol, msg_type, "
+                    "sender, attachment_id, attachment_info, content_type, media_kind, "
+                    "protocol, msg_type, "
                     "quote_text, quote_timestamp, quote_author, quote_attachment_id, "
                     "quote_content_type, quote_attachment_path, status, edited, read, "
                     "reply_to_message_id "
@@ -336,6 +355,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                     or ("image/*" if row["msg_type"] == "image" else None)
                     or _infer_attachment_type(attachment_id, None)
                 ),
+                "media_kind": row["media_kind"],
             }
             logger.debug(
                 "web messages proto=%s id=%s attachment_id=%s content_type=%s type=%s",
@@ -353,20 +373,34 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 # nome file e URL media WA ("Media: http://...").
                 from models import is_media_quote_placeholder
 
-                lower = text.strip().lower()
-                if (
-                    text.strip() == str(row["attachment_info"] or "").strip()
-                    or is_media_quote_placeholder(text)
-                    or lower.startswith(
-                        (
-                            "immagine:",
-                            "image:",
-                            "media:",
-                            "video:",
-                            "audio:",
-                            "file:",
+                stripped = text.strip()
+                info = str(row["attachment_info"] or "").strip()
+                prefixed_info = bool(
+                    info
+                    and any(
+                        stripped.casefold() == f"{label}: {info}".casefold()
+                        for label in (
+                            "immagine",
+                            "image",
+                            "media",
+                            "video",
+                            "audio",
+                            "file",
                         )
                     )
+                )
+                if (
+                    stripped == info
+                    or is_media_quote_placeholder(text)
+                    or prefixed_info
+                    or (protocol == "whatsapp" and _is_whatsapp_synthetic_text(text))
+                ):
+                    text = ""
+            elif protocol == "whatsapp" and text:
+                from models import is_media_quote_placeholder
+
+                if is_media_quote_placeholder(text) or _is_whatsapp_synthetic_text(
+                    text
                 ):
                     text = ""
             if not text and row["attachment_info"]:
@@ -382,7 +416,9 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                     # Un mimetype puro (es. "image/jpeg", "video/mp4") non è mai
                     # una caption: arriva da attachment_info usato come mimetype
                     # (reperto live WAHA su messaggi immagine inviati).
-                    and not re.fullmatch(r"[a-z0-9.+-]+/[a-z0-9.+-]+", info)
+                    and not re.fullmatch(
+                        r"[a-z0-9.+-]+/[a-z0-9.+-]+(?:\s*;.*)?", info.lower()
+                    )
                     and not info.lower().endswith(
                         (
                             ".png",
@@ -393,12 +429,21 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                             ".heic",
                             ".mp4",
                             ".mp3",
+                            ".oga",
+                            ".ogg",
+                            ".opus",
+                            ".aac",
+                            ".m4a",
+                            ".wav",
                             ".pdf",
                             ".doc",
                             ".docx",
                         )
                     )
                     and not is_media_quote_placeholder(info)
+                    and not (
+                        protocol == "whatsapp" and _is_whatsapp_synthetic_text(info)
+                    )
                     and info.lower()
                     not in {
                         "photo",
@@ -422,9 +467,6 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                         "🎨 sticker",
                         "📎 file",
                     }
-                    and not info.lower().startswith(
-                        ("media:", "image:", "immagine:", "video:", "audio:", "file:")
-                    )
                 ):
                     text = info
         direction = "out" if row["is_mine"] else "in"

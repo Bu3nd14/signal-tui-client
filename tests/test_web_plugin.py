@@ -1153,6 +1153,7 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
         "attachment_id": "pic",
         "name": "x.jpg",
         "type": "image/jpeg",
+        "media_kind": None,
     }
     assert body[1]["id"].isdigit()
     assert body[2]["direction"] == "out"
@@ -1403,6 +1404,16 @@ def test_messages_infers_missing_image_content_type(web_client):
                     None,
                     None,
                 ),
+                (
+                    "whatsapp",
+                    "alice",
+                    "Media: http://localhost:3000/api/files/voice-note.oga",
+                    0,
+                    5,
+                    "http://localhost:3000/api/files/voice-note.oga",
+                    "audio/ogg; codecs=opus",
+                    "audio/ogg",
+                ),
             ],
         )
 
@@ -1420,6 +1431,8 @@ def test_messages_infers_missing_image_content_type(web_client):
     assert attachments[0]["name"] == "photo.jpeg"
     assert attachments[1]["type"] is None
     assert attachments[2]["type"] == "application/custom"
+    assert messages[3]["text"] == ""
+    assert attachments[3]["type"] == "audio/ogg"
 
     # Non-WhatsApp captions starting with "Media: " must be preserved.
     response = client.get(
@@ -1429,6 +1442,63 @@ def test_messages_infers_missing_image_content_type(web_client):
     )
     assert response.status_code == 200
     assert response.json()[0]["text"] == "Media: att-1"
+
+
+@pytest.mark.parametrize(
+    ("text", "attachment_info", "expected_text"),
+    [
+        (
+            "Media: http://localhost:3000/api/files/default/false_x.oga",
+            "audio/ogg; codecs=opus",
+            "",
+        ),
+        ("Media: false_12345@lid_ABC", None, ""),
+        (
+            "AuDiO: registrazione del concerto",
+            None,
+            "AuDiO: registrazione del concerto",
+        ),
+        ("Video: il mio video", None, "Video: il mio video"),
+        ("File: documento importante", None, "File: documento importante"),
+        (
+            "Media: 42:1",
+            "Audio: registrazione del concerto",
+            "Audio: registrazione del concerto",
+        ),
+    ],
+)
+def test_whatsapp_messages_filter_only_synthetic_media_text(
+    web_client, text, attachment_info, expected_text
+):
+    client, _, db_file = web_client
+    import sqlite3
+
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            "INSERT INTO messages(protocol, contact_number, text, is_mine, "
+            "timestamp, msg_type, attachment_id, attachment_info, content_type) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "whatsapp",
+                "alice",
+                text,
+                0,
+                1,
+                "audio",
+                "voice-note.oga",
+                attachment_info,
+                "audio/ogg",
+            ),
+        )
+
+    response = client.get(
+        "/api/messages",
+        params={"proto": "whatsapp", "contact_id": "alice"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["text"] == expected_text
 
 
 def test_bridge_is_bounded_nonblocking_and_counts_drop():

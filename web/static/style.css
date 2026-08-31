@@ -463,6 +463,10 @@ h2 { font-size: 1.05rem; }
 .attachment { position: relative; min-width: 120px; min-height: 90px; width: fit-content; margin-bottom: 7px; overflow: hidden; border-radius: 10px; background: #111820; cursor: zoom-in; }
 .attachment img { display: block; width: auto; height: auto; max-width: min(72vw, 360px); max-height: min(28vh, 220px); object-fit: contain; }
 .attachment.local-preview { min-width: 120px; aspect-ratio: auto; cursor: default; }
+.attachment-file { display: flex; min-width: 190px; max-width: min(72vw, 360px); align-items: center; gap: 10px; margin-bottom: 7px; padding: 10px 12px; border: 1px solid #ffffff1f; border-radius: 10px; background: #11182080; cursor: pointer; }
+.attachment-file:hover, .attachment-file:focus-visible { border-color: #ffffff40; outline: none; background: #111820cc; }
+.attachment-file-icon { flex: none; font-size: 1.4rem; }
+.attachment-file-name { min-width: 0; overflow: hidden; font-size: .86rem; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
 .spinner { width: 26px; height: 26px; border: 3px solid #ffffff30; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 .attachment-error { display: grid; min-height: 120px; place-items: center; padding: 18px; color: var(--muted); text-align: center; }
