@@ -139,7 +139,8 @@ callback([{ target: observed, isIntersecting: true }], state.mediaObserver);
   await loadImage(node("div"), node("img"), "/api/media/signal/missing.jpg?w=480", "missing.jpg", "in");
   assert.equal(fetches, 1);
 
-  const stage = app.slice(app.indexOf("async function stageAttachment("), app.indexOf("\nasync function submitMessage"));
+  const helper = app.slice(app.indexOf("function mediaKindFromMime("), app.indexOf("\nfunction clearStagedAttachment"));
+  const stage = helper + "\n" + app.slice(app.indexOf("async function stageAttachment("), app.indexOf("\nasync function submitMessage"));
   globalThis.clearStagedAttachment = () => {};
   globalThis.updateComposer = () => {};
   globalThis.showError = assert.fail;

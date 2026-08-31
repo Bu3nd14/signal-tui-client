@@ -644,6 +644,7 @@ class SignalBackend(ChatBackend):
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
         quote_attachments: list[str] | None = None,
+        media_kind: str | None = None,
     ) -> str:
         SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
         attachment_id = f"sent-{uuid.uuid4().hex}{file_path.suffix.lower()}"
@@ -680,6 +681,7 @@ class SignalBackend(ChatBackend):
         reply_to_message_id: str | None = None,
         attachment_path: Path | None = None,
         mime_type: str | None = None,
+        media_kind: str | None = None,
     ) -> None:
         try:
             ts = int(message_id)
@@ -690,9 +692,8 @@ class SignalBackend(ChatBackend):
         attachment_info = None
         msg_type = "text"
         if attachment_path is not None:
-            msg_type = (
-                "image" if (mime_type or "").startswith("image/") else "attachment"
-            )
+            media_kind = media_kind or media_kind_from_mime(mime_type) or "document"
+            msg_type = msg_type_for_media_kind(media_kind)
             attachment_info = text or None
             with self._sent_attachment_paths_lock:
                 persistent_path = self._sent_attachment_paths.pop(
@@ -730,6 +731,7 @@ class SignalBackend(ChatBackend):
                     "attachment_info": attachment_info,
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
+                    "media_kind": media_kind,
                 },
             )
         )

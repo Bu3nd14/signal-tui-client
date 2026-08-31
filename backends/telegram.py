@@ -1044,6 +1044,7 @@ class TelegramBackend(ChatBackend):
         quote_author: str | None = None,
         quote_message: str | None = None,
         reply_to_message_id: str | None = None,
+        media_kind: str | None = None,
     ) -> str:
         if self._loop is None or self._client is None:
             raise RuntimeError("Telegram backend not connected")
@@ -1055,12 +1056,15 @@ class TelegramBackend(ChatBackend):
                 raise ValueError(f"Invalid Telegram contact id: {contact_id}")
             reply_to = self._validated_reply_to_message_id(reply_to_message_id)
             entity = await self._resolve_input_entity(eid)
+            normalized_mime = mime_type.lower().split(";", 1)[0].strip()
+            kind = media_kind or media_kind_from_mime(normalized_mime) or "document"
             msg = await self._client.send_file(
                 entity,
                 str(file_path),
                 caption=caption or None,
                 reply_to=reply_to,
-                force_document=False,
+                force_document=kind == "document",
+                voice_note=kind == "voice" and normalized_mime == "audio/ogg",
             )
             return str(msg.id)
 
@@ -1079,15 +1083,15 @@ class TelegramBackend(ChatBackend):
         reply_to_message_id: str | None = None,
         attachment_path: Path | None = None,
         mime_type: str | None = None,
+        media_kind: str | None = None,
     ) -> None:
         is_attachment = attachment_path is not None
-        msg_type = (
-            "image"
-            if is_attachment and (mime_type or "").startswith("image/")
-            else "attachment"
+        media_kind = (
+            media_kind or media_kind_from_mime(mime_type) or "document"
             if is_attachment
-            else "text"
+            else None
         )
+        msg_type = msg_type_for_media_kind(media_kind) if media_kind else "text"
         media_text = "" if msg_type == "image" else text
         attachment_id = None
         if attachment_path is not None:
@@ -1116,6 +1120,7 @@ class TelegramBackend(ChatBackend):
                     "attachment_info": text or None if is_attachment else None,
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
+                    "media_kind": media_kind,
                 },
             )
         )

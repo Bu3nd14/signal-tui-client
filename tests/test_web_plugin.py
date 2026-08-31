@@ -282,7 +282,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
-const submit = app.slice(app.indexOf("async function submitMessage("), app.indexOf("\nfunction encodeToken"));
+const helper = app.slice(app.indexOf("function mediaKindFromMime("), app.indexOf("\nfunction clearStagedAttachment"));
+const submit = helper + "\n" + app.slice(app.indexOf("async function submitMessage("), app.indexOf("\nfunction encodeToken"));
 globalThis.state = {
   sending: false,
   active: { id: "alice", protocol: "signal" },
@@ -307,6 +308,7 @@ vm.runInThisContext(submit);
   assert.equal(state.optimistic.length, 1);
   assert.equal(state.optimistic[0].text, "la caption");
   assert.equal(state.optimistic[0].attachment.type, "image/png");
+  assert.equal(state.optimistic[0].attachment.media_kind, "image");
   assert.equal(state.optimistic[0].localPreviewUrl, "blob:photo");
   assert.equal(request.url, "/api/send");
   assert.equal(request.options.body.get("text"), "la caption");
@@ -654,7 +656,25 @@ def test_send_multipart_image_routes_and_cleans_temporary_file(web_client):
     assert (protocol, contact_id, existed_during_send) == ("signal", "alice", True)
     assert kwargs["caption"] == "caption"
     assert kwargs["mime_type"] == "image/png"
+    assert kwargs["media_kind"] == "image"
     assert not Path(path).exists()
+
+
+def test_send_multipart_pdf_routes_as_document(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": "report"},
+        files={"file": ("report.pdf", b"%PDF-1.7\n", "application/pdf")},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    kwargs = manager.attachment_calls[0][3]
+    assert kwargs["mime_type"] == "application/pdf"
+    assert kwargs["media_kind"] == "document"
 
 
 @pytest.mark.parametrize("multipart", [False, True])
@@ -809,6 +829,7 @@ def test_send_multipart_image_routes_quote(web_client):
     assert manager.attachment_calls[0][3] == {
         "caption": None,
         "mime_type": "image/png",
+        "media_kind": "image",
         "quote_timestamp": 123456,
         "quote_author": "alice",
         "quote_message": "photo.png",
@@ -844,6 +865,7 @@ def test_send_multipart_rejects_non_image_magic(web_client):
     )
 
     assert response.status_code == 400
+    assert response.json()["detail"] == "Unsupported media type"
     assert manager.attachment_calls == []
 
 

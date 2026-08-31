@@ -1039,12 +1039,13 @@ def create_api_router() -> Any:
         upload_file = None
         try:
             if is_multipart:
-                from web.uploads import MAX_UPLOAD_BYTES
+                from web.uploads import _MAX_BYTES_BY_KIND
 
                 content_length = request.headers.get("content-length")
                 if (
                     content_length
-                    and int(content_length) > MAX_UPLOAD_BYTES + 1024 * 1024
+                    and int(content_length)
+                    > max(_MAX_BYTES_BY_KIND.values()) + 1024 * 1024
                 ):
                     raise HTTPException(status_code=413, detail="Upload too large")
                 form = await request.form()
@@ -1199,7 +1200,7 @@ def create_api_router() -> Any:
                     detail = (
                         "Upload too large"
                         if exc.status_code == 413
-                        else "Invalid image"
+                        else "Unsupported media type"
                     )
                     raise HTTPException(
                         status_code=exc.status_code, detail=detail
@@ -1211,6 +1212,7 @@ def create_api_router() -> Any:
                     upload.path,
                     caption=text or None,
                     mime_type=upload.mime_type,
+                    media_kind=upload.media_kind,
                     **kwargs,
                 )
             else:

@@ -626,6 +626,43 @@ class TestTelegramTyping:
 
 
 class TestTelegramBackendOperations:
+    def test_voice_attachment_sets_voice_note(self, monkeypatch, tmp_path):
+        backend = _backend()
+        backend._loop = MagicMock()
+        backend._client = SimpleNamespace(
+            send_file=AsyncMock(return_value=SimpleNamespace(id=77))
+        )
+        backend._resolve_input_entity = AsyncMock(return_value="entity")
+
+        class CompletedFuture:
+            def __init__(self, value):
+                self.value = value
+
+            def result(self, timeout):
+                return self.value
+
+        monkeypatch.setattr(
+            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            lambda coro, _loop: CompletedFuture(asyncio.run(coro)),
+        )
+
+        result = backend.send_attachment_sync(
+            "42",
+            tmp_path / "voice.ogg",
+            mime_type="audio/ogg",
+            media_kind="voice",
+        )
+
+        assert result == "77"
+        backend._client.send_file.assert_awaited_once_with(
+            "entity",
+            str(tmp_path / "voice.ogg"),
+            caption=None,
+            reply_to=None,
+            force_document=False,
+            voice_note=True,
+        )
+
     def test_attachment_send_timeout_is_120_and_configurable(
         self, monkeypatch, tmp_path
     ):
