@@ -307,3 +307,113 @@ renderMessages([], "telegram");
 assert.equal(bottomCalls, 0);
 assert.equal(elements.messages.scrollTop, 240);
 """)
+
+
+def test_pickers_close_on_pointerdown_outside():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const pointerMark = app.indexOf('"pointerdown"');
+const start = app.lastIndexOf("document.addEventListener(", pointerMark);
+const end = app.indexOf("true\n);", pointerMark) + 7;
+let closed = 0;
+let emojiClosed = 0;
+globalThis.state = { reactionPicker: null };
+globalThis.closeReactionPicker = () => { closed += 1; state.reactionPicker = null; };
+const emojiPicker = { hidden: true, contains: (t) => t === "emojiTab" || t === "emojiCell" };
+const emojiToggle = { contains: (t) => t === "toggleChild" };
+globalThis.elements = { emojiPicker, emojiToggle };
+globalThis.closeEmojiPicker = ({ focus = true } = {}) => { emojiClosed += 1; emojiPicker.hidden = true; };
+let handler = null;
+globalThis.document = { addEventListener(type, callback) { handler = callback; } };
+vm.runInThisContext(app.slice(start, end));
+assert.ok(handler);
+
+// ---- reaction picker ----
+// picker aperto: click FUORI dal picker e dal bottone -> chiude
+state.reactionPicker = {
+  anchor: { contains: (t) => t === "anchorChild" },
+  picker: { contains: (t) => t === "emoji" },
+};
+handler({ target: "altrove" });
+assert.equal(closed, 1);
+assert.equal(state.reactionPicker, null);
+
+// riapriamo: click su una emoji del picker -> resta aperto
+closed = 0;
+state.reactionPicker = {
+  anchor: { contains: (t) => t === "anchorChild" },
+  picker: { contains: (t) => t === "emoji" },
+};
+handler({ target: "emoji" });
+assert.equal(closed, 0);
+assert.ok(state.reactionPicker);
+
+// click sul bottone anchor -> resta aperto (lo gestisce il toggle)
+handler({ target: state.reactionPicker.anchor });
+assert.equal(closed, 0);
+
+// click su un figlio del bottone -> resta aperto
+handler({ target: "anchorChild" });
+assert.equal(closed, 0);
+
+// ---- emoji picker dell'editor ----
+// nessun picker aperto: click generico -> nessuna chiusura
+closed = 0;
+state.reactionPicker = null;
+emojiClosed = 0;
+handler({ target: "altrove" });
+assert.equal(emojiClosed, 0);
+
+// emoji picker aperto: click fuori -> chiude
+emojiPicker.hidden = false;
+handler({ target: "altrove" });
+assert.equal(emojiClosed, 1);
+assert.equal(emojiPicker.hidden, true);
+
+// riapriamo: click dentro il picker -> resta aperto
+emojiClosed = 0;
+emojiPicker.hidden = false;
+handler({ target: "emojiCell" });
+assert.equal(emojiClosed, 0);
+assert.equal(emojiPicker.hidden, false);
+
+// click sul toggle -> resta aperto (lo gestisce il toggle)
+handler({ target: emojiToggle });
+assert.equal(emojiClosed, 0);
+
+// click su un figlio del toggle -> resta aperto
+handler({ target: "toggleChild" });
+assert.equal(emojiClosed, 0);
+""")
+
+
+def test_ctrl_shift_x_toggles_emoji_picker_from_composer():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const start = app.indexOf('elements.messageInput.addEventListener("keydown"');
+const end = app.indexOf("});", start) + 3;
+let toggled = 0;
+globalThis.state = { editing: false, sending: false, editSending: false };
+let handler = null;
+globalThis.elements = { messageInput: { addEventListener(type, cb) { handler = cb; } } };
+globalThis.cancelEdit = () => {};
+globalThis.toggleEmojiPicker = () => { toggled += 1; };
+globalThis.submitEdit = () => {};
+globalThis.submitMessage = () => {};
+vm.runInThisContext(app.slice(start, end));
+assert.ok(handler);
+
+// Ctrl+Shift+X nel campo di testo -> apre/chiude il picker emoji
+handler({ ctrlKey: true, shiftKey: true, key: "x", preventDefault() {} });
+assert.equal(toggled, 1);
+
+// altro tasto (Enter senza shift) -> non tocca il picker
+handler({ ctrlKey: false, shiftKey: false, key: "Enter", preventDefault() {} });
+assert.equal(toggled, 1);
+""")
