@@ -41,6 +41,18 @@ _IMAGE_EXTENSIONS = {
     ".tiff",
 }
 
+_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".m4v",
+    ".mov",
+    ".webm",
+    ".mkv",
+    ".3gp",
+    ".avi",
+    ".mpg",
+    ".mpeg",
+}
+
 
 def _effective_host(request: Any) -> str:
     """Return the browser-facing host, trusting proxies only for HTTPS origins."""
@@ -873,6 +885,11 @@ def _is_thumbnail_candidate(path: Path, proto: str, attachment_id: str) -> bool:
     )
 
 
+def _is_video_candidate(path: Path, proto: str, attachment_id: str) -> bool:
+    content_type = (_attachment_content_type(proto, attachment_id) or "").lower()
+    return content_type.startswith("video/") or path.suffix.lower() in _VIDEO_EXTENSIONS
+
+
 def _thumb_lock(path: Path) -> threading.Lock:
     with _THUMB_LOCKS_GUARD:
         return _THUMB_LOCKS.setdefault(path, threading.Lock())
@@ -1618,6 +1635,19 @@ def create_api_router() -> Any:
         if w in _THUMB_WIDTHS:
             thumb = _thumbnail(path, proto, attachment_id, w)
             if thumb is not None:
+                return FileResponse(
+                    thumb,
+                    media_type="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=31536000, immutable"},
+                )
+            if _is_video_candidate(path, proto, attachment_id):
+                from web.video_thumbs import _video_thumbnail
+
+                thumb = _video_thumbnail(path, proto, attachment_id, w)
+                if thumb is None:
+                    raise HTTPException(
+                        status_code=422, detail="Video thumbnail unavailable"
+                    )
                 return FileResponse(
                     thumb,
                     media_type="image/jpeg",
