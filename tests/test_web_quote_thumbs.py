@@ -440,7 +440,9 @@ def test_quote_video_resolver_path_timestamp_and_filename(web_client):
 
     assert response.status_code == 200
     messages = {message["text"]: message for message in response.json()}
-    encoded_path = "/".join(quote(part, safe="") for part in str(local_video).split("/"))
+    encoded_path = "/".join(
+        quote(part, safe="") for part in str(local_video).split("/")
+    )
     assert messages["path reply"]["quote_thumb_url"] == (
         f"/api/media/signal/{encoded_path}?w=96"
     )
@@ -458,9 +460,7 @@ def test_quote_filename_fallback_ignores_unknown_names_and_future():
 
     assert _quoted_media_by_filename("signal", "alice", "solo testo", 2000) is None
     assert (
-        _quoted_media_by_filename(
-            "signal", "alice", "IMG_1303.jpg — 🖼️ Immagine", 2000
-        )
+        _quoted_media_by_filename("signal", "alice", "IMG_1303.jpg — 🖼️ Immagine", 2000)
         is None
     )
 
