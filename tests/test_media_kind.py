@@ -7,10 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.db import _migrate_protocol_schema
-from backends.signal import SignalBackend
-from backends.telegram import _tg_media_kind
 from models import media_kind_from_mime, msg_type_for_media_kind
+from protocols.db import _migrate_protocol_schema
+from protocols.signal import SignalBackend
+from protocols.telegram import _tg_media_kind
 
 
 @pytest.mark.parametrize(

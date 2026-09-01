@@ -1,4 +1,4 @@
-"""Non-blocking bridge from backend ingestion to the web event loop."""
+"""Non-blocking bridge from protocol ingestion to the web event loop."""
 
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 """
 Signal backend — a ``ChatBackend`` implementation for signal-cli.
 
-This wraps the existing signal-cli handling in ``backend.py`` (JSON-RPC over
+This wraps the existing signal-cli handling in ``protocols.rpc`` (JSON-RPC over
 HTTP daemon, subprocess fallback, SQLite cache) and exposes it through the
 neutral ``ChatBackend`` interface.  Envelope parsing that used to live in the
 TUI is gathered here so the UI only deals with normalized ``ChatContact`` /
@@ -49,26 +49,28 @@ _fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logger.addHandler(_fh)
 logger.setLevel(logging.DEBUG)
 
-from backend import (
+from protocols.db import (
     _ECHO_MATCH_WINDOW_MS,
     CACHE_DIR,
+    _add_message_to_cache,
+    _load_cache,
+    _mark_as_read,
+    _update_message_attachment_id,
+    _update_message_id,
+    _update_message_status,
+)
+from protocols.rpc import (
     DAEMON_HTTP_PORT,
     SIGNAL_CLI_ATTACHMENTS_DIR,
     USER_NUMBER,
     Contact,
     SignalRPCClient,
-    _add_message_to_cache,
     _is_daemon_running,
-    _load_cache,
-    _mark_as_read,
     _process_receipt,
     _process_typing,
     _require_user_number,
     _run_subprocess,
     _send_subprocess,
-    _update_message_attachment_id,
-    _update_message_id,
-    _update_message_status,
     find_signal_cli,
     get_attachment_path,
 )
@@ -524,8 +526,8 @@ class SignalBackend(ChatBackend):
 
     # ─── Cache ────────────────────────────────────────────────────────
     # NOTE: ``self.cache`` is keyed by the *raw* contact id (e.g. the phone
-    # number) so it is compatible with ``backend._process_receipt`` and
-    # ``backend._process_typing`` which look up by the raw id.  The UI keeps
+    # number) so it is compatible with ``protocols.rpc._process_receipt`` and
+    # ``protocols.rpc._process_typing`` which look up by the raw id. The UI keeps
     # its own copy keyed by ``contact_cache_key`` (protocol-aware).
 
     def _load_protocol_cache(self) -> dict[str, list[dict]]:
@@ -1665,7 +1667,7 @@ class SignalBackend(ChatBackend):
         is_mine: bool | None = None,
         edit_timestamp: int | None = None,
     ) -> dict | None:
-        from backend import _update_message_text
+        from protocols.db import _update_message_text
 
         try:
             target_ts = int(message_id)
@@ -1711,7 +1713,7 @@ class SignalBackend(ChatBackend):
         Deltas for unknown targets are persisted without producing a WebSocket
         aggregate.
         """
-        from backend import (
+        from protocols.db import (
             _apply_reaction_delta,
             _reactions_for_contact,
             _resolve_reaction_target_row,

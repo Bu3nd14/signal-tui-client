@@ -7,7 +7,6 @@ from pathlib import Path
 
 from textual.widgets import Input
 
-from backend import get_attachment_path
 from emoji_picker import EmojiCompletionWidget
 from emoji_picker import replace_emoji_aliases as _replace_emoji_aliases
 from models import (
@@ -16,6 +15,7 @@ from models import (
     PROTOCOL_WHATSAPP,
     is_media_quote_placeholder,
 )
+from protocols.rpc import get_attachment_path
 from ui_components import MessageTextArea
 
 logger = logging.getLogger(__name__)
@@ -457,8 +457,8 @@ class SendMixin:
         expected_statuses: tuple[str, ...],
     ) -> bool:
         """Atomically advance one optimistic message across every cache layer."""
-        from backend import _update_message_status, _update_message_status_by_text
         from models import contact_cache_key
+        from protocols.db import _update_message_status, _update_message_status_by_text
 
         if not _update_message_status(
             timestamp,
@@ -487,7 +487,7 @@ class SendMixin:
                 try:
                     import sqlite3
 
-                    from backend import DB_FILE
+                    from protocols.db import DB_FILE
 
                     conn = sqlite3.connect(DB_FILE)
                     try:

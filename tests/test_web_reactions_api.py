@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.db import _add_message_to_cache, _apply_reaction_delta
+from protocols.db import _add_message_to_cache, _apply_reaction_delta
 from web.api import _messages
 
 

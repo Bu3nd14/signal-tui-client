@@ -33,9 +33,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod
-from backends import SignalBackend
+import protocols.db as backend_mod
 from models import PROTOCOL_SIGNAL, ChatContact
+from protocols import SignalBackend
 from tui.edit import EditMessageMixin
 from tui.send import SendMixin
 from ui_components import MessageWidget
@@ -140,7 +140,7 @@ class TestSendMessageSyncRealTimestamp:
         """Subprocess stdout ``"1787250931234\\n"`` → 1787250931234."""
         backend = SignalBackend()
         backend._use_daemon = False
-        with patch("backends.signal._send_subprocess", return_value="1787250931234\n"):
+        with patch("protocols.signal._send_subprocess", return_value="1787250931234\n"):
             result = backend._send_message_sync(
                 "+391234567890", "ciao", None, None, None
             )
@@ -152,7 +152,7 @@ class TestSendMessageSyncRealTimestamp:
         backend = SignalBackend()
         backend._use_daemon = False
         before = int(time.time() * 1000)
-        with patch("backends.signal._send_subprocess", return_value="garbage\n"):
+        with patch("protocols.signal._send_subprocess", return_value="garbage\n"):
             result = backend._send_message_sync(
                 "+391234567890", "ciao", None, None, None
             )

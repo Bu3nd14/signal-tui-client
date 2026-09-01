@@ -10,11 +10,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import backend as backend_mod
-from backends.signal import SignalBackend
-from backends.telegram import TelegramBackend
-from backends.whatsapp import WhatsAppBackend
+import protocols.db as backend_mod
 from models import ChatContact, ChatEvent
+from protocols.signal import SignalBackend
+from protocols.telegram import TelegramBackend
+from protocols.whatsapp import WhatsAppBackend
 from tui.events import EventHandlingMixin
 from web.api import _messages, create_api_router
 
@@ -68,7 +68,7 @@ def test_telegram_attachment_upgrade_works_in_both_event_orders(monkeypatch, tmp
     db_file = _db(monkeypatch, tmp_path)
     media_dir = tmp_path / "telegram-media"
     media_dir.mkdir()
-    monkeypatch.setattr("backends.telegram._media_dir", lambda: media_dir)
+    monkeypatch.setattr("protocols.telegram._media_dir", lambda: media_dir)
     mirrored = media_dir / "42-77-sent.png"
     mirrored.write_bytes(b"image")
 
@@ -94,7 +94,7 @@ def test_telegram_tgref_prefers_mirrored_file(monkeypatch, tmp_path):
     media_dir.mkdir()
     mirrored = media_dir / "42-77-sent.jpg"
     mirrored.write_bytes(b"image")
-    monkeypatch.setattr("backends.telegram._media_dir", lambda: media_dir)
+    monkeypatch.setattr("protocols.telegram._media_dir", lambda: media_dir)
     backend = TelegramBackend()
     backend._download_media_by_ref = MagicMock()
 
@@ -106,7 +106,7 @@ def test_signal_unresolved_echo_is_upgraded_to_sent_attachment(monkeypatch, tmp_
     db_file = _db(monkeypatch, tmp_path)
     media_dir = tmp_path / "signal-media"
     media_dir.mkdir()
-    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    monkeypatch.setattr("protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
     mirrored = media_dir / "sent-local.png"
     mirrored.write_bytes(b"image")
     backend = SignalBackend()
@@ -125,7 +125,7 @@ def test_signal_echo_never_adds_row_and_keeps_mirrored_file(monkeypatch, tmp_pat
     db_file = _db(monkeypatch, tmp_path)
     media_dir = tmp_path / "signal-media"
     media_dir.mkdir()
-    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    monkeypatch.setattr("protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
     mirrored = media_dir / "sent-local.png"
     remote = media_dir / "remote-signal-id"
     mirrored.write_bytes(b"mirror")
@@ -149,7 +149,7 @@ def test_signal_outgoing_attachment_is_resolvable_or_null(monkeypatch, tmp_path)
     db_file = _db(monkeypatch, tmp_path)
     media_dir = tmp_path / "signal-media"
     media_dir.mkdir()
-    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    monkeypatch.setattr("protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
     backend = SignalBackend()
     unresolved = {**_media_data("remote-missing"), "id": "77"}
 
@@ -185,7 +185,7 @@ def test_web_api_does_not_use_mimetype_as_caption(monkeypatch, tmp_path):
     """attachment_info che contiene solo un mimetype (es. 'image/jpeg', reperto
     live WAHA su immagini inviate) non deve diventare la caption della bolla."""
     _db(monkeypatch, tmp_path)
-    from backend import _add_message_to_cache
+    from protocols.db import _add_message_to_cache
 
     for info in ("image/jpeg", "video/mp4"):
         _add_message_to_cache(
@@ -388,7 +388,7 @@ def test_signal_and_whatsapp_never_downgrade_sent_attachment(monkeypatch, tmp_pa
     _db(monkeypatch, tmp_path)
     signal_dir = tmp_path / "signal-media"
     signal_dir.mkdir()
-    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", signal_dir)
+    monkeypatch.setattr("protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", signal_dir)
     signal_file = signal_dir / "sent-signal.png"
     signal_file.write_bytes(b"image")
     signal = SignalBackend()

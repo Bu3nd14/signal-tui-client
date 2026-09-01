@@ -29,8 +29,8 @@ from telethon.tl.types import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends.telegram import TelegramBackend
 from models import PROTOCOL_TELEGRAM, ChatContact, ChatEvent
+from protocols.telegram import TelegramBackend
 
 
 def _backend() -> TelegramBackend:
@@ -108,7 +108,7 @@ class TestTelegramContacts:
         backend._loop.is_running.return_value = False
         run_threadsafe = MagicMock()
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe", run_threadsafe
+            "protocols.telegram.asyncio.run_coroutine_threadsafe", run_threadsafe
         )
 
         assert backend.get_attachment_path("tgref:42:99") is None
@@ -123,9 +123,9 @@ class TestTelegramContacts:
             get_input_entity=AsyncMock(return_value="entity"),
             get_messages=AsyncMock(return_value=msg),
         )
-        monkeypatch.setattr("backends.telegram._media_dir", lambda: tmp_path)
+        monkeypatch.setattr("protocols.telegram._media_dir", lambda: tmp_path)
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, _loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),
@@ -174,7 +174,7 @@ class TestTelegramContacts:
             get_messages=AsyncMock(return_value=None),
         )
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, _loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),
@@ -199,7 +199,7 @@ class TestTelegramContacts:
             get_messages=AsyncMock(return_value=msg),
         )
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, _loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),
@@ -246,7 +246,7 @@ class TestTelegramContacts:
             return SimpleNamespace(result=result)
 
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe", raise_now
+            "protocols.telegram.asyncio.run_coroutine_threadsafe", raise_now
         )
 
         assert backend.get_attachment_path("tgref:42:99") is None
@@ -514,9 +514,9 @@ class TestTelegramMessages:
         }
         persist_status = MagicMock()
         persist_status_by_id = MagicMock()
-        monkeypatch.setattr("backend._update_message_status", persist_status)
+        monkeypatch.setattr("protocols.db._update_message_status", persist_status)
         monkeypatch.setattr(
-            "backend._update_message_status_by_id", persist_status_by_id
+            "protocols.db._update_message_status_by_id", persist_status_by_id
         )
 
         assert backend.process_receipt({}) == []
@@ -536,7 +536,7 @@ class TestTelegramMessages:
         persisted = MagicMock()
         updated_id = MagicMock()
         monkeypatch.setattr(backend, "_persist_message", persisted)
-        monkeypatch.setattr("backend._update_message_id", updated_id)
+        monkeypatch.setattr("protocols.db._update_message_id", updated_id)
         data = {"id": None, "text": "optimistic", "is_mine": True}
         assert backend.ingest_message("7", data, 100) is True
         assert backend.ingest_message("7", {**data, "id": "server"}, 101) is False
@@ -560,7 +560,7 @@ class TestTelegramMessages:
         assert backend.cache["42"][0]["id"] == "1"
 
         add = MagicMock()
-        monkeypatch.setattr("backend._add_message_to_cache", add)
+        monkeypatch.setattr("protocols.db._add_message_to_cache", add)
         backend._persist_message("42", {"id": "1", "text": "text", "is_mine": True}, 5)
         assert add.call_args.kwargs["protocol"] == PROTOCOL_TELEGRAM
         assert add.call_args.kwargs["msg_id"] == "1"
@@ -680,7 +680,7 @@ class TestTelegramBackendOperations:
                 return self.value
 
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, _loop: CompletedFuture(asyncio.run(coro)),
         )
 
@@ -707,7 +707,7 @@ class TestTelegramBackendOperations:
 
     def test_attachment_mirror_uses_original_filename(self, monkeypatch, tmp_path):
         media_dir = tmp_path / "telegram-media"
-        monkeypatch.setattr("backends.telegram._media_dir", lambda: media_dir)
+        monkeypatch.setattr("protocols.telegram._media_dir", lambda: media_dir)
         upload = tmp_path / "upload-uabsa_a2.pdf"
         upload.write_bytes(b"pdf")
         backend = _backend()
@@ -739,7 +739,7 @@ class TestTelegramBackendOperations:
             return future
 
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe", schedule
+            "protocols.telegram.asyncio.run_coroutine_threadsafe", schedule
         )
         backend.send_attachment_sync(
             "42", tmp_path / "photo.png", mime_type="image/png"
@@ -754,17 +754,21 @@ class TestTelegramBackendOperations:
 
     def test_load_cache_mark_read_and_pairing(self, monkeypatch, tmp_path):
         backend = _backend()
-        monkeypatch.setattr("backend._load_cache", MagicMock(return_value={"1": []}))
+        monkeypatch.setattr(
+            "protocols.db._load_cache", MagicMock(return_value={"1": []})
+        )
         assert backend._load_protocol_cache() == {"1": []}
-        monkeypatch.setattr("backend._load_cache", MagicMock(side_effect=RuntimeError))
+        monkeypatch.setattr(
+            "protocols.db._load_cache", MagicMock(side_effect=RuntimeError)
+        )
         assert backend._load_protocol_cache() == {}
 
         mark_read = MagicMock()
-        monkeypatch.setattr("backend._mark_as_read", mark_read)
+        monkeypatch.setattr("protocols.db._mark_as_read", mark_read)
         backend.mark_read_sync("42")
         mark_read.assert_called_once_with("42", protocol=PROTOCOL_TELEGRAM)
         monkeypatch.setattr(
-            "backend._mark_as_read", MagicMock(side_effect=RuntimeError)
+            "protocols.db._mark_as_read", MagicMock(side_effect=RuntimeError)
         )
         backend.mark_read_sync("42")
 
@@ -815,12 +819,12 @@ class TestTelegramBackendOperations:
             return SimpleNamespace(result=result)
 
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe", run_now
+            "protocols.telegram.asyncio.run_coroutine_threadsafe", run_now
         )
         assert asyncio.run(backend.send_message("42", "hi")) == "77"
         assert backend.send_message_sync("42", "hi") == "77"
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe", invalid_id
+            "protocols.telegram.asyncio.run_coroutine_threadsafe", invalid_id
         )
         with pytest.raises(ValueError):
             asyncio.run(backend.send_message("bad", "hi"))
@@ -833,7 +837,7 @@ class TestTelegramBackendOperations:
             send_message=AsyncMock(return_value=SimpleNamespace(id=77)),
         )
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, _loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),
@@ -864,7 +868,7 @@ class TestTelegramBackendOperations:
 
         run_threadsafe = MagicMock(side_effect=discard)
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe", run_threadsafe
+            "protocols.telegram.asyncio.run_coroutine_threadsafe", run_threadsafe
         )
         backend.disconnect_sync()
         thread.join.assert_called_once_with(timeout=5)
@@ -882,7 +886,7 @@ class TestTelegramBackendOperations:
         )
         monkeypatch.setattr(backend, "ingest_message", MagicMock())
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, _loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),
@@ -915,7 +919,7 @@ class TestTelegramBackendOperations:
         ingest = MagicMock()
         monkeypatch.setattr(backend, "ingest_message", ingest)
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, _loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),
@@ -944,7 +948,7 @@ class TestTelegramQuoteMedia:
 
     def test_tg_quote_media_from_cache_placeholder(self, cached_media_target):
         """Target foto senza caption in cache → "🖼️ Immagine"."""
-        from backends.telegram import _tg_quote_text_from_cached
+        from protocols.telegram import _tg_quote_text_from_cached
 
         assert _tg_quote_text_from_cached(cached_media_target) == "🖼️ Immagine"
 
@@ -961,7 +965,7 @@ class TestTelegramQuoteMedia:
     )
     def test_tg_quote_media_placeholder_variants(self, msg_type, info, expected):
         """Etichette Telegram fini mappano al segnaposto canonico."""
-        from backends.telegram import _tg_quote_text_from_cached
+        from protocols.telegram import _tg_quote_text_from_cached
 
         target = {"id": "12", "text": "", "msg_type": msg_type, "attachment_info": info}
         assert _tg_quote_text_from_cached(target) == expected
@@ -979,14 +983,14 @@ class TestTelegramQuoteMedia:
         self, msg_type, info, expected
     ):
         """Un ``attachment_info`` non mappato compone ``filename — segnaposto``."""
-        from backends.telegram import _tg_quote_text_from_cached
+        from protocols.telegram import _tg_quote_text_from_cached
 
         target = {"id": "12", "text": "", "msg_type": msg_type, "attachment_info": info}
         assert _tg_quote_text_from_cached(target) == expected
 
     def test_tg_quote_caption_from_cache(self):
         """La caption (``text``) di un media quotato ha priorità."""
-        from backends.telegram import _tg_quote_text_from_cached
+        from protocols.telegram import _tg_quote_text_from_cached
 
         target = {
             "id": "12",
@@ -1033,8 +1037,8 @@ def test_migrate_legacy_media_dir(tmp_path, monkeypatch):
     e riscrive i riferimenti nel DB."""
     import sqlite3
 
-    import backend
-    from backends import telegram as tg
+    import protocols.db as backend
+    from protocols import telegram as tg
 
     monkeypatch.setattr(tg.tempfile, "gettempdir", lambda: str(tmp_path / "oldtmp"))
     monkeypatch.setattr(backend, "CACHE_DIR", tmp_path / "share")

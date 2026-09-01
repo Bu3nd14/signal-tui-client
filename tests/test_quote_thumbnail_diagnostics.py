@@ -25,10 +25,10 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod
-from backends.telegram import TelegramBackend
-from backends.whatsapp import WhatsAppBackend
+import protocols.db as backend_mod
 from models import PROTOCOL_SIGNAL, ChatContact
+from protocols.telegram import TelegramBackend
+from protocols.whatsapp import WhatsAppBackend
 from tui.app import SignalTUI
 from tui.chat_view import (
     _is_scrolled_to_bottom,  # noqa: F401  (module import side effect)
@@ -159,7 +159,7 @@ class TestSignalStalePathNoRecovery:
 
     def test_signal_live_payload_lacks_quote_attachment_id(self, tmp_path):
         """Document the asymmetry: Signal live payload has path, not id."""
-        from backends.signal import SignalBackend
+        from protocols.signal import SignalBackend
 
         be = SignalBackend()
         png = _png_bytes()
@@ -194,7 +194,7 @@ class TestSignalStalePathNoRecovery:
                 },
             },
         }
-        with patch("backends.signal.CACHE_DIR", tmp_path):
+        with patch("protocols.signal.CACHE_DIR", tmp_path):
             events = be.envelope_to_event(envelope)
         payload = events[0].payload
         assert payload["quote_attachment_path"] is not None

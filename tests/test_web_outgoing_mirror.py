@@ -7,10 +7,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backends.manager import BackendManager
-from backends.signal import SignalBackend
-from backends.telegram import TelegramBackend
-from backends.whatsapp import WhatsAppBackend
+from protocols.manager import BackendManager
+from protocols.signal import SignalBackend
+from protocols.telegram import TelegramBackend
+from protocols.whatsapp import WhatsAppBackend
 
 
 def _backend(protocol: str):
@@ -79,12 +79,12 @@ def test_facade_send_attachment_enqueues_event_with_media_data(
     attachment.write_bytes(b"image-data")
     if protocol == "signal":
         monkeypatch.setattr(
-            "backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
+            "protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
         )
     else:
         if protocol == "telegram":
             monkeypatch.setattr(
-                "backends.telegram._media_dir", lambda: tmp_path / "tg-media"
+                "protocols.telegram._media_dir", lambda: tmp_path / "tg-media"
             )
         else:
             backend_media = tmp_path / "wa-media"
@@ -131,11 +131,11 @@ def test_web_image_mirror_has_empty_text_and_resolvable_attachment(
     attachment.write_bytes(b"image-data")
     if protocol == "signal":
         monkeypatch.setattr(
-            "backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
+            "protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
         )
     elif protocol == "telegram":
         monkeypatch.setattr(
-            "backends.telegram._media_dir", lambda: tmp_path / "tg-media"
+            "protocols.telegram._media_dir", lambda: tmp_path / "tg-media"
         )
     else:
         backend_media = tmp_path / "wa-media"
@@ -171,7 +171,7 @@ def test_mirror_copy_failure_warns_and_enqueues_without_attachment(
     manager = BackendManager()
     manager.register(backend)
     monkeypatch.setattr(
-        "backends.whatsapp.shutil.copy2",
+        "protocols.whatsapp.shutil.copy2",
         MagicMock(side_effect=OSError("copy failed")),
     )
 
@@ -190,7 +190,7 @@ def test_mirror_copy_failure_warns_and_enqueues_without_attachment(
 
 def test_signal_attachment_rpc_and_echo_reuse_persistent_file(tmp_path, monkeypatch):
     media_dir = tmp_path / "signal-media"
-    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    monkeypatch.setattr("protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
     upload = tmp_path / "upload.png"
     upload.write_bytes(b"image-data")
     backend = SignalBackend()
@@ -230,7 +230,7 @@ def test_signal_attachment_filename_is_sanitized_and_collision_safe(
     tmp_path, monkeypatch
 ):
     media_dir = tmp_path / "signal-media"
-    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    monkeypatch.setattr("protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
     upload = tmp_path / "upload.pdf"
     upload.write_bytes(b"pdf")
     backend = SignalBackend()
@@ -263,7 +263,7 @@ def test_signal_attachment_filename_is_sanitized_and_collision_safe(
 def test_signal_named_attachment_is_upgraded_by_outgoing_echo(tmp_path, monkeypatch):
     media_dir = tmp_path / "signal-media"
     media_dir.mkdir()
-    monkeypatch.setattr("backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    monkeypatch.setattr("protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
     source = tmp_path / "upload.pdf"
     current = media_dir / "relazione.pdf"
     incoming = media_dir / "echo-real-id"
@@ -287,8 +287,8 @@ def test_signal_named_attachment_is_upgraded_by_outgoing_echo(tmp_path, monkeypa
 
     with monkeypatch.context() as context:
         update = MagicMock()
-        context.setattr("backends.signal._update_message_attachment_id", update)
-        context.setattr("backends.signal._update_message_id", MagicMock())
+        context.setattr("protocols.signal._update_message_attachment_id", update)
+        context.setattr("protocols.signal._update_message_id", MagicMock())
         changed = backend.ingest_message(
             "42",
             {
@@ -309,7 +309,7 @@ def test_signal_named_attachment_is_upgraded_by_outgoing_echo(tmp_path, monkeypa
 
 def test_signal_attachment_forwards_quote_attachments(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "backends.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
+        "protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
     )
     upload = tmp_path / "upload.png"
     upload.write_bytes(b"image-data")

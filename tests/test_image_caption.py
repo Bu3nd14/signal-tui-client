@@ -18,12 +18,12 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends import BackendManager
 from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
     PROTOCOL_WHATSAPP,
 )
+from protocols import BackendManager
 from signal_tui import SignalTUI
 from tui.chat_view import _image_caption
 from ui_components import ImageWidget, MessageWidget

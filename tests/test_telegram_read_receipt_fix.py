@@ -11,8 +11,8 @@ Covers the three combined root causes of "sent Telegram messages never reach
       receipts that arrived while the TUI was closed are not lost.
   + Cleanup: ``_dedup_messages_by_id`` keeps the highest-rank status row.
 
-Every test uses an isolated temporary SQLite DB (patched ``backend.DB_FILE`` /
-``backend.CACHE_DIR``); the real DB in ``~/.local/share/signal-tui-client`` is
+Every test uses an isolated temporary SQLite DB (patched ``protocols.db.DB_FILE`` /
+``protocols.db.CACHE_DIR``); the real DB in ``~/.local/share/signal-tui-client`` is
 never touched.
 """
 
@@ -37,9 +37,9 @@ from telethon.tl.types import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod  # patched DB_FILE / CACHE_DIR
-from backends.telegram import TelegramBackend
+import protocols.db as backend_mod  # patched DB_FILE / CACHE_DIR
 from models import PROTOCOL_TELEGRAM, ChatContact
+from protocols.telegram import TelegramBackend
 
 
 @pytest.fixture

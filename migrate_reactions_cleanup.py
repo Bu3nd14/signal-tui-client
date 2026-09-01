@@ -11,8 +11,8 @@ import sqlite3
 import sys
 from collections.abc import Sequence
 
-import backend
-from backend import _DB_LOCK
+import protocols.db as backend
+from protocols.db import _DB_LOCK
 
 PROTOCOLS = ("signal", "whatsapp", "telegram")
 _CANDIDATE_WHERE = """

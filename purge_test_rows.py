@@ -7,7 +7,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from backend import _DB_LOCK, DB_FILE
+from protocols.db import _DB_LOCK, DB_FILE
 
 TEST_CONTACTS = ("db@lid", "unread@lid", "3912345678@c.us")
 

@@ -25,9 +25,9 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends.base import ChatBackend
-from backends.manager import BackendManager
 from models import ChatContact
+from protocols.base import ChatBackend
+from protocols.manager import BackendManager
 
 
 class _MinimalBackend(ChatBackend):
@@ -155,7 +155,7 @@ class TestAsyncWrapperDelegation:
             seen["args"] = args
             return func(*args)
 
-        with patch("backends.base.asyncio.to_thread", side_effect=fake_to_thread):
+        with patch("protocols.base.asyncio.to_thread", side_effect=fake_to_thread):
             result = asyncio.run(backend.edit_message("c", "m", "new-text"))
 
         assert result is True
@@ -168,7 +168,7 @@ class TestAsyncWrapperDelegation:
         async def fake_to_thread(func, *args):
             return func(*args)
 
-        with patch("backends.base.asyncio.to_thread", side_effect=fake_to_thread):
+        with patch("protocols.base.asyncio.to_thread", side_effect=fake_to_thread):
             result = asyncio.run(backend.edit_message("c", "m", "t"))
 
         assert result is False

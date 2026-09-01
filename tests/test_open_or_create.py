@@ -22,12 +22,12 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends.telegram import TelegramBackend
 from models import (
     PROTOCOL_TELEGRAM,
     PROTOCOL_WHATSAPP,
     ChatContact,
 )
+from protocols.telegram import TelegramBackend
 from tui.app import SignalTUI
 
 
@@ -197,7 +197,7 @@ class TestSendGhostTelegram:
         backend.register_contact(ghost)
 
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),
@@ -222,7 +222,7 @@ class TestSendGhostTelegram:
         backend.register_contact(ghost)
 
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),

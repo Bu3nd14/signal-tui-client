@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_autouse_fixture_routes_ingest_away_from_real_database(tmp_path):
-    import backend
+    import protocols.db as backend
 
     real_db = Path.home() / ".local" / "share" / "signal-tui-client" / "messages.db"
     before = (

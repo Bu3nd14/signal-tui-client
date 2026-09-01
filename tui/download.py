@@ -8,12 +8,10 @@ from pathlib import Path
 from textual.containers import Horizontal
 from textual.widgets import Static
 
-from backend import (
-    serve_text_as_file,
-)
 from models import (
     PROTOCOL_SIGNAL,
 )
+from protocols.download import serve_text_as_file
 from tui.images.detect import ImageSupport
 from ui_components import (
     DownloadLinkWidget,
@@ -182,7 +180,7 @@ class DownloadModeMixin:
 
         A clickable ``DownloadLinkWidget`` is mounted in the chat log.
         """
-        from backend import _serve_file_path
+        from protocols.download import _serve_file_path
 
         if attachment_id:
             resolved = attachment_path

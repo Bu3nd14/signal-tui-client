@@ -18,7 +18,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends.whatsapp import WhatsAppBackend
+from protocols.whatsapp import WhatsAppBackend
 from signal_tui import SignalTUI
 
 

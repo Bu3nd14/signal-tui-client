@@ -22,13 +22,13 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend import (
+from models import PROTOCOL_SIGNAL, ChatContact, ChatEvent, contact_cache_key
+from protocols.db import (
     _add_message_to_cache,
     _load_cache,
     _mark_as_read,
     _update_message_status,
 )
-from models import PROTOCOL_SIGNAL, ChatContact, ChatEvent, contact_cache_key
 from signal_tui import SignalTUI
 
 
@@ -36,7 +36,10 @@ from signal_tui import SignalTUI
 def tmp_db(tmp_path: Path):
     """Point backend at a temporary SQLite DB and reset it between tests."""
     db_file = tmp_path / "messages.db"
-    with patch("backend.DB_FILE", db_file), patch("backend.CACHE_DIR", tmp_path):
+    with (
+        patch("protocols.db.DB_FILE", db_file),
+        patch("protocols.db.CACHE_DIR", tmp_path),
+    ):
         yield db_file
 
 

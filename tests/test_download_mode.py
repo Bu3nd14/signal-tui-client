@@ -113,7 +113,7 @@ class TestDownloadMode:
             _update_download_bar=MagicMock(),
         )
         with patch(
-            "backend._serve_file_path", return_value="http://x/photo.jpg"
+            "protocols.download._serve_file_path", return_value="http://x/photo.jpg"
         ) as serve:
             DownloadModeMixin._start_download(
                 app, "photo", attachment_id="att", protocol="signal"
@@ -134,7 +134,9 @@ class TestDownloadMode:
             _update_download_bar=MagicMock(),
         )
 
-        with patch("backend._serve_file_path", return_value="http://x/cached.mp4"):
+        with patch(
+            "protocols.download._serve_file_path", return_value="http://x/cached.mp4"
+        ):
             DownloadModeMixin._start_download(
                 app,
                 "cached.mp4",

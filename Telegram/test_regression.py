@@ -24,8 +24,6 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends import BackendManager, SignalBackend, WhatsAppBackend
-from backends.base import ChatBackend
 from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
@@ -35,6 +33,8 @@ from models import (
     contact_cache_key,
     protocol_emoji,
 )
+from protocols import BackendManager, SignalBackend, WhatsAppBackend
+from protocols.base import ChatBackend
 
 # ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ class TestMultiBackendRouting:
 
     def test_all_protocols_registered(self):
         manager, _, _ = _make_multi_manager()
-        from backends.telegram import TelegramBackend
+        from protocols.telegram import TelegramBackend
 
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
@@ -98,7 +98,7 @@ class TestMultiBackendRouting:
 
     def test_list_contacts_merges_three_backends(self):
         manager, _, _ = _make_multi_manager()
-        from backends.telegram import TelegramBackend
+        from protocols.telegram import TelegramBackend
 
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
@@ -269,7 +269,7 @@ class TestCacheIsolation:
 
     def test_same_phone_different_protocol_different_cache_keys(self):
         """Stesso numero su Signal e Telegram → due cache key diverse."""
-        from backends.telegram import TelegramBackend
+        from protocols.telegram import TelegramBackend
 
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
@@ -364,9 +364,9 @@ class TestConfigIsolation:
         """Senza credenziali, telegram_enabled() è False."""
         with (
             patch.dict("os.environ", {}, clear=True),
-            patch("backends.config._load_dotenv", return_value={}),
+            patch("protocols.config._load_dotenv", return_value={}),
         ):
-            from backends.config import telegram_enabled
+            from protocols.config import telegram_enabled
 
             assert telegram_enabled() is False
 
@@ -380,26 +380,26 @@ class TestConfigIsolation:
             },
             clear=True,
         ):
-            from backends.config import telegram_enabled, whatsapp_enabled
+            from protocols.config import telegram_enabled, whatsapp_enabled
 
-            with patch("backends.config._local_waha_reachable", return_value=False):
+            with patch("protocols.config._local_waha_reachable", return_value=False):
                 assert telegram_enabled() is True
                 assert whatsapp_enabled() is False
 
     def test_telegram_enabled_requires_both_credentials(self):
         with (
             patch.dict("os.environ", {"TELEGRAM_API_ID": "12345"}, clear=True),
-            patch("backends.config._load_dotenv", return_value={}),
+            patch("protocols.config._load_dotenv", return_value={}),
         ):
-            from backends.config import telegram_enabled
+            from protocols.config import telegram_enabled
 
             assert telegram_enabled() is False
 
         with (
             patch.dict("os.environ", {"TELEGRAM_API_HASH": "abc"}, clear=True),
-            patch("backends.config._load_dotenv", return_value={}),
+            patch("protocols.config._load_dotenv", return_value={}),
         ):
-            from backends.config import telegram_enabled
+            from protocols.config import telegram_enabled
 
             assert telegram_enabled() is False
 
@@ -411,12 +411,12 @@ class TestConfigIsolation:
             },
             clear=True,
         ):
-            from backends.config import telegram_enabled
+            from protocols.config import telegram_enabled
 
             assert telegram_enabled() is True
 
     def test_session_path_uses_cache_dir(self):
-        from backends.config import get_telegram_session_path
+        from protocols.config import get_telegram_session_path
 
         path = get_telegram_session_path()
         assert path.name == "telegram.session"
@@ -498,7 +498,7 @@ class TestEdgeCases:
     def test_whatsapp_backend_not_affected_by_telegram_registration(self):
         """Registrare Telegram non modifica il riferimento WhatsApp."""
         manager, signal, whatsapp = _make_multi_manager()
-        from backends.telegram import TelegramBackend
+        from protocols.telegram import TelegramBackend
 
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
@@ -517,7 +517,7 @@ class TestEdgeCases:
         signal.contacts = []
         signal._events = queue.Queue()
 
-        from backends.telegram import TelegramBackend
+        from protocols.telegram import TelegramBackend
 
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
@@ -569,7 +569,7 @@ class TestEdgeCases:
             _signal_contact("+1", "Alice"),
             _signal_contact("+2", "Bob"),
         ]
-        from backends.telegram import TelegramBackend
+        from protocols.telegram import TelegramBackend
 
         telegram = TelegramBackend.__new__(TelegramBackend)
         telegram.protocol = PROTOCOL_TELEGRAM
@@ -585,7 +585,7 @@ class TestEdgeCases:
 
     def test_whatsapp_specific_functionality_not_broken(self):
         """WhatsApp REST client e metodi non sono toccati da Telegram."""
-        from backends.whatsapp import WhatsAppRESTClient
+        from protocols.whatsapp import WhatsAppRESTClient
 
         client = WhatsAppRESTClient("http://test.local")
         assert client.base_url == "http://test.local"

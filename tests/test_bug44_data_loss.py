@@ -22,21 +22,24 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod
-from backend import (
+import protocols.db as backend_mod
+from protocols.db import (
+    _ECHO_MATCH_WINDOW_MS,
     _add_message_to_cache,
     _dedup_messages_by_id,
     _update_message_id,
 )
-from backend.db import _ECHO_MATCH_WINDOW_MS
-from backends.whatsapp import WhatsAppBackend
+from protocols.whatsapp import WhatsAppBackend
 
 
 @pytest.fixture
 def tmp_db(tmp_path: Path):
     """Point backend at a temporary SQLite DB and reset it between tests."""
     db_file = tmp_path / "messages.db"
-    with patch("backend.DB_FILE", db_file), patch("backend.CACHE_DIR", tmp_path):
+    with (
+        patch("protocols.db.DB_FILE", db_file),
+        patch("protocols.db.CACHE_DIR", tmp_path),
+    ):
         yield db_file
 
 
@@ -109,7 +112,7 @@ class TestDedupDefensiveGuard:
             msg_id="shared",
         )
 
-        with patch("backend.db.logger.warning") as mock_warn:
+        with patch("protocols.db.logger.warning") as mock_warn:
             removed = _dedup_messages_by_id()
 
         assert removed == 0

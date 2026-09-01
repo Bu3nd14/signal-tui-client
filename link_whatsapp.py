@@ -44,11 +44,11 @@ import time
 
 logger = logging.getLogger(__name__)
 
-from backends.config import (
+from protocols.config import (
     get_whatsapp_session_name,
     resolve_whatsapp_api_url,
 )
-from backends.whatsapp import WhatsAppRESTClient
+from protocols.whatsapp import WhatsAppRESTClient
 from qr_utils import print_qr_code, qr_png_to_ascii
 
 

@@ -38,7 +38,7 @@ from .base import ChatBackend, should_upgrade_outgoing_attachment
 from .config import (
     get_address_book_ttl_s,
     get_wa_lid_cache_ttl_days,
-    get_whatsapp_api_key,  # noqa: F401  re-export (whatsapp_rest reads it via backends.whatsapp)
+    get_whatsapp_api_key,  # noqa: F401  re-export (whatsapp_rest reads it via protocols.whatsapp)
     get_whatsapp_media_dir,
     get_whatsapp_session_name,
     get_whatsapp_webhook_url,
@@ -863,7 +863,7 @@ class WhatsAppBackend(ChatBackend):
 
     def _lid_cache_path(self) -> Path:
         """Return ``CACHE_DIR/wa_lid_map.json`` (respects test override)."""
-        from backend import CACHE_DIR
+        from protocols.db import CACHE_DIR
 
         return Path(CACHE_DIR) / "wa_lid_map.json"
 
@@ -1233,7 +1233,7 @@ class WhatsAppBackend(ChatBackend):
         # Fetch parallelo: WAHA serve le richieste /api/messages concorrenti in
         # parallelo (verificato: 8 chat in ~7.6s totali vs ~34s sommati).  Ogni
         # worker tocca una chat diversa → nessuna contesa sullo stesso dato; le
-        # scritture SQLite sono già serializzate da _DB_LOCK in backend/db.py.
+        # scritture SQLite sono già serializzate da _DB_LOCK in protocols/db.py.
         def _fetch_one(jid: str) -> None:
             try:
                 self.fetch_history(jid, limit=limit)
@@ -1522,7 +1522,7 @@ class WhatsAppBackend(ChatBackend):
         """Synchronous mark-read, for use from the TUI's sync callbacks."""
         if self._rest:
             self._rest.mark_read(contact_id)
-        from backend import _mark_as_read
+        from protocols.db import _mark_as_read
 
         _mark_as_read(contact_id, protocol=PROTOCOL_WHATSAPP)
 
@@ -1538,7 +1538,7 @@ class WhatsAppBackend(ChatBackend):
         if self.media_dir:
             base = Path(self.media_dir)
         else:
-            from backend import CACHE_DIR
+            from protocols.db import CACHE_DIR
 
             base = CACHE_DIR / "whatsapp-media"
         base.mkdir(parents=True, exist_ok=True)
@@ -1812,7 +1812,7 @@ class WhatsAppBackend(ChatBackend):
         startup makes the existing ``ingest_message`` dedup work across
         sessions and makes persisted messages immediately available to the UI.
         """
-        from backend import _load_cache
+        from protocols.db import _load_cache
 
         return _load_cache(protocol=PROTOCOL_WHATSAPP)
 
@@ -1933,7 +1933,7 @@ class WhatsAppBackend(ChatBackend):
 
     def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
         """Persist a message to the SQLite cache (WhatsApp protocol)."""
-        from backend import _add_message_to_cache
+        from protocols.db import _add_message_to_cache
 
         _add_message_to_cache(
             contact_id,
@@ -1961,7 +1961,7 @@ class WhatsAppBackend(ChatBackend):
     def _upgrade_outgoing_attachment(
         self, contact_id: str, message: dict, data: dict, ts: int
     ) -> bool:
-        from backend import (
+        from protocols.db import (
             _update_message_attachment_id,
             _update_message_media_identity,
         )
@@ -2035,7 +2035,7 @@ class WhatsAppBackend(ChatBackend):
 
         Returns ``True`` when a row was reused, ``False`` otherwise.
         """
-        from backend import _DB_LOCK, _ECHO_MATCH_WINDOW_MS, DB_FILE, _init_db
+        from protocols.db import _DB_LOCK, _ECHO_MATCH_WINDOW_MS, DB_FILE, _init_db
 
         _init_db()
         status = data.get("status", "sent" if data.get("is_mine") else "read")
@@ -2111,7 +2111,7 @@ class WhatsAppBackend(ChatBackend):
         Returns ``True`` if newly added, ``"changed"`` if healed in place,
         and ``False`` if it was an unchanged duplicate.
         """
-        from backend import _fill_message_quote_fields, _update_message_id
+        from protocols.db import _fill_message_quote_fields, _update_message_id
 
         if data.get("msg_type") == "image":
             data = {**data, "text": ""}
@@ -2254,7 +2254,7 @@ class WhatsAppBackend(ChatBackend):
     def apply_edit(
         self, contact_id, message_id, new_text, *, is_mine=None, edit_timestamp=None
     ) -> dict | None:
-        from backend import _update_message_text
+        from protocols.db import _update_message_text
 
         target = None
         for msg in self.cache.get(contact_id, []):
@@ -2302,7 +2302,7 @@ class WhatsAppBackend(ChatBackend):
         if target_message_id is None or not payload.get("author_key"):
             return None
 
-        from backend import (
+        from protocols.db import (
             _apply_reaction_delta,
             _load_cache,
             _reactions_for_contact,
@@ -2563,7 +2563,10 @@ class WhatsAppBackend(ChatBackend):
 
         # Persist status changes to SQLite so they survive restarts.
         if to_persist:
-            from backend import _update_message_status, _update_message_status_by_id
+            from protocols.db import (
+                _update_message_status,
+                _update_message_status_by_id,
+            )
 
             for msg_id, ts, text, contact_id in to_persist:
                 if msg_id:

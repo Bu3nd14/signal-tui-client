@@ -169,7 +169,7 @@ def _media_dir() -> Path:
     directory è persistente sotto ``CACHE_DIR``; ``_migrate_legacy_media_dir``
     sposta i file già scaricati e aggiorna i riferimenti nel DB.
     """
-    from backend import CACHE_DIR
+    from protocols.db import CACHE_DIR
 
     return Path(CACHE_DIR) / "telegram-media"
 
@@ -182,8 +182,7 @@ def _migrate_legacy_media_dir() -> None:
     ``quote_attachment_path``) che puntano al vecchio prefisso. Non solleva
     mai: in caso di errore logga in debug e prosegue (i file restano dove sono).
     """
-    from backend import CACHE_DIR, DB_FILE
-    from backend.db import _DB_LOCK
+    from protocols.db import _DB_LOCK, CACHE_DIR, DB_FILE
 
     new_dir = Path(CACHE_DIR) / "telegram-media"
     old_dir = Path(tempfile.gettempdir()) / "telegram-media"
@@ -741,7 +740,7 @@ class TelegramBackend(ChatBackend):
         Called after contacts/dialogs are loaded so that receipts received while
         the TUI was closed are not lost.  Scoped per contact; never downgrades.
         """
-        from backend import _update_message_status_by_id
+        from protocols.db import _update_message_status_by_id
 
         rank = {
             "pending": 0,
@@ -1334,7 +1333,7 @@ class TelegramBackend(ChatBackend):
     def mark_read_sync(self, contact_id: str) -> None:
         """Synchronous mark-read — persists read status to SQLite."""
         try:
-            from backend import _mark_as_read
+            from protocols.db import _mark_as_read
 
             _mark_as_read(contact_id, protocol=PROTOCOL_TELEGRAM)
         except Exception as _e:
@@ -1812,7 +1811,7 @@ class TelegramBackend(ChatBackend):
                         }
                     )
                     try:
-                        from backend import _update_message_status_by_id
+                        from protocols.db import _update_message_status_by_id
 
                         _update_message_status_by_id(
                             mid,
@@ -1843,7 +1842,7 @@ class TelegramBackend(ChatBackend):
     def _load_protocol_cache(self) -> dict[str, list[dict]]:
         """Load Telegram message cache from the shared SQLite database."""
         try:
-            from backend import _load_cache as _load_sqlite_cache
+            from protocols.db import _load_cache as _load_sqlite_cache
 
             cache = _load_sqlite_cache(protocol=PROTOCOL_TELEGRAM)
             self._seen_msg_ids = {
@@ -1857,7 +1856,7 @@ class TelegramBackend(ChatBackend):
 
     def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
         """Persist a message to the SQLite cache (Telegram protocol)."""
-        from backend import _add_message_to_cache
+        from protocols.db import _add_message_to_cache
 
         _add_message_to_cache(
             contact_id,
@@ -1894,7 +1893,7 @@ class TelegramBackend(ChatBackend):
         Returns True when added, ``"changed"`` for an attachment upgrade,
         and False for an unchanged duplicate.
         """
-        from backend import _update_message_attachment_id, _update_message_id
+        from protocols.db import _update_message_attachment_id, _update_message_id
 
         if data.get("msg_type") == "image":
             data = {**data, "text": ""}
@@ -2050,7 +2049,7 @@ class TelegramBackend(ChatBackend):
         is_mine: bool | None = None,
         edit_timestamp: int | None = None,
     ) -> dict | None:
-        from backend import _update_message_text
+        from protocols.db import _update_message_text
 
         for msg in self.cache.get(contact_id, []):
             if str(msg.get("id") or "") != str(message_id):
@@ -2084,7 +2083,7 @@ class TelegramBackend(ChatBackend):
         if payload.get("mode") != "snapshot":
             return None
 
-        from backend import (
+        from protocols.db import (
             _reactions_for_contact,
             _replace_reactions_snapshot,
             _resolve_reaction_target_row,

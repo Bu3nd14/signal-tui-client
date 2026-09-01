@@ -175,7 +175,7 @@ def get_whatsapp_webhook_port() -> int:
     """Return the client webhook listen port (default ``8088``).
 
     Read from the ``CLIENT_WEBHOOK_PORT`` environment variable (default 8088),
-    the same value used by ``backend.WEBHOOK_PORT`` and the WAHA webhook URL
+    the same value used by ``protocols.webhook.WEBHOOK_PORT`` and the WAHA webhook URL
     declared in ``docker-compose.yml``.
     """
     raw = os.environ.get("CLIENT_WEBHOOK_PORT", "8088") or "8088"

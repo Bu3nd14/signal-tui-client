@@ -6,7 +6,7 @@ and updates the contact index so messages are namespaced by protocol.  The
 migration is idempotent: running it on an already-migrated database is a no-op.
 
 The application also runs this automatically at startup (see
-``backend._migrate_protocol_schema``), so this script is only needed for an
+``protocols.db._migrate_protocol_schema``), so this script is only needed for an
 explicit/manual migration.
 
 Usage:
@@ -16,7 +16,7 @@ Usage:
 import sqlite3
 from pathlib import Path
 
-from backend import _migrate_protocol_schema
+from protocols.db import _migrate_protocol_schema
 
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 DB_FILE = CACHE_DIR / "messages.db"

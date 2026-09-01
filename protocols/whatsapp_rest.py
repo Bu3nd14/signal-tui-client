@@ -2,8 +2,8 @@
 Synchronous REST client for the Baileys-based WhatsApp HTTP API.
 
 Endpoints follow the generic ``whatsapp-http-api`` contract; the base URL is
-provided by ``backends.config.get_whatsapp_api_url``.  Configuration values
-(session name, API key) are read through ``backends.whatsapp`` so that tests
+provided by ``protocols.config.get_whatsapp_api_url``. Configuration values
+(session name, API key) are read through ``protocols.whatsapp`` so that tests
 can patch them on that module.
 """
 
@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-import backends.whatsapp as _wa
+import protocols.whatsapp as _wa
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class WhatsAppRESTClient:
     """Minimal synchronous JSON client for the Baileys-based HTTP API.
 
     Endpoints follow the generic ``whatsapp-http-api`` contract; the base URL
-    is provided by ``backends.config.get_whatsapp_api_url``.
+    is provided by ``protocols.config.get_whatsapp_api_url``.
     """
 
     def __init__(self, base_url: str):

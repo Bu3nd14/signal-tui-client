@@ -14,8 +14,8 @@ Covers the Telegram-side edit surface described in DESIGN_EDIT_MESSAGES.md
 - ``ingest_message`` dedup branch → applies the edit (no new row) and
   ``fetch_recent_history`` reconciliation.
 
-Tests that touch SQLite use an isolated temporary DB (``backend.DB_FILE`` /
-``backend.CACHE_DIR`` patched), mirroring ``tests/test_db_edit.py``; the real
+Tests that touch SQLite use an isolated temporary DB (``protocols.db.DB_FILE`` /
+``protocols.db.CACHE_DIR`` patched), mirroring ``tests/test_db_edit.py``; the real
 DB in ``~/.local/share/signal-tui-client`` is never touched.
 """
 
@@ -34,9 +34,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod
-from backends.telegram import TelegramBackend
+import protocols.db as backend_mod
 from models import PROTOCOL_TELEGRAM, ChatContact
+from protocols.telegram import TelegramBackend
 
 # ─── Helpers / fixtures ───────────────────────────────────────────────────────
 
@@ -216,7 +216,7 @@ class TestEditMessageSync:
             backend, "_resolve_input_entity", AsyncMock(return_value="entity")
         )
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, _loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),
@@ -239,7 +239,7 @@ class TestEditMessageSync:
             edit_message=AsyncMock(),
         )
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, _loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),
@@ -286,7 +286,7 @@ class TestEditMessageSync:
         backend._client = SimpleNamespace()
         run_threadsafe = MagicMock()
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe", run_threadsafe
+            "protocols.telegram.asyncio.run_coroutine_threadsafe", run_threadsafe
         )
 
         with pytest.raises(ValueError):
@@ -546,7 +546,7 @@ class TestFetchRecentHistoryEdit:
             get_messages=AsyncMock(return_value=[edited_msg]),
         )
         monkeypatch.setattr(
-            "backends.telegram.asyncio.run_coroutine_threadsafe",
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
             lambda coro, _loop: SimpleNamespace(
                 result=lambda timeout: asyncio.run(coro)
             ),

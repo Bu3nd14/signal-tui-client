@@ -22,9 +22,9 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod
-from backends.whatsapp import WhatsAppBackend, _event_from_ack
-from backends.whatsapp_events import canonical_msg_id
+import protocols.db as backend_mod
+from protocols.whatsapp import WhatsAppBackend, _event_from_ack
+from protocols.whatsapp_events import canonical_msg_id
 
 
 def _make_backend(api_url: str = "http://api.test") -> WhatsAppBackend:
@@ -283,7 +283,7 @@ class TestProcessReceiptIdlessFallback:
         with (
             patch.object(backend_mod, "_update_message_status_by_id"),
             patch.object(backend_mod, "_update_message_status"),
-            patch("backends.whatsapp.logger.warning") as mock_warn,
+            patch("protocols.whatsapp.logger.warning") as mock_warn,
         ):
             backend.process_receipt({"message_ids": ["HEXID"], "is_read": True})
         mock_warn.assert_called_once()

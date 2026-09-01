@@ -26,19 +26,19 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 
 from dump_address_book_fixtures import anonymize_payload
 
-from backends import config
-from backends.base import ChatBackend
-from backends.manager import BackendManager
-from backends.signal import SignalBackend
-from backends.telegram import TelegramBackend
-from backends.whatsapp import WhatsAppBackend, _dedup_book_contacts
-from backends.whatsapp_rest import WhatsAppRESTClient
 from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
     PROTOCOL_WHATSAPP,
     ChatContact,
 )
+from protocols import config
+from protocols.base import ChatBackend
+from protocols.manager import BackendManager
+from protocols.signal import SignalBackend
+from protocols.telegram import TelegramBackend
+from protocols.whatsapp import WhatsAppBackend, _dedup_book_contacts
+from protocols.whatsapp_rest import WhatsAppRESTClient
 
 
 class _MinimalBackend(ChatBackend):
@@ -430,7 +430,7 @@ class TestWALidCache:
     """💾 Cache persistente ``@lid`` → numero."""
 
     def test_roundtrip_on_tmp_path(self, monkeypatch, tmp_path):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
         now = int(time.time())
@@ -448,7 +448,7 @@ class TestWALidCache:
         assert b2._lid_lookup("220988985864200@lid") == "393331234567"
 
     def test_positive_ttl(self, monkeypatch, tmp_path):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
         now = int(time.time())
@@ -467,7 +467,7 @@ class TestWALidCache:
         assert backend._lid_lookup("stale@lid") is None
 
     def test_negative_ttl_24h(self, monkeypatch, tmp_path):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
         now = int(time.time())
@@ -483,7 +483,7 @@ class TestWALidCache:
         assert backend._lid_cached("neg_stale@lid") is False
 
     def test_corrupt_file_starts_empty(self, monkeypatch, tmp_path):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
         (tmp_path / "wa_lid_map.json").write_text("{not valid json")
@@ -567,7 +567,7 @@ class TestWAMerge:
         assert contact.display_name == "Mario Rossi"
 
     def test_lid_unresolved_standalone_no_network(self, monkeypatch, tmp_path):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         # Isola la cache @lid reale (wa_lid_map.json): senza questa patch il
         # test leggerebbe il file della macchina su cui gira (su alcune
@@ -671,7 +671,7 @@ class TestWALidResolver:
         assert backend._lid_resolver_started is True
 
     def test_batch_max_30_and_save_once(self, monkeypatch, tmp_path):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
         backend = _wa_backend()
@@ -749,7 +749,7 @@ def _tg_backend_with_book(monkeypatch, users, dialogs=None) -> TelegramBackend:
         except (ValueError, TypeError):
             pass
     monkeypatch.setattr(
-        "backends.telegram.asyncio.run_coroutine_threadsafe",
+        "protocols.telegram.asyncio.run_coroutine_threadsafe",
         lambda coro, loop: SimpleNamespace(result=lambda timeout: asyncio.run(coro)),
     )
     return backend
@@ -1170,7 +1170,7 @@ class TestFixtureIntegration:
         assert mario["name"].startswith("Contatto ")
 
     def test_wa_fixture_merge_with_chat(self, monkeypatch, tmp_path):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
         raw = [

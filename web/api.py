@@ -125,8 +125,8 @@ def _is_whatsapp_synthetic_text(text: str | None) -> bool:
 
 
 def _unread_counts() -> dict[tuple[str, str], int]:
-    import backend
-    from backend.db import _DB_LOCK
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
 
     with _DB_LOCK:
         try:
@@ -174,8 +174,8 @@ def _message_edit_id(row: sqlite3.Row | dict[str, Any]) -> str | None:
 def _message_row_for_edit(
     protocol: str, contact_id: str, message_id: str
 ) -> dict[str, Any] | None:
-    import backend
-    from backend.db import _DB_LOCK
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
 
     with _DB_LOCK:
         try:
@@ -214,8 +214,8 @@ def _message_row_for_edit(
 def _message_row_for_reaction(
     protocol: str, contact_id: str, message_id: str
 ) -> dict[str, Any] | None:
-    import backend
-    from backend.db import _DB_LOCK
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
 
     with _DB_LOCK:
         try:
@@ -257,8 +257,8 @@ def _message_row_for_reaction(
 def _persist_message_edit(
     protocol: str, contact_id: str, message_id: str, new_text: str
 ) -> int:
-    import backend
-    from backend.db import _DB_LOCK
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
 
     with _DB_LOCK:
         connection = sqlite3.connect(backend.DB_FILE)
@@ -345,8 +345,8 @@ def _aggregate_reactions(
 
 
 def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
-    import backend
-    from backend.db import _DB_LOCK, _reactions_for_contact
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK, _reactions_for_contact
 
     with _DB_LOCK:
         try:
@@ -615,7 +615,7 @@ def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
     altrimenti ``None`` (nessuna miniatura: placeholder testuale).
     """
     proto = str(row["protocol"])
-    from backend import CACHE_DIR
+    from protocols.db import CACHE_DIR
 
     thumbs_root = (Path(CACHE_DIR) / "quote-thumbs").resolve()
     image_extensions = (".jpg", ".jpeg", ".png", ".gif", ".webp")
@@ -730,8 +730,8 @@ def _quoted_media_attachment_id(
     """
     if not quote_ts:
         return None
-    import backend
-    from backend.db import _DB_LOCK
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
 
     media_clause = _quoted_media_clause(kind)
     try:
@@ -811,8 +811,8 @@ def _quoted_media_by_filename(
     filename = match.group(1).strip()
     if not filename or not quoter_ts:
         return None
-    import backend
-    from backend.db import _DB_LOCK
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
 
     media_clause = _quoted_media_clause(kind)
     try:
@@ -863,8 +863,8 @@ def _quoted_media_by_message_id(
     """
     if not reply_to_message_id:
         return None
-    import backend
-    from backend.db import _DB_LOCK
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
 
     media_clause = _quoted_media_clause(kind)
     try:
@@ -904,18 +904,19 @@ def _quote_media_placeholder(text: Any) -> bool:
 
 
 def _allowed_media_root(manager: Any, proto: str) -> Path:
-    import backend
+    from protocols.db import CACHE_DIR
+    from protocols.rpc import SIGNAL_CLI_ATTACHMENTS_DIR
 
     if proto == "signal":
-        return Path(backend.SIGNAL_CLI_ATTACHMENTS_DIR).resolve()
+        return Path(SIGNAL_CLI_ATTACHMENTS_DIR).resolve()
     if proto == "whatsapp":
         instance = manager.get(proto)
         if instance is not None and hasattr(instance, "_ensure_media_dir"):
             return instance._ensure_media_dir().resolve()
-        return (backend.CACHE_DIR / "whatsapp-media").resolve()
+        return (CACHE_DIR / "whatsapp-media").resolve()
     if proto == "telegram":
         try:
-            from backends.telegram import _media_dir
+            from protocols.telegram import _media_dir
 
             return _media_dir().resolve()
         except ImportError:
@@ -931,8 +932,8 @@ def _web_thumb_dir(proto: str) -> Path:
 
 
 def _attachment_content_type(proto: str, attachment_id: str) -> str | None:
-    import backend
-    from backend.db import _DB_LOCK
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
 
     with _DB_LOCK:
         try:
@@ -1039,8 +1040,8 @@ def _quoted_sender(proto: str, contact_id: str, quote_ts: Any) -> str | None:
     """Sender del messaggio quotato nella stessa chat (match esatto su timestamp)."""
     if not quote_ts:
         return None
-    import backend
-    from backend.db import _DB_LOCK
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
 
     try:
         with _DB_LOCK:
@@ -1769,8 +1770,8 @@ def create_api_router() -> Any:
         message_row_id: int,
         w: int | None = None,
     ) -> Any:
-        import backend
-        from backend.db import _DB_LOCK
+        import protocols.db as backend
+        from protocols.db import _DB_LOCK
 
         with _DB_LOCK:
             try:

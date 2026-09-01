@@ -1,7 +1,7 @@
 """
-Regression tests for lazy configuration in ``backend.rpc``.
+Regression tests for lazy configuration in ``protocols.rpc``.
 
-Ensures ``backend.rpc`` (and therefore ``backend``) imports cleanly without
+Ensures ``protocols.rpc`` (and therefore ``protocols``) imports cleanly without
 ``config.json`` or ``bin/`` present, and that the canonical RuntimeError /
 FileNotFoundError are raised only at the point of use.
 """
@@ -18,28 +18,30 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-from backend import rpc as backend_rpc
-from backends import SignalBackend
+import protocols.rpc as backend_rpc
+from protocols import SignalBackend
 
 
 def test_import_clean_without_config_in_ci_environment(tmp_path: Path) -> None:
-    """Importing backend.rpc in a clean environment never raises.
+    """Importing protocols.rpc in a clean environment never raises.
 
-    Copies only the ``backend/`` package into a temp dir (leaving out
-    ``config.json`` and ``bin/``, which live in the project root, not in the
-    package) and runs a fresh interpreter with ``PYTHONPATH`` pointing at that
-    copy.  This mirrors CI, where the real project root's ``config.json`` and
-    ``bin/`` do not exist, and asserts the import-time defaults:
+    Copies the ``protocols/`` package and its local module dependencies into a
+    temp dir (leaving out ``config.json`` and ``bin/``) and runs a fresh
+    interpreter with ``PYTHONPATH`` pointing at that copy. This mirrors CI,
+    where the real project root's ``config.json`` and ``bin/`` do not exist,
+    and asserts the import-time defaults:
     ``USER_NUMBER == ""`` and ``SIGNAL_CLI_PATH is None``.
     """
     shutil.copytree(
-        PROJECT_ROOT / "backend",
-        tmp_path / "backend",
+        PROJECT_ROOT / "protocols",
+        tmp_path / "protocols",
         ignore=shutil.ignore_patterns("__pycache__"),
     )
+    shutil.copy2(PROJECT_ROOT / "filename_utils.py", tmp_path)
+    shutil.copy2(PROJECT_ROOT / "models.py", tmp_path)
 
     code = (
-        "import backend.rpc as r; print(repr(r.USER_NUMBER), repr(r.SIGNAL_CLI_PATH))"
+        "import protocols.rpc as r; print(repr(r.USER_NUMBER), repr(r.SIGNAL_CLI_PATH))"
     )
     env = {k: v for k, v in os.environ.items() if k != "SIGNAL_USER_NUMBER"}
     env["PYTHONPATH"] = str(tmp_path)

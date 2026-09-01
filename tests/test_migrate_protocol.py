@@ -142,7 +142,7 @@ class TestInitDBAutoMigrate:
     @pytest.fixture
     def tmp_backend_db(self, tmp_path: Path):
         """Point backend at a temp legacy DB for _init_db tests."""
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         db_file = tmp_path / "messages.db"
         with (

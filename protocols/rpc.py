@@ -13,8 +13,6 @@ import subprocess
 import urllib.request
 from pathlib import Path
 
-import backend as _backend
-
 logger = logging.getLogger(__name__)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -105,7 +103,7 @@ def find_signal_cli() -> Path:
 def _is_daemon_running() -> bool:
     """Check if the signal-cli daemon is already running."""
     try:
-        rpc = _backend.SignalRPCClient()
+        rpc = SignalRPCClient()
         test = rpc._call("listContacts")
         return "result" in test
     except Exception as _e:
@@ -158,7 +156,7 @@ def _send_subprocess(
         args.extend(["--quote-attachment", qa])
     for attachment in attachments or []:
         args.extend(["--attachment", attachment])
-    return _backend._run_subprocess(args)
+    return _run_subprocess(args)
 
 
 # ─── Attachment helpers ─────────────────────────────────────────────────────
@@ -172,10 +170,8 @@ def get_attachment_path(attachment_id: str) -> Path | None:
     """
     if not attachment_id:
         return None
-    att_path = _backend.SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id
-    if not att_path.resolve().is_relative_to(
-        _backend.SIGNAL_CLI_ATTACHMENTS_DIR.resolve()
-    ):
+    att_path = SIGNAL_CLI_ATTACHMENTS_DIR / attachment_id
+    if not att_path.resolve().is_relative_to(SIGNAL_CLI_ATTACHMENTS_DIR.resolve()):
         logger.warning("Rejected attachment path outside the attachments directory")
         return None
     if att_path.exists() and att_path.is_file():

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend import download as dl
+import protocols.download as dl
 
 
 class TestLocalIp:

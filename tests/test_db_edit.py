@@ -5,8 +5,8 @@ Covers the ``_update_message_text`` helper and the ``edited`` column
 migration (schema v2 -> v3) described in DESIGN_EDIT_MESSAGES.md §5 and the
 test plan in §7 (``tests/test_db_edit.py``).
 
-Every test uses an isolated temporary SQLite DB (``backend.DB_FILE`` and
-``backend.CACHE_DIR`` are patched), mirroring ``test_db_schema_versioning.py``;
+Every test uses an isolated temporary SQLite DB (``protocols.db.DB_FILE`` and
+``protocols.db.CACHE_DIR`` are patched), mirroring ``test_db_schema_versioning.py``;
 the real DB in ``~/.local/share/signal-tui-client`` is never touched.
 """
 
@@ -22,7 +22,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod  # package: DB_FILE / CACHE_DIR are patched here
+import protocols.db as backend_mod  # package: DB_FILE / CACHE_DIR are patched here
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 

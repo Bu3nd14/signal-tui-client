@@ -25,8 +25,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend import _process_typing
 from models import PROTOCOL_SIGNAL, ChatContact, contact_cache_key
+from protocols.rpc import _process_typing
 from signal_tui import SignalTUI
 
 
@@ -90,7 +90,7 @@ class TestSignalTUITyping:
     @pytest.fixture(autouse=True)
     def _temp_db(self, tmp_path):
         """Isolate the SQLite cache for this test class."""
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         db_file = tmp_path / "messages.db"
         with (

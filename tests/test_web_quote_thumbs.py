@@ -13,8 +13,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
-import backend
-from backend.db import _init_db
+import protocols.db as backend
+from protocols.db import _init_db
 from web.api import create_api_router
 from web.auth import install_auth
 

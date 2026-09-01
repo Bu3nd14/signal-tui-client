@@ -27,9 +27,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from backends.config import resolve_whatsapp_api_url
-from backends.whatsapp import WhatsAppRESTClient
 from models import PROTOCOL_WHATSAPP
+from protocols.config import resolve_whatsapp_api_url
+from protocols.whatsapp import WhatsAppRESTClient
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
 DB_FILE = CACHE_DIR / "messages.db"
 
 # Si riusa il lock del backend per non corrompere un DB in uso dalla TUI.
-from backend import _DB_LOCK
+from protocols.db import _DB_LOCK
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (

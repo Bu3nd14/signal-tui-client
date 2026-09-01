@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import backend
-from backends import SignalBackend
+import protocols.db as backend
 from models import PROTOCOL_SIGNAL, ChatContact
+from protocols import SignalBackend
 
 CONTACT_ID = "+391234567890"
 TARGET_TS = 1_700_000_000_000

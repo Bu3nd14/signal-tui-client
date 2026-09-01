@@ -11,7 +11,7 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend import SignalRPCClient, _send_subprocess
+from protocols.rpc import SignalRPCClient, _send_subprocess
 
 
 class TestSendSubprocess:
@@ -19,7 +19,7 @@ class TestSendSubprocess:
 
     def test_send_basic(self):
         """Send base → comando con -m e destinatario."""
-        with patch("backend._run_subprocess") as mock_run:
+        with patch("protocols.rpc._run_subprocess") as mock_run:
             _send_subprocess("Ciao!", "+391234567890")
         mock_run.assert_called_once()
         args = mock_run.call_args[0][0]
@@ -30,7 +30,7 @@ class TestSendSubprocess:
 
     def test_send_with_quote(self):
         """Send con quote → include flag quote."""
-        with patch("backend._run_subprocess") as mock_run:
+        with patch("protocols.rpc._run_subprocess") as mock_run:
             _send_subprocess(
                 "Ciao!",
                 "+391234567890",
@@ -46,7 +46,7 @@ class TestSendSubprocess:
 
     def test_send_with_partial_quote(self):
         """Send con solo quote_timestamp → ok."""
-        with patch("backend._run_subprocess") as mock_run:
+        with patch("protocols.rpc._run_subprocess") as mock_run:
             _send_subprocess(
                 "Ciao!",
                 "+391234567890",

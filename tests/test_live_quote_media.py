@@ -36,11 +36,6 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend import get_attachment_path
-from backends.signal import SignalBackend
-from backends.telegram import TelegramBackend
-from backends.whatsapp import WhatsAppBackend
-from backends.whatsapp_events import _event_from_message
 from models import (
     MEDIA_QUOTE_PLACEHOLDERS,
     PROTOCOL_SIGNAL,
@@ -50,6 +45,11 @@ from models import (
     is_media_quote_placeholder,
     media_quote_placeholder,
 )
+from protocols.rpc import get_attachment_path
+from protocols.signal import SignalBackend
+from protocols.telegram import TelegramBackend
+from protocols.whatsapp import WhatsAppBackend
+from protocols.whatsapp_events import _event_from_message
 
 LIVE = os.environ.get("LIVE_TESTS") == "1"
 LIVE_MANUAL = os.environ.get("LIVE_MANUAL") == "1"
@@ -277,7 +277,7 @@ def _await_fresh_image(
 @pytest.fixture
 def signal_live():
     """Connect Signal (daemon already running), resolve contact, wrap send."""
-    from backend import _is_daemon_running, _require_user_number
+    from protocols.rpc import _is_daemon_running, _require_user_number
 
     try:
         user_number = _require_user_number()
@@ -336,7 +336,7 @@ def signal_fresh_media():
     cache/DB with a persisted ``content_type``.  Shared by E1/E2/E7 so the user
     does not have to send three separate images.
     """
-    from backend import _is_daemon_running, _require_user_number
+    from protocols.rpc import _is_daemon_running, _require_user_number
 
     try:
         user_number = _require_user_number()

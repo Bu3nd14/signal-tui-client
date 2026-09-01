@@ -5,11 +5,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from backends import SignalBackend
-from backends.telegram import TelegramBackend
-from backends.whatsapp import WhatsAppBackend
-from backends.whatsapp_events import _event_from_message
 from models import PROTOCOL_SIGNAL, ChatContact
+from protocols import SignalBackend
+from protocols.telegram import TelegramBackend
+from protocols.whatsapp import WhatsAppBackend
+from protocols.whatsapp_events import _event_from_message
 
 
 def _signal_backend() -> SignalBackend:
