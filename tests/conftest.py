@@ -23,6 +23,10 @@ def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     monkeypatch.setattr(backend, "CACHE_DIR", cache_dir)
     monkeypatch.setattr(backend, "DB_FILE", cache_dir / "messages.db")
     monkeypatch.setattr(backend, "CACHE_FILE", cache_dir / "messages.json")
+    from protocols import config, rpc
+
+    monkeypatch.setattr(rpc, "SIGNAL_CLI_ATTACHMENTS_DIR", cache_dir / "signal-media")
+    monkeypatch.setattr(config, "get_whatsapp_media_dir", lambda: "")
     return cache_dir
 
 
