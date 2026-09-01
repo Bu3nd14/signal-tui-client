@@ -3,6 +3,12 @@
 const TOKEN_KEY = "signal-tui-web-token";
 const PROTOCOL_KEY = "signal-tui-web-proto";
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
+const TRANSCRIBE_MODEL = "onnx-community/whisper-base";
+const TRANSCRIBE_DTYPE = "q8";
+const TRANSCRIBE_DEVICE = "webgpu"; // fallback automatico a wasm
+const TRANSCRIBE_LANGUAGE = null; // null = auto-detect
+const TRANSCRIBE_CACHE_KEY = "signal-tui-web-transcriptions";
+const TRANSCRIBE_CACHE_LIMIT = 200;
 const REACTION_EMOJIS = [
   "👍", "❤️", "😂", "😮", "😢", "🙏",
   "🔥", "🎉", "👏", "💯", "😍", "🤔",
@@ -52,7 +58,12 @@ const state = {
   telegramRefreshTimer: null,
   telegramReactions: [],
   userScrolledUp: false,
+  transcriber: null,
+  transcriberPromise: null,
+  transcriptions: new Map(),
 };
+
+loadTranscriptionCache();
 
 const elements = {
   app: document.querySelector("#app"),
@@ -138,6 +149,124 @@ async function apiFetch(path, options = {}) {
     throw error;
   }
   return response;
+}
+
+function loadTranscriptionCache() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(TRANSCRIBE_CACHE_KEY) || "[]");
+    const entries = Array.isArray(stored) ? stored.slice(-TRANSCRIBE_CACHE_LIMIT) : [];
+    for (const entry of entries) {
+      if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
+      const value = entry[1];
+      if (!value || typeof value.text !== "string") continue;
+      state.transcriptions.set(entry[0], {
+        text: value.text,
+        ts: Number.isFinite(value.ts) ? value.ts : Date.now(),
+      });
+    }
+  } catch {
+    state.transcriptions.clear();
+  }
+}
+
+function persistTranscriptionCache() {
+  try {
+    localStorage.setItem(TRANSCRIBE_CACHE_KEY, JSON.stringify([...state.transcriptions]));
+  } catch {
+    // La cache in memoria resta disponibile se localStorage non è accessibile.
+  }
+}
+
+function transcriptionCacheKey(protocol, attachmentId) {
+  return `${protocol}:${attachmentId}`;
+}
+
+function getCachedTranscription(key) {
+  return state.transcriptions.get(key)?.text ?? null;
+}
+
+function setCachedTranscription(key, text) {
+  state.transcriptions.delete(key);
+  state.transcriptions.set(key, { text, ts: Date.now() });
+  while (state.transcriptions.size > TRANSCRIBE_CACHE_LIMIT) {
+    state.transcriptions.delete(state.transcriptions.keys().next().value);
+  }
+  persistTranscriptionCache();
+}
+
+function whenTransformersReady() {
+  if (window.TransformersJS) return Promise.resolve(window.TransformersJS);
+  return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      if (window.TransformersJS) {
+        window.clearInterval(timer);
+        resolve(window.TransformersJS);
+      } else if (Date.now() - startedAt >= 30000) {
+        window.clearInterval(timer);
+        reject(new Error("transformers.js non disponibile dopo 30 secondi"));
+      }
+    }, 100);
+  });
+}
+
+function formatBytes(bytes) {
+  const units = ["B", "KB", "MB", "GB"];
+  let value = Number(bytes) || 0;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+async function ensureTranscriber(onProgress) {
+  if (state.transcriber) return state.transcriber;
+  if (state.transcriberPromise) return state.transcriberPromise;
+
+  state.transcriberPromise = (async () => {
+    const { pipeline, env } = await whenTransformersReady();
+    env.allowRemoteModels = true;
+    env.allowLocalModels = false;
+    const createPipeline = (device) => pipeline("automatic-speech-recognition", TRANSCRIBE_MODEL, {
+      dtype: TRANSCRIBE_DTYPE,
+      device,
+      progress_callback: onProgress,
+    });
+    try {
+      return await createPipeline(TRANSCRIBE_DEVICE);
+    } catch (error) {
+      if (TRANSCRIBE_DEVICE === "wasm") throw error;
+      return createPipeline("wasm");
+    }
+  })();
+
+  try {
+    state.transcriber = await state.transcriberPromise;
+    return state.transcriber;
+  } finally {
+    state.transcriberPromise = null;
+  }
+}
+
+async function transcribeAudio(mediaPath) {
+  const response = await apiFetch(mediaPath);
+  const blob = await response.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  state.objectUrls.add(blobUrl);
+  state.pinnedUrls.add(blobUrl);
+  try {
+    await ensureTranscriber();
+    const options = { task: "transcribe", return_timestamps: false };
+    if (TRANSCRIBE_LANGUAGE) options.language = TRANSCRIBE_LANGUAGE;
+    const output = await state.transcriber(blobUrl, options);
+    return String(output?.text || "").trim();
+  } finally {
+    state.pinnedUrls.delete(blobUrl);
+    state.objectUrls.delete(blobUrl);
+    URL.revokeObjectURL(blobUrl);
+  }
 }
 
 function formatTimestamp(value, includeDate = true) {
@@ -668,6 +797,73 @@ function fileAttachment(attachment, protocol, direction) {
       open();
     }
   });
+  if (attachment.media_kind === "voice" || attachment.media_kind === "audio") {
+    const transcribeButton = document.createElement("button");
+    transcribeButton.className = "transcribe-button";
+    transcribeButton.type = "button";
+    transcribeButton.textContent = "Trascrivi";
+    transcribeButton.setAttribute("aria-label", "Trascrivi messaggio audio");
+    const transcriptBox = document.createElement("div");
+    transcriptBox.className = "transcript-box";
+    transcriptBox.hidden = true;
+    container.append(transcribeButton, transcriptBox);
+
+    const transcribe = async (event) => {
+      event.stopPropagation();
+      const key = transcriptionCacheKey(protocol, attachmentId);
+      const cached = getCachedTranscription(key);
+      if (cached !== null) {
+        transcriptBox.textContent = cached || "Nessun testo rilevato.";
+        transcriptBox.hidden = false;
+        transcribeButton.hidden = true;
+        return;
+      }
+
+      transcribeButton.disabled = true;
+      transcriptBox.hidden = false;
+      try {
+        if (!state.transcriber) {
+          transcribeButton.textContent = "Caricamento modello… (primo avvio)";
+          transcriptBox.textContent = "Caricamento del modello di trascrizione…";
+          await ensureTranscriber((progress) => {
+            if (progress.status === "initiate") {
+              transcriptBox.textContent = "Preparazione download…";
+            } else if (progress.status === "download") {
+              transcriptBox.textContent = "Download: file in corso…";
+            } else if (progress.status === "progress" || progress.status === "progress_total") {
+              transcriptBox.textContent = progress.total > 0
+                ? `Download modello: ${Math.round(progress.progress)}% (${formatBytes(progress.loaded)} / ${formatBytes(progress.total)})`
+                : "Download: file in corso…";
+            } else if (progress.status === "done") {
+              transcriptBox.textContent = "File scaricato, inizializzazione…";
+            } else if (progress.status === "ready") {
+              transcriptBox.textContent = "Modello pronto, trascrizione in corso…";
+            }
+          });
+        }
+        transcribeButton.textContent = "Trascrizione in corso…";
+        transcriptBox.textContent = "Trascrizione in corso…";
+        const text = await transcribeAudio(mediaPath);
+        setCachedTranscription(key, text);
+        transcriptBox.textContent = text || "Nessun testo rilevato.";
+        transcribeButton.hidden = true;
+      } catch (error) {
+        transcriptBox.textContent = error.message === "unauthorized"
+          ? "Autenticazione necessaria per scaricare l'audio."
+          : "Trascrizione non riuscita. Riprova.";
+        transcribeButton.disabled = false;
+        transcribeButton.textContent = "Riprova";
+      }
+    };
+    transcribeButton.addEventListener("click", transcribe);
+    transcribeButton.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        event.stopPropagation();
+        transcribeButton.click();
+      }
+    });
+  }
   return container;
 }
 
