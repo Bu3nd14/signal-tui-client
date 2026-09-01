@@ -15,7 +15,7 @@ PYTHON ?= python
 
 .PHONY: test lint typecheck coverage format-check check live-test live-test-manual
 
-# Esegue l'intera suite (tests/ + Telegram/) — radici definite da testpaths.
+# Esegue l'intera suite in tests/ — radice definita da testpaths.
 test:
 	$(PYTHON) -m pytest
 

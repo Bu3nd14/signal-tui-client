@@ -721,7 +721,7 @@ speed up outgoing bubbles.
 
 ### Standard suite (unit + integration, CI-safe)
 
-Runs every test in `tests/` and `Telegram/` (no network, no real accounts):
+Runs every test in `tests/` (no network, no real accounts):
 
 ```bash
 make test PYTHON=.venv-test/bin/python      # or: source .venv-test/bin/activate && make test
@@ -820,11 +820,9 @@ signal-tui-client/
 ├── migrate_cache_status.py    # One-shot migration: add status field to cache
 ├── migrate_content_type.py    # Backfill MIME type for legacy cached media (quote media plan B)
 ├── purge_whatsapp_cache.py    # Utility: purge WhatsApp messages from cache
-├── Telegram/                  # Telegram test suite
-│   ├── test_telegram_backend.py
-│   └── test_regression.py
 ├── tests/                     # Test suite (pytest; unit, UI pilot, integration, live-gated)
 │   ├── conftest.py
+│   ├── protocols/telegram/    # Telegram backend and regression tests
 │   ├── test_live_quote_media.py   # Live E2E tests (opt-in via LIVE_TESTS=1)
 │   └── …                      # Backend, UI, grouping, filters, edit flow, quote media, …
 ├── profiling/                 # Performance profiling tools (CPU, RAM, I/O)

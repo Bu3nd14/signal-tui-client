@@ -7,7 +7,7 @@
 # =============================================================================
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "Telegram"]
+testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra --tb=short --strict-markers"
 asyncio_mode = "auto"
@@ -22,7 +22,6 @@ source = ["."]
 branch = true
 omit = [
     "tests/*",
-    "Telegram/*",
     "profiling/*",
     "scripts/*",
     "bin/*",
