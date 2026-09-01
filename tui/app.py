@@ -18,13 +18,6 @@ from textual.widgets import (
     ListItem,
 )
 
-from backends import (
-    BackendManager,
-    SignalBackend,
-    TelegramBackend,
-    WhatsAppBackend,
-)
-from backends.config import telegram_enabled, whatsapp_enabled
 from contact_picker import BackendChoiceScreen, ContactPickerScreen
 from models import (
     PROTOCOL_SIGNAL,
@@ -33,6 +26,13 @@ from models import (
     ChatContact,
     protocol_emoji,
 )
+from protocols import (
+    BackendManager,
+    SignalBackend,
+    TelegramBackend,
+    WhatsAppBackend,
+)
+from protocols.config import telegram_enabled, whatsapp_enabled
 from tui.backend_connect import BackendConnectMixin
 from tui.chat_view import ChatViewMixin
 from tui.contacts import ContactListMixin
@@ -607,7 +607,7 @@ class SignalTUI(
         # evento può arrivare. Best-effort: un errore non deve mai impedire
         # l'uscita.
         try:
-            from backend import _prune_cache
+            from protocols.db import _prune_cache
 
             _prune_cache()
         except Exception:

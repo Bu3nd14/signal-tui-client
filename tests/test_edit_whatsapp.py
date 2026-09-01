@@ -15,8 +15,8 @@ Covers the WhatsApp-side edit surface described in DESIGN_EDIT_MESSAGES.md
 - ``fetch_history`` → ``apply_edit`` reconciliation (row/cache count unchanged);
 - ``edit_message_sync`` and ``apply_edit`` (cache + SQLite mutation and guards).
 
-Tests that touch SQLite use an isolated temporary DB (``backend.DB_FILE`` /
-``backend.CACHE_DIR`` patched), mirroring ``tests/test_db_edit.py``; the real
+Tests that touch SQLite use an isolated temporary DB (``protocols.db.DB_FILE`` /
+``protocols.db.CACHE_DIR`` patched), mirroring ``tests/test_db_edit.py``; the real
 DB in ``~/.local/share/signal-tui-client`` is never touched.
 """
 
@@ -32,9 +32,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod
-from backends.whatsapp import WhatsAppBackend, WhatsAppRESTClient
+import protocols.db as backend_mod
 from models import PROTOCOL_WHATSAPP
+from protocols.whatsapp import WhatsAppBackend, WhatsAppRESTClient
 
 # ─── Constants / helpers ───────────────────────────────────────────────────────
 

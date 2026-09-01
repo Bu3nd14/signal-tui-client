@@ -1,5 +1,5 @@
 """
-Regression tests for the Telegram backend (backends/telegram.py).
+Regression tests for the Telegram backend (protocols/telegram.py).
 
 Tests the normalization layer (Telethon objects → ChatContact/ChatEvent),
 the event queue bridge, cache/dedup logic, and the thread boundary contract.
@@ -21,12 +21,12 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends.telegram import TelegramBackend
 from models import (
     PROTOCOL_TELEGRAM,
     ChatEvent,
     contact_cache_key,
 )
+from protocols.telegram import TelegramBackend
 
 # ─── Telethon mock objects ────────────────────────────────────────────────
 
@@ -562,7 +562,7 @@ class TestCacheDedup:
         non trovava il match e raddoppiava il messaggio inviato.
         """
         backend = _make_backend()
-        with patch("backend._update_message_id") as mock_upd:
+        with patch("protocols.db._update_message_id") as mock_upd:
             # 1) Invio ottimistico dalla TUI: nessun id, ts client.
             added = backend.ingest_message(
                 "111",
@@ -720,18 +720,18 @@ class TestProtocolConstant:
         assert protocol_emoji(PROTOCOL_TELEGRAM) == "📨"
 
     def test_telegram_backend_protocol(self):
-        from backends.telegram import TelegramBackend
+        from protocols.telegram import TelegramBackend
 
         assert TelegramBackend.protocol == PROTOCOL_TELEGRAM
 
     def test_is_chat_backend_subclass(self):
-        from backends.base import ChatBackend
-        from backends.telegram import TelegramBackend
+        from protocols.base import ChatBackend
+        from protocols.telegram import TelegramBackend
 
         assert issubclass(TelegramBackend, ChatBackend)
 
     def test_instantiable(self):
-        from backends.telegram import TelegramBackend
+        from protocols.telegram import TelegramBackend
 
         backend = TelegramBackend()
         assert backend.protocol == PROTOCOL_TELEGRAM

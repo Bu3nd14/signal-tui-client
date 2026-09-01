@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend import SSE_URL, SignalRPCClient, _is_daemon_running
+from protocols.rpc import SSE_URL, SignalRPCClient, _is_daemon_running
 
 
 class TestSignalRPCClient:
@@ -181,7 +181,7 @@ class TestIsDaemonRunning:
 
     def test_daemon_running(self):
         """Demone attivo → True."""
-        with patch("backend.SignalRPCClient") as mock_client_cls:
+        with patch("protocols.rpc.SignalRPCClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client._call.return_value = {"result": ["ok"]}
             mock_client_cls.return_value = mock_client
@@ -190,7 +190,7 @@ class TestIsDaemonRunning:
 
     def test_daemon_not_running(self):
         """Demone non attivo → False."""
-        with patch("backend.SignalRPCClient") as mock_client_cls:
+        with patch("protocols.rpc.SignalRPCClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client._call.side_effect = Exception("Connection refused")
             mock_client_cls.return_value = mock_client

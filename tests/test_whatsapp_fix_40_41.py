@@ -27,20 +27,20 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends.whatsapp import (
+from models import PROTOCOL_WHATSAPP, ChatContact
+from protocols.whatsapp import (
     WhatsAppBackend,
     WhatsAppRESTClient,
     _event_from_ack,
     _event_from_typing,
 )
-from backends.whatsapp_events import (
+from protocols.whatsapp_events import (
     WAHA_ACK_DEVICE,
     WAHA_ACK_PLAYED,
     WAHA_ACK_READ,
     WAHA_ACK_SERVER,
     _ack_value,
 )
-from models import PROTOCOL_WHATSAPP, ChatContact
 
 
 def _make_backend(api_url: str = "http://api.test") -> WhatsAppBackend:
@@ -288,7 +288,7 @@ class TestWebhookDesiredEvents:
     """⚙️ ``_configure_webhook`` sottoscrive anche ``presence.update``."""
 
     def test_desired_events_include_presence_update(self):
-        import backends.whatsapp as wa_mod
+        import protocols.whatsapp as wa_mod
 
         backend = _make_backend()
         webhook = "http://host.docker.internal:8088/webhook"
@@ -312,7 +312,7 @@ class TestWebhookDesiredEvents:
         ]
 
     def test_no_put_when_presence_update_already_subscribed(self):
-        import backends.whatsapp as wa_mod
+        import protocols.whatsapp as wa_mod
 
         backend = _make_backend()
         webhook = "http://host.docker.internal:8088/webhook"
@@ -345,7 +345,7 @@ class TestWebhookDesiredEvents:
         mock_put.assert_not_called()
 
     def test_put_when_events_outdated(self):
-        import backends.whatsapp as wa_mod
+        import protocols.whatsapp as wa_mod
 
         backend = _make_backend()
         webhook = "http://host.docker.internal:8088/webhook"
@@ -414,7 +414,7 @@ class TestPresenceSubscribe:
         backend._rest.presence_subscribe.assert_not_called()
 
     def test_sweep_subscribes_known_chats(self):
-        import backends.whatsapp as wa_mod
+        import protocols.whatsapp as wa_mod
 
         backend = _make_backend()
         backend.contacts = [

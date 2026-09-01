@@ -22,9 +22,9 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends import BackendManager
-from backends.telegram import TelegramBackend
 from models import PROTOCOL_SIGNAL, PROTOCOL_TELEGRAM, ChatContact
+from protocols import BackendManager
+from protocols.telegram import TelegramBackend
 from signal_tui import SignalTUI
 
 
@@ -67,8 +67,8 @@ def test_telegram_send_updates_last_ts_and_reorders_immediately():
     event.value = "ciao"
 
     with (
-        patch("backend._add_message_to_cache"),
-        patch("backend._update_message_id"),
+        patch("protocols.db._add_message_to_cache"),
+        patch("protocols.db._update_message_id"),
         patch.object(stui, "replace_emoji_aliases", side_effect=lambda x: x),
     ):
         app.on_input_submitted(event)

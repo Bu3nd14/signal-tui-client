@@ -22,14 +22,14 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends import BackendManager, SignalBackend
-from backends.base import ChatBackend
-from backends.signal import _extract_quote_thumbnail, _signal_quote_attachment_id
 from models import (
     PROTOCOL_SIGNAL,
     ChatContact,
     contact_cache_key,
 )
+from protocols import BackendManager, SignalBackend
+from protocols.base import ChatBackend
+from protocols.signal import _extract_quote_thumbnail, _signal_quote_attachment_id
 
 # ─── ChatBackend ABC ─────────────────────────────────────────────────────────
 
@@ -144,7 +144,7 @@ class TestSignalBackend:
 
     def test_to_chat_contact(self):
         """Contact legacy → ChatContact con protocol='signal'."""
-        from backend import Contact
+        from protocols.rpc import Contact
 
         backend = SignalBackend()
         cc = backend._to_chat_contact(
@@ -160,7 +160,7 @@ class TestSignalBackend:
         """mark_read_sync persiste lo stato letto su SQLite."""
         from unittest.mock import patch
 
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         db_file = tmp_path / "messages.db"
         with (
@@ -736,7 +736,7 @@ class TestSendMsgSync:
         """Senza daemon, invia via subprocess."""
         backend = SignalBackend()
         backend._use_daemon = False
-        with patch("backends.signal._send_subprocess") as mock_sub:
+        with patch("protocols.signal._send_subprocess") as mock_sub:
             backend.send_message_sync("+391234567890", "Ciao!")
         mock_sub.assert_called_once()
 
@@ -860,7 +860,7 @@ class TestIngestDedup:
         """
         from unittest.mock import patch
 
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         TEST_CONTACT = "+399999999999"
         db_file = tmp_path / "messages.db"
@@ -1213,7 +1213,7 @@ class TestSignalQuoteThumbnail:
             },
         }
 
-        with patch("backends.signal.CACHE_DIR", tmp_path):
+        with patch("protocols.signal.CACHE_DIR", tmp_path):
             events = backend.envelope_to_event(envelope)
 
         assert len(events) == 1

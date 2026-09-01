@@ -1,6 +1,6 @@
 """
-Regression tests for the WhatsApp backend (backends/whatsapp.py) and the
-optional configuration gating (backends/config.py).
+Regression tests for the WhatsApp backend (protocols/whatsapp.py) and the
+optional configuration gating (protocols/config.py).
 
 REST endpoints are mocked via ``urllib.request.urlopen`` (same style as the
 Signal RPC tests); the WebSocket stream is exercised through the internal
@@ -23,7 +23,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends.whatsapp import (
+from models import PROTOCOL_WHATSAPP, contact_cache_key
+from protocols.whatsapp import (
     WhatsAppBackend,
     WhatsAppRESTClient,
     _event_from_ack,
@@ -33,7 +34,6 @@ from backends.whatsapp import (
     _event_from_typing,
     _resolve_wa_media_chat_id,
 )
-from models import PROTOCOL_WHATSAPP, contact_cache_key
 
 
 def _msg(raw, contacts=None):
@@ -342,7 +342,7 @@ class TestWhatsAppRESTClient:
 
     def test_request_sends_api_key_header(self):
         """Quando una key è configurata, _request la invia come X-Api-Key."""
-        import backends.whatsapp as wh
+        import protocols.whatsapp as wh
 
         captured = {}
 
@@ -369,7 +369,7 @@ class TestWhatsAppRESTClient:
 
     def test_request_skips_api_key_header_when_unset(self):
         """Senza key, _request NON invia l'header X-Api-Key."""
-        import backends.whatsapp as wh
+        import protocols.whatsapp as wh
 
         captured = {}
 
@@ -1637,7 +1637,7 @@ class TestWhatsAppBackend:
         assert backend.poll_once() == []
 
     def test_ingest_message_dedup(self):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         data = {
@@ -1664,7 +1664,7 @@ class TestWhatsAppBackend:
         Il fuzzy dedup con tolleranza ±5s serve a gestire ID mismatch tra
         webhook e REST API di WAHA.  Messaggi oltre la finestra sono distinti.
         """
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
@@ -1703,7 +1703,7 @@ class TestWhatsAppBackend:
 
     def test_ingest_message_dedup_falls_back_without_id(self):
         """Senza id, il dedup ricade su (is_mine, testo, timestamp) come prima."""
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
@@ -1726,7 +1726,7 @@ class TestWhatsAppBackend:
 
     def test_two_identical_texts_confirmed_not_merged(self):
         """Outgoing rows with different real ids remain distinct within 10 min."""
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
@@ -1767,7 +1767,7 @@ class TestWhatsAppBackend:
 
     def test_three_images_rapid_send_not_merged(self):
         """Three rapid images with distinct ids and attachments produce three rows."""
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
@@ -1810,7 +1810,7 @@ class TestWhatsAppBackend:
 
     def test_echo_upgrades_only_idless_row(self):
         """An echo cannot fallback-match a confirmed row with a different id."""
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
@@ -1858,7 +1858,7 @@ class TestWhatsAppBackend:
         ripristinata in place a immagine quando l'echo/fetch porta l'URL media
         reale di WAHA (reperto live: la 3ª foto a Giovanni non compariva
         nemmeno dopo aver riaperto la chat)."""
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "15771304468671@lid"
@@ -1909,7 +1909,7 @@ class TestWhatsAppBackend:
             assert row == (url, "image")
 
     def test_named_attachment_mirror_reconciles_waha_echo(self, tmp_path, monkeypatch):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
         media_dir = tmp_path / "whatsapp-media"
@@ -1964,7 +1964,7 @@ class TestWhatsAppBackend:
 
     def test_echo_out_of_order_picks_closest_idless(self):
         """Among id-less fallback candidates, the closest timestamp is upgraded."""
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
@@ -2016,7 +2016,7 @@ class TestWhatsAppBackend:
         altrimenti "Media: <url>" ≠ caption e l'evento ack diventa una bolla
         di testo duplicata accanto alla caption reale.
         """
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
@@ -2049,7 +2049,7 @@ class TestWhatsAppBackend:
     def test_ack_echo_text_still_dedups_optimistic(self):
         """🛡️ Regressione: il dedup ottimistico (TUI-send senza id) + echo con
         id resta funzionante dopo il reorder id-su-testo per gli outgoing."""
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
@@ -2084,7 +2084,7 @@ class TestWhatsAppBackend:
     def test_ack_echo_media_reverse_order(self):
         """🛡️ Regressione: ack sintetico (text=caption, id=msg_id) ingerito
         PRIMA del messaggio immagine (stesso id) non crea due righe."""
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "wa:1@s.whatsapp.net"
@@ -2186,7 +2186,7 @@ class TestWhatsAppMediaResolver:
 
 class TestWhatsAppMediaIdentityUpdate:
     def test_does_not_overwrite_existing_attachment(self):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend_mod._add_message_to_cache(
             "1@c.us",
@@ -2219,7 +2219,7 @@ class TestWhatsAppMediaIdentityUpdate:
 
     @pytest.mark.parametrize("initial_attachment", [None, ""])
     def test_updates_missing_attachment(self, initial_attachment):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         msg_id = f"media-missing-{initial_attachment!r}"
         backend_mod._add_message_to_cache(
@@ -2379,7 +2379,7 @@ class TestWhatsAppWebhook:
         assert media.payload["text"] == "Media: https://wa.test/photo.jpg"
 
     def test_outgoing_echo_and_ack_read_keep_the_parent_message_id(self):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = self._backend()
         payload = {
@@ -2661,7 +2661,7 @@ class TestWhatsAppConfigGating:
     """⚙️ WhatsApp backend è opzionale (non rompe la modalità solo-Signal)."""
 
     def test_disabled_when_no_api_url_and_no_local(self):
-        from backends import config
+        from protocols import config
 
         with (
             patch.object(config, "get_whatsapp_api_url", return_value=""),
@@ -2670,7 +2670,7 @@ class TestWhatsAppConfigGating:
             assert config.whatsapp_enabled() is False
 
     def test_enabled_with_api_url(self):
-        from backends import config
+        from protocols import config
 
         with patch.object(
             config, "get_whatsapp_api_url", return_value="http://127.0.0.1:3000"
@@ -2679,7 +2679,7 @@ class TestWhatsAppConfigGating:
 
     def test_enabled_when_local_waha_detected(self):
         """Auto-detect: WAHA locale raggiungibile abilita il backend anche senza URL."""
-        from backends import config
+        from protocols import config
 
         with (
             patch.object(config, "get_whatsapp_api_url", return_value=""),
@@ -2688,7 +2688,7 @@ class TestWhatsAppConfigGating:
             assert config.whatsapp_enabled() is True
 
     def test_resolve_whatsapp_api_url_prefers_configured(self):
-        from backends import config
+        from protocols import config
 
         with patch.object(
             config, "get_whatsapp_api_url", return_value="http://waha:9999"
@@ -2696,7 +2696,7 @@ class TestWhatsAppConfigGating:
             assert config.resolve_whatsapp_api_url() == "http://waha:9999"
 
     def test_resolve_whatsapp_api_url_falls_back_to_local_port(self):
-        from backends import config
+        from protocols import config
 
         with (
             patch.object(config, "get_whatsapp_api_url", return_value=""),
@@ -2705,7 +2705,7 @@ class TestWhatsAppConfigGating:
             assert config.resolve_whatsapp_api_url() == "http://127.0.0.1:3005"
 
     def test_api_key_prefers_env_over_config_and_dotenv(self):
-        from backends import config
+        from protocols import config
 
         with (
             patch.dict(os.environ, {"WHATSAPP_API_KEY": "from-env"}),
@@ -2719,7 +2719,7 @@ class TestWhatsAppConfigGating:
             assert config.get_whatsapp_api_key() == "from-env"
 
     def test_api_key_falls_back_to_config(self):
-        from backends import config
+        from protocols import config
 
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -2733,7 +2733,7 @@ class TestWhatsAppConfigGating:
             assert config.get_whatsapp_api_key() == "from-cfg"
 
     def test_api_key_falls_back_to_dotenv_waha(self):
-        from backends import config
+        from protocols import config
 
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -2745,7 +2745,7 @@ class TestWhatsAppConfigGating:
             assert config.get_whatsapp_api_key() == "from-dotenv"
 
     def test_api_key_empty_when_nowhere(self):
-        from backends import config
+        from protocols import config
 
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -3113,7 +3113,7 @@ class TestSeedCacheFromDB:
     def test_multipart_attachments_persist_and_seed_after_restart_without_schema_change(
         self, tmp_path, monkeypatch
     ):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
         backend_mod._init_db()
@@ -3167,7 +3167,7 @@ class TestSeedCacheFromDB:
     def test_single_media_variants_share_a_canonical_identity(
         self, tmp_path, monkeypatch
     ):
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
         backend_mod._init_db()
@@ -3232,7 +3232,7 @@ class TestSeedCacheFromDB:
     def test_connect_sync_seeds_cache_from_db(self, tmp_path, monkeypatch):
         import time
 
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         # Isola il DB su un file temporaneo.
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
@@ -3282,7 +3282,7 @@ class TestSeedCacheFromDB:
         tra sessioni)."""
         import time
 
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
 
@@ -3341,7 +3341,7 @@ class TestSeedCacheFromDB:
         """
         import time
 
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
 
@@ -3422,7 +3422,7 @@ class TestSeedCacheFromDB:
         (> finestra 5s) NON deve creare un duplicato, e deve aggiornare l'entry
         ottimistica con l'id reale.
         """
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
 
@@ -3495,7 +3495,7 @@ class TestSeedCacheFromDB:
         veniva mai mostrato).  Ora il fallback è limitato a una finestra
         temporale (``_ECHO_MATCH_WINDOW_MS``).
         """
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "391234567890@s.whatsapp.net"
@@ -3549,7 +3549,7 @@ class TestSeedCacheFromDB:
         """
         import time
 
-        import backend as backend_mod
+        import protocols.db as backend_mod
 
         backend = _make_backend()
         cid = "391234567890@s.whatsapp.net"
@@ -3671,7 +3671,7 @@ class TestWhatsAppWebhookRegistration:
         assert payload["config"]["webhooks"][0]["events"] == ["message"]
 
     def test_configure_webhook_registers_when_missing(self):
-        import backends.whatsapp as wa_mod
+        import protocols.whatsapp as wa_mod
 
         backend = _make_backend()
         webhook = "http://host.docker.internal:8090/webhook"
@@ -3697,7 +3697,7 @@ class TestWhatsAppWebhookRegistration:
         ]
 
     def test_configure_webhook_skips_when_already_registered(self):
-        import backends.whatsapp as wa_mod
+        import protocols.whatsapp as wa_mod
 
         backend = _make_backend()
         webhook = "http://host.docker.internal:8088/webhook"
@@ -3733,7 +3733,7 @@ class TestWhatsAppWebhookRegistration:
 
     def test_configure_webhook_updates_when_events_outdated(self):
         """Se l'URL c'è ma manca message.ack, esegue comunque il PUT."""
-        import backends.whatsapp as wa_mod
+        import protocols.whatsapp as wa_mod
 
         backend = _make_backend()
         webhook = "http://host.docker.internal:8088/webhook"
@@ -3762,7 +3762,7 @@ class TestWhatsAppWebhookRegistration:
         ]
 
     def test_configure_webhook_never_raises_on_error(self):
-        import backends.whatsapp as wa_mod
+        import protocols.whatsapp as wa_mod
 
         backend = _make_backend()
         with (
@@ -3778,7 +3778,7 @@ class TestWhatsAppWebhookRegistration:
         mock_put.assert_not_called()
 
     def test_configure_webhook_noop_without_rest(self):
-        import backends.whatsapp as wa_mod
+        import protocols.whatsapp as wa_mod
 
         backend = _make_backend()
         backend._rest = None
@@ -3988,7 +3988,7 @@ def test_request_http_error_logs_local_status_and_single_line(caplog):
     )
 
     with (
-        caplog.at_level(logging.ERROR, logger="backends.whatsapp_rest"),
+        caplog.at_level(logging.ERROR, logger="protocols.whatsapp_rest"),
         patch("urllib.request.urlopen", side_effect=error),
     ):
         assert client._request("GET", "/api/messages") is None
@@ -4021,9 +4021,9 @@ def test_mark_read_uses_send_seen_and_404_still_marks_local(caplog):
         )
 
     with (
-        caplog.at_level(logging.DEBUG, logger="backends.whatsapp_rest"),
+        caplog.at_level(logging.DEBUG, logger="protocols.whatsapp_rest"),
         patch("urllib.request.urlopen", side_effect=not_found),
-        patch("backend._mark_as_read") as mark_local,
+        patch("protocols.db._mark_as_read") as mark_local,
     ):
         backend.mark_read_sync("123@c.us")
 

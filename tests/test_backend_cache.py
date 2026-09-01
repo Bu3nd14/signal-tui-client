@@ -15,21 +15,24 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # We'll test the cache functions by temporarily patching DB_FILE / CACHE_DIR
-from backend import (
+from protocols.db import (
     _add_message_to_cache,
     _load_cache,
     _mark_as_read,
-    _process_receipt,
     _prune_cache,
     _update_message_status,
 )
+from protocols.rpc import _process_receipt
 
 
 @pytest.fixture
 def tmp_db(tmp_path: Path):
     """Point backend at a temporary SQLite DB and reset it between tests."""
     db_file = tmp_path / "messages.db"
-    with patch("backend.DB_FILE", db_file), patch("backend.CACHE_DIR", tmp_path):
+    with (
+        patch("protocols.db.DB_FILE", db_file),
+        patch("protocols.db.CACHE_DIR", tmp_path),
+    ):
         yield db_file
 
 
@@ -72,7 +75,10 @@ class TestCacheAddLoad:
         """Aggiunge in una directory che non esiste → viene creata."""
         cache_dir = tmp_path / "nested" / "dir"
         db_file = cache_dir / "messages.db"
-        with patch("backend.DB_FILE", db_file), patch("backend.CACHE_DIR", cache_dir):
+        with (
+            patch("protocols.db.DB_FILE", db_file),
+            patch("protocols.db.CACHE_DIR", cache_dir),
+        ):
             _add_message_to_cache("+39", "test", True, "You", 1)
         assert db_file.exists()
 

@@ -8,15 +8,15 @@ from pathlib import Path
 from textual.containers import Vertical
 from textual.widgets import Button, Static
 
-from backends import (
-    WhatsAppBackend,
-)
-from backends.config import thumbnail_max_cols, thumbnail_max_lines
 from models import (
     PROTOCOL_SIGNAL,
     is_media_quote_placeholder,
     media_kind_from_mime,
 )
+from protocols import (
+    WhatsAppBackend,
+)
+from protocols.config import thumbnail_max_cols, thumbnail_max_lines
 from tui.images.detect import ImageSupport
 from ui_components import (
     ImageWidget,
@@ -837,8 +837,8 @@ class ChatViewMixin:
             return None
         import sqlite3
 
-        import backend
-        from backend.db import _DB_LOCK
+        import protocols.db as backend
+        from protocols.db import _DB_LOCK
 
         ts = widget.quote_timestamp
         if not ts:
@@ -914,8 +914,8 @@ class ChatViewMixin:
         try:
             import sqlite3
 
-            import backend
-            from backend.db import _DB_LOCK
+            import protocols.db as backend
+            from protocols.db import _DB_LOCK
 
             with _DB_LOCK:
                 connection = sqlite3.connect(backend.DB_FILE)
@@ -971,8 +971,8 @@ class ChatViewMixin:
         try:
             import sqlite3
 
-            import backend
-            from backend.db import _DB_LOCK
+            import protocols.db as backend
+            from protocols.db import _DB_LOCK
 
             with _DB_LOCK:
                 connection = sqlite3.connect(backend.DB_FILE)

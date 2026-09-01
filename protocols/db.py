@@ -12,8 +12,6 @@ import threading
 import time
 from pathlib import Path
 
-import backend as _backend
-
 logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
@@ -45,7 +43,7 @@ _DB_LOCK = threading.RLock()
 
 def _ensure_cache_dir():
     """Create the cache directory if it doesn't exist."""
-    _backend.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _current_schema_version(conn: sqlite3.Connection) -> int:
@@ -302,7 +300,7 @@ def _init_db():
     """
     _ensure_cache_dir()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
@@ -387,7 +385,7 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
     _init_db()
     _dedup_messages_by_id()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             conn.row_factory = sqlite3.Row
             if protocol is None:
@@ -471,7 +469,7 @@ def _add_message_to_cache(
     if quote_attachment_path is not None:
         quote_attachment_path = str(quote_attachment_path)
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             existing = conn.execute(
                 "SELECT id FROM messages "
@@ -557,7 +555,7 @@ def _update_message_id(
     """
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             cursor = conn.execute(
                 "UPDATE messages SET msg_id = ?, timestamp = ? "
@@ -595,7 +593,7 @@ def _update_message_attachment_id(
         return False
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             row = conn.execute(
                 "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
@@ -635,7 +633,7 @@ def _update_message_media_identity(
         return False
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             row = conn.execute(
                 "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
@@ -670,7 +668,7 @@ def _fill_message_quote_fields(
         return False
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             row = conn.execute(
                 "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
@@ -719,7 +717,7 @@ def _apply_reaction_delta(
     """Apply an author-scoped reaction add, change, or removal."""
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             cursor = conn.execute(
                 "DELETE FROM reactions WHERE protocol = ? AND contact_number = ? "
@@ -765,7 +763,7 @@ def _replace_reactions_snapshot(
     """Replace aggregate reaction rows with a complete protocol snapshot."""
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             cursor = conn.execute(
                 "DELETE FROM reactions WHERE protocol = ? AND contact_number = ? "
@@ -805,7 +803,7 @@ def _reactions_for_contact(protocol: str, contact: str) -> list[dict]:
     """Return all persisted reactions for a protocol contact."""
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
@@ -827,7 +825,7 @@ def _resolve_reaction_target_row(
     """Resolve a reaction target to its cached message identity."""
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             conn.row_factory = sqlite3.Row
             if protocol == "signal":
@@ -862,7 +860,7 @@ def _prune_orphan_reactions() -> int:
     """Delete reactions whose target message is no longer cached."""
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             cursor = conn.execute(
                 """
@@ -894,7 +892,7 @@ def _prune_cache(limit: int | None = None, *, now_ms: int | None = None) -> int:
     the dedup cycle: a later fetch cannot reinsert pruned messages as unread.
     """
     if limit is None:
-        from backends.config import get_message_retention_per_contact
+        from protocols.config import get_message_retention_per_contact
 
         limit = get_message_retention_per_contact()
     if not limit or limit <= 0:
@@ -912,7 +910,7 @@ def _prune_cache(limit: int | None = None, *, now_ms: int | None = None) -> int:
         now_ms = int(time.time() * 1000)
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             cursor = conn.execute(
                 """
@@ -954,7 +952,7 @@ def _mark_as_read(contact_number: str, protocol: str = "signal"):
     """Mark all messages for a contact as read."""
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             conn.execute(
                 "UPDATE messages SET read = 1 WHERE contact_number = ? AND protocol = ?",
@@ -974,7 +972,7 @@ def _dedup_messages() -> int:
     """
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             before = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
             conn.execute("""
@@ -1006,7 +1004,7 @@ def _update_message_status(
     """
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             where = "protocol = ? AND contact_number = ? AND timestamp = ?"
             params: list = [protocol, contact_number, timestamp]
@@ -1048,7 +1046,7 @@ def _update_message_status_by_id(
     """
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             where = "protocol = ? AND msg_id = ?"
             params: list = [protocol, msg_id]
@@ -1088,7 +1086,7 @@ def _update_message_status_by_text(
     """
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             where = "protocol = ? AND contact_number = ? AND text = ? AND is_mine = 1"
             params: list = [protocol, contact_number, text]
@@ -1135,7 +1133,7 @@ def _update_message_text(
     """
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             if msg_id is not None:
                 where = "protocol = ? AND contact_number = ? AND msg_id = ?"
@@ -1180,7 +1178,7 @@ def _dedup_messages_by_id() -> int:
     """
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             before = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
             # Defensive: log partitions whose timestamps diverge beyond the echo
@@ -1269,7 +1267,7 @@ def _count_unread() -> dict[str, int]:
     """Count unread messages per contact."""
     _init_db()
     with _DB_LOCK:
-        conn = sqlite3.connect(_backend.DB_FILE)
+        conn = sqlite3.connect(DB_FILE)
         try:
             rows = conn.execute(
                 "SELECT contact_number, COUNT(*) as cnt FROM messages "

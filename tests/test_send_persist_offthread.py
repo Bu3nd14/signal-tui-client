@@ -32,8 +32,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod
-from backends import BackendManager, SignalBackend, WhatsAppBackend
+import protocols.db as backend_mod
 from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
@@ -41,6 +40,7 @@ from models import (
     ChatContact,
     ChatEvent,
 )
+from protocols import BackendManager, SignalBackend, WhatsAppBackend
 from signal_tui import SignalTUI
 
 
@@ -119,7 +119,7 @@ class TestSendPersistOffthread:
         app.selected_contact = contact
         _prepare_send(app)
 
-        with patch("backends.signal._add_message_to_cache") as spy_persist:
+        with patch("protocols.signal._add_message_to_cache") as spy_persist:
             _send_text(app, "ciao")
 
         # The (slow) SQLite write was NOT performed on the UI thread.
@@ -988,7 +988,7 @@ class TestMediaReplySend:
 
     def test_telegram_media_reply_guard_unchanged(self, tmp_db):
         """Guardia Telegram: reply media senza id server valido → bloccata."""
-        from backends import TelegramBackend
+        from protocols import TelegramBackend
 
         app = _signal_app()
         telegram = TelegramBackend()

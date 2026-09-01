@@ -3,16 +3,13 @@
 import logging
 import time
 
-from backend import (
-    WEBHOOK_PORT,
-    ensure_webhook_server,
-)
-from backends import (
-    ChatBackend,
-)
 from models import (
     contact_cache_key,
 )
+from protocols import (
+    ChatBackend,
+)
+from protocols.webhook import WEBHOOK_PORT, ensure_webhook_server
 
 logger = logging.getLogger("signal_tui")
 

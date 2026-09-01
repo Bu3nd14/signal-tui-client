@@ -29,9 +29,9 @@ from telethon.tl.types import (
     UpdateMessageReactions,
 )
 
-import backend as backend_mod
-from backends.telegram import TelegramBackend
+import protocols.db as backend_mod
 from models import PROTOCOL_TELEGRAM, ChatContact
+from protocols.telegram import TelegramBackend
 
 
 def _backend() -> TelegramBackend:
@@ -62,7 +62,7 @@ def test_get_available_reactions_filters_and_caches(monkeypatch):
         return SimpleNamespace(result=lambda timeout: asyncio.run(coroutine))
 
     monkeypatch.setattr(
-        "backends.telegram.asyncio.run_coroutine_threadsafe", run_coroutine
+        "protocols.telegram.asyncio.run_coroutine_threadsafe", run_coroutine
     )
 
     assert backend.get_available_reactions() == ["👍"]
@@ -80,7 +80,7 @@ def test_get_available_reactions_returns_empty_on_error(monkeypatch):
         return SimpleNamespace(result=lambda timeout: (_ for _ in ()).throw(OSError()))
 
     monkeypatch.setattr(
-        "backends.telegram.asyncio.run_coroutine_threadsafe", run_coroutine
+        "protocols.telegram.asyncio.run_coroutine_threadsafe", run_coroutine
     )
 
     assert backend.get_available_reactions() == []
@@ -452,7 +452,7 @@ def test_on_raw_dispatches_reaction_update(monkeypatch):
     handle = AsyncMock()
     monkeypatch.setattr(backend, "_handle_reactions_update", handle)
     monkeypatch.setattr("telethon.TelegramClient", FakeClient)
-    monkeypatch.setattr("backends.telegram.threading.Thread", FakeThread)
+    monkeypatch.setattr("protocols.telegram.threading.Thread", FakeThread)
 
     backend._connect_sync()
     update = _update()
@@ -509,7 +509,7 @@ def test_reaction_catchup_during_connect_is_enqueued_and_persisted(monkeypatch, 
     )
     backend = _backend()
     monkeypatch.setattr("telethon.TelegramClient", FakeClient)
-    monkeypatch.setattr("backends.telegram.threading.Thread", FakeThread)
+    monkeypatch.setattr("protocols.telegram.threading.Thread", FakeThread)
 
     backend._connect_sync()
     try:

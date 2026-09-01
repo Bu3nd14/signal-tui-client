@@ -13,14 +13,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
-import backend
+import protocols.rpc as signal_rpc
 from web.api import create_api_router
 
 
 def _client(monkeypatch, tmp_path: Path, files: dict[str, Path]) -> TestClient:
     root = tmp_path / "media"
     root.mkdir(exist_ok=True)
-    monkeypatch.setattr(backend, "SIGNAL_CLI_ATTACHMENTS_DIR", root)
+    monkeypatch.setattr(signal_rpc, "SIGNAL_CLI_ATTACHMENTS_DIR", root)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     manager = SimpleNamespace(
         get_attachment_path=lambda _proto, attachment_id: files.get(attachment_id),

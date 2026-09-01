@@ -79,10 +79,10 @@ def _global_exception_handler(exc_type, exc_value, exc_traceback):
 
 sys.excepthook = _global_exception_handler
 
-from backends.config import image_protocol, web_enabled, web_host, web_port, web_token
 from emoji_picker import (
     replace_emoji_aliases,  # noqa: F401 (re-exported for test patching)
 )
+from protocols.config import image_protocol, web_enabled, web_host, web_port, web_token
 from tui.app import SignalTUI
 from tui.images.cellsize import get_cell_size
 from tui.images.detect import ImageSupport, detect_image_support
@@ -212,7 +212,7 @@ if __name__ == "__main__":
         """
         app._polling_active = False
         try:
-            from backend import _prune_cache
+            from protocols.db import _prune_cache
 
             _prune_cache()
         except Exception:

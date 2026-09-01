@@ -16,7 +16,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate every test from the user's persistent cache and database."""
-    import backend
+    import protocols.db as backend
 
     cache_dir = tmp_path / "backend-cache"
     cache_dir.mkdir()
@@ -233,7 +233,7 @@ def _make_test_app():
         self._render_contact_list(list(self.contacts))
 
     # Patch the symbols where they are IMPORTED/USED (``tui.app``), not where
-    # they are defined (``backends`` / ``signal_tui`` shim).
+    # they are defined (``protocols`` / ``signal_tui`` shim).
     with (
         patch("tui.app.BackendManager"),
         patch("tui.app.SignalBackend"),

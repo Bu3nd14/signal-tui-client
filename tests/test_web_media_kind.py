@@ -13,7 +13,7 @@ def _run_node(source: str) -> None:
 
 
 def test_messages_exposes_media_kind_and_keeps_type_fallback():
-    from backend import _add_message_to_cache
+    from protocols.db import _add_message_to_cache
 
     _add_message_to_cache(
         "alice",

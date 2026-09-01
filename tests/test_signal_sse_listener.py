@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock, patch
 
-from backends import SignalBackend
+from protocols import SignalBackend
 
 
 def _running_backend() -> SignalBackend:
@@ -22,9 +22,9 @@ def test_empty_stream_logs_connection_lost_no_unbound_error(caplog):
     backend._rpc.listen_events = MagicMock(return_value=iter(()))
 
     with (
-        caplog.at_level(logging.INFO, logger="backends.signal"),
+        caplog.at_level(logging.INFO, logger="protocols.signal"),
         patch(
-            "backends.signal.time.sleep",
+            "protocols.signal.time.sleep",
             side_effect=lambda _seconds: _stop_after_backoff(backend),
         ),
     ):
@@ -43,9 +43,9 @@ def test_envelopes_processed_and_logged(caplog):
     backend.envelope_to_event = MagicMock(return_value=[event])
 
     with (
-        caplog.at_level(logging.INFO, logger="backends.signal"),
+        caplog.at_level(logging.INFO, logger="protocols.signal"),
         patch(
-            "backends.signal.time.sleep",
+            "protocols.signal.time.sleep",
             side_effect=lambda _seconds: _stop_after_backoff(backend),
         ),
     ):
@@ -62,9 +62,9 @@ def test_internal_error_logged_as_error(caplog):
     backend.envelope_to_event = MagicMock(side_effect=RuntimeError("broken parser"))
 
     with (
-        caplog.at_level(logging.ERROR, logger="backends.signal"),
+        caplog.at_level(logging.ERROR, logger="protocols.signal"),
         patch(
-            "backends.signal.time.sleep",
+            "protocols.signal.time.sleep",
             side_effect=lambda _seconds: _stop_after_backoff(backend),
         ),
     ):

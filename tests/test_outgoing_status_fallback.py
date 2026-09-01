@@ -21,12 +21,12 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend import (
+from models import PROTOCOL_WHATSAPP
+from protocols.db import (
     _add_message_to_cache,
     _update_message_status,
     _update_message_status_by_text,
 )
-from models import PROTOCOL_WHATSAPP
 from tui.send import SendMixin
 
 
@@ -34,7 +34,10 @@ from tui.send import SendMixin
 def tmp_db(tmp_path: Path):
     """Point backend at a temporary SQLite DB and reset it between tests."""
     db_file = tmp_path / "messages.db"
-    with patch("backend.DB_FILE", db_file), patch("backend.CACHE_DIR", tmp_path):
+    with (
+        patch("protocols.db.DB_FILE", db_file),
+        patch("protocols.db.CACHE_DIR", tmp_path),
+    ):
         yield db_file
 
 

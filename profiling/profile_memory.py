@@ -151,10 +151,10 @@ with open(output_path, "w") as f:
 
     # Filter for project-specific files
     f.write("-" * 80 + "\\n")
-    f.write("  PROJECT-SPECIFIC ALLOCATIONS (signal_tui, backend, ui_components)\\n")
+    f.write("  PROJECT-SPECIFIC ALLOCATIONS (signal_tui, protocols, ui_components)\\n")
     f.write("-" * 80 + "\\n\\n")
 
-    project_files = ("signal_tui.py", "backend.py", "ui_components.py", "emoji_picker.py")
+    project_files = ("signal_tui.py", "protocols/", "ui_components.py", "emoji_picker.py")
     project_stats = [s for s in top_stats if any(pf in s.traceback[0].filename for pf in project_files)]
 
     if project_stats:

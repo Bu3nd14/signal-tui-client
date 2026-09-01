@@ -6,11 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import backend as backend_mod
-import backends.whatsapp as whatsapp_mod
-from backends.whatsapp import WhatsAppBackend
-from backends.whatsapp_events import _event_from_raw, _event_from_reaction
+import protocols.db as backend_mod
+import protocols.whatsapp as whatsapp_mod
 from models import PROTOCOL_WHATSAPP
+from protocols.whatsapp import WhatsAppBackend
+from protocols.whatsapp_events import _event_from_raw, _event_from_reaction
 
 CONTACT_ID = "391234567890@c.us"
 PARTICIPANT = "39000111222@lid"

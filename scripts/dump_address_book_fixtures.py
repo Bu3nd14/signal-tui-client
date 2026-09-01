@@ -252,7 +252,7 @@ def _tg_user_to_dict(user) -> dict:
 
 def _fetch_signal_contacts() -> list[dict]:
     """Read ``listContacts`` from the Signal backend (daemon or subprocess)."""
-    from backends.signal import SignalBackend
+    from protocols.signal import SignalBackend
 
     backend = SignalBackend()
     backend._connect_sync()
@@ -261,7 +261,7 @@ def _fetch_signal_contacts() -> list[dict]:
 
 def _fetch_whatsapp() -> tuple[list, list]:
     """Read ``/api/contacts/all`` and ``/api/{session}/chats`` from WAHA."""
-    from backends.whatsapp import WhatsAppBackend
+    from protocols.whatsapp import WhatsAppBackend
 
     backend = WhatsAppBackend()
     if backend._rest is None:
@@ -280,7 +280,7 @@ def _fetch_telegram_users() -> list[dict]:
 
     from telethon.tl.functions.contacts import GetContactsRequest
 
-    from backends.telegram import TelegramBackend
+    from protocols.telegram import TelegramBackend
 
     backend = TelegramBackend()
 

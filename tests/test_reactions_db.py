@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-import backend
+import protocols.db as backend
 
 
 def _add_message(protocol: str, contact: str, timestamp: int, msg_id: str | None):

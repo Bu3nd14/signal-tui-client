@@ -652,7 +652,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         """Run ``signal-cli link`` in a thread, extract the sgnl:// URL."""
         import asyncio as _asyncio
 
-        from backend import find_signal_cli
+        from protocols.rpc import find_signal_cli
 
         def _run() -> str:
             args = [

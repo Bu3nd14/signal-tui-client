@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from backends.base import ChatBackend
 from models import PROTOCOL_SIGNAL, ChatContact, ChatEvent
+from protocols.base import ChatBackend
 
 
 @pytest.mark.parametrize(

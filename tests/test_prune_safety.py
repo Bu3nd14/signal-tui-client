@@ -8,9 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import backend
-from backend import db
-from backends import config
+import protocols.db as backend
+from protocols import config, db
 from tui.app import SignalTUI
 
 
@@ -278,7 +277,7 @@ class TestCachePruneSafety:
 class TestAppExitPrune:
     @pytest.mark.integration
     async def test_ctrl_q_dispatches_on_exit_app_and_prunes(self, app_for_test):
-        with patch("backend._prune_cache") as prune:
+        with patch("protocols.db._prune_cache") as prune:
             async with app_for_test.run_test() as pilot:
                 await pilot.press("ctrl+q")
                 await pilot.pause()
@@ -292,10 +291,10 @@ class TestAppExitPrune:
         app._web_enabled = False
         app.telegram_backend = None
 
-        with patch("backend._prune_cache") as prune:
+        with patch("protocols.db._prune_cache") as prune:
             SignalTUI.on_exit_app(app)
         prune.assert_called_once_with()
         assert app._polling_active is False
 
-        with patch("backend._prune_cache", side_effect=RuntimeError("boom")):
+        with patch("protocols.db._prune_cache", side_effect=RuntimeError("boom")):
             SignalTUI.on_exit_app(app)  # best-effort: must not propagate

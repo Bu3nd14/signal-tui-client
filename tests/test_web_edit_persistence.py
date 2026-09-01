@@ -20,8 +20,8 @@ class Manager:
 
 
 def test_web_edit_persists_when_message_is_not_in_backend_cache(monkeypatch, tmp_path):
-    import backend
-    from backend.db import _init_db
+    import protocols.db as backend
+    from protocols.db import _init_db
     from web.api import create_api_router
     from web.auth import install_auth
 

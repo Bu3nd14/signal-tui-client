@@ -69,8 +69,8 @@ def make_app(manager):
 
 @pytest.fixture
 def web_client(tmp_path):
-    import backend
-    from backend.db import _init_db
+    import protocols.db as backend
+    from protocols.db import _init_db
 
     db_file = tmp_path / "messages.db"
     with (
@@ -611,7 +611,7 @@ assert.equal(result.optimistic[0].confirmed_message_id, "echo-1");
 
 
 def test_optimistic_signal_image_reply_reconciles_forwarded_quote_echo():
-    from backends.signal import _signal_quote_text
+    from protocols.signal import _signal_quote_text
 
     echo_quote = _signal_quote_text({"text": "Image: photo.jpg"})
     _run_reconciliation_node(f"""
@@ -627,7 +627,7 @@ assert.equal(result.optimistic[0].confirmed_message_id, "2001");
 
 
 def test_optimistic_telegram_image_reply_reconciles_media_echo():
-    from backends.telegram import _tg_quote_text_from_cached
+    from protocols.telegram import _tg_quote_text_from_cached
 
     echo_quote = _tg_quote_text_from_cached(
         {"id": "10", "text": "", "msg_type": "image", "attachment_info": "Photo"}
@@ -662,7 +662,7 @@ assert.equal(require("./web/static/reconcile.js").messageDisplayText(legacyEcho)
 
 
 def test_backend_manager_send_message_sync_routes_to_backend():
-    from backends.manager import BackendManager
+    from protocols.manager import BackendManager
 
     backend = MagicMock(protocol="signal")
     backend.send_message_sync.return_value = "message-id"
@@ -693,7 +693,7 @@ def test_backend_manager_send_message_sync_routes_to_backend():
 
 
 def test_backend_manager_send_attachment_sync_routes_to_backend(tmp_path):
-    from backends.manager import BackendManager
+    from protocols.manager import BackendManager
 
     image = tmp_path / "image.png"
     backend = MagicMock(protocol="signal")
@@ -780,7 +780,7 @@ def test_send_multipart_pdf_routes_as_document(web_client):
 def test_send_signal_media_reply_builds_quote_attachment_descriptor(
     web_client, multipart
 ):
-    from backend.db import _add_message_to_cache
+    from protocols.db import _add_message_to_cache
 
     client, manager, db_file = web_client
     manager.contacts = [ChatContact("alice", "Alice", "signal")]
@@ -849,8 +849,8 @@ def test_send_signal_media_reply_rejects_unknown_attachment(web_client):
 
 
 def test_send_multipart_whatsapp_lid_uses_resolved_chat_id(tmp_path):
-    from backends.manager import BackendManager
-    from backends.whatsapp import WhatsAppBackend
+    from protocols.manager import BackendManager
+    from protocols.whatsapp import WhatsAppBackend
 
     backend = WhatsAppBackend(api_url="http://api.test", media_dir=str(tmp_path))
     backend.contacts = [ChatContact("139153@lid", "Bob", "whatsapp")]
@@ -878,8 +878,8 @@ def test_send_multipart_whatsapp_lid_uses_resolved_chat_id(tmp_path):
 
 
 def test_send_multipart_whatsapp_unresolved_lid_returns_502(tmp_path):
-    from backends.manager import BackendManager
-    from backends.whatsapp import WhatsAppBackend
+    from protocols.manager import BackendManager
+    from protocols.whatsapp import WhatsAppBackend
 
     backend = WhatsAppBackend(api_url="http://api.test", media_dir=str(tmp_path))
     backend.contacts = [ChatContact("139153@lid", "Bob", "whatsapp")]
@@ -988,7 +988,7 @@ def test_send_multipart_maps_backend_errors(web_client, exception, status):
 
 
 def test_upload_janitor_removes_only_files_older_than_one_hour(tmp_path):
-    import backend
+    import protocols.db as backend
     from web.uploads import prepare_upload_directory
 
     upload_dir = tmp_path / "web-uploads"
@@ -1074,7 +1074,7 @@ def test_media_whatsapp_accepts_full_waha_url_and_masks_download_failure(tmp_pat
 
 
 def test_media_telegram_accepts_absolute_path_only_inside_media_root(tmp_path):
-    from backends import telegram
+    from protocols import telegram
 
     root = tmp_path / "telegram-media"
     root.mkdir()
@@ -1099,7 +1099,7 @@ def test_media_telegram_accepts_absolute_path_only_inside_media_root(tmp_path):
 
 
 def test_media_telegram_tgref_download_success_and_failure(tmp_path):
-    from backends import telegram
+    from protocols import telegram
 
     root = tmp_path / "telegram-media"
     root.mkdir()
@@ -1127,7 +1127,7 @@ def test_media_telegram_tgref_download_success_and_failure(tmp_path):
 
 
 def test_media_rejects_nested_traversal_and_symlink_escape(tmp_path):
-    import backend
+    import protocols.rpc as signal_rpc
 
     root = tmp_path / "attachments"
     root.mkdir()
@@ -1146,7 +1146,7 @@ def test_media_rejects_nested_traversal_and_symlink_escape(tmp_path):
         )
     )
     with (
-        patch.object(backend, "SIGNAL_CLI_ATTACHMENTS_DIR", root),
+        patch.object(signal_rpc, "SIGNAL_CLI_ATTACHMENTS_DIR", root),
         TestClient(make_app(manager)) as client,
     ):
         traversal_response = client.get(_media_url("signal", traversal), headers=AUTH)
@@ -1159,7 +1159,7 @@ def test_media_rejects_nested_traversal_and_symlink_escape(tmp_path):
 
 
 def test_media_signal_serves_file_inside_configured_root_and_rejects_outside(tmp_path):
-    import backend
+    import protocols.rpc as signal_rpc
 
     root = tmp_path / "attachments"
     root.mkdir()
@@ -1174,7 +1174,7 @@ def test_media_signal_serves_file_inside_configured_root_and_rejects_outside(tmp
         }
     )
     with (
-        patch.object(backend, "SIGNAL_CLI_ATTACHMENTS_DIR", root),
+        patch.object(signal_rpc, "SIGNAL_CLI_ATTACHMENTS_DIR", root),
         TestClient(make_app(manager)) as client,
     ):
         success = client.get(_media_url("signal", "photo.jpg"), headers=AUTH)

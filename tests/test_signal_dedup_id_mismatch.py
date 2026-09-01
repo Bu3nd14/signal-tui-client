@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-import backends.signal as signal_mod
-from backends import SignalBackend
+import protocols.signal as signal_mod
+from protocols import SignalBackend
 
 CONTACT = "+391234567890"
 T0 = 1_700_000_000_000
@@ -44,7 +44,7 @@ def _outgoing(
 
 
 def _db_rows() -> list[tuple[str | None, str | None]]:
-    import backend as backend_mod
+    import protocols.db as backend_mod
 
     with sqlite3.connect(backend_mod.DB_FILE) as conn:
         return conn.execute(

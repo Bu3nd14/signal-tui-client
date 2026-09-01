@@ -28,7 +28,6 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label, ListItem, ListView, Static
 
-from backends.config import get_picker_max_results, get_picker_preferred_backend
 from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_TELEGRAM,
@@ -36,6 +35,7 @@ from models import (
     ChatContact,
     protocol_emoji,
 )
+from protocols.config import get_picker_max_results, get_picker_preferred_backend
 
 logger = logging.getLogger(__name__)
 

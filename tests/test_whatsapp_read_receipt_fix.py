@@ -8,8 +8,8 @@ Covers the plan items for "sent WhatsApp messages never reach read in the UI":
   S3 — ``process_receipt`` persists by ``msg_id`` with a rank guard.
   S2 — UI cache merges upgrade the status instead of a plain ``continue``.
 
-All tests use an isolated temporary SQLite DB (``backend.DB_FILE`` /
-``backend.CACHE_DIR`` patched); the real DB is never touched.
+All tests use an isolated temporary SQLite DB (``protocols.db.DB_FILE`` /
+``protocols.db.CACHE_DIR`` patched); the real DB is never touched.
 """
 
 from __future__ import annotations
@@ -24,9 +24,9 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod
-from backends.whatsapp import WhatsAppBackend
+import protocols.db as backend_mod
 from models import PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
+from protocols.whatsapp import WhatsAppBackend
 
 
 @pytest.fixture

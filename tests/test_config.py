@@ -1,5 +1,5 @@
 """
-Regression tests for backends/config.py.
+Regression tests for protocols/config.py.
 
 Covers the env-var / config.json / .env resolution order, the invalid-input
 fallbacks (default ports / empty dicts), and the socket reachability check.
@@ -14,7 +14,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backends import config
+from protocols import config
 
 
 class TestLoadDotenv:

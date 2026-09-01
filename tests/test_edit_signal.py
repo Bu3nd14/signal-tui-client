@@ -13,7 +13,7 @@ Covers the Signal-side edit surface described in DESIGN_EDIT_MESSAGES.md
   unknown-timestamp / is_mine-mismatch guards).
 
 The two ``apply_edit`` tests that touch SQLite use an isolated temporary DB
-(``backend.DB_FILE`` / ``backend.CACHE_DIR`` are patched), mirroring the
+(``protocols.db.DB_FILE`` / ``protocols.db.CACHE_DIR`` are patched), mirroring the
 ``tests/test_db_edit.py`` pattern; the real DB is never touched.
 """
 
@@ -29,10 +29,11 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod
-from backend import SignalRPCClient, _send_subprocess
-from backends import SignalBackend
+import protocols.db as backend_mod
+import protocols.rpc as rpc_mod
 from models import PROTOCOL_SIGNAL, ChatContact
+from protocols import SignalBackend
+from protocols.rpc import SignalRPCClient, _send_subprocess
 
 # ─── Helpers / fixtures ───────────────────────────────────────────────────────
 
@@ -105,7 +106,7 @@ class TestSendSubprocessEdit:
 
     def test_argv_contains_edit_timestamp(self):
         """``edit_timestamp=123`` → ``--edit-timestamp 123``."""
-        with patch.object(backend_mod, "_run_subprocess") as mock_run:
+        with patch.object(rpc_mod, "_run_subprocess") as mock_run:
             mock_run.return_value = ""
             _send_subprocess("nuovo", "+391234567890", edit_timestamp=123)
 
@@ -118,7 +119,7 @@ class TestSendSubprocessEdit:
 
     def test_argv_omits_edit_timestamp_when_none(self):
         """``edit_timestamp=None`` → flag assente."""
-        with patch.object(backend_mod, "_run_subprocess") as mock_run:
+        with patch.object(rpc_mod, "_run_subprocess") as mock_run:
             mock_run.return_value = ""
             _send_subprocess("nuovo", "+391234567890", edit_timestamp=None)
 
@@ -127,7 +128,7 @@ class TestSendSubprocessEdit:
 
     def test_argv_omits_edit_timestamp_when_not_passed(self):
         """Senza argomento → flag assente (send normale invariato)."""
-        with patch.object(backend_mod, "_run_subprocess") as mock_run:
+        with patch.object(rpc_mod, "_run_subprocess") as mock_run:
             mock_run.return_value = ""
             _send_subprocess("nuovo", "+391234567890")
 
@@ -165,7 +166,7 @@ class TestEditMessageSync:
         """Senza daemon → invia via ``_send_subprocess``."""
         backend = SignalBackend()
         backend._use_daemon = False
-        with patch("backends.signal._send_subprocess") as mock_sub:
+        with patch("protocols.signal._send_subprocess") as mock_sub:
             result = backend.edit_message_sync("+391234567890", "1000", "nuovo")
 
         assert result is True

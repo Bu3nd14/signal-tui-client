@@ -11,7 +11,7 @@ from unittest.mock import patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend import get_attachment_path
+from protocols.rpc import get_attachment_path
 
 
 class TestGetAttachmentPath:
@@ -24,7 +24,7 @@ class TestGetAttachmentPath:
         att_file = att_dir / "att-123"
         att_file.write_text("fake image data")
 
-        with patch("backend.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
+        with patch("protocols.rpc.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
             result = get_attachment_path("att-123")
         assert result == att_file
 
@@ -33,7 +33,7 @@ class TestGetAttachmentPath:
         att_dir = tmp_path / "attachments"
         att_dir.mkdir(parents=True)
 
-        with patch("backend.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
+        with patch("protocols.rpc.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
             result = get_attachment_path("att-999")
         assert result is None
 
@@ -42,7 +42,7 @@ class TestGetAttachmentPath:
         att_dir = tmp_path / "attachments"
         att_dir.mkdir(parents=True)
 
-        with patch("backend.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
+        with patch("protocols.rpc.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
             result = get_attachment_path("")
         assert result is None
 
@@ -51,7 +51,7 @@ class TestGetAttachmentPath:
         att_dir = tmp_path / "attachments"
         att_dir.mkdir(parents=True)
 
-        with patch("backend.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
+        with patch("protocols.rpc.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
             result = get_attachment_path(None)  # type: ignore
         assert result is None
 
@@ -61,6 +61,6 @@ class TestGetAttachmentPath:
         att_dir.mkdir(parents=True)
         (att_dir / "att-dir").mkdir()
 
-        with patch("backend.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
+        with patch("protocols.rpc.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
             result = get_attachment_path("att-dir")
         assert result is None

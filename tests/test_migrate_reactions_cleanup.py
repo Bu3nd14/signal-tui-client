@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
-import backend
 import migrate_reactions_cleanup as migration
+import protocols.db as backend
 
 
 def _insert_message(

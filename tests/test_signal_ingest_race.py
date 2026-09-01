@@ -7,9 +7,9 @@ from unittest.mock import patch
 
 import pytest
 
-import backend as backend_mod
-from backend import _add_message_to_cache
-from backends import SignalBackend
+import protocols.db as backend_mod
+from protocols import SignalBackend
+from protocols.db import _add_message_to_cache
 
 CONTACT = "+391234567890"
 TIMESTAMP = 1_787_000_000_000
@@ -91,7 +91,7 @@ def test_connect_merge_preserves_inflight():
 
     with (
         patch.object(backend, "_load_protocol_cache", return_value={}),
-        patch("backends.signal._is_daemon_running", return_value=True),
+        patch("protocols.signal._is_daemon_running", return_value=True),
         patch.object(backend, "_load_contacts_rpc"),
         patch.object(backend, "_start_sse_listener"),
         patch.object(backend._rpc, "_call", return_value={"result": {}}),
@@ -103,7 +103,7 @@ def test_connect_merge_preserves_inflight():
 
 def test_signal_quote_timestamp_extraction():
     """Il timestamp del messaggio quotato è esposto da id/targetSentTimestamp."""
-    from backends.signal import _signal_quote_timestamp
+    from protocols.signal import _signal_quote_timestamp
 
     assert _signal_quote_timestamp({"id": "1787948503599"}) == 1787948503599
     assert (

@@ -8,12 +8,12 @@ from unittest.mock import MagicMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import backend
-from backend.db import _add_message_to_cache, _init_db, _reactions_for_contact
-from backend.rpc import SignalRPCClient
-from backends.signal import SignalBackend
-from backends.telegram import TelegramBackend
-from backends.whatsapp import WhatsAppBackend
+import protocols.db as backend
+from protocols.db import _add_message_to_cache, _init_db, _reactions_for_contact
+from protocols.rpc import SignalRPCClient
+from protocols.signal import SignalBackend
+from protocols.telegram import TelegramBackend
+from protocols.whatsapp import WhatsAppBackend
 from tests.test_edit_contract import _MinimalBackend
 from web.api import create_api_router
 
@@ -78,7 +78,7 @@ def test_telegram_send_reaction_runs_on_backend_loop():
         future.set_result(asyncio.run(coroutine))
         return future
 
-    with patch("backends.telegram.asyncio.run_coroutine_threadsafe", side_effect=run):
+    with patch("protocols.telegram.asyncio.run_coroutine_threadsafe", side_effect=run):
         assert backend_instance.send_reaction_sync("42", "77", "🙏") is True
 
     assert requests[0].msg_id == 77

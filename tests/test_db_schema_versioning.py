@@ -31,8 +31,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import backend as backend_mod  # package: DB_FILE / CACHE_DIR are patched here
-import backend.db as db_mod  # the db module under test
+import protocols.db as backend_mod  # package: DB_FILE / CACHE_DIR are patched here
+import protocols.db as db_mod  # the db module under test
 
 
 def _make_legacy_db(db_file: Path) -> None:

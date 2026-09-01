@@ -57,7 +57,7 @@ class StoredUpload:
 
 
 def upload_directory() -> Path:
-    import backend
+    import protocols.db as backend
 
     return Path(backend.CACHE_DIR) / "web-uploads"
 
