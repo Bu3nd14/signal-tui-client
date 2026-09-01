@@ -13,7 +13,7 @@
 
 PYTHON ?= python
 
-.PHONY: test lint coverage format-check check live-test live-test-manual
+.PHONY: test lint typecheck coverage format-check check live-test live-test-manual
 
 # Esegue l'intera suite (tests/ + Telegram/) — radici definite da testpaths.
 test:
@@ -22,6 +22,10 @@ test:
 # Lint con ruff (regole da [tool.ruff] in pyproject.toml; profiling escluso).
 lint:
 	ruff check .
+
+# Type checking progressivo (config da [tool.basedpyright] in pyproject.toml).
+typecheck:
+	$(PYTHON) -m basedpyright
 
 # Test + coverage con gate (fail_under in [tool.coverage.report]).
 # Produce coverage.xml per Codecov (Fase 5).

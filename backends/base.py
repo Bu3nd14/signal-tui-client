@@ -46,6 +46,7 @@ class ChatBackend(ABC):
 
     #: Protocol identifier (one of ``models.PROTOCOL_*``).
     protocol: str = ""
+    contacts: list[ChatContact]
 
     # ─── Lifecycle ────────────────────────────────────────────────────
 
@@ -206,7 +207,7 @@ class ChatBackend(ABC):
         *,
         is_mine: bool | None = None,
         edit_timestamp: int | None = None,
-    ) -> dict | None:
+    ) -> dict[str, object] | None:
         """Applica un edit (ricevuto o echo) a cache in-memory + SQLite.
 
         Punto UNICO di mutazione lato backend per gli edit (specchio di
@@ -223,8 +224,8 @@ class ChatBackend(ABC):
     def apply_reaction(
         self,
         contact_id: str,
-        payload: dict,
-    ) -> dict | None:
+        payload: dict[str, object],
+    ) -> dict[str, object] | None:
         """Applica una reazione (ricevuta o snapshot) a cache + SQLite.
 
         Punto UNICO di mutazione lato backend per le reazioni (specchio di

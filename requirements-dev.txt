@@ -16,3 +16,8 @@ coverage>=7.15,<8
 # default più ampio delle 0.9.x). La baseline dei 354 errori è stata misurata con
 # 0.16.1: la versione va bloccata per non far "muovere" il gate lint.
 ruff==0.16.1
+
+# --- Type checking ---
+# PINNATO: gli aggiornamenti di basedpyright possono introdurre nuove diagnostiche;
+# la versione va bloccata per non far "muovere" il gate di type checking.
+basedpyright==1.39.10
