@@ -1454,6 +1454,47 @@ class TestWhatsAppBackend:
         assert path == media / "true_85328132063407@lid_3A6090013A860EEEBA75.oga"
         assert path.read_bytes() == b"audio"
 
+    def test_get_attachment_chunk_uses_fresh_media_url(self, tmp_path):
+        backend = _make_backend(media_dir=str(tmp_path))
+        attachment_id = "false_391234567890@c.us_ABC.mp4"
+        fresh_url = "http://localhost:3000/api/files/default/fresh.mp4"
+        backend._rest.get_message_media = MagicMock(
+            return_value={"media": {"url": fresh_url}}
+        )
+        backend._rest.download_media_range = MagicMock(return_value=b"chunk")
+
+        assert backend.get_attachment_chunk(attachment_id, 0, 512 * 1024) == b"chunk"
+        backend._rest.get_message_media.assert_called_once_with(
+            "391234567890@c.us_ABC", "false_391234567890@c.us_ABC"
+        )
+        backend._rest.download_media_range.assert_called_once_with(
+            fresh_url, 0, 512 * 1024
+        )
+
+    def test_download_media_range_rewrites_url_and_requires_206(self):
+        client = WhatsAppRESTClient("http://127.0.0.1:3005")
+        client.api_key = "test-key"
+        response = MagicMock()
+        response.status = 206
+        response.headers = {"Content-Range": "bytes 0-4/20"}
+        response.read.return_value = b"abcde"
+        response.__enter__.return_value = response
+
+        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+            result = client.download_media_range(
+                "http://localhost:3000/api/files/default/a%20b.mp4", 0, 5
+            )
+
+        assert result == b"abcde"
+        request = urlopen.call_args.args[0]
+        assert request.full_url == "http://127.0.0.1:3005/api/files/default/a%20b.mp4"
+        assert request.headers["Range"] == "bytes=0-4"
+        assert request.headers["X-api-key"] == "test-key"
+
+        response.status = 200
+        with patch("urllib.request.urlopen", return_value=response):
+            assert client.download_media_range("http://api.test/file.mp4", 0, 5) is None
+
     @pytest.mark.parametrize("message", [None, {"media": {"mimetype": "video/mp4"}}])
     def test_get_attachment_path_forced_redownload_without_url_returns_none(
         self, tmp_path, message

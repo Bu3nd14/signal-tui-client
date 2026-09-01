@@ -264,6 +264,20 @@ class BackendManager:
             return None
         return backend.get_attachment_path(attachment_id)
 
+    def get_attachment_chunk(
+        self,
+        protocol: str,
+        attachment_id: str,
+        start: int | None,
+        length: int,
+    ) -> bytes | None:
+        """Fetch a bounded attachment range when the backend supports it."""
+        backend = self._backends.get(protocol)
+        provider = getattr(backend, "get_attachment_chunk", None)
+        if provider is None:
+            return None
+        return provider(attachment_id, start, length)
+
     def edit_message_sync(
         self, protocol: str, contact_id: str, message_id: str, new_text: str
     ) -> bool:

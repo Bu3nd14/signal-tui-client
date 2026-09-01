@@ -68,10 +68,14 @@ def test_non_thumbnail_media_and_invalid_width_serve_original(monkeypatch, tmp_p
         {path.name: path for path in (gif, heic, video)},
     )
 
-    for path in (gif, heic, video):
+    for path in (gif, heic):
         response = client.get(_url(path.name))
         assert response.content == path.read_bytes()
         assert response.headers["cache-control"] == "private, max-age=86400"
+    with patch("web.video_thumbs._video_thumbnail", return_value=None):
+        response = client.get(_url(video.name))
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Video thumbnail unavailable"}
     assert client.get(_url(gif.name, 241)).content == gif.read_bytes()
 
 
@@ -191,6 +195,104 @@ callback([{ target: observed, isIntersecting: true }], state.mediaObserver);
   await stageAttachment({ type: "image/gif", size: 1000, name: "invalid.gif" });
   assert.equal(state.stagedAttachment, stagedBeforeInvalidImage);
   assert.deepEqual(errors, ["Impossibile elaborare l'immagine."]);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_spa_video_thumbnail_badge_dispatch_and_text_fallback():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const media = app.slice(app.indexOf("const MEDIA_CACHE_LIMIT"), app.indexOf("\nfunction replyAuthor"));
+function node(tag) {
+  return {
+    tag, className: "", textContent: "", children: [], listeners: {}, attributes: {}, parentNode: null,
+    append(...items) { for (const item of items) { item.parentNode = this; this.children.push(item); } },
+    replaceChildren(...items) { this.children = items; },
+    replaceWith(item) {
+      this.replacement = item;
+      if (this.parentNode) {
+        const index = this.parentNode.children.indexOf(this);
+        this.parentNode.children[index] = item;
+        item.parentNode = this.parentNode;
+      }
+    },
+    querySelector(selector) { return this.children.find((item) => `.${item.className}` === selector) || null; },
+    addEventListener(name, callback) { this.listeners[name] = callback; },
+    setAttribute(name, value) { this.attributes[name] = value; },
+    remove() {},
+  };
+}
+globalThis.document = { createElement: node };
+globalThis.elements = { messages: { parent: null } };
+globalThis.window = { setTimeout, clearTimeout, open: assert.fail };
+globalThis.URL = { createObjectURL: () => "blob:thumb", revokeObjectURL() {} };
+globalThis.showError = assert.fail;
+globalThis.state = {
+  mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(),
+  objectUrls: new Set(), fileTabUrls: new Map(), mediaCache: new Map(), optimistic: [],
+};
+let status = 422;
+globalThis.apiFetch = async () => { throw Object.assign(new Error(String(status)), { status }); };
+vm.runInThisContext(media);
+
+;(async () => {
+  for (const code of [422, 404]) {
+    status = code;
+    const id = `broken-${code}.mp4`;
+    const card = videoThumbAttachment({ attachment_id: id, name: "clip.mp4", media_kind: "video" }, "signal", "in");
+    const badge = card.children.find((item) => item.className === "attachment-video-badge");
+    assert.equal(badge.textContent, "▶");
+    const bubble = node("div");
+    bubble.append(card);
+    await new Promise(setImmediate);
+    assert.equal(bubble.children[0].className, "attachment-file");
+    assert.equal(bubble.children[0].children[0].textContent, "🎬");
+    assert.equal(bubble.children[0].children[1].textContent, "clip.mp4");
+    assert.ok(state.mediaFailures.has(id));
+  }
+
+  const renderStart = app.indexOf("function renderMessages(");
+  const renderEnd = app.indexOf("\nfunction copyReactions", renderStart);
+  let videoCalls = 0;
+  let imageCalls = 0;
+  let fileCalls = 0;
+  globalThis.videoThumbAttachment = () => { videoCalls += 1; return node("video-thumb"); };
+  globalThis.imageAttachment = () => { imageCalls += 1; return node("image"); };
+  globalThis.fileAttachment = () => { fileCalls += 1; return node("file"); };
+  globalThis.pruneOrphanObjectUrls = () => {};
+  globalThis.timestampMilliseconds = Number;
+  globalThis.formatTimestamp = () => "10:00";
+  globalThis.appendRenderedQuote = () => {};
+  globalThis.scrollThreadToBottom = () => {};
+  globalThis.copyReactions = () => [];
+  state.active = { protocol: "signal", id: "alice" };
+  state.userScrolledUp = false;
+  state.messageNodes = new Map();
+  state.optimistic = [];
+  elements.messages = node("main");
+  elements.messages.scrollHeight = 0;
+  elements.messages.scrollTop = 0;
+  elements.messages.clientHeight = 0;
+  window.SignalTuiReconcile = {
+    reconcileOptimisticMessages: () => ({ optimistic: [], visible: [] }),
+    messageDisplayText: () => "",
+  };
+  vm.runInThisContext(app.slice(renderStart, renderEnd));
+  renderMessages([
+    { id: "v1", timestamp: 1, direction: "in", attachment: { attachment_id: "one.mp4", type: "video/mp4" } },
+    { id: "v2", timestamp: 2, direction: "in", attachment: { attachment_id: "two.bin", type: "application/octet-stream", media_kind: "video" } },
+    { id: "g1", timestamp: 3, direction: "in", attachment: { attachment_id: "loop.gif", type: "image/gif", media_kind: "gif" } },
+  ], "signal");
+  assert.equal(videoCalls, 2);
+  assert.equal(imageCalls, 0);
+  assert.equal(fileCalls, 1);
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
     completed = subprocess.run(

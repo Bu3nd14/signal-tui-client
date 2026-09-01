@@ -97,10 +97,30 @@ def test_message_payload_maps_quote_thumbnails_and_raw_fields(web_client):
     assert messages[1]["quote_attachment_id"] == remote_id
     assert messages[1]["quote_content_type"] == "image/jpeg"
     assert messages[1]["quote_thumb_url"] == (f"/api/media/telegram/{encoded_id}?w=96")
-    assert messages[2]["quote_thumb_url"] is None
+    assert messages[2]["quote_thumb_url"] == "/api/media/telegram/video-id?w=96"
     assert messages[3]["quote_attachment_id"] is None
     assert messages[3]["quote_content_type"] is None
     assert messages[3]["quote_thumb_url"] is None
+
+
+def test_signal_embedded_video_thumbnail_is_content_type_agnostic(web_client):
+    client, db_file, tmp_path = web_client
+    embedded = tmp_path / "quote-thumbs" / "video-frame.jpg"
+    embedded.parent.mkdir()
+    Image.new("RGB", (24, 24)).save(embedded)
+    row_id = _insert_message(
+        db_file,
+        quote_attachment_id="video.mp4",
+        quote_attachment_path=str(embedded),
+        quote_content_type="video/mp4",
+    )
+
+    response = client.get("/api/messages?proto=signal&contact_id=alice", headers=AUTH)
+
+    assert response.status_code == 200
+    assert response.json()[0]["quote_thumb_url"] == (
+        f"/api/quote-media/signal/{row_id}?w=96"
+    )
 
 
 def test_quote_media_thumbnail_is_cached(web_client):
@@ -183,7 +203,7 @@ let mode = "ok";
 let requestedPath;
 globalThis.apiFetch = async (path) => {
   requestedPath = path;
-  if (mode === "missing") throw Object.assign(new Error("404"), { status: 404 });
+  if (mode !== "ok") throw Object.assign(new Error(String(mode)), { status: mode });
   return { status: 200, blob: async () => ({}) };
 };
 function node(tag) {
@@ -223,16 +243,26 @@ vm.runInThisContext(quote);
   assert.ok(state.pinnedUrls.has("blob:quote-thumb"));
   assert.ok(!state.mediaCache.has("quote:/api/quote-media/signal/7?w=96"));
 
-  mode = "missing";
-  const failedBubble = node("div");
-  appendRenderedQuote(failedBubble, { direction: "in", quote_author: "Bob", quote_text: "Testo", quote_thumb_url: "/api/quote-media/signal/8?w=96" });
-  const failedQuote = failedBubble.children[0];
-  const failedImage = failedQuote.children[0];
-  await new Promise(setImmediate);
-  assert.equal(failedImage.removed, true);
-  assert.equal(failedQuote.children.length, 1);
-  assert.equal(failedQuote.children[0].children[0].textContent, "Bob");
-  assert.equal(failedQuote.children[0].children[1].textContent, "Testo");
+  const videoBubble = node("div");
+  appendRenderedQuote(videoBubble, { direction: "in", quote_author: "Bob", quote_text: "Video", quote_content_type: "video/mp4", quote_thumb_url: "/api/media/signal/video.mp4?w=96" });
+  const videoWrapper = videoBubble.children[0].children[0];
+  assert.equal(videoWrapper.className, "message-quote-thumb-video");
+  assert.equal(videoWrapper.children[0].className, "message-quote-thumb");
+  assert.equal(videoWrapper.children[1].className, "attachment-video-badge");
+  assert.equal(videoWrapper.children[1].textContent, "▶");
+
+  for (const status of [404, 422]) {
+    mode = status;
+    const failedBubble = node("div");
+    appendRenderedQuote(failedBubble, { direction: "in", quote_author: "Bob", quote_text: "Testo", quote_content_type: "video/mp4", quote_thumb_url: `/api/media/signal/broken-${status}.mp4?w=96` });
+    const failedQuote = failedBubble.children[0];
+    const failedWrapper = failedQuote.children[0];
+    await new Promise(setImmediate);
+    assert.equal(failedWrapper.removed, true);
+    assert.equal(failedQuote.children.length, 1);
+    assert.equal(failedQuote.children[0].children[0].textContent, "Bob");
+    assert.equal(failedQuote.children[0].children[1].textContent, "Testo");
+  }
 
   const plainBubble = node("div");
   appendRenderedQuote(plainBubble, { quote_author: "Carol", quote_text: "Solo testo" });
@@ -281,7 +311,41 @@ vm.runInThisContext(submit);
   elements.messageInput.value = "reply wa";
   await submitMessage();
   assert.equal(state.optimistic[1].quote_thumb_url, "/api/media/whatsapp/wa/image?w=96");
+
+  state.active = { id: "carol", protocol: "telegram" };
+  state.replyTo = { timestamp: 12, quoteAuthor: "carol", quoteMessage: "Video TG", isImage: false, isVideo: true, isMedia: true, contentType: "video/mp4", attachmentId: "tgref:video id", id: "12" };
+  elements.messageInput.value = "reply video";
+  await submitMessage();
+  assert.equal(state.optimistic[2].quote_thumb_url, "/api/media/telegram/tgref%3Avideo%20id?w=96");
+  assert.equal(state.optimistic[2].quote_content_type, "video/mp4");
+  assert.equal(state.optimistic[2].quote_media_type, "video");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_spa_start_reply_marks_video():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const reply = app.slice(app.indexOf("function replyAuthor("), app.indexOf("\nfunction remoteLog("));
+globalThis.state = { active: { id: "alice", protocol: "signal", display_name: "Alice" }, replyTo: null };
+globalThis.elements = {
+  replyBanner: {}, replyMark: {}, replyAuthor: {}, replySnippet: {},
+  messageInput: { focus() {}, placeholder: "" },
+};
+globalThis.window = { SignalTuiReconcile: { replyQuoteMessage: () => "clip.mp4" } };
+globalThis.cancelEdit = () => {};
+globalThis.timestampMilliseconds = (value) => value;
+vm.runInThisContext(reply);
+startReply({ id: 7, timestamp: 1000, direction: "in", attachment: { type: "application/octet-stream", media_kind: "video", attachment_id: "clip.mp4" } });
+assert.equal(state.replyTo.isVideo, true);
+assert.equal(state.replyTo.isImage, false);
 """
     completed = subprocess.run(
         ["node", "-e", source], capture_output=True, text=True, check=False
@@ -324,13 +388,79 @@ def test_quote_thumb_resolved_by_filename_when_timestamp_missing(web_client):
     )
 
 
+def test_quote_video_resolver_path_timestamp_and_filename(web_client):
+    client, db_file, tmp_path = web_client
+    local_video = tmp_path / "clip local.mp4"
+    local_video.write_bytes(b"video")
+    _insert_message(
+        db_file,
+        timestamp=500,
+        text="path reply",
+        quote_attachment_path=str(local_video),
+        quote_content_type="video/mp4",
+    )
+    _insert_message(
+        db_file,
+        timestamp=1000,
+        is_mine=1,
+        attachment_id="photo.jpg",
+        content_type="image/jpeg",
+    )
+    _insert_message(
+        db_file,
+        timestamp=1000,
+        is_mine=1,
+        attachment_id="timestamp-video.mp4",
+        content_type="video/mp4",
+    )
+    _insert_message(
+        db_file,
+        timestamp=2000,
+        text="timestamp reply",
+        quote_timestamp=1000,
+        quote_content_type="video/mp4",
+    )
+    _insert_message(
+        db_file,
+        timestamp=2500,
+        is_mine=1,
+        attachment_id="stored-video-id",
+        attachment_info="Video: holiday clip.mp4",
+        content_type="video/mp4",
+    )
+    _insert_message(
+        db_file,
+        timestamp=3000,
+        text="filename reply",
+        quote_text="holiday clip.mp4 — 🎬 Video",
+        quote_content_type=None,
+    )
+
+    response = client.get("/api/messages?proto=signal&contact_id=alice", headers=AUTH)
+
+    assert response.status_code == 200
+    messages = {message["text"]: message for message in response.json()}
+    encoded_path = "/".join(
+        quote(part, safe="") for part in str(local_video).split("/")
+    )
+    assert messages["path reply"]["quote_thumb_url"] == (
+        f"/api/media/signal/{encoded_path}?w=96"
+    )
+    assert messages["timestamp reply"]["quote_thumb_url"] == (
+        "/api/media/signal/timestamp-video.mp4?w=96"
+    )
+    assert messages["filename reply"]["quote_thumb_url"] == (
+        "/api/media/signal/stored-video-id?w=96"
+    )
+
+
 def test_quote_filename_fallback_ignores_unknown_names_and_future():
     """Nessun nome file → nessuna risoluzione; allegati futuri esclusi."""
-    from web.api import _quoted_image_by_filename
+    from web.api import _quoted_media_by_filename
 
-    assert _quoted_image_by_filename("signal", "alice", "solo testo", 2000) is None
+    assert _quoted_media_by_filename("signal", "alice", "solo testo", 2000) is None
     assert (
-        _quoted_image_by_filename("signal", "alice", "IMG_1303.jpg — 🖼️ Immagine", 2000)
+        _quoted_media_by_filename("signal", "alice", "IMG_1303.jpg — 🖼️ Immagine", 2000)
         is None
     )
 

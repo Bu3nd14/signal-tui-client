@@ -378,6 +378,94 @@ class TelegramBackend(ChatBackend):
             logger.exception("Telegram: lazy media download failed")
             return None
 
+    def get_attachment_chunk(
+        self,
+        attachment_id: str,
+        start: int | None,
+        length: int,
+    ) -> bytes | None:
+        """Download a bounded document range through Telethon."""
+        if not attachment_id or length <= 0:
+            return None
+        local = Path(attachment_id)
+        if local.is_file():
+            try:
+                with local.open("rb") as source:
+                    if start is None:
+                        source.seek(max(0, local.stat().st_size - length))
+                    else:
+                        source.seek(max(0, start))
+                    return source.read(length)
+            except OSError:
+                return None
+        if not attachment_id.startswith(_TGREF_PREFIX):
+            return None
+        try:
+            chat_id_s, msg_id_s = attachment_id[len(_TGREF_PREFIX) :].rsplit(":", 1)
+            chat_id = int(chat_id_s)
+            msg_id = int(msg_id_s)
+        except (TypeError, ValueError):
+            return None
+        mirrored = next(
+            (
+                candidate
+                for candidate in _media_dir().glob(f"{chat_id}-{msg_id}-sent*")
+                if candidate.is_file()
+            ),
+            None,
+        )
+        if mirrored is not None:
+            try:
+                with mirrored.open("rb") as source:
+                    if start is None:
+                        source.seek(max(0, mirrored.stat().st_size - length))
+                    else:
+                        source.seek(max(0, start))
+                    return source.read(length)
+            except OSError:
+                return None
+        if (
+            self._client is None
+            or self._loop is None
+            or not self._connected
+            or not self._loop.is_running()
+        ):
+            return None
+
+        async def _download_chunk() -> bytes | None:
+            entity = await self._client.get_input_entity(chat_id)
+            msg = await self._client.get_messages(entity, ids=msg_id)
+            document = getattr(msg, "document", None) if msg is not None else None
+            size = int(getattr(document, "size", 0) or 0)
+            if document is None or size <= 0:
+                return None
+            offset = max(0, size - length) if start is None else max(0, start)
+            amount = min(length, max(0, size - offset))
+            if amount <= 0:
+                return b""
+            chunks = bytearray()
+            iterator = self._client.iter_download(
+                document,
+                offset=offset,
+                limit=1,
+                chunk_size=amount,
+                request_size=max(
+                    4096,
+                    min(512 * 1024, ((amount + 4095) // 4096) * 4096),
+                ),
+                file_size=size,
+            )
+            async for chunk in iterator:
+                chunks.extend(chunk)
+            return bytes(chunks[:amount])
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_download_chunk(), self._loop)
+            return future.result(timeout=30)
+        except Exception:
+            logger.debug("Telegram: partial media download failed", exc_info=True)
+            return None
+
     # ─── Lifecycle ─────────────────────────────────────────────────────────
 
     async def connect(self) -> None:

@@ -637,7 +637,7 @@ class WhatsAppRESTClient:
                 if "localhost:3000" in host or "127.0.0.1:3000" in host:
                     base_parsed = urlparse(self.base_url)
                     host = base_parsed.netloc  # e.g. localhost:3005
-                safe_path = quote(parsed.path, safe="/")
+                safe_path = quote(unquote(parsed.path), safe="/")
                 if parsed.query:
                     safe_path += "?" + parsed.query
                 safe_url = parsed.scheme + "://" + host + safe_path
@@ -705,3 +705,42 @@ class WhatsAppRESTClient:
         if raw:
             return raw
         return None
+
+    def download_media_range(
+        self,
+        media_url: str,
+        start: int | None,
+        length: int,
+        timeout: int = 10,
+    ) -> bytes | None:
+        """Fetch one byte range from a fresh WAHA media URL."""
+        from urllib.parse import quote, unquote, urlparse
+
+        if length <= 0 or not media_url.startswith(("http://", "https://")):
+            return None
+        try:
+            parsed = urlparse(media_url)
+            host = parsed.netloc
+            if "localhost:3000" in host or "127.0.0.1:3000" in host:
+                host = urlparse(self.base_url).netloc
+            safe_path = quote(unquote(parsed.path), safe="/")
+            if parsed.query:
+                safe_path += "?" + parsed.query
+            safe_url = parsed.scheme + "://" + host + safe_path
+            range_value = (
+                f"bytes=-{length}"
+                if start is None
+                else f"bytes={max(0, start)}-{max(0, start) + length - 1}"
+            )
+            headers = {"Accept": "*/*", "Range": range_value}
+            if self.api_key:
+                headers["X-Api-Key"] = self.api_key
+            request = urllib.request.Request(safe_url, headers=headers, method="GET")
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status = getattr(response, "status", None) or response.getcode()
+                if status != 206 or not response.headers.get("Content-Range"):
+                    return None
+                return response.read(length)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+            logger.debug("WAHA media Range fetch failed", exc_info=True)
+            return None
