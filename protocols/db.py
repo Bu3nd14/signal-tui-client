@@ -32,7 +32,8 @@ _ECHO_MATCH_WINDOW_MS = 600_000  # 10 minuti
 
 # Current schema version, persisted via ``PRAGMA user_version`` so the legacy
 # migration below is skipped once the schema is known to be up to date.
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
+_LEGACY_MIGRATION_VERSION = 4
 
 
 # ─── Message cache (SQLite) ─────────────────────────────────────────────────
@@ -161,7 +162,7 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
                 "OR LOWER(COALESCE(attachment_id, '')) LIKE '%.heic' "
                 "OR LOWER(LTRIM(COALESCE(attachment_info, ''))) LIKE 'image/%')"
             )
-            if _current_schema_version(conn) >= _SCHEMA_VERSION:
+            if _current_schema_version(conn) >= _LEGACY_MIGRATION_VERSION:
                 conn.execute(
                     "UPDATE messages SET media_kind='document' "
                     "WHERE media_kind IS NULL "
@@ -185,7 +186,7 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
     if "quote_attachment_path" not in columns:
         conn.execute("ALTER TABLE messages ADD COLUMN quote_attachment_path TEXT")
 
-    if _current_schema_version(conn) >= _SCHEMA_VERSION:
+    if _current_schema_version(conn) >= _LEGACY_MIGRATION_VERSION:
         return
 
     if "protocol" not in columns:
@@ -345,6 +346,18 @@ def _init_db():
                     timestamp INTEGER NOT NULL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS transcriptions (
+                    protocol TEXT NOT NULL,
+                    attachment_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    text TEXT,
+                    error TEXT,
+                    model TEXT,
+                    updated_at REAL NOT NULL,
+                    PRIMARY KEY (protocol, attachment_id)
+                )
+            """)
             reaction_indexes = {
                 row[0]
                 for row in conn.execute(
@@ -366,6 +379,8 @@ def _init_db():
                 """)
             # Upgrade a pre-existing legacy DB in place (idempotent).
             _migrate_protocol_schema(conn)
+            if _current_schema_version(conn) < _SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             conn.commit()
         finally:
             conn.close()
@@ -895,9 +910,8 @@ def _prune_cache(limit: int | None = None, *, now_ms: int | None = None) -> int:
         from protocols.config import get_message_retention_per_contact
 
         limit = get_message_retention_per_contact()
-    if not limit or limit <= 0:
-        return 0
-    if limit < _MIN_PRUNE_LIMIT:
+    deleted = 0
+    if limit > 0 and limit < _MIN_PRUNE_LIMIT:
         logging.getLogger("signal-tui").warning(
             "MESSAGE_RETENTION_PER_CONTACT=%s sotto il minimo %s; forzato a %s",
             limit,
@@ -906,14 +920,15 @@ def _prune_cache(limit: int | None = None, *, now_ms: int | None = None) -> int:
         )
         limit = _MIN_PRUNE_LIMIT
 
-    if now_ms is None:
-        now_ms = int(time.time() * 1000)
-    _init_db()
-    with _DB_LOCK:
-        conn = sqlite3.connect(DB_FILE)
-        try:
-            cursor = conn.execute(
-                """
+    if limit > 0:
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+        _init_db()
+        with _DB_LOCK:
+            conn = sqlite3.connect(DB_FILE)
+            try:
+                cursor = conn.execute(
+                    """
                 DELETE FROM messages WHERE id IN (
                     SELECT id FROM (
                         SELECT id, ROW_NUMBER() OVER (
@@ -926,26 +941,41 @@ def _prune_cache(limit: int | None = None, *, now_ms: int | None = None) -> int:
                     ) WHERE rn > ?
                 )
                 """,
-                (now_ms - _ECHO_MATCH_WINDOW_MS, limit),
-            )
-            deleted = cursor.rowcount
-            conn.commit()
-            try:
-                _prune_orphan_reactions()
-            except Exception:
-                logger.debug("Reaction orphan prune failed", exc_info=True)
-            if deleted > 0:
+                    (now_ms - _ECHO_MATCH_WINDOW_MS, limit),
+                )
+                deleted = cursor.rowcount
+                conn.commit()
                 try:
-                    conn.execute("VACUUM")
-                except sqlite3.Error:
-                    pass  # best-effort: mai bloccare l'uscita
-            if deleted > 0:
-                logger.info("Cache pruned: %d rows removed (limit=%s)", deleted, limit)
-            else:
-                logger.info("Cache prune: no rows removed (limit=%s)", limit)
-            return deleted
-        finally:
-            conn.close()
+                    _prune_orphan_reactions()
+                except Exception:
+                    logger.debug("Reaction orphan prune failed", exc_info=True)
+                if deleted > 0:
+                    try:
+                        conn.execute("VACUUM")
+                    except sqlite3.Error:
+                        pass  # best-effort: mai bloccare l'uscita
+                if deleted > 0:
+                    logger.info(
+                        "Cache pruned: %d rows removed (limit=%s)", deleted, limit
+                    )
+                else:
+                    logger.info("Cache prune: no rows removed (limit=%s)", limit)
+            finally:
+                conn.close()
+
+    try:
+        from protocols.media_prune import prune_media
+
+        media_report = prune_media()
+        logger.info(
+            "Media prune: %d file, %.1f MB liberati (dry_run=%s)",
+            media_report.total_orphans(),
+            media_report.total_bytes() / (1024 * 1024),
+            False,
+        )
+    except Exception:
+        logger.debug("Media prune failed", exc_info=True)
+    return deleted
 
 
 def _mark_as_read(contact_number: str, protocol: str = "signal"):

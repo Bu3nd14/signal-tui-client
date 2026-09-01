@@ -66,6 +66,33 @@ def start_web_server(
     app.state.token = token
     app.state.websocket_connections = set()
 
+    from transcription import store
+    from transcription.config import (
+        get_openai_api_key,
+        get_transcription_base_url,
+        get_transcription_language,
+        get_transcription_model,
+        get_transcription_timeout,
+    )
+
+    api_key = get_openai_api_key()
+    if api_key:
+        from transcription.client import CloudTranscriptionClient
+        from transcription.service import TranscriptionService
+
+        client = CloudTranscriptionClient(
+            api_key,
+            base_url=get_transcription_base_url(),
+            model=get_transcription_model(),
+            language=get_transcription_language(),
+            timeout=get_transcription_timeout(),
+        )
+        app.state.transcription_service = TranscriptionService(client, store)
+        logger.info("Trascrizione cloud OpenAI attiva")
+    else:
+        app.state.transcription_service = None
+        logger.info("Trascrizione cloud OpenAI disattivata")
+
     from web.api import create_api_router
     from web.auth import install_auth
     from web.bridge import init_bridge
