@@ -1600,6 +1600,48 @@ class WhatsAppBackend(ChatBackend):
 
         return candidate
 
+    def get_attachment_chunk(
+        self,
+        attachment_id: str,
+        start: int | None,
+        length: int,
+    ) -> bytes | None:
+        """Return a local or remote byte range without downloading all media."""
+        if not attachment_id or length <= 0:
+            return None
+        base = self._ensure_media_dir()
+        candidate = base / (Path(attachment_id).name or attachment_id)
+        if candidate.is_file():
+            try:
+                with candidate.open("rb") as source:
+                    if start is None:
+                        source.seek(max(0, candidate.stat().st_size - length))
+                    else:
+                        source.seek(max(0, start))
+                    return source.read(length)
+            except OSError:
+                return None
+        if self._rest is None:
+            return None
+        chat_id, media_name = _resolve_wa_media_chat_id(attachment_id)
+        if chat_id is None:
+            return None
+        try:
+            message = self._rest.get_message_media(chat_id, media_name)
+            media = message.get("media") if isinstance(message, dict) else None
+            fresh_url = media.get("url") if isinstance(media, dict) else None
+            if not fresh_url:
+                return None
+            return self._rest.download_media_range(str(fresh_url), start, length)
+        except Exception:
+            logger.debug(
+                "WhatsApp media chunk download failed: chat=%s id=%s",
+                chat_id,
+                media_name,
+                exc_info=True,
+            )
+            return None
+
     # ─── Incoming event ingestion ─────────────────────────────────────
     # La ricezione è interamente PUSH via webhook di WAHA Core:
     # ``WAHA_WEBHOOK_URL`` + ``WAHA_WEBHOOK_EVENTS: message`` fanno sì che WAHA

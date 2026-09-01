@@ -1606,6 +1606,22 @@ def create_api_router() -> Any:
         manager = request.app.state.manager
         root = _allowed_media_root(manager, proto)
         path = None
+        video_request = w in _THUMB_WIDTHS and _is_video_candidate(
+            Path(attachment_id), proto, attachment_id
+        )
+        chunk_available = False
+        if video_request and proto in {"whatsapp", "telegram"}:
+            from web.video_thumbs import _chunk_video_thumbnail
+
+            thumb, chunk_available = _chunk_video_thumbnail(
+                manager, proto, attachment_id, w
+            )
+            if thumb is not None:
+                return FileResponse(
+                    thumb,
+                    media_type="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=31536000, immutable"},
+                )
         try:
             resolved = manager.get_attachment_path(proto, attachment_id)
         except Exception:  # noqa: BLE001
@@ -1615,6 +1631,10 @@ def create_api_router() -> Any:
                 attachment_id,
                 path,
             )
+            if chunk_available:
+                raise HTTPException(
+                    status_code=422, detail="Video thumbnail unavailable"
+                ) from None
             raise HTTPException(status_code=404) from None
         path = Path(resolved).resolve() if resolved else None
         if path is None or not path.is_file() or not path.is_relative_to(root):
@@ -1624,6 +1644,10 @@ def create_api_router() -> Any:
                 attachment_id,
                 path,
             )
+            if chunk_available:
+                raise HTTPException(
+                    status_code=422, detail="Video thumbnail unavailable"
+                )
             raise HTTPException(status_code=404)
         logger.info(
             "web media ok proto=%s attachment_id=%s path=%s w=%s",
@@ -1640,7 +1664,7 @@ def create_api_router() -> Any:
                     media_type="image/jpeg",
                     headers={"Cache-Control": "private, max-age=31536000, immutable"},
                 )
-            if _is_video_candidate(path, proto, attachment_id):
+            if video_request or _is_video_candidate(path, proto, attachment_id):
                 from web.video_thumbs import _video_thumbnail
 
                 thumb = _video_thumbnail(path, proto, attachment_id, w)

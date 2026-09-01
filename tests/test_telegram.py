@@ -251,6 +251,42 @@ class TestTelegramContacts:
 
         assert backend.get_attachment_path("tgref:42:99") is None
 
+    def test_get_attachment_chunk_uses_telethon_partial_download(
+        self, monkeypatch, tmp_path
+    ):
+        document = SimpleNamespace(size=2_000_000)
+        msg = SimpleNamespace(document=document)
+        backend = self._ready_backend_with_media_msg(monkeypatch, tmp_path, msg)
+        calls = []
+
+        class Chunks:
+            def __aiter__(self):
+                self.done = False
+                return self
+
+            async def __anext__(self):
+                if self.done:
+                    raise StopAsyncIteration
+                self.done = True
+                return b"partial"
+
+        def iter_download(location, **kwargs):
+            calls.append((location, kwargs))
+            return Chunks()
+
+        backend._client.iter_download = iter_download
+
+        assert backend.get_attachment_chunk("tgref:42:99", 0, 512 * 1024) == b"partial"
+        assert calls[0][0] is document
+        assert calls[0][1]["offset"] == 0
+        assert calls[0][1]["limit"] == 1
+        assert calls[0][1]["chunk_size"] == 512 * 1024
+
+        backend._client.get_messages.return_value = SimpleNamespace(
+            document=SimpleNamespace(size=0)
+        )
+        assert backend.get_attachment_chunk("tgref:42:99", 0, 512 * 1024) is None
+
     def test_entity_to_contact_handles_duck_types_and_real_telethon_entities(self):
         user = TelegramBackend._entity_to_contact(
             SimpleNamespace(

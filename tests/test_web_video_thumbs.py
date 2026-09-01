@@ -4,6 +4,7 @@ import io
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from urllib.parse import quote
 
 from fastapi import FastAPI
@@ -156,3 +157,140 @@ def test_media_video_thumbnail_unavailable_returns_422(monkeypatch, tmp_path):
     assert response.status_code == 422
     assert response.json() == {"detail": "Video thumbnail unavailable"}
     assert response.content != source.read_bytes()
+
+
+def test_chunk_pipeline_uses_head_and_tail_and_stable_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(video_thumbs, "_ffmpeg_executable", lambda: "/usr/bin/ffmpeg")
+    calls: list[tuple[list[str], dict]] = []
+    monkeypatch.setattr(video_thumbs.subprocess, "run", _fake_ffmpeg(calls))
+    ranges = []
+    head = _box(b"ftyp", b"isom") + _box(b"mdat", b"frame")
+    tail = _box(b"moov", b"metadata")
+
+    def chunk(_proto, _attachment_id, start, length):
+        ranges.append((start, length))
+        return head if start == 0 else tail
+
+    manager = SimpleNamespace(get_attachment_chunk=chunk)
+    thumbnail, available = video_thumbs._chunk_video_thumbnail(
+        manager, "whatsapp", "video.mp4", 480
+    )
+
+    assert available is True
+    assert thumbnail is not None and thumbnail.is_file()
+    assert ranges == [(0, 512 * 1024), (None, 2 * 1024 * 1024)]
+    assert len(calls) == 1
+
+    cached, available = video_thumbs._chunk_video_thumbnail(
+        manager, "whatsapp", "video.mp4", 480
+    )
+    assert available is True
+    assert cached == thumbnail
+    assert len(ranges) == 2
+
+
+def test_chunk_pipeline_faststart_uses_only_head(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(video_thumbs, "_ffmpeg_executable", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(video_thumbs.subprocess, "run", _fake_ffmpeg([]))
+    ranges = []
+    head = _box(b"ftyp", b"isom") + _box(b"moov", b"metadata")
+
+    def chunk(_proto, _attachment_id, start, length):
+        ranges.append((start, length))
+        return head
+
+    thumbnail, available = video_thumbs._chunk_video_thumbnail(
+        SimpleNamespace(get_attachment_chunk=chunk),
+        "telegram",
+        "tgref:42:99",
+        96,
+    )
+
+    assert available is True
+    assert thumbnail is not None
+    assert ranges == [(0, 512 * 1024)]
+
+
+def test_whatsapp_media_endpoint_uses_chunk_without_full_download(
+    monkeypatch, tmp_path
+):
+    media_root = tmp_path / "whatsapp-media"
+    media_root.mkdir()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(video_thumbs, "_ffmpeg_executable", lambda: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(video_thumbs.subprocess, "run", _fake_ffmpeg([]))
+    head = _box(b"ftyp", b"isom") + _box(b"moov", b"metadata")
+    backend_instance = SimpleNamespace(_ensure_media_dir=lambda: media_root)
+    manager = SimpleNamespace(
+        get=lambda _proto: backend_instance,
+        get_attachment_chunk=lambda *_args: head,
+        get_attachment_path=MagicMock(side_effect=AssertionError("full download")),
+    )
+    app = FastAPI()
+    app.state.manager = manager
+    app.include_router(create_api_router())
+
+    response = TestClient(app).get("/api/media/whatsapp/video.mp4?w=480")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/jpeg")
+    manager.get_attachment_path.assert_not_called()
+
+
+def test_chunk_failure_falls_back_to_complete_file(monkeypatch, tmp_path):
+    media_root = tmp_path / "telegram-media"
+    media_root.mkdir()
+    complete = media_root / "complete.mp4"
+    complete.write_bytes(b"complete")
+    monkeypatch.setattr("backends.telegram._media_dir", lambda: media_root)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(web_api, "_attachment_content_type", lambda *_args: "video/mp4")
+    monkeypatch.setattr(video_thumbs, "_ffmpeg_executable", lambda: "/usr/bin/ffmpeg")
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if len(calls) == 2:
+            Image.new("RGB", (320, 180), "navy").save(argv[-1], "JPEG")
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        return subprocess.CompletedProcess(argv, 1, b"", b"invalid chunk")
+
+    monkeypatch.setattr(video_thumbs.subprocess, "run", run)
+    backend_instance = SimpleNamespace()
+    manager = SimpleNamespace(
+        get=lambda _proto: backend_instance,
+        get_attachment_chunk=lambda *_args: _box(b"ftyp", b"isom") + _box(b"moov"),
+        get_attachment_path=MagicMock(return_value=complete),
+    )
+    app = FastAPI()
+    app.state.manager = manager
+    app.include_router(create_api_router())
+
+    response = TestClient(app).get("/api/media/telegram/tgref%3A42%3A99?w=240")
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+    manager.get_attachment_path.assert_called_once_with("telegram", "tgref:42:99")
+
+
+def test_insufficient_chunk_without_complete_file_returns_422(monkeypatch, tmp_path):
+    media_root = tmp_path / "whatsapp-media"
+    media_root.mkdir()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(video_thumbs, "_ffmpeg_executable", lambda: None)
+    backend_instance = SimpleNamespace(_ensure_media_dir=lambda: media_root)
+    manager = SimpleNamespace(
+        get=lambda _proto: backend_instance,
+        get_attachment_chunk=lambda *_args: _box(b"ftyp", b"isom") + _box(b"moov"),
+        get_attachment_path=lambda *_args: None,
+    )
+    app = FastAPI()
+    app.state.manager = manager
+    app.include_router(create_api_router())
+
+    response = TestClient(app).get("/api/media/whatsapp/video.mp4?w=480")
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Video thumbnail unavailable"}

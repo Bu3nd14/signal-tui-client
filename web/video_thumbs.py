@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 _VIDEO_THUMB_SEMAPHORE = threading.BoundedSemaphore(2)
 _VIDEO_THUMB_ACQUIRE_TIMEOUT = 20
 _FFMPEG_TIMEOUT = 15
+_HEAD_BYTES = 512 * 1024
+_TAIL_BYTES = 2 * 1024 * 1024
 _ffmpeg_unavailable_warned = False
 
 
@@ -59,6 +61,8 @@ def _video_thumbnail(
     proto: str,
     attachment_id: str,
     width: int,
+    *,
+    cache_identity: str | None = None,
 ) -> Path | None:
     if path is None or not path.is_file():
         return None
@@ -68,8 +72,9 @@ def _video_thumbnail(
     from web.api import _prune_thumb_cache, _thumb_lock, _web_thumb_dir
 
     try:
+        primitive = cache_identity or f"{path}|{path.stat().st_mtime_ns}|{width}"
         digest = hashlib.sha1(
-            f"{path}|{path.stat().st_mtime_ns}|{width}".encode(),
+            primitive.encode(),
             usedforsecurity=False,
         ).hexdigest()
     except OSError:
@@ -151,3 +156,71 @@ def _video_thumbnail(
             output_path.unlink(missing_ok=True)
             if frame_path is not None:
                 frame_path.unlink(missing_ok=True)
+
+
+def _chunk_video_thumbnail(
+    manager: object,
+    proto: str,
+    attachment_id: str,
+    width: int,
+) -> tuple[Path | None, bool]:
+    provider = getattr(manager, "get_attachment_chunk", None)
+    if provider is None:
+        return None, False
+    identity = f"vid|{proto}|{attachment_id}|{width}"
+    digest = hashlib.sha1(identity.encode(), usedforsecurity=False).hexdigest()
+    cached = _cached_thumbnail(proto, digest)
+    if cached is not None:
+        return cached, True
+    try:
+        head = provider(proto, attachment_id, 0, _HEAD_BYTES)
+    except Exception:
+        logger.debug("Video head chunk unavailable", exc_info=True)
+        return None, False
+    if not head:
+        return None, False
+    data = bytes(head)
+    is_mp4 = len(data) >= 8 and data[4:8] == b"ftyp"
+    if not (is_mp4 and _mp4_has_moov(data)):
+        try:
+            tail = provider(proto, attachment_id, None, _TAIL_BYTES)
+        except Exception:
+            logger.debug("Video tail chunk unavailable", exc_info=True)
+            return None, True
+        if not tail:
+            return None, True
+        data += bytes(tail)
+
+    descriptor, source_name = tempfile.mkstemp(prefix="video-chunk-", suffix=".video")
+    source = Path(source_name)
+    try:
+        os.close(descriptor)
+        source.write_bytes(data)
+        return (
+            _video_thumbnail(
+                source,
+                proto,
+                attachment_id,
+                width,
+                cache_identity=identity,
+            ),
+            True,
+        )
+    except OSError:
+        return None, True
+    finally:
+        source.unlink(missing_ok=True)
+
+
+def _cached_thumbnail(proto: str, digest: str) -> Path | None:
+    from web.api import _thumb_lock, _web_thumb_dir
+
+    thumb = _web_thumb_dir(proto) / f"{digest}.jpg"
+    with _thumb_lock(thumb):
+        if not thumb.is_file():
+            return None
+        try:
+            thumb.touch()
+        except OSError:
+            pass
+        return thumb
