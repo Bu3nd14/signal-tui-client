@@ -44,6 +44,17 @@ target-version = "py312"
 line-length = 88
 exclude = ["profiling", ".opencode"]
 
+[tool.basedpyright]
+typeCheckingMode = "off"
+# Temporary reduced subset for progressive rollout. Extend in follow-ups to:
+# backends/config.py (60 errors), backends/manager.py (39),
+# backends/signal.py (633), backends/telegram.py (354),
+# backends/whatsapp.py (771), backends/whatsapp_events.py (350),
+# backends/whatsapp_rest.py (158).
+strict = ["backends/base.py", "models.py"]
+pythonVersion = "3.12"
+exclude = [".venv", ".venv-test", "__pycache__"]
+
 [tool.ruff.lint]
 
 [tool.ruff.format]

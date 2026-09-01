@@ -20,7 +20,7 @@ messaggistica/database · unica dipendenza nuova: Pillow
 
 ## 2. Esito della POC: perché NON si usa `textual-image`
 
-La POC (`poc-image/`, gitignored) ha verificato su terminale reale via ssh:
+La POC (cartella `poc-image/`, poi rimossa dal progetto a feature implementate) ha verificato su terminale reale via ssh:
 
 | Approccio | Esito |
 |---|---|
