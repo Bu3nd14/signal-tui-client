@@ -1,7 +1,7 @@
 # Piano di Implementazione — Integrazione Telegram
 
 > **Branch**: `feature/telegram-backend`
-> **Basato su**: `Telegram/ARCHITECTURE.md` v2
+> **Basato su**: `docs/TELEGRAM_ARCHITECTURE.md` v2
 > **Data**: 2026-08-11
 
 ---

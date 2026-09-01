@@ -71,8 +71,8 @@
 | Send Timing | `test_send_timing.py` | 3 | ✅ |
 | Docker Compose | `test_docker_compose_extra_hosts.py` | 2 | ✅ |
 | TG Send Reorder | `test_telegram_send_reorder.py` | 1 | ✅ |
-| Telegram Regression | `Telegram/test_regression.py` | 39 | ✅ |
-| Telegram Backend | `Telegram/test_telegram_backend.py` | 35 | ✅ |
+| Telegram Regression | `tests/protocols/telegram/test_regression.py` | 39 | ✅ |
+| Telegram Backend | `tests/protocols/telegram/test_telegram_backend.py` | 35 | ✅ |
 | **Totale** | | **1396** | **✅ 1389 + 7 gated** |
 
 ---
@@ -411,7 +411,7 @@ Test della funzionalità "sta scrivendo": gli indicatori di digitazione arrivano
 
 
 ```bash
-# Test completi (tests/ + Telegram/) — richiede il venv attivo o PYTHON=...
+# Test completi (tests/) — richiede il venv attivo o PYTHON=...
 make test
 
 # Test con coverage + gate (soglia 68%) + report XML per Codecov
@@ -428,4 +428,4 @@ make live-test PYTHON=.venv-test/bin/python
 make live-test-manual PYTHON=.venv-test/bin/python   # E4 (ingresso, manuale)
 ```
 
-I comandi del `Makefile` usano la config condivisa in `pyproject.toml` (`testpaths = ["tests", "Telegram"]`), quindi raccolgono **entrambe** le radici di test. Lo script legacy `tests/run_regression_tests.sh` è stato sostituito dal Makefile (non copriva la suite `Telegram/`).
+I comandi del `Makefile` usano la config condivisa in `pyproject.toml` (`testpaths = ["tests"]`), quindi raccolgono l'intera suite dalla radice comune. Lo script legacy `tests/run_regression_tests.sh` è stato sostituito dal Makefile.
