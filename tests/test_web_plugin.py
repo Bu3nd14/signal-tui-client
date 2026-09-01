@@ -1405,6 +1405,93 @@ def test_messages_never_serializes_image_placeholder_text(web_client, protocol):
 
 
 @pytest.mark.parametrize(
+    ("text", "attachment_info", "expected_text"),
+    [
+        ("🎬 Video: nome.mp4", "🎬 Video", ""),
+        (
+            "Video: IMG_1110.mp4: id.mp4",
+            "Video: IMG_1110.mp4",
+            "",
+        ),
+        ("Guarda questo!", "🎬 Video", "Guarda questo!"),
+    ],
+)
+def test_messages_distinguishes_video_placeholders_from_captions(
+    web_client, text, attachment_info, expected_text
+):
+    client, _, db_file = web_client
+    import sqlite3
+
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            "INSERT INTO messages(protocol, contact_number, text, is_mine, "
+            "timestamp, msg_type, attachment_id, attachment_info, content_type, "
+            "media_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "signal",
+                "alice",
+                text,
+                0,
+                1,
+                "attachment",
+                "signal-video-id",
+                attachment_info,
+                "video/mp4",
+                "video",
+            ),
+        )
+
+    response = client.get(
+        "/api/messages",
+        params={"proto": "signal", "contact_id": "alice"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["text"] == expected_text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_text"),
+    [
+        ("🖼️ Immagine", ""),
+        ("Guarda questa!", "Guarda questa!"),
+    ],
+)
+def test_messages_preserves_image_caption_cleanup(web_client, text, expected_text):
+    client, _, db_file = web_client
+    import sqlite3
+
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            "INSERT INTO messages(protocol, contact_number, text, is_mine, "
+            "timestamp, msg_type, attachment_id, attachment_info, content_type, "
+            "media_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "signal",
+                "alice",
+                text,
+                0,
+                1,
+                "image",
+                "signal-image-id",
+                "🖼️ Immagine",
+                "image/jpeg",
+                "image",
+            ),
+        )
+
+    response = client.get(
+        "/api/messages",
+        params={"proto": "signal", "contact_id": "alice"},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["text"] == expected_text
+
+
+@pytest.mark.parametrize(
     ("attachment_info", "expected_text"),
     [
         ("🖼️ Image", ""),

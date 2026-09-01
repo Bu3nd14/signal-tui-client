@@ -373,6 +373,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
     for row in rows:
         attachment = None
         text = row["text"] or ""
+        suppress_attachment_info_caption = False
         if row["attachment_id"]:
             attachment_id = row["attachment_id"]
             attachment_path = attachment_id.split("?", 1)[0]
@@ -425,6 +426,24 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                     or (protocol == "whatsapp" and _is_whatsapp_synthetic_text(text))
                 ):
                     text = ""
+            elif text and (
+                str(row["media_kind"] or "").strip().lower()
+                in {"video", "audio", "document", "sticker", "voice"}
+                or str(row["msg_type"] or "").strip().lower()
+                in {"attachment", "video", "audio", "document", "sticker", "voice"}
+            ):
+                from models import is_media_quote_placeholder
+
+                stripped = text.strip()
+                info = str(row["attachment_info"] or "").strip()
+                prefixed_info = bool(info and stripped.startswith(f"{info}:"))
+                if (
+                    is_media_quote_placeholder(text)
+                    or prefixed_info
+                    or (protocol == "whatsapp" and _is_whatsapp_synthetic_text(text))
+                ):
+                    text = ""
+                    suppress_attachment_info_caption = prefixed_info
             elif protocol == "whatsapp" and text:
                 from models import is_media_quote_placeholder
 
@@ -432,7 +451,11 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                     text
                 ):
                     text = ""
-            if not text and row["attachment_info"]:
+            if (
+                not text
+                and row["attachment_info"]
+                and not suppress_attachment_info_caption
+            ):
                 # Caption in attachment_info (es. invii WhatsApp che salvano la
                 # caption qui, col text = URL media): usala se non è un nome file.
                 info = str(row["attachment_info"] or "").strip()
@@ -638,9 +661,13 @@ def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
     has_image_name = bool(re.search(r"\.(?:jpe?g|png|gif|webp)\b", quote_text))
     media_kind = (
         "video"
-        if quote_content_type.startswith("video/") or has_video_name or "🎬" in quote_text
+        if quote_content_type.startswith("video/")
+        or has_video_name
+        or "🎬" in quote_text
         else "image"
-        if quote_content_type.startswith("image/") or has_image_name or "🖼️" in quote_text
+        if quote_content_type.startswith("image/")
+        or has_image_name
+        or "🖼️" in quote_text
         else None
     )
     quoted = _quoted_media_attachment_id(
@@ -764,7 +791,9 @@ def _quoted_media_by_filename(
     if not quote_text:
         return None
     image_pattern = r"jpe?g|png|gif|webp"
-    video_pattern = "|".join(extension.removeprefix(".") for extension in sorted(_VIDEO_EXTENSIONS))
+    video_pattern = "|".join(
+        extension.removeprefix(".") for extension in sorted(_VIDEO_EXTENSIONS)
+    )
     extension_pattern = (
         image_pattern
         if kind == "image"
