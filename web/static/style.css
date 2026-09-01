@@ -470,15 +470,10 @@ h2 { font-size: 1.05rem; }
 .attachment-video { cursor: pointer; }
 .attachment-video-badge { position: absolute; top: 50%; left: 50%; display: grid; width: 46px; height: 46px; place-items: center; padding-left: 3px; border: 1px solid #ffffff80; border-radius: 50%; background: #05080da8; color: #fff; font-size: 1.25rem; line-height: 1; pointer-events: none; transform: translate(-50%, -50%); box-shadow: 0 2px 10px #0008; }
 .attachment.local-preview { min-width: 120px; aspect-ratio: auto; cursor: default; }
-.attachment-file { display: flex; min-width: 190px; max-width: min(72vw, 360px); flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 7px; padding: 10px 12px; border: 1px solid #ffffff1f; border-radius: 10px; background: #11182080; cursor: pointer; }
+.attachment-file { display: flex; min-width: 190px; max-width: min(72vw, 360px); align-items: center; gap: 10px; margin-bottom: 7px; padding: 10px 12px; border: 1px solid #ffffff1f; border-radius: 10px; background: #11182080; cursor: pointer; }
 .attachment-file:hover, .attachment-file:focus-visible { border-color: #ffffff40; outline: none; background: #111820cc; }
 .attachment-file-icon { flex: none; font-size: 1.4rem; }
-.attachment-file-name { min-width: 0; flex: 1; overflow: hidden; font-size: .86rem; text-overflow: ellipsis; white-space: nowrap; }
-.transcribe-button { flex: none; padding: 5px 8px; border: 1px solid #ffffff2b; border-radius: 7px; background: var(--panel-raised); color: var(--text); font-size: .72rem; cursor: pointer; }
-.transcribe-button:hover, .transcribe-button:focus-visible { border-color: var(--accent); outline: none; background: #4f8cff25; }
-.transcribe-button:disabled { opacity: .65; cursor: wait; }
-.transcript-box { width: 100%; padding: 8px 9px; border: 1px solid #ffffff1f; border-radius: 8px; background: #090f1680; color: var(--muted); font-size: .8rem; line-height: 1.45; white-space: pre-wrap; cursor: text; }
-.transcript-box[hidden], .transcribe-button[hidden] { display: none; }
+.attachment-file-name { min-width: 0; overflow: hidden; font-size: .86rem; text-overflow: ellipsis; white-space: nowrap; }
 .attachment-loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
 .spinner { width: 26px; height: 26px; border: 3px solid #ffffff30; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 .attachment-error { display: grid; min-height: 120px; place-items: center; padding: 18px; color: var(--muted); text-align: center; }
