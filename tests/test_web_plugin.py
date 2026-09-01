@@ -453,6 +453,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
+const linkifyStart = app.indexOf("function linkifyText(");
+const linkifyEnd = app.indexOf("\nfunction timestampMilliseconds", linkifyStart);
 const renderStart = app.indexOf("function renderMessages(");
 const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
 globalThis.state = {
@@ -478,14 +480,22 @@ function node(tag) {
   return {
     tag, className: "", textContent: "", children: [], classList: { add() {} },
     append(...children) { this.children.push(...children); },
-    replaceChildren(...children) { this.children = children; },
+    replaceChildren(...children) {
+      this.children = children.flatMap((child) =>
+        child.tag === "#fragment" ? child.children : [child]);
+    },
     setAttribute(name, value) { this[name] = value; },
     addEventListener() {},
     set src(value) { this.url = value; },
   };
 }
-globalThis.document = { createElement: node };
+globalThis.document = {
+  createElement: node,
+  createDocumentFragment: () => node("#fragment"),
+  createTextNode: (text) => ({ tag: "#text", text }),
+};
 globalThis.elements = { messages: node("main") };
+vm.runInThisContext(app.slice(linkifyStart, linkifyEnd));
 vm.runInThisContext(app.slice(renderStart, renderEnd));
 renderMessages([], "signal");
 assert.equal(elements.messages.children.length, 1);
@@ -496,7 +506,7 @@ assert.ok(preview);
 assert.equal(preview.children[0].tag, "img");
 assert.equal(preview.children[0].url, "blob:photo");
 assert.ok(caption);
-assert.equal(caption.textContent, "la caption");
+assert.equal(caption.children[0].text, "la caption");
 """
     completed = subprocess.run(
         ["node", "-e", source], capture_output=True, text=True, check=False

@@ -19,6 +19,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
+const linkifyStart = app.indexOf("function linkifyText(");
+const linkifyEnd = app.indexOf("\nfunction timestampMilliseconds", linkifyStart);
 const start = app.indexOf("function renderMessages(");
 const end = app.indexOf("\nasync function loadMessages", start);
 globalThis.state = { optimistic: [], active: { protocol: "signal", id: "42" } };
@@ -37,14 +39,23 @@ function node(tag) {
   return {
     tag, className: "", textContent: "", title: "", children: [], attributes: {}, parentNode: null,
     append(...children) { for (const child of children) { child.parentNode = this; this.children.push(child); } },
-    replaceChildren(...children) { this.children = []; this.append(...children); },
+    replaceChildren(...children) {
+      this.children = [];
+      this.append(...children.flatMap((child) =>
+        child.tag === "#fragment" ? child.children : [child]));
+    },
     setAttribute(name, value) { this.attributes[name] = value; },
     addEventListener() {}, classList: { add() {} },
     remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((child) => child !== this); },
   };
 }
-globalThis.document = { createElement: node };
+globalThis.document = {
+  createElement: node,
+  createDocumentFragment: () => node("#fragment"),
+  createTextNode: (text) => ({ tag: "#text", text, parentNode: null }),
+};
 globalThis.elements = { messages: node("main") };
+vm.runInThisContext(app.slice(linkifyStart, linkifyEnd));
 vm.runInThisContext(app.slice(start, end));
 const reactions = [
   { emoji: "👍", count: 2, is_mine: true, authors: ["Giovanni", "You"] },
