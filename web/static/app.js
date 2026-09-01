@@ -157,7 +157,8 @@ function linkifyText(text) {
   for (const part of String(text).split(/(https?:\/\/[^\s<]+)/)) {
     if (!part) continue;
     if (/^https?:\/\//.test(part)) {
-      const href = trimUrlEnd(part);
+      const linkText = trimUrlEnd(part);
+      const href = safeExternalUrl(linkText);
       if (!href) {
         fragment.append(document.createTextNode(part));
         continue;
@@ -166,9 +167,9 @@ function linkifyText(text) {
       anchor.href = href;
       anchor.target = "_blank";
       anchor.rel = "noopener noreferrer";
-      anchor.textContent = href;
+      anchor.textContent = linkText;
       fragment.append(anchor);
-      const trailing = part.slice(href.length);
+      const trailing = part.slice(linkText.length);
       if (trailing) fragment.append(document.createTextNode(trailing));
     } else {
       fragment.append(document.createTextNode(part));
@@ -192,6 +193,16 @@ function trimUrlEnd(raw) {
     break;
   }
   return raw.slice(0, end);
+}
+
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.href;
+  } catch {
+    return null;
+  }
 }
 
 function timestampMilliseconds(value) {

@@ -59,7 +59,8 @@ assert.equal(plain.children.filter((c) => c.tag === "a").length, 0);
 assert.equal(plain.children[0].tag, "#text");
 
 const backslash = linkifyText("https://example.com/dir\\");
-assert.equal(backslash.children[0].href, "https://example.com/dir\\");
+assert.equal(backslash.children[0].href, "https://example.com/dir/");
+assert.equal(backslash.children[0].textContent, "https://example.com/dir\\");
 
 const unsupported = linkifyText("javascript:alert(1) ftp://x");
 assert.equal(unsupported.children.length, 1);
