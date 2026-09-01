@@ -464,6 +464,8 @@ h2 { font-size: 1.05rem; }
 
 .attachment { position: relative; min-width: 120px; min-height: 90px; width: fit-content; margin-bottom: 7px; overflow: hidden; border-radius: 10px; background: #111820; cursor: zoom-in; }
 .attachment img { display: block; width: auto; height: auto; max-width: min(72vw, 360px); max-height: min(28vh, 220px); object-fit: contain; }
+.attachment-video { cursor: pointer; }
+.attachment-video-badge { position: absolute; top: 50%; left: 50%; display: grid; width: 46px; height: 46px; place-items: center; padding-left: 3px; border: 1px solid #ffffff80; border-radius: 50%; background: #05080da8; color: #fff; font-size: 1.25rem; line-height: 1; pointer-events: none; transform: translate(-50%, -50%); box-shadow: 0 2px 10px #0008; }
 .attachment.local-preview { min-width: 120px; aspect-ratio: auto; cursor: default; }
 .attachment-file { display: flex; min-width: 190px; max-width: min(72vw, 360px); align-items: center; gap: 10px; margin-bottom: 7px; padding: 10px 12px; border: 1px solid #ffffff1f; border-radius: 10px; background: #11182080; cursor: pointer; }
 .attachment-file:hover, .attachment-file:focus-visible { border-color: #ffffff40; outline: none; background: #111820cc; }

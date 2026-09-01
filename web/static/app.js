@@ -496,10 +496,10 @@ async function openImageModal(path, alt) {
   }
 }
 
-async function loadImage(container, image, path, attachmentId, direction, onLoad) {
+async function loadThumbnail(container, image, path, attachmentId, direction, onLoad, showFallback) {
   const key = String(attachmentId);
   if (state.mediaFailures.has(key)) {
-    showImageFallback(container);
+    showFallback(container);
     return;
   }
   let request = state.mediaLoads.get(key);
@@ -518,10 +518,37 @@ async function loadImage(container, image, path, attachmentId, direction, onLoad
   } catch (error) {
     if (error.name !== "AbortError") {
       console.debug("[web] media failed", { attachment_id: attachmentId });
-      showImageFallback(container);
+      showFallback(container);
     }
   } finally {
     if (state.mediaLoads.get(key) === request) state.mediaLoads.delete(key);
+  }
+}
+
+function loadImage(container, image, path, attachmentId, direction, onLoad) {
+  return loadThumbnail(container, image, path, attachmentId, direction, onLoad, showImageFallback);
+}
+
+function setupLazyThumbnail(container, image, path, attachmentId, direction, onLoad, showFallback) {
+  console.debug("[web] media", { attachment_id: attachmentId, cache: state.mediaCache.has(attachmentId) ? "hit" : "miss" });
+  const cachedUrl = state.mediaCache.get(attachmentId);
+  if (cachedUrl) {
+    state.mediaCache.delete(attachmentId);
+    state.mediaCache.set(attachmentId, cachedUrl);
+    image.addEventListener("load", () => {
+      container.querySelector(".attachment-loading")?.remove();
+      onLoad?.();
+    }, { once: true });
+    image.src = cachedUrl;
+    return;
+  }
+  const load = () => loadThumbnail(container, image, path, attachmentId, direction, onLoad, showFallback);
+  const observer = mediaObserver();
+  if (observer) {
+    container._loadMedia = load;
+    observer.observe(container);
+  } else {
+    load();
   }
 }
 
@@ -549,26 +576,7 @@ function imageAttachment(attachment, protocol, direction, onLoad) {
       openImageModal(mediaPath, image.alt);
     }
   });
-  console.debug("[web] media", { attachment_id: attachmentId, cache: state.mediaCache.has(attachmentId) ? "hit" : "miss" });
-  const cachedUrl = state.mediaCache.get(attachmentId);
-  if (cachedUrl) {
-    state.mediaCache.delete(attachmentId);
-    state.mediaCache.set(attachmentId, cachedUrl);
-    image.addEventListener("load", () => {
-      loading.remove();
-      onLoad?.();
-    }, { once: true });
-    image.src = cachedUrl;
-    return container;
-  }
-  const load = () => loadImage(container, image, path, attachmentId, direction, onLoad);
-  const observer = mediaObserver();
-  if (observer) {
-    container._loadMedia = load;
-    observer.observe(container);
-  } else {
-    load();
-  }
+  setupLazyThumbnail(container, image, path, attachmentId, direction, onLoad, showImageFallback);
   return container;
 }
 
@@ -599,7 +607,19 @@ function fileAttachment(attachment, protocol, direction) {
   container.append(icon, name);
   const attachmentId = String(attachment.attachment_id);
   const mediaPath = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
-  const open = () => {
+  const open = fileAttachmentOpenHandler(mediaPath, protocol);
+  container.addEventListener("click", open);
+  container.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open();
+    }
+  });
+  return container;
+}
+
+function fileAttachmentOpenHandler(mediaPath, protocol) {
+  return () => {
     // L'apertura deve restare sincrona con il gesto utente.
     const tab = window.open("", "_blank")
     if (!tab) return
@@ -630,7 +650,31 @@ function fileAttachment(attachment, protocol, direction) {
         }
       }
     })()
-  }
+  };
+}
+
+function videoThumbAttachment(attachment, protocol, direction, onLoad) {
+  const attachmentId = String(attachment.attachment_id);
+  if (state.mediaFailures.has(attachmentId)) return fileAttachment(attachment, protocol, direction);
+  const container = document.createElement("div");
+  container.className = "attachment attachment-video";
+  container.setAttribute("role", "button");
+  container.tabIndex = 0;
+  const loading = document.createElement("div");
+  loading.className = "attachment-loading";
+  const spinner = document.createElement("span");
+  spinner.className = "spinner";
+  spinner.setAttribute("aria-label", "Caricamento miniatura video");
+  loading.append(spinner);
+  const image = document.createElement("img");
+  image.alt = attachment.name || "Video allegato";
+  const badge = document.createElement("span");
+  badge.className = "attachment-video-badge";
+  badge.setAttribute("aria-hidden", "true");
+  badge.textContent = "▶";
+  container.append(loading, image, badge);
+  const mediaPath = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+  const open = fileAttachmentOpenHandler(mediaPath, protocol);
   container.addEventListener("click", open);
   container.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
@@ -638,6 +682,12 @@ function fileAttachment(attachment, protocol, direction) {
       open();
     }
   });
+  const showFallback = (target) => {
+    const fallback = fileAttachment(attachment, protocol, direction);
+    target.replaceWith(fallback);
+  };
+  const path = `${mediaPath}?w=480`;
+  setupLazyThumbnail(container, image, path, attachmentId, direction, onLoad, showFallback);
   return container;
 }
 
@@ -871,7 +921,10 @@ function renderMessages(messages, protocol) {
       bubble.append(sender);
     }
     appendRenderedQuote(bubble, item);
-    const isImage = item.attachment?.type?.toLowerCase().startsWith("image/");
+    const mediaKind = item.attachment?.media_kind;
+    const mediaType = item.attachment?.type?.toLowerCase();
+    const isVideo = mediaKind === "video" || mediaType?.startsWith("video/");
+    const isImage = mediaKind === "image" || (!mediaKind && mediaType?.startsWith("image/"));
     if (isImage) {
       if (item.localPreviewUrl) {
         const preview = document.createElement("div");
@@ -884,6 +937,8 @@ function renderMessages(messages, protocol) {
       } else {
         bubble.append(imageAttachment(item.attachment, protocol, item.direction, stickToBottom));
       }
+    } else if (isVideo) {
+      bubble.append(videoThumbAttachment(item.attachment, protocol, item.direction, stickToBottom));
     } else if (item.attachment) {
       bubble.append(fileAttachment(item.attachment, protocol, item.direction));
     }
