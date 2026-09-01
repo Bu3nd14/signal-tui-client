@@ -152,6 +152,59 @@ function formatTimestamp(value, includeDate = true) {
     : { hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
+function linkifyText(text) {
+  const fragment = document.createDocumentFragment();
+  for (const part of String(text).split(/(https?:\/\/[^\s<]+)/)) {
+    if (!part) continue;
+    if (/^https?:\/\//.test(part)) {
+      const linkText = trimUrlEnd(part);
+      const href = safeExternalUrl(linkText);
+      if (!href) {
+        fragment.append(document.createTextNode(part));
+        continue;
+      }
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.textContent = linkText;
+      fragment.append(anchor);
+      const trailing = part.slice(linkText.length);
+      if (trailing) fragment.append(document.createTextNode(trailing));
+    } else {
+      fragment.append(document.createTextNode(part));
+    }
+  }
+  return fragment;
+}
+
+function trimUrlEnd(raw) {
+  let end = raw.length;
+  while (end > 0) {
+    if (/[.,;:!?'"\]]/.test(raw[end - 1])) {
+      end -= 1;
+      continue;
+    }
+    if (raw[end - 1] === ")"
+      && (raw.slice(0, end).split(")").length - 1) > (raw.slice(0, end).split("(").length - 1)) {
+      end -= 1;
+      continue;
+    }
+    break;
+  }
+  return raw.slice(0, end);
+}
+
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 function timestampMilliseconds(value) {
   const numeric = Number(value);
   return numeric < 100000000000 ? numeric * 1000 : numeric;
@@ -967,7 +1020,7 @@ function renderMessages(messages, protocol) {
     if (displayText) {
       textEl = document.createElement("div");
       textEl.className = "message-text";
-      textEl.textContent = displayText;
+      textEl.replaceChildren(linkifyText(displayText));
       bubble.append(textEl);
     }
     const time = document.createElement("time");
@@ -1281,7 +1334,7 @@ async function submitEdit() {
   const item = storedMessageForEdit(editing);
   const wasEdited = Boolean(entry?.edited ?? item?.edited);
   const previousMarker = entry?.timeEl.querySelector?.(".message-edited") || null;
-  if (entry?.textEl) entry.textEl.textContent = newText;
+  if (entry?.textEl) entry.textEl.replaceChildren(linkifyText(newText));
   if (entry) {
     ensureEditedMarker(entry);
     entry.text = newText;
@@ -1306,7 +1359,7 @@ async function submitEdit() {
     });
   } catch (error) {
     if (error.message !== "unauthorized") {
-      if (entry?.textEl) entry.textEl.textContent = editing.oldText;
+      if (entry?.textEl) entry.textEl.replaceChildren(linkifyText(editing.oldText));
       if (entry) {
         if (!wasEdited && !previousMarker) {
           entry.timeEl.querySelector?.(".message-edited")?.remove();
@@ -1340,7 +1393,7 @@ function applyRemoteEdit(payload) {
       && timestampMilliseconds(candidate.ts) === timestampMilliseconds(payload.timestamp));
   }
   if (!entry) return;
-  if (entry.textEl) entry.textEl.textContent = payload.text;
+  if (entry.textEl) entry.textEl.replaceChildren(linkifyText(payload.text));
   ensureEditedMarker(entry);
   const item = state.messages.find((message) =>
     String(message.id) === String(payload.message_id)

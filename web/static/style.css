@@ -231,6 +231,7 @@ h2 { font-size: 1.05rem; }
 .bubble { position: relative; min-width: 0; padding: 9px 11px 7px; border-radius: 6px 16px 16px; background: var(--incoming); box-shadow: 0 2px 8px #0003; }
 .message.out .bubble { border-radius: 16px 6px 16px 16px; background: var(--outgoing); }
 .message-text { line-height: 1.42; overflow-wrap: anywhere; white-space: pre-wrap; }
+.message-text a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .message-time { display: block; margin-top: 5px; color: #c3cedaaa; font-size: .66rem; text-align: right; }
 .message-status.failed { color: var(--danger); }
 .message-tick { margin-left: 4px; color: #9aa7b8; font-size: .66rem; white-space: nowrap; }
