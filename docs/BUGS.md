@@ -1,5 +1,19 @@
 # Bug Report — Signal TUI Client
 
+> ## ⚠️ DEPRECATO — il tracking è migrato su GitHub
+>
+> **Dal 01/09/2026** questo file è **solo archivio storico** e non viene più aggiornato.
+> Il bug tracking è migrato su GitHub: **https://github.com/Bu3nd14/signal-tui-client/issues**
+>
+> - Bug **APERTI** → issue aperte **#126–#163** (etichettate per severità `severity:high/medium/low`, cluster `cluster:a…g` e `partially-mitigated`; milestone `Cluster A…G`).
+> - Bug **RISOLTI / WON'T FIX / WAD / IGIENE-HARDENING** → issue **chiuse #164–#189** (archivio).
+>
+> Ogni issue riporta nel body il riferimento `Source: docs/BUGS.md #N`. Il contenuto sottostante è mantenuto integralmente come storico.
+
+---
+
+# Bug Report — Signal TUI Client
+
 > **Stato:** Revisionato il 23/08/2026 — verifica conclusiva manuale del codice e integrazione dei problemi emersi dalla review architetturale (`documentation/review/ARCHITECT_REVIEW.md`). In data odierna aggiunti i bug **#54** (DuplicateIds su `load-more-msg`, emerso dai log runtime) e **#55** (receipt WhatsApp `@lid` senza match `is_mine`, residuo del #39 osservato sul campo). Il 24/08/2026 aggiunto **#56** (perdita permanente dei messaggi Signal durante finestre di disconnessione), emerso da un caso reale e verificato da shell/bytecode. Sempre il 24/08/2026 aggiunto **#57** (quote di media non-immagine su Signal non fedele al body), emerso dalla review del fix #37 sul branch `fix/quote-media-37-v2`. Il 24/08/2026 **#37 RISOLTO** con PR #53 (V2 + piano B, verifica empirica sul filo reale superata). Il 25/08/2026 aggiunti **#58–#64**: follow-up della feature *immagini native inline (kitty graphics protocol)* sul branch `dev-images` (design `documentation/design/DESIGN_NATIVE_IMAGES.md`), emersi dalle review di tester e architetto (P1–P10/B1–B8; P1–P4 e B1–B2 già risolti pre-merge). Il 26/08/2026 seconda revisione indipendente del codice `master` (architetto-2, documento di supporto `BUGS_DELTA_20260826.md`): rivalidazione dei 34 bug APERTI, aggiornamento dei riferimenti riga (drift sistematico) e integrazione degli esiti — aggiunti **#65** (fallimento di bind del server webhook inghiottito, con falso stato "webhook attivo" in status bar, Medio) e **#67** (lock single-instance TOCTOU su `/tmp/signal-tui.lock`, Minore); il **#66** è stato riclassificato come voce di igiene/hardening non-bug correlata al #53 e non conta tra gli aperti. Validazione dell'architetto sul delta di review: **APPROVATO CON RISERVE**, correzioni applicate. Il 28/08/2026 aggiunto **#69** (mark-read Telegram no-op: `read=1` mai persistito in SQLite — badge non letti Telegram mai azzerati in web UI/TUI), emerso dalla verifica E2E della web UI con test deterministico sul DB reale (diagnosi: bug backend, web UI corretta). **#69 RISOLTO** lo stesso giorno: `backends/telegram.py:756-762` — `mark_read` ora delega a `mark_read_sync` (persistenza `read=1` in SQLite), verificato sul DB reale (7→0 non letti). Il 28/08/2026 aggiunto **#70** (lazy rendering assente in TUI: chat con molte immagini enormi montate inline → lentezza severa, Medi, cluster E), emerso dalla verifica manuale post-ottimizzazione media web. Nessun bug APERTO risulta interamente risolto; #44 RISOLTO confermato sul codice con evidenza.
 > **Ordinamento:** Per impatto sull'utente finale (dal più grave al meno grave).
 > **Nota:** I bug #2, #14, #15 (pattern `_save_cache/_prune_cache/_load_cache` su JSON) sono stati **rimossi** — il passaggio a SQLite li ha resi obsoleti. I problemi della review architetturale (P1-1..P1-4, P2-1..P2-9, P3-1..P3-6) sono correlati alle voci esistenti tramite una riga **Correlazione**; quelli non coperti hanno aperto i nuovi bug **#42–#53** (verificati sul codice, riferimenti file:rigma reali).
