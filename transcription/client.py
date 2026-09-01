@@ -37,6 +37,7 @@ def _transcode_to_mp3(path: Path) -> Path:
             ],
             capture_output=True,
             timeout=120,
+            check=False,
         )
         if result.returncode != 0:
             raise TranscriptionError(
@@ -57,7 +58,7 @@ def _transcode_to_mp3(path: Path) -> Path:
 def _ffmpeg_available() -> bool:
     try:
         result = subprocess.run(
-            ["ffmpeg", "-version"], capture_output=True, timeout=10
+            ["ffmpeg", "-version"], capture_output=True, timeout=10, check=False
         )
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -114,7 +115,7 @@ class CloudTranscriptionClient:
 
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         headers = {"Authorization": f"Bearer {self.api_key}"}
-        with upload_path.open("rb") as audio_file:  # noqa: ASYNC230
+        with upload_path.open("rb") as audio_file:
             form.add_field("file", audio_file, filename=upload_path.name)
             async with (
                 aiohttp.ClientSession(timeout=timeout) as session,
