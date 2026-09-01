@@ -7,7 +7,7 @@ write (index churn on the UI thread).  The fix gates the migration behind
 ``PRAGMA user_version`` so the DROP/CREATE runs exactly once per database.
 
 These tests verify:
-  T1a: a legacy DB is migrated to ``user_version == 4`` and the SECOND
+  T1a: a legacy DB is migrated to ``user_version == 5`` and the SECOND
        ``_init_db()`` call does NOT run DROP/CREATE INDEX.
   T1b: after init the index is ``(protocol, contact_number, timestamp)`` and
        the ``messages`` table carries ``protocol`` and ``msg_id``.
@@ -127,13 +127,13 @@ class TestSchemaVersioning:
     """🧱 T1a-d — versioning dello schema via ``PRAGMA user_version``."""
 
     def test_init_db_migrates_legacy_and_sets_user_version(self, tmp_db):
-        """(a) ``_init_db()`` su DB legacy imposta ``user_version == 4``."""
+        """(a) ``_init_db()`` su DB legacy imposta ``user_version == 5``."""
         _make_legacy_db(tmp_db)
         assert _user_version(tmp_db) == 0  # legacy DB is unversioned
 
         backend_mod._init_db()
 
-        assert _user_version(tmp_db) == 4
+        assert _user_version(tmp_db) == 5
         assert "protocol" in _table_columns(tmp_db)
         assert "msg_id" in _table_columns(tmp_db)
         assert "reply_to_message_id" in _table_columns(tmp_db)
@@ -172,7 +172,7 @@ class TestSchemaVersioning:
         assert "media_kind" in cols
 
     def test_migrate_on_versioned_connection_is_noop(self, tmp_db):
-        """(c) Una migrazione già a v4 non modifica nuovamente lo schema."""
+        """(c) Una migrazione già a v5 non modifica nuovamente lo schema."""
         backend_mod._init_db()  # fresh, already versioned
 
         conn = sqlite3.connect(tmp_db)

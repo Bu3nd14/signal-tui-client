@@ -1407,6 +1407,43 @@ def create_api_router() -> Any:
         logger.info("[web-client] %s", message)
         return {"status": "ok"}
 
+    @router.post("/transcribe")
+    def transcribe(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+        proto = payload.get("protocol")
+        attachment_id = payload.get("attachment_id")
+        if proto not in _PROTOCOLS or not isinstance(attachment_id, str):
+            raise HTTPException(status_code=400, detail="Invalid request")
+        attachment_id = attachment_id.strip()
+        if not attachment_id:
+            raise HTTPException(status_code=400, detail="Invalid request")
+
+        service = getattr(request.app.state, "transcription_service", None)
+        if service is None:
+            raise HTTPException(status_code=503, detail="Trascrizione non configurata")
+        current = service.status(proto, attachment_id)
+        if current is not None and current["status"] == "ok":
+            return {"status": "done", "text": current.get("text", "")}
+        if current is not None and current["status"] == "pending":
+            return {"status": "pending"}
+
+        path = request.app.state.manager.get_attachment_path(proto, attachment_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Allegato non trovato")
+        service.submit(proto, attachment_id, path)
+        return {"status": "pending"}
+
+    @router.get("/transcribe/{proto}/{attachment_id:path}")
+    def transcription_status(
+        request: Request,
+        proto: Literal["signal", "whatsapp", "telegram"],
+        attachment_id: str,
+    ) -> dict[str, Any]:
+        service = getattr(request.app.state, "transcription_service", None)
+        if service is None:
+            raise HTTPException(status_code=503, detail="Trascrizione non configurata")
+        current = service.status(proto, attachment_id)
+        return current if current is not None else {"status": "unknown"}
+
     @router.get("/messages")
     async def messages(
         request: Request,

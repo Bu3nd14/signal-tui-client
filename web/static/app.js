@@ -35,6 +35,7 @@ const state = {
   pinnedUrls: new Set(),
   modalObjectUrl: null,
   mediaCache: new Map(),
+  transcriptions: new Map(),
   messages: [],
   optimistic: [],
   optimisticSequence: 0,
@@ -659,6 +660,98 @@ function fileAttachment(attachment, protocol, direction) {
   name.textContent = attachmentName({ attachment });
   container.append(icon, name);
   const attachmentId = String(attachment.attachment_id);
+  if (attachment.media_kind === "voice" || attachment.media_kind === "audio") {
+    const transcribeButton = document.createElement("button");
+    transcribeButton.className = "transcribe-button";
+    transcribeButton.type = "button";
+    transcribeButton.setAttribute("aria-label", "Trascrivi messaggio audio");
+    transcribeButton.textContent = "Trascrivi";
+    const transcriptBox = document.createElement("div");
+    transcriptBox.className = "transcript-box";
+    transcriptBox.hidden = true;
+    transcriptBox.addEventListener("click", (event) => event.stopPropagation());
+
+    const showTranscript = (text) => {
+      transcriptBox.textContent = text || "Nessun testo rilevato.";
+      transcriptBox.hidden = false;
+      transcribeButton.hidden = true;
+    };
+    const showTranscriptionError = (message) => {
+      transcriptBox.textContent = message;
+      transcriptBox.hidden = false;
+      transcribeButton.disabled = false;
+      transcribeButton.textContent = "Riprova";
+    };
+    const transcribe = async (event) => {
+      event.stopPropagation();
+      if (transcribeButton.disabled) return;
+      const key = `${protocol}:${attachmentId}`;
+      if (state.transcriptions.has(key)) {
+        showTranscript(state.transcriptions.get(key));
+        return;
+      }
+      transcribeButton.disabled = true;
+      transcriptBox.textContent = "Trascrizione in corso…";
+      transcriptBox.hidden = false;
+      try {
+        const response = await apiFetch("/api/transcribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ protocol, attachment_id: attachmentId }),
+        });
+        const data = await response.json();
+        if (data.status === "done") {
+          const text = data.text || "";
+          state.transcriptions.set(key, text);
+          showTranscript(text);
+          return;
+        }
+        if (data.status !== "pending") {
+          showTranscriptionError("Trascrizione non riuscita. Riprova.");
+          return;
+        }
+
+        const statusPath = `/api/transcribe/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+        for (let attempt = 0; attempt < 150; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          const statusResponse = await apiFetch(statusPath);
+          const status = await statusResponse.json();
+          if (status.status === "ok") {
+            const text = status.text || "";
+            state.transcriptions.set(key, text);
+            showTranscript(text);
+            return;
+          }
+          if (status.status === "failed") {
+            showTranscriptionError(status.error || "Trascrizione non riuscita. Riprova.");
+            return;
+          }
+        }
+        showTranscriptionError("Timeout. Riprova.");
+      } catch (error) {
+        if (error.status === 401 || error.message === "unauthorized") {
+          transcriptBox.hidden = true;
+          transcribeButton.disabled = false;
+          return;
+        }
+        const message = error.status === 404
+          ? "Allegato non più disponibile."
+          : error.status === 503
+            ? "Trascrizione non configurata."
+            : "Trascrizione non riuscita. Riprova.";
+        showTranscriptionError(message);
+      }
+    };
+    transcribeButton.addEventListener("click", transcribe);
+    transcribeButton.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        event.stopPropagation();
+        void transcribe(event);
+      }
+    });
+    container.append(transcribeButton, transcriptBox);
+  }
   const mediaPath = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
   const open = fileAttachmentOpenHandler(mediaPath, protocol);
   container.addEventListener("click", open);
