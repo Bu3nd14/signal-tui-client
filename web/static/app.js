@@ -742,6 +742,7 @@ function startReply(item) {
     quoteMessage: window.SignalTuiReconcile.replyQuoteMessage(item),
     isMedia: Boolean(item.attachment),
     isImage: Boolean(item.attachment?.type?.toLowerCase().startsWith("image/")),
+    isVideo: Boolean(item.attachment?.media_kind === "video" || item.attachment?.type?.toLowerCase().startsWith("video/")),
     contentType: item.attachment?.type,
     attachmentId: item.attachment?.attachment_id,
     caption: item.text || "",
@@ -825,10 +826,25 @@ function appendRenderedQuote(bubble, item) {
   }
   const hasRealCaption = Boolean(quoteText) && !item.quote_media_placeholder;
   let thumb = null;
-  thumb = quoteThumb(item, () => { body.hidden = false; });
+  let thumbContainer = null;
+  thumb = quoteThumb(item, () => {
+    thumbContainer?.remove();
+    body.hidden = false;
+  });
   if (thumb) {
     quote.className = "message-quote has-thumb";
-    quote.append(thumb);
+    if (item.quote_content_type?.toLowerCase().startsWith("video/")) {
+      thumbContainer = document.createElement("span");
+      thumbContainer.className = "message-quote-thumb-video";
+      const badge = document.createElement("span");
+      badge.className = "attachment-video-badge";
+      badge.setAttribute("aria-hidden", "true");
+      badge.textContent = "▶";
+      thumbContainer.append(thumb, badge);
+      quote.append(thumbContainer);
+    } else {
+      quote.append(thumb);
+    }
     if (!hasRealCaption) body.hidden = true;
   }
   if ((!item.quote_media_placeholder || !thumb) && quoteText) {
@@ -1700,8 +1716,11 @@ async function submitMessage() {
     optimistic.quote_author = reply.quoteAuthor;
     optimistic.quote_message = reply.quoteMessage;
     optimistic.quote_text = reply.quoteMessage;
-    if (reply.isImage && active.protocol !== "signal") optimistic.quote_media_type = "image";
-    if (reply.isImage && reply.attachmentId) {
+    if (reply.contentType) optimistic.quote_content_type = reply.contentType;
+    if ((reply.isImage || reply.isVideo) && active.protocol !== "signal") {
+      optimistic.quote_media_type = reply.isVideo ? "video" : "image";
+    }
+    if ((reply.isImage || reply.isVideo) && reply.attachmentId) {
       const quoteAttachmentId = String(reply.attachmentId).split("/").map(encodeURIComponent).join("/");
       optimistic.quote_thumb_url = `/api/media/${active.protocol}/${quoteAttachmentId}?w=96`;
       // Senza caption reale la bolla optimistic mostra SOLO la miniatura

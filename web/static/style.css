@@ -353,6 +353,8 @@ h2 { font-size: 1.05rem; }
 .message-quote-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .message-quote-body[hidden] { display: none; }
 .message-quote-thumb { width: 48px; height: 48px; object-fit: cover; border-radius: 3px; flex: none; background: var(--panel-raised); }
+.message-quote-thumb-video { position: relative; display: block; width: 48px; height: 48px; flex: none; }
+.message-quote-thumb-video .attachment-video-badge { width: 24px; height: 24px; padding-left: 2px; font-size: .7rem; }
 .message-quote strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .message-quote span { overflow-wrap: anywhere; }
 .message-quote strong { color: #b8d0ff; }
@@ -510,6 +512,7 @@ h2 { font-size: 1.05rem; }
   .back-button { display: inline-grid; }
   .message { max-width: 88%; }
   .message-quote-thumb { width: 40px; height: 40px; }
+  .message-quote-thumb-video { width: 40px; height: 40px; }
 }
 
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }

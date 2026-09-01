@@ -584,18 +584,18 @@ def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
 
     1. ``quote_attachment_path`` sotto ``CACHE_DIR/quote-thumbs`` (thumb
        estratta) → ``/api/quote-media`` (endpoint dedicato anti-traversal);
-    2. ``quote_attachment_path`` esistente e immagine (anche sotto la media
+    2. ``quote_attachment_path`` esistente e immagine/video (anche sotto la media
        root del protocollo, es. allegato originale Signal/Telegram/WhatsApp)
        → ``/api/media`` con il path;
-    3. ``quote_attachment_id`` + ``image/*`` (o estensione immagine per quote
-       legacy senza content_type) → ``/api/media`` con l'id;
+    3. ``quote_attachment_id`` + content type media (o estensione nota per
+       quote legacy senza content_type) → ``/api/media`` con l'id;
     altrimenti ``None`` (nessuna miniatura: placeholder testuale).
     """
     proto = str(row["protocol"])
     from backend import CACHE_DIR
 
     thumbs_root = (Path(CACHE_DIR) / "quote-thumbs").resolve()
-    _IMAGE_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+    image_extensions = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 
     def _media_url(value: str) -> str:
         encoded = "/".join(url_quote(segment, safe="") for segment in value.split("/"))
@@ -608,49 +608,93 @@ def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
             return f"/api/quote-media/{proto}/{row['id']}?w=96"
         content_type = (row["quote_content_type"] or "").lower()
         is_image = content_type.startswith("image/") or str(path).lower().endswith(
-            _IMAGE_EXT
+            image_extensions
         )
-        if is_image and resolved.is_file():
+        is_video = content_type.startswith("video/") or resolved.suffix.lower() in (
+            _VIDEO_EXTENSIONS
+        )
+        if (is_image or is_video) and resolved.is_file():
             return _media_url(str(path))
-        return None
     quote_attachment_id = row["quote_attachment_id"]
     quote_content_type = (row["quote_content_type"] or "").lower()
     is_image = quote_content_type.startswith("image/") or (
-        not quote_content_type and str(quote_attachment_id).lower().endswith(_IMAGE_EXT)
+        not quote_content_type
+        and str(quote_attachment_id).lower().endswith(image_extensions)
     )
-    if quote_attachment_id and is_image:
+    is_video = quote_content_type.startswith("video/") or (
+        not quote_content_type
+        and Path(str(quote_attachment_id)).suffix.lower() in _VIDEO_EXTENSIONS
+    )
+    if quote_attachment_id and (is_image or is_video):
         return _media_url(str(quote_attachment_id))
     # 4. Fallback (reply inviate senza metadati quote persistiti): risolvi
-    # l'immagine quotata dalla stessa chat tramite quote_timestamp e usa il
+    # il media quotato dalla stessa chat tramite quote_timestamp e usa il
     # suo attachment_id (il backend non persiste i metadati all'invio).
-    quoted = _quoted_image_attachment_id(
-        proto, str(row["contact_number"]), row["quote_timestamp"]
+    quote_text = str(row["quote_text"] or "").lower()
+    has_video_name = any(
+        re.search(rf"{re.escape(extension)}\b", quote_text)
+        for extension in _VIDEO_EXTENSIONS
     )
-    if not quoted and (row["quote_content_type"] or "").lower().startswith("image/"):
+    has_image_name = bool(re.search(r"\.(?:jpe?g|png|gif|webp)\b", quote_text))
+    media_kind = (
+        "video"
+        if quote_content_type.startswith("video/") or has_video_name or "🎬" in quote_text
+        else "image"
+        if quote_content_type.startswith("image/") or has_image_name or "🖼️" in quote_text
+        else None
+    )
+    quoted = _quoted_media_attachment_id(
+        proto, str(row["contact_number"]), row["quote_timestamp"], media_kind
+    )
+    if not quoted and media_kind in {"image", "video"}:
         # 5. Fallback per nome file: la quote testuale cita il file (es.
         # "IMG_1303.jpg — 🖼️ Immagine"); lo cerchiamo tra gli allegati della
         # chat quando il timestamp quotato non è stato persistito dal backend.
-        quoted = _quoted_image_by_filename(
+        quoted = _quoted_media_by_filename(
             proto,
             str(row["contact_number"]),
             row["quote_text"],
             row["timestamp"],
+            media_kind,
         )
     if not quoted:
         # 6. Fallback per id messaggio quotato (Telegram/WhatsApp persistono
         # reply_to_message_id ma non sempre il timestamp quotato né l'allegato).
-        quoted = _quoted_image_by_message_id(
-            proto, str(row["contact_number"]), row["reply_to_message_id"]
+        quoted = _quoted_media_by_message_id(
+            proto,
+            str(row["contact_number"]),
+            row["reply_to_message_id"],
+            media_kind,
         )
     if quoted:
         return _media_url(quoted)
     return None
 
 
-def _quoted_image_attachment_id(
-    proto: str, contact_number: str, quote_ts: Any
+def _quoted_media_clause(kind: Literal["image", "video"] | None) -> str:
+    image = (
+        "content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
+        "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
+        "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp'"
+    )
+    video = "content_type LIKE 'video/%' OR " + " OR ".join(
+        f"lower(attachment_id) LIKE '%{extension}'"
+        for extension in sorted(_VIDEO_EXTENSIONS)
+    )
+    if kind == "image":
+        return f"AND ({image})"
+    if kind == "video":
+        return f"AND ({video})"
+    return f"AND ({image} OR {video})"
+
+
+def _quoted_media_attachment_id(
+    proto: str,
+    contact_number: str,
+    quote_ts: Any,
+    kind: Literal["image", "video"] | None = None,
 ) -> str | None:
-    """Attachment id dell'immagine quotata (stessa chat).
+    """Attachment id del media quotato (stessa chat).
 
     Match PRIMA esatto sul timestamp: evita falsi positivi quando messaggi
     vicini (±2s) convivono (es. un'immagine appena inviata e la reply).
@@ -662,11 +706,7 @@ def _quoted_image_attachment_id(
     import backend
     from backend.db import _DB_LOCK
 
-    image_clause = (
-        "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-        "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-        "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
-    )
+    media_clause = _quoted_media_clause(kind)
     try:
         with _DB_LOCK:
             connection = sqlite3.connect(backend.DB_FILE)
@@ -675,7 +715,7 @@ def _quoted_image_attachment_id(
                     "SELECT attachment_id FROM messages "
                     "WHERE protocol = ? AND contact_number = ? "
                     "AND timestamp = ? AND attachment_id IS NOT NULL "
-                    + image_clause
+                    + media_clause
                     + " LIMIT 1",
                     (proto, contact_number, quote_ts),
                 ).fetchone()
@@ -686,14 +726,14 @@ def _quoted_image_attachment_id(
                         (proto, contact_number, quote_ts),
                     ).fetchone()
                     if exists:
-                        # Il messaggio quotato esiste ma non è un'immagine:
+                        # Il messaggio quotato esiste ma non è un media compatibile:
                         # niente miniatura (mai prendere messaggi vicini).
                         return None
                     row = connection.execute(
                         "SELECT attachment_id FROM messages "
                         "WHERE protocol = ? AND contact_number = ? "
                         "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
-                        + image_clause
+                        + media_clause
                         + " ORDER BY ABS(timestamp - ?) LIMIT 1",
                         (proto, contact_number, quote_ts, quote_ts),
                     ).fetchone()
@@ -706,10 +746,14 @@ def _quoted_image_attachment_id(
     return str(row[0])
 
 
-def _quoted_image_by_filename(
-    proto: str, contact_number: str, quote_text: Any, quoter_ts: Any
+def _quoted_media_by_filename(
+    proto: str,
+    contact_number: str,
+    quote_text: Any,
+    quoter_ts: Any,
+    kind: Literal["image", "video"] | None = None,
 ) -> str | None:
-    """Attachment id dell'immagine quotata, risolto per nome file nella quote.
+    """Attachment id del media quotato, risolto per nome file nella quote.
 
     Usato quando il backend non ha persistito ``quote_timestamp`` né metadati
     dell'allegato quotato (es. quote Signal a un'immagine): la ``quote_text``
@@ -719,8 +763,17 @@ def _quoted_image_by_filename(
     """
     if not quote_text:
         return None
+    image_pattern = r"jpe?g|png|gif|webp"
+    video_pattern = "|".join(extension.removeprefix(".") for extension in sorted(_VIDEO_EXTENSIONS))
+    extension_pattern = (
+        image_pattern
+        if kind == "image"
+        else video_pattern
+        if kind == "video"
+        else f"{image_pattern}|{video_pattern}"
+    )
     match = re.search(
-        r"([A-Za-z0-9][\w.\- ]*\.(?:jpe?g|png|gif|webp))\b",
+        rf"([A-Za-z0-9][\w.\- ]*\.(?:{extension_pattern}))\b",
         str(quote_text),
         re.IGNORECASE,
     )
@@ -732,6 +785,7 @@ def _quoted_image_by_filename(
     import backend
     from backend.db import _DB_LOCK
 
+    media_clause = _quoted_media_clause(kind)
     try:
         with _DB_LOCK:
             connection = sqlite3.connect(backend.DB_FILE)
@@ -741,6 +795,8 @@ def _quoted_image_by_filename(
                     "WHERE protocol = ? AND contact_number = ? "
                     "AND attachment_id IS NOT NULL AND timestamp < ? "
                     "AND (attachment_info LIKE ? OR attachment_id LIKE ?) "
+                    + media_clause
+                    + " "
                     "ORDER BY timestamp DESC LIMIT 5",
                     (
                         proto,
@@ -764,10 +820,13 @@ def _quoted_image_by_filename(
     return str(best[0])
 
 
-def _quoted_image_by_message_id(
-    proto: str, contact_number: str, reply_to_message_id: Any
+def _quoted_media_by_message_id(
+    proto: str,
+    contact_number: str,
+    reply_to_message_id: Any,
+    kind: Literal["image", "video"] | None = None,
 ) -> str | None:
-    """Attachment id dell'immagine quotata per ``msg_id``.
+    """Attachment id del media quotato per ``msg_id``.
 
     Telegram/WhatsApp persistono ``reply_to_message_id`` (= id del messaggio
     quotato, colonna ``msg_id``) ma non sempre il timestamp quotato: il match
@@ -778,11 +837,7 @@ def _quoted_image_by_message_id(
     import backend
     from backend.db import _DB_LOCK
 
-    image_clause = (
-        "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-        "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-        "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
-    )
+    media_clause = _quoted_media_clause(kind)
     try:
         with _DB_LOCK:
             connection = sqlite3.connect(backend.DB_FILE)
@@ -792,7 +847,7 @@ def _quoted_image_by_message_id(
                     "WHERE protocol = ? AND contact_number = ? "
                     "AND attachment_id IS NOT NULL "
                     "AND (msg_id = ? OR msg_id LIKE '%_' || ?) "
-                    + image_clause
+                    + media_clause
                     + " LIMIT 1",
                     (
                         proto,
