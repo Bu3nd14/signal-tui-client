@@ -124,9 +124,7 @@ def test_get_returns_transcription_status(record):
     service.status.return_value = record
 
     with TestClient(make_app(FakeManager(), service)) as client:
-        response = client.get(
-            "/api/transcribe/signal/folder/audio-1", headers=AUTH
-        )
+        response = client.get("/api/transcribe/signal/folder/audio-1", headers=AUTH)
 
     assert response.status_code == 200
     assert response.json() == (record or {"status": "unknown"})

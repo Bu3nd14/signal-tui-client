@@ -30,9 +30,16 @@ def _transcode_to_mp3(path: Path) -> Path:
     try:
         result = subprocess.run(
             [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-i", str(path),
-                "-ac", "1", "-b:a", "64k",
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(path),
+                "-ac",
+                "1",
+                "-b:a",
+                "64k",
                 tmp_path,
             ],
             capture_output=True,

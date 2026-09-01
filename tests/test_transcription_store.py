@@ -22,9 +22,7 @@ def test_get_missing_key_returns_none(transcription_db: Path):
 
 
 def test_set_then_get_returns_persisted_record(transcription_db: Path):
-    store.set(
-        "signal", "audio-1", status="ok", text="ciao", model="gpt-transcribe"
-    )
+    store.set("signal", "audio-1", status="ok", text="ciao", model="gpt-transcribe")
 
     record = store.get("signal", "audio-1")
 
@@ -38,9 +36,7 @@ def test_set_then_get_returns_persisted_record(transcription_db: Path):
 
 def test_set_upserts_existing_key_without_duplicate(transcription_db: Path):
     store.set("telegram", "audio-2", status="pending")
-    store.set(
-        "telegram", "audio-2", status="failed", error="boom", model="whisper-1"
-    )
+    store.set("telegram", "audio-2", status="failed", error="boom", model="whisper-1")
 
     record = store.get("telegram", "audio-2")
     with sqlite3.connect(transcription_db) as connection:
@@ -66,8 +62,7 @@ def test_init_db_creates_transcriptions_table_at_schema_v5(transcription_db: Pat
         ).fetchone()
         version = connection.execute("PRAGMA user_version").fetchone()[0]
         columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(transcriptions)")
+            row[1] for row in connection.execute("PRAGMA table_info(transcriptions)")
         }
 
     assert table == ("transcriptions",)

@@ -127,7 +127,9 @@ async def test_language_field_depends_on_model(
     names = [name for name, _, _ in form.fields]
     assert expected_field in names
     assert ({"language", "languages"} - {expected_field}).isdisjoint(names)
-    assert next(value for name, value, _ in form.fields if name == expected_field) == "it"
+    assert (
+        next(value for name, value, _ in form.fields if name == expected_field) == "it"
+    )
 
 
 @pytest.mark.asyncio
