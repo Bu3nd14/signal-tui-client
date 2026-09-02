@@ -2346,7 +2346,9 @@ class WhatsAppBackend(ChatBackend):
                 if msg.get("msg_type", "text") != "text":
                     continue
                 if str(msg.get("id") or "") == str(msg_id):
-                    return msg if _norm(msg.get("text", "")) != normalized_text else None
+                    return (
+                        msg if _norm(msg.get("text", "")) != normalized_text else None
+                    )
         if not is_mine and ts_ms:
             candidates = [
                 m
@@ -2405,7 +2407,10 @@ class WhatsAppBackend(ChatBackend):
                 mark_edited=mark_edited,
             )
         logger.info(
-            "edit applied id=%s old=%r new=%r", target.get("id") or message_id, old_text, new_text
+            "edit applied id=%s old=%r new=%r",
+            target.get("id") or message_id,
+            old_text,
+            new_text,
         )
         return {
             "message_id": str(target.get("id") or message_id),
