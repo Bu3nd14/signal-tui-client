@@ -3,11 +3,19 @@
 import asyncio
 import base64
 import queue
+import time
 from contextlib import suppress
 from typing import Any
 
 from web.auth import is_authorized
 from web.bridge import get_push_queue
+
+#: Heartbeat cadence: the SPA watchdog (app.js) treats the WebSocket as a
+#: zombie when no traffic arrives for 10s; the server therefore fans out a
+#: lightweight ``{"type": "heartbeat"}`` frame every ``HEARTBEAT_INTERVAL_S``
+#: even when the push queue is empty, so healthy connections are never
+#: mistaken for dead.
+HEARTBEAT_INTERVAL_S = 5.0
 
 
 def _browser_authorization(websocket: Any) -> tuple[str | None, str | None]:
@@ -35,6 +43,7 @@ def _browser_authorization(websocket: Any) -> tuple[str | None, str | None]:
 
 
 async def _broadcast(app: Any) -> None:
+    last_send = 0.0
     while True:
         push_queue = get_push_queue()
         if push_queue is None:
@@ -43,7 +52,15 @@ async def _broadcast(app: Any) -> None:
         try:
             event = await asyncio.to_thread(push_queue.get, True, 0.5)
         except queue.Empty:
-            continue
+            event = None
+        if event is None:
+            now = time.monotonic()
+            if now - last_send < HEARTBEAT_INTERVAL_S:
+                continue
+            event = {"type": "heartbeat"}
+            last_send = now
+        else:
+            last_send = time.monotonic()
         stale = []
         for websocket in tuple(app.state.websocket_connections):
             try:

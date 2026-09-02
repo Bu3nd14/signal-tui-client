@@ -193,8 +193,12 @@ h2 { font-size: 1.05rem; }
 .thread-heading p { margin-top: 3px; color: var(--muted); font-size: .78rem; text-transform: capitalize; }
 .back-button { display: none; font-size: 2rem; }
 .connection-state { color: var(--muted); font-size: .72rem; }
-.connection-state::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: #687482; }
-.connection-state.online::before { background: #54ce8a; box-shadow: 0 0 8px #54ce8a; }
+.connection-state::before {
+  content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px;
+  border-radius: 50%; background: var(--dot-color, #687482);
+  box-shadow: 0 0 8px var(--dot-color, transparent);
+  transition: background .12s linear, box-shadow .12s linear;
+}
 
 .error-banner {
   display: flex;
