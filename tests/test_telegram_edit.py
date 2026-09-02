@@ -345,7 +345,11 @@ class TestApplyEdit:
             backend.apply_edit("42", "99", "nuovo")
 
         mock_update.assert_called_once_with(
-            "42", "nuovo", protocol=PROTOCOL_TELEGRAM, msg_id="99"
+            "42",
+            "nuovo",
+            protocol=PROTOCOL_TELEGRAM,
+            msg_id="99",
+            mark_edited=True,
         )
 
     def test_identical_text_returns_none(self):

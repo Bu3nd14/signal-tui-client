@@ -103,7 +103,7 @@ class TestFetchHistoryAckThresholds:
     def test_ack2_delivered_ack3_read_ack1_none(self):
         backend = _make_backend()
         backend._presence_subscribe_lazy = MagicMock()
-        backend.ingest_message = lambda cid, data, ts: True
+        backend.ingest_message = lambda cid, data, ts, *, reconcile=False: True
         backend._rest.list_messages.return_value = [
             {
                 "id": "m2",

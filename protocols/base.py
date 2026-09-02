@@ -207,6 +207,7 @@ class ChatBackend(ABC):
         *,
         is_mine: bool | None = None,
         edit_timestamp: int | None = None,
+        mark_edited: bool = True,
     ) -> dict[str, object] | None:
         """Applica un edit (ricevuto o echo) a cache in-memory + SQLite.
 

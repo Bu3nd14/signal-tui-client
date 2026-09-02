@@ -80,7 +80,13 @@ def _only_message_widget(app) -> MessageWidget:
 
 
 def _fake_apply_edit(
-    contact_id, message_id, new_text, *, is_mine=None, edit_timestamp=None
+    contact_id,
+    message_id,
+    new_text,
+    *,
+    is_mine=None,
+    edit_timestamp=None,
+    mark_edited=True,
 ):
     """Simula ``backend.apply_edit`` (mutazione + info) per il path UI."""
     return {

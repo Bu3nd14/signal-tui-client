@@ -200,7 +200,11 @@ class EditMessageMixin:
         backend = self.manager.get(snap["protocol"])
         if backend is not None:
             backend.apply_edit(
-                snap["contact_id"], snap["message_id"], old_text, is_mine=True
+                snap["contact_id"],
+                snap["message_id"],
+                old_text,
+                is_mine=True,
+                mark_edited=False,
             )
         self._rewrite_message_identity(
             snap["protocol"],

@@ -451,6 +451,7 @@ class TestApplyEdit:
             timestamp=1755001000,
             old_text="vecchio",
             is_mine=False,
+            mark_edited=True,
         )
 
     def test_identical_text_returns_none(self):

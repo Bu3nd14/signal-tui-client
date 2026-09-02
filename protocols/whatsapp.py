@@ -68,6 +68,10 @@ def _is_fetchable_jid(jid: str) -> bool:
     return bool(_FETCHABLE_JID_RE.fullmatch(jid))
 
 
+def _norm(text: object) -> str:
+    return " ".join(str(text).split())
+
+
 def _resolve_wa_media_chat_id(attachment_id: str) -> tuple[str | None, str]:
     """Extract the chat JID and extensionless WAHA media name."""
     if attachment_id.startswith(("http://", "https://")):
@@ -1158,6 +1162,7 @@ class WhatsAppBackend(ChatBackend):
                         "attachment_id": payload.get("attachment_id"),
                     },
                     payload.get("timestamp", 0),
+                    reconcile=True,
                 )
 
                 ack = payload.get("ack")
@@ -1865,6 +1870,9 @@ class WhatsAppBackend(ChatBackend):
         text: str,
         msg_id: str | None = None,
         attachment_id: str | None = None,
+        *,
+        msg_type: str = "text",
+        reconcile: bool = False,
     ) -> dict | None:
         """Return the cached message matching the same identity, or ``None``.
 
@@ -1876,9 +1884,10 @@ class WhatsAppBackend(ChatBackend):
         For **outgoing** messages (``is_mine=True``) the id is stable and
         used as the primary identity (optimistic-send echo dedup).
         """
+        entries = self.cache.get(contact_id, [])
         best_idless: dict | None = None
         best_idless_delta: int | None = None
-        for msg in self.cache.get(contact_id, []):
+        for msg in entries:
             if msg.get("is_mine") != is_mine:
                 continue
             # Outgoing: l'id è l'identità primaria e stabile (echo message.ack con
@@ -1934,7 +1943,27 @@ class WhatsAppBackend(ChatBackend):
                         best_idless_delta = delta
             elif abs(msg.get("timestamp", 0) - ts) <= _SEND_DEDUP_WINDOW_MS:
                 return msg
-        return best_idless
+        if best_idless is not None:
+            return best_idless
+        if (
+            reconcile
+            and is_mine
+            and msg_id
+            and text.strip()
+            and not attachment_id
+            and msg_type == "text"
+        ):
+            candidates = [
+                msg
+                for msg in entries
+                if msg.get("is_mine")
+                and msg.get("text") == text
+                and msg.get("msg_type") == "text"
+                and not msg.get("attachment_id")
+            ]
+            if len(candidates) == 1:
+                return candidates[0]
+        return None
 
     def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
         """Persist a message to the SQLite cache (WhatsApp protocol)."""
@@ -2105,7 +2134,13 @@ class WhatsAppBackend(ChatBackend):
         return True
 
     def ingest_message(
-        self, contact_id: str, data: dict, ts: int, persist: bool = True
+        self,
+        contact_id: str,
+        data: dict,
+        ts: int,
+        persist: bool = True,
+        *,
+        reconcile: bool = False,
     ) -> bool | str:
         """Save an incoming/outgoing message to the DB cache and in-memory cache.
 
@@ -2129,9 +2164,31 @@ class WhatsAppBackend(ChatBackend):
         msg_id = data.get("id")
 
         existing = self._message_already_cached(
-            contact_id, ts, is_mine, text, msg_id, data.get("attachment_id")
+            contact_id,
+            ts,
+            is_mine,
+            text,
+            msg_id,
+            data.get("attachment_id"),
+            msg_type=data.get("msg_type", "text"),
+            reconcile=reconcile,
         )
         if existing is not None:
+            if (
+                reconcile
+                and msg_id
+                and existing.get("id")
+                and existing.get("id") != msg_id
+            ):
+                logger.info(
+                    "history reconcile kept original id=%s instead of remote id=%s "
+                    "contact=%s text=%r",
+                    existing.get("id"),
+                    msg_id,
+                    contact_id,
+                    text,
+                )
+                return False
             # Upgrade an existing entry that lacks an id (legacy / optimistic send).
             # This applies to both outgoing (optimistic send echo) and incoming
             # (legacy DB entries from before the msg_id column existed) so the
@@ -2195,6 +2252,33 @@ class WhatsAppBackend(ChatBackend):
                 )
             return "changed" if attachment_changed or caption_changed else False
 
+        if (
+            reconcile
+            and is_mine
+            and msg_id
+            and text.strip()
+            and not data.get("attachment_id")
+            and data.get("msg_type", "text") == "text"
+        ):
+            candidates = [
+                msg
+                for msg in self.cache.get(contact_id, [])
+                if msg.get("is_mine")
+                and msg.get("text") == text
+                and msg.get("msg_type") == "text"
+                and not msg.get("attachment_id")
+            ]
+            if len(candidates) >= 2:
+                logger.warning(
+                    "history reconcile skipped ambiguous outgoing text "
+                    "contact=%s remote_id=%s text=%r candidates=%d",
+                    contact_id,
+                    msg_id,
+                    text,
+                    len(candidates),
+                )
+                return False
+
         # Fallback DB post-send (bug #44): un messaggio failed può avere la sua
         # riga id-less nel DB ma NON in self.cache.  Prima di inserire una nuova
         # riga, riusiamo quella riga (se unica entro la finestra echo) invece di
@@ -2253,6 +2337,7 @@ class WhatsAppBackend(ChatBackend):
         """
         if not text:
             return None
+        normalized_text = _norm(text)
         entries = self.cache.get(contact_id, [])
         if msg_id:
             for msg in entries:
@@ -2261,7 +2346,9 @@ class WhatsAppBackend(ChatBackend):
                 if msg.get("msg_type", "text") != "text":
                     continue
                 if str(msg.get("id") or "") == str(msg_id):
-                    return msg if msg.get("text", "") != text else None
+                    return (
+                        msg if _norm(msg.get("text", "")) != normalized_text else None
+                    )
         if not is_mine and ts_ms:
             candidates = [
                 m
@@ -2269,14 +2356,21 @@ class WhatsAppBackend(ChatBackend):
                 if not m.get("is_mine")
                 and m.get("msg_type", "text") == "text"
                 and abs(int(m.get("timestamp") or 0) - ts_ms) <= 2000
-                and m.get("text", "") != text
+                and _norm(m.get("text", "")) != normalized_text
             ]
             if len(candidates) == 1:  # ambiguità → skip (vedi §9)
                 return candidates[0]
         return None
 
     def apply_edit(
-        self, contact_id, message_id, new_text, *, is_mine=None, edit_timestamp=None
+        self,
+        contact_id,
+        message_id,
+        new_text,
+        *,
+        is_mine=None,
+        edit_timestamp=None,
+        mark_edited: bool = True,
     ) -> dict | None:
         from protocols.db import _update_message_text
 
@@ -2290,10 +2384,10 @@ class WhatsAppBackend(ChatBackend):
         if target is None or target.get("msg_type", "text") != "text":
             return None
         old_text = target.get("text", "")
-        if old_text == new_text:
+        if _norm(old_text) == _norm(new_text):
             return None  # echo nostro edit: no-op
         target["text"] = new_text
-        target["edited"] = True
+        target["edited"] = mark_edited
         # niente _sort_contact_cache: il timestamp non cambia
         if target.get("id"):
             _update_message_text(
@@ -2301,6 +2395,7 @@ class WhatsAppBackend(ChatBackend):
                 new_text,
                 protocol=PROTOCOL_WHATSAPP,
                 msg_id=str(target["id"]),
+                mark_edited=mark_edited,
             )
         else:
             _update_message_text(
@@ -2309,7 +2404,14 @@ class WhatsAppBackend(ChatBackend):
                 protocol=PROTOCOL_WHATSAPP,
                 timestamp=int(target.get("timestamp") or 0),
                 old_text=old_text,
+                mark_edited=mark_edited,
             )
+        logger.info(
+            "edit applied id=%s old=%r new=%r",
+            target.get("id") or message_id,
+            old_text,
+            new_text,
+        )
         return {
             "message_id": str(target.get("id") or message_id),
             "timestamp": int(target.get("timestamp") or 0),
