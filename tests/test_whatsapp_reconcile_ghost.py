@@ -51,9 +51,9 @@ def test_reconcile_different_id_keeps_original_row(tmp_db):
     backend = _backend()
     assert backend.ingest_message(CID, _message("A"), TS)
 
-    assert backend.ingest_message(
-        CID, _message("B"), TS + 1000, reconcile=True
-    ) is False
+    assert (
+        backend.ingest_message(CID, _message("B"), TS + 1000, reconcile=True) is False
+    )
 
     assert len(backend.cache[CID]) == 1
     assert backend.cache[CID][0]["id"] == "A"
@@ -65,9 +65,7 @@ def test_reconcile_exact_ids_keeps_repeated_real_sends(tmp_db):
     assert backend.ingest_message(CID, _message("X", "OK"), TS)
     assert backend.ingest_message(CID, _message("Y", "OK"), TS + 1000)
 
-    assert not backend.ingest_message(
-        CID, _message("X", "OK"), TS, reconcile=True
-    )
+    assert not backend.ingest_message(CID, _message("X", "OK"), TS, reconcile=True)
     assert not backend.ingest_message(
         CID, _message("Y", "OK"), TS + 1000, reconcile=True
     )
