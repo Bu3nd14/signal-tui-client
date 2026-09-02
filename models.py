@@ -172,6 +172,35 @@ def is_media_quote_placeholder_composite(text: str | None) -> bool:
 
 
 _CAPTION_FILENAME_RE = re.compile(r"^[^\s/\\]+\.[a-z0-9]{1,5}$", re.IGNORECASE)
+_CAPTION_FILE_EXTENSIONS = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".heic",
+    ".heif",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".avif",
+    ".svg",
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".webm",
+    ".mp3",
+    ".oga",
+    ".ogg",
+    ".opus",
+    ".aac",
+    ".m4a",
+    ".wav",
+    ".flac",
+    ".pdf",
+    ".doc",
+    ".docx",
+)
 _MEDIA_LABELS = {
     "photo",
     "image",
@@ -199,7 +228,11 @@ def is_caption_like(value: str | None) -> bool:
     if not stripped or is_media_quote_placeholder_composite(stripped):
         return False
     lowered = stripped.lower()
-    if lowered in _MEDIA_LABELS or _CAPTION_FILENAME_RE.fullmatch(stripped):
+    if (
+        lowered in _MEDIA_LABELS
+        or lowered.endswith(_CAPTION_FILE_EXTENSIONS)
+        or _CAPTION_FILENAME_RE.fullmatch(stripped)
+    ):
         return False
     if re.fullmatch(r"[a-z0-9.+-]+/[a-z0-9.+-]+(?:\s*;.*)?", lowered):
         return False

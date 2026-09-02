@@ -108,6 +108,8 @@ def test_is_caption_like_rejects_media_metadata():
         "photo.avif",
         "photo.tiff",
         "photo.svg",
+        "Image: IMG_1303.jpg",
+        "foto 2024.jpg",
         "image/jpeg",
         "Photo",
         "🖼️ Immagine",
@@ -121,4 +123,3 @@ def test_is_caption_like_accepts_user_text():
     assert is_caption_like("La foto delle vacanze") is True
     assert is_caption_like("tramonto sul mare") is True
     assert is_caption_like("quando hai le idee chiare...") is True
-    assert is_caption_like("foto 2024.jpg") is True
