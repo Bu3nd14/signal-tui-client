@@ -478,7 +478,11 @@ class TestApplyEdit:
             backend.apply_edit(_CID, "m1", "nuovo")
 
         mock_update.assert_called_once_with(
-            _CID, "nuovo", protocol=PROTOCOL_WHATSAPP, msg_id="m1"
+            _CID,
+            "nuovo",
+            protocol=PROTOCOL_WHATSAPP,
+            msg_id="m1",
+            mark_edited=True,
         )
 
     def test_no_id_falls_back_to_timestamp_and_old_text(self):
@@ -503,6 +507,7 @@ class TestApplyEdit:
             protocol=PROTOCOL_WHATSAPP,
             timestamp=_TS_MS,
             old_text="vecchio",
+            mark_edited=True,
         )
 
     def test_identical_text_returns_none(self):

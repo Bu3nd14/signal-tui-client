@@ -1700,6 +1700,7 @@ class SignalBackend(ChatBackend):
         *,
         is_mine: bool | None = None,
         edit_timestamp: int | None = None,
+        mark_edited: bool = True,
     ) -> dict | None:
         from protocols.db import _update_message_text
 
@@ -1723,7 +1724,7 @@ class SignalBackend(ChatBackend):
             if old_text == new_text:
                 return None  # idempotente (echo nostro edit)
             msg["text"] = new_text
-            msg["edited"] = True
+            msg["edited"] = mark_edited
             _update_message_text(
                 contact_id,
                 new_text,
@@ -1731,6 +1732,7 @@ class SignalBackend(ChatBackend):
                 timestamp=int(msg["timestamp"]),  # ts della ENTRY (ottimistico)
                 old_text=old_text,
                 is_mine=msg.get("is_mine"),
+                mark_edited=mark_edited,
             )
             return {
                 "message_id": str(message_id),

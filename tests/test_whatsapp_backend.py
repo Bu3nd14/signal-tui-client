@@ -2635,7 +2635,7 @@ class TestWhatsAppWebhook:
         ]
         # isola ingest_message (toccherebbe SQLite)
         ingested = []
-        backend.ingest_message = lambda cid, data, ts: (
+        backend.ingest_message = lambda cid, data, ts, *, reconcile=False: (
             ingested.append((cid, data.get("text"), data.get("is_mine"), ts)) or True
         )
         result = backend.fetch_history("15771304468671@lid", limit=20)

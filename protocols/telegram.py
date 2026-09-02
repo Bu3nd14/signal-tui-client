@@ -2092,6 +2092,7 @@ class TelegramBackend(ChatBackend):
         *,
         is_mine: bool | None = None,
         edit_timestamp: int | None = None,
+        mark_edited: bool = True,
     ) -> dict | None:
         from protocols.db import _update_message_text
 
@@ -2106,12 +2107,13 @@ class TelegramBackend(ChatBackend):
             if old_text == new_text:
                 return None  # echo del nostro edit: no-op
             msg["text"] = new_text
-            msg["edited"] = True
+            msg["edited"] = mark_edited
             _update_message_text(
                 contact_id,
                 new_text,
                 protocol=PROTOCOL_TELEGRAM,
                 msg_id=str(message_id),
+                mark_edited=mark_edited,
             )
             return {
                 "message_id": str(message_id),

@@ -399,6 +399,7 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
     """
     _init_db()
     _dedup_messages_by_id()
+    _detect_ghost_outgoing_text()
     with _DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         try:
@@ -1319,6 +1320,89 @@ def _dedup_messages_by_id() -> int:
             conn.commit()
             after = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
             return before - after
+        finally:
+            conn.close()
+
+
+def _detect_ghost_outgoing_text(db_file=None) -> list[dict]:
+    """Detect suspicious WhatsApp outgoing text pairs without changing them.
+
+    Detection ≠ deletion: in-app code never deletes these rows.  The returned
+    details are intended for explicit review by ``purge_ghost_outgoing.py``.
+    """
+    if db_file is None:
+        _init_db()
+    target = Path(db_file or DB_FILE)
+    with _DB_LOCK:
+        conn = sqlite3.connect(target)
+        try:
+            ambiguous = conn.execute(
+                "SELECT contact_number, text, COUNT(*) FROM messages "
+                "WHERE protocol = 'whatsapp' "
+                "AND is_mine = 1 AND msg_type = 'text' "
+                "AND TRIM(COALESCE(text, '')) != '' "
+                "AND COALESCE(attachment_id, '') = '' "
+                "AND msg_id IS NOT NULL AND msg_id != '' "
+                "GROUP BY contact_number, text "
+                "HAVING COUNT(*) >= 3"
+            ).fetchall()
+            for contact_number, text, count in ambiguous:
+                logger.warning(
+                    "ambiguous outgoing text ghost detection skipped "
+                    "contact=%r text=%r rows=%d",
+                    contact_number,
+                    text,
+                    count,
+                )
+
+            groups = conn.execute(
+                "SELECT contact_number, text FROM messages "
+                "WHERE protocol = 'whatsapp' "
+                "AND is_mine = 1 AND msg_type = 'text' "
+                "AND TRIM(COALESCE(text, '')) != '' "
+                "AND COALESCE(attachment_id, '') = '' "
+                "AND msg_id IS NOT NULL AND msg_id != '' "
+                "GROUP BY contact_number, text "
+                "HAVING COUNT(*) = 2 AND COUNT(DISTINCT msg_id) = 2 "
+                "AND MAX(timestamp) - MIN(timestamp) <= ?",
+                (_ECHO_MATCH_WINDOW_MS,),
+            ).fetchall()
+            detected = []
+            for contact_number, text in groups:
+                rows = conn.execute(
+                    "SELECT id, msg_id, timestamp, status FROM messages "
+                    "WHERE protocol = 'whatsapp' AND contact_number = ? AND text = ? "
+                    "AND is_mine = 1 AND msg_type = 'text' "
+                    "AND COALESCE(attachment_id, '') = '' "
+                    "AND msg_id IS NOT NULL AND msg_id != '' "
+                    "ORDER BY id",
+                    (contact_number, text),
+                ).fetchall()
+                if len(rows) != 2:
+                    continue
+                row_details = [
+                    {
+                        "id": row_id,
+                        "msg_id": msg_id,
+                        "timestamp": timestamp,
+                        "status": status,
+                    }
+                    for row_id, msg_id, timestamp, status in rows
+                ]
+                group = {
+                    "contact": contact_number,
+                    "text": text,
+                    "rows": row_details,
+                }
+                detected.append(group)
+                logger.warning(
+                    "suspicious outgoing text ghost contact=%r text=%r rows=%r; "
+                    "run purge_ghost_outgoing.py --apply to remove",
+                    contact_number,
+                    text,
+                    row_details,
+                )
+            return detected
         finally:
             conn.close()
 

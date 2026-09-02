@@ -324,6 +324,7 @@ class TestApplyEditIdFirst:
             timestamp=self.OTT,  # ts della ENTRY (ottimistico), non il REAL
             old_text="vecchio",
             is_mine=True,
+            mark_edited=True,
         )
         assert backend.cache[self.CID][0]["text"] == "nuovo"
         assert backend.cache[self.CID][0]["edited"] is True
@@ -347,6 +348,7 @@ class TestApplyEditIdFirst:
             timestamp=self.OTT,
             old_text="vecchio",
             is_mine=True,
+            mark_edited=True,
         )
         assert backend.cache[self.CID][0]["text"] == "nuovo"
 
