@@ -219,6 +219,11 @@ h2 { font-size: 1.05rem; }
   gap: 8px;
   overflow-y: auto;
   padding: 24px clamp(14px, 5vw, 70px);
+  /* L'anchor del fondo è gestito manualmente (scrollThreadToBottom + flag
+     userScrolledUp): lo scroll-anchoring nativo di Chrome/Edge compete con
+     gli scrollTop espliciti e può sporcare il flag dopo uno scroll up + ritorno
+     al fondo (Safari non applica l'ancoraggio). Lo disattiviamo qui. */
+  overflow-anchor: none;
 }
 .empty-state { margin: auto; max-width: 360px; color: var(--muted); text-align: center; }
 .empty-state strong { display: block; margin: 12px 0 6px; color: var(--text); }
