@@ -3,6 +3,21 @@
 const TOKEN_KEY = "signal-tui-web-token";
 const PROTOCOL_KEY = "signal-tui-web-proto";
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
+// Heartbeat watchdog: the server fans out a ``{"type":"heartbeat"}`` frame
+// every ~5s (web/ws.py).  If nothing at all arrives for this long, the socket
+// is likely a zombie (e.g. through the Cloudflare tunnel) and we self-heal by
+// forcing a reconnect instead of waiting for a manual page reload.
+const WS_HEARTBEAT_TIMEOUT_MS = 10000;
+const WS_WATCHDOG_INTERVAL_MS = 1000;
+// Visual heartbeat dot: the colour is interpolated continuously from the time
+// since the last received frame, so it smoothly fades green -> orange as the
+// next heartbeat is late, then orange -> red before the watchdog reconnects.
+const WS_DOT_TICK_MS = 100;
+const WS_HEARTBEAT_PERIOD_MS = 5000;
+// (r, g, b) triplets, kept in sync with the colours the old classes used.
+const COLOR_GREEN = [84, 206, 138];
+const COLOR_ORANGE = [245, 166, 35];
+const COLOR_RED = [224, 82, 82];
 const REACTION_EMOJIS = [
   "👍", "❤️", "😂", "😮", "😢", "🙏",
   "🔥", "🎉", "👏", "💯", "😍", "🤔",
@@ -26,6 +41,9 @@ const state = {
   socket: null,
   reconnectTimer: null,
   reconnectAttempt: 0,
+  lastWsActivity: 0,
+  wsWatchdog: null,
+  wsColorTick: null,
   messageRequest: null,
   mediaRequests: new Set(),
   mediaLoads: new Map(),
@@ -2034,8 +2052,72 @@ function disconnectSocket() {
     state.socket.close();
     state.socket = null;
   }
+  setDotColor(null);
   elements.connection.className = "connection-state offline";
   elements.connection.textContent = "offline";
+}
+
+function setDotColor(color) {
+  if (!color) {
+    elements.connection.style.removeProperty("--dot-color");
+    return;
+  }
+  elements.connection.style.setProperty(
+    "--dot-color", `rgb(${color[0]}, ${color[1]}, ${color[2]})`);
+}
+
+function lerpColor(a, b, t) {
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * t),
+    Math.round(a[1] + (b[1] - a[1]) * t),
+    Math.round(a[2] + (b[2] - a[2]) * t),
+  ];
+}
+
+// Continuous dot colour: 0..2.5s green, 2.5..5s green->orange, 5..10s
+// orange->red; past the timeout the watchdog (below) forces a reconnect.
+function wsDotColorFor(idle) {
+  if (idle <= WS_HEARTBEAT_PERIOD_MS / 2) return COLOR_GREEN;
+  if (idle <= WS_HEARTBEAT_PERIOD_MS) {
+    const t = (idle - WS_HEARTBEAT_PERIOD_MS / 2) / (WS_HEARTBEAT_PERIOD_MS / 2);
+    return lerpColor(COLOR_GREEN, COLOR_ORANGE, t);
+  }
+  if (idle <= WS_HEARTBEAT_TIMEOUT_MS) {
+    const t = (idle - WS_HEARTBEAT_PERIOD_MS) / (WS_HEARTBEAT_TIMEOUT_MS - WS_HEARTBEAT_PERIOD_MS);
+    return lerpColor(COLOR_ORANGE, COLOR_RED, t);
+  }
+  return COLOR_RED;
+}
+
+// Self-healing watchdog: when no WebSocket traffic (real events or heartbeat
+// frames) arrives for WS_HEARTBEAT_TIMEOUT_MS, the connection is very likely a
+// zombie (dead through the Cloudflare tunnel while both ends still think it is
+// open).  Force a reconnect instead of waiting for a manual page reload.
+function startWsWatchdog() {
+  if (state.wsWatchdog !== null) return;
+  state.wsWatchdog = window.setInterval(() => {
+    const socket = state.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    const idle = Date.now() - state.lastWsActivity;
+    if (idle > WS_HEARTBEAT_TIMEOUT_MS) {
+      console.debug("[web] ws watchdog: no traffic for %d ms, forcing reconnect", idle);
+      state.reconnectAttempt = 0;
+      socket.onclose = null;
+      socket.close();
+      state.socket = null;
+      elements.connection.textContent = "connessione…";
+      scheduleReconnect();
+    }
+  }, WS_WATCHDOG_INTERVAL_MS);
+  // Fine-grained tick that fades the dot between heartbeats.
+  state.wsColorTick = window.setInterval(() => {
+    const socket = state.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      setDotColor(null);
+      return;
+    }
+    setDotColor(wsDotColorFor(Date.now() - state.lastWsActivity));
+  }, WS_DOT_TICK_MS);
 }
 
 function scheduleReconnect() {
@@ -2055,14 +2137,20 @@ function connectSocket() {
   const protocol = `signal-tui-token.${encodeToken(state.token)}`;
   const socket = new WebSocket(`${scheme}//${location.host}/ws`, ["signal-tui-bearer", protocol]);
   state.socket = socket;
+  state.lastWsActivity = Date.now();
+  startWsWatchdog();
   elements.connection.textContent = "connessione…";
   socket.onopen = () => {
     state.reconnectAttempt = 0;
+    state.lastWsActivity = Date.now();
     elements.connection.className = "connection-state online";
+    setDotColor(COLOR_GREEN);
     elements.connection.textContent = "live";
     if (state.active) loadMessages();
   };
   socket.onmessage = (event) => {
+    state.lastWsActivity = Date.now();
+    setDotColor(COLOR_GREEN);
     try {
       const update = JSON.parse(event.data);
       if (!update.payload) return;
@@ -2096,6 +2184,7 @@ function connectSocket() {
   socket.onclose = (event) => {
     if (state.socket !== socket) return;
     state.socket = null;
+    setDotColor(null);
     elements.connection.className = "connection-state offline";
     elements.connection.textContent = "offline";
     if (event.code === 1008) requestToken(true);
