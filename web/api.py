@@ -54,6 +54,25 @@ _VIDEO_EXTENSIONS = {
     ".mpeg",
 }
 
+_AUDIO_MIME_BY_EXT: dict[str, str] = {
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".oga": "audio/ogg",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".flac": "audio/flac",
+}
+
+
+def _media_content_type(path: Path) -> str | None:
+    """Return deterministic audio MIME types and guess all other types."""
+    ext = path.suffix.lower()
+    if ext in _AUDIO_MIME_BY_EXT:
+        return _AUDIO_MIME_BY_EXT[ext]
+    return mimetypes.guess_type(path.name)[0]
+
 
 def _effective_host(request: Any) -> str:
     """Return the browser-facing host, trusting proxies only for HTTPS origins."""
@@ -1840,7 +1859,12 @@ def create_api_router() -> Any:
                     media_type="image/jpeg",
                     headers={"Cache-Control": "private, max-age=31536000, immutable"},
                 )
-        return FileResponse(path, headers={"Cache-Control": "private, max-age=86400"})
+        media_type = _media_content_type(path)
+        return FileResponse(
+            path,
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=86400"},
+        )
 
     @router.get("/quote-media/{proto}/{message_row_id}")
     def quote_media(
