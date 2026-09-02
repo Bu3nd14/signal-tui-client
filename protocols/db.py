@@ -627,6 +627,36 @@ def _update_message_attachment_id(
             conn.close()
 
 
+def _update_message_attachment_info(
+    protocol: str,
+    contact_number: str,
+    msg_id: str | None,
+    timestamp: int,
+    attachment_info: str,
+) -> bool:
+    if not msg_id:
+        return False
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            row = conn.execute(
+                "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
+                "AND msg_id = ? ORDER BY ABS(timestamp - ?) ASC, rowid ASC LIMIT 1",
+                (protocol, contact_number, str(msg_id), timestamp),
+            ).fetchone()
+            if row is None:
+                return False
+            cursor = conn.execute(
+                "UPDATE messages SET attachment_info = ? WHERE id = ?",
+                (attachment_info, row[0]),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+
 def _update_message_media_identity(
     protocol: str,
     contact_number: str,

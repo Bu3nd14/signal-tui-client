@@ -11,6 +11,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from models import (
     MEDIA_QUOTE_PLACEHOLDERS,
     ChatMessage,
+    is_caption_like,
     is_media_quote_placeholder,
     is_media_quote_placeholder_composite,
     media_quote_placeholder,
@@ -96,3 +97,29 @@ class TestIsMediaQuotePlaceholderComposite:
         assert is_media_quote_placeholder_composite("photo.jpg") is False
         assert is_media_quote_placeholder_composite("") is False
         assert is_media_quote_placeholder_composite(None) is False
+
+
+def test_is_caption_like_rejects_media_metadata():
+    for value in (
+        None,
+        "",
+        "photo.jpg",
+        "photo.bmp",
+        "photo.avif",
+        "photo.tiff",
+        "photo.svg",
+        "Image: IMG_1303.jpg",
+        "foto 2024.jpg",
+        "image/jpeg",
+        "Photo",
+        "🖼️ Immagine",
+        "Media: https://example.test/photo.jpg",
+    ):
+        assert is_caption_like(value) is False
+
+
+def test_is_caption_like_accepts_user_text():
+    assert is_caption_like("Che bella!") is True
+    assert is_caption_like("La foto delle vacanze") is True
+    assert is_caption_like("tramonto sul mare") is True
+    assert is_caption_like("quando hai le idee chiare...") is True

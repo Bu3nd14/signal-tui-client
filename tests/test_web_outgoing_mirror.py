@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import stat
 import time
 from pathlib import Path
@@ -104,6 +105,7 @@ def test_facade_send_attachment_enqueues_event_with_media_data(
         attachment,
         caption="from web",
         mime_type="image/png",
+        filename="photo.png",
     )
     event = backend.poll_once()[0]
     added = backend.ingest_message(
@@ -150,14 +152,113 @@ def test_web_image_mirror_has_empty_text_and_resolvable_attachment(
     manager.register(backend)
 
     manager.send_attachment_sync(
-        protocol, "42", attachment, caption=None, mime_type="image/png"
+        protocol,
+        "42",
+        attachment,
+        caption=None,
+        mime_type="image/png",
+        filename="photo.png",
     )
     event = backend.poll_once()[0]
 
     assert event.payload["text"] == ""
-    assert not event.payload["attachment_info"]
+    assert event.payload["attachment_info"] == "photo.png"
     assert backend.get_attachment_path(event.payload["attachment_id"]).is_file()
     assert "upload-" not in event.payload["text"]
+
+
+@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
+def test_web_document_mirror_keeps_filename_and_caption_text(
+    protocol, tmp_path, monkeypatch
+):
+    attachment = tmp_path / "upload.pdf"
+    attachment.write_bytes(b"pdf")
+    if protocol == "signal":
+        monkeypatch.setattr(
+            "protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", tmp_path / "signal-media"
+        )
+    elif protocol == "telegram":
+        monkeypatch.setattr(
+            "protocols.telegram._media_dir", lambda: tmp_path / "tg-media"
+        )
+
+    backend = _backend(protocol)
+    if protocol == "whatsapp":
+        backend.media_dir = str(tmp_path / "wa-media")
+    backend.send_attachment_sync = MagicMock(
+        return_value=backend.send_message_sync.return_value
+    )
+    manager = BackendManager()
+    manager.register(backend)
+
+    manager.send_attachment_sync(
+        protocol,
+        "42",
+        attachment,
+        caption="document caption",
+        mime_type="application/pdf",
+        filename="report.pdf",
+    )
+    event = backend.poll_once()[0]
+
+    assert event.payload["msg_type"] == "attachment"
+    assert event.payload["text"] == "document caption"
+    assert event.payload["attachment_info"] == "report.pdf"
+
+
+def _image_ingest_data(attachment_info: str) -> dict:
+    return {
+        "id": "1787250931234",
+        "text": "",
+        "is_mine": True,
+        "sender": "You",
+        "quote_text": None,
+        "quote_timestamp": None,
+        "quote_author": None,
+        "reply_to_message_id": None,
+        "msg_type": "image",
+        "attachment_info": attachment_info,
+        "attachment_id": None,
+        "content_type": "image/png",
+        "media_kind": "image",
+    }
+
+
+@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
+@pytest.mark.parametrize("order", ["mirror-echo", "echo-mirror"])
+def test_image_caption_race_always_persists_caption(protocol, order):
+    from protocols import db
+
+    backend = _backend(protocol)
+    mirror = _image_ingest_data("photo.png")
+    echo = _image_ingest_data("caption from echo")
+    messages = (mirror, echo) if order == "mirror-echo" else (echo, mirror)
+
+    for message in messages:
+        backend.ingest_message("42", message, 1787250931234)
+
+    assert len(backend.cache["42"]) == 1
+    assert backend.cache["42"][0]["text"] == ""
+    assert backend.cache["42"][0]["attachment_info"] == "caption from echo"
+    with sqlite3.connect(db.DB_FILE) as conn:
+        rows = conn.execute(
+            "SELECT attachment_info FROM messages WHERE protocol = ? AND contact_number = ?",
+            (protocol, "42"),
+        ).fetchall()
+    assert rows == [("caption from echo",)]
+
+
+@pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
+def test_image_echo_filename_does_not_replace_existing_caption(protocol):
+    backend = _backend(protocol)
+    captioned = _image_ingest_data("existing caption")
+    filename_echo = _image_ingest_data("server-photo.jpg")
+
+    backend.ingest_message("42", captioned, 1787250931234)
+    changed = backend.ingest_message("42", filename_echo, 1787250931234)
+
+    assert changed is False
+    assert backend.cache["42"][0]["attachment_info"] == "existing caption"
 
 
 def test_mirror_copy_failure_warns_and_enqueues_without_attachment(

@@ -34,6 +34,7 @@ from models import (
     PROTOCOL_SIGNAL,
     ChatContact,
     ChatEvent,
+    is_caption_like,
     media_kind_from_mime,
     media_quote_placeholder,
     msg_type_for_media_kind,
@@ -56,6 +57,7 @@ from protocols.db import (
     _load_cache,
     _mark_as_read,
     _update_message_attachment_id,
+    _update_message_attachment_info,
     _update_message_id,
     _update_message_status,
 )
@@ -723,7 +725,11 @@ class SignalBackend(ChatBackend):
             media_kind = media_kind or media_kind_from_mime(mime_type) or "document"
             msg_type = msg_type_for_media_kind(media_kind)
             safe_filename = sanitize_filename(filename)
-            attachment_info = safe_filename or text or None
+            attachment_info = (
+                text or safe_filename or None
+                if msg_type == "image"
+                else safe_filename or text or None
+            )
             with self._sent_attachment_paths_lock:
                 persistent_path = self._sent_attachment_paths.get(
                     str(attachment_path.resolve()), None
@@ -1460,6 +1466,27 @@ class SignalBackend(ChatBackend):
         )
         return True
 
+    @staticmethod
+    def _heal_image_caption(
+        contact_id: str, message: dict, data: dict, ts: int
+    ) -> bool:
+        incoming_info = data.get("attachment_info")
+        if (
+            data.get("msg_type") != "image"
+            or not is_caption_like(incoming_info)
+            or is_caption_like(message.get("attachment_info"))
+        ):
+            return False
+        message["attachment_info"] = incoming_info
+        _update_message_attachment_info(
+            PROTOCOL_SIGNAL,
+            contact_id,
+            message.get("id") or data.get("id"),
+            int(message.get("timestamp", ts)),
+            incoming_info,
+        )
+        return True
+
     def _persist_message(self, contact_id: str, data: dict, ts: int) -> int | None:
         """Persist a message to the SQLite cache (Signal protocol).
 
@@ -1568,6 +1595,9 @@ class SignalBackend(ChatBackend):
                     except Exception:
                         logger.exception("Signal: _update_message_id failed")
                     changed = self._upgrade_outgoing_attachment(contact_id, m, data, ts)
+                    changed = (
+                        self._heal_image_caption(contact_id, m, data, ts) or changed
+                    )
                     if not changed:
                         logger.info(
                             "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
@@ -1591,6 +1621,10 @@ class SignalBackend(ChatBackend):
                 if is_mine:
                     changed = self._upgrade_outgoing_attachment(
                         contact_id, existing, data, ts
+                    )
+                    changed = (
+                        self._heal_image_caption(contact_id, existing, data, ts)
+                        or changed
                     )
                     if changed:
                         return "changed"

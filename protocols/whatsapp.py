@@ -30,6 +30,7 @@ from models import (
     PROTOCOL_WHATSAPP,
     ChatContact,
     ChatEvent,
+    is_caption_like,
     media_kind_from_mime,
     msg_type_for_media_kind,
 )
@@ -1469,7 +1470,11 @@ class WhatsAppBackend(ChatBackend):
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
                     "msg_type": msg_type,
-                    "attachment_info": (filename or text or None)
+                    "attachment_info": (
+                        (text or filename or None)
+                        if msg_type == "image"
+                        else (filename or text or None)
+                    )
                     if is_attachment
                     else None,
                     "attachment_id": attachment_id,
@@ -2111,7 +2116,11 @@ class WhatsAppBackend(ChatBackend):
         Returns ``True`` if newly added, ``"changed"`` if healed in place,
         and ``False`` if it was an unchanged duplicate.
         """
-        from protocols.db import _fill_message_quote_fields, _update_message_id
+        from protocols.db import (
+            _fill_message_quote_fields,
+            _update_message_attachment_info,
+            _update_message_id,
+        )
 
         if data.get("msg_type") == "image":
             data = {**data, "text": ""}
@@ -2169,7 +2178,22 @@ class WhatsAppBackend(ChatBackend):
             attachment_changed = self._upgrade_outgoing_attachment(
                 contact_id, existing, data, ts
             )
-            return "changed" if attachment_changed else False
+            incoming_info = data.get("attachment_info")
+            caption_changed = bool(
+                data.get("msg_type") == "image"
+                and is_caption_like(incoming_info)
+                and not is_caption_like(existing.get("attachment_info"))
+            )
+            if caption_changed:
+                existing["attachment_info"] = incoming_info
+                _update_message_attachment_info(
+                    PROTOCOL_WHATSAPP,
+                    contact_id,
+                    existing.get("id") or msg_id,
+                    int(existing.get("timestamp", ts)),
+                    incoming_info,
+                )
+            return "changed" if attachment_changed or caption_changed else False
 
         # Fallback DB post-send (bug #44): un messaggio failed può avere la sua
         # riga id-less nel DB ma NON in self.cache.  Prima di inserire una nuova
