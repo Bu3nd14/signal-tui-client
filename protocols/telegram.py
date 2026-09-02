@@ -30,6 +30,7 @@ from models import (
     PROTOCOL_TELEGRAM,
     ChatContact,
     ChatEvent,
+    is_caption_like,
     media_kind_from_mime,
     media_quote_placeholder,
     msg_type_for_media_kind,
@@ -1208,7 +1209,11 @@ class TelegramBackend(ChatBackend):
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
                     "msg_type": msg_type,
-                    "attachment_info": (filename or text or None)
+                    "attachment_info": (
+                        (text or filename or None)
+                        if msg_type == "image"
+                        else (filename or text or None)
+                    )
                     if is_attachment
                     else None,
                     "attachment_id": attachment_id,
@@ -1893,7 +1898,11 @@ class TelegramBackend(ChatBackend):
         Returns True when added, ``"changed"`` for an attachment upgrade,
         and False for an unchanged duplicate.
         """
-        from protocols.db import _update_message_attachment_id, _update_message_id
+        from protocols.db import (
+            _update_message_attachment_id,
+            _update_message_attachment_info,
+            _update_message_id,
+        )
 
         if data.get("msg_type") == "image":
             data = {**data, "text": ""}
@@ -1946,6 +1955,26 @@ class TelegramBackend(ChatBackend):
                         int(entry.get("timestamp", ts)),
                         incoming_attachment,
                     )
+                    attachment_changed = True
+                else:
+                    attachment_changed = False
+                incoming_info = data.get("attachment_info")
+                caption_changed = bool(
+                    entry is not None
+                    and data.get("msg_type") == "image"
+                    and is_caption_like(incoming_info)
+                    and not is_caption_like(entry.get("attachment_info"))
+                )
+                if caption_changed:
+                    entry["attachment_info"] = incoming_info
+                    _update_message_attachment_info(
+                        PROTOCOL_TELEGRAM,
+                        contact_id,
+                        str(mid),
+                        int(entry.get("timestamp", ts)),
+                        incoming_info,
+                    )
+                if attachment_changed or caption_changed:
                     return "changed"
                 if (
                     entry is not None
@@ -1989,6 +2018,21 @@ class TelegramBackend(ChatBackend):
                         )
                     except Exception:
                         logger.exception("Telegram: _update_message_id failed")
+                    incoming_info = data.get("attachment_info")
+                    if (
+                        data.get("msg_type") == "image"
+                        and is_caption_like(incoming_info)
+                        and not is_caption_like(m.get("attachment_info"))
+                    ):
+                        m["attachment_info"] = incoming_info
+                        _update_message_attachment_info(
+                            PROTOCOL_TELEGRAM,
+                            contact_id,
+                            str(mid),
+                            int(m.get("timestamp", ts)),
+                            incoming_info,
+                        )
+                        return "changed"
                     return False
             self._seen_msg_ids.add(mid)
         else:

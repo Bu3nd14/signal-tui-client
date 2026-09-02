@@ -17,7 +17,7 @@ from typing import Any, Literal
 from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
-from models import is_media_quote_placeholder_composite
+from models import is_caption_like, is_media_quote_placeholder_composite
 from web.bridge import push_event
 
 logger = logging.getLogger(__name__)
@@ -480,66 +480,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 # caption qui, col text = URL media): usala se non è un nome file.
                 info = str(row["attachment_info"] or "").strip()
                 file_name = Path(str(row["attachment_id"] or "")).name
-                from models import is_media_quote_placeholder
-
-                if (
-                    info
-                    and info != file_name
-                    # Un mimetype puro (es. "image/jpeg", "video/mp4") non è mai
-                    # una caption: arriva da attachment_info usato come mimetype
-                    # (reperto live WAHA su messaggi immagine inviati).
-                    and not re.fullmatch(
-                        r"[a-z0-9.+-]+/[a-z0-9.+-]+(?:\s*;.*)?", info.lower()
-                    )
-                    and not info.lower().endswith(
-                        (
-                            ".png",
-                            ".jpg",
-                            ".jpeg",
-                            ".gif",
-                            ".webp",
-                            ".heic",
-                            ".mp4",
-                            ".mp3",
-                            ".oga",
-                            ".ogg",
-                            ".opus",
-                            ".aac",
-                            ".m4a",
-                            ".wav",
-                            ".pdf",
-                            ".doc",
-                            ".docx",
-                        )
-                    )
-                    and not is_media_quote_placeholder(info)
-                    and not (
-                        protocol == "whatsapp" and _is_whatsapp_synthetic_text(info)
-                    )
-                    and info.lower()
-                    not in {
-                        "photo",
-                        "image",
-                        "immagine",
-                        "video",
-                        "audio",
-                        "document",
-                        "documento",
-                        "file",
-                        "allegato",
-                        "sticker",
-                    }
-                    and info.strip().lower()
-                    not in {
-                        "🖼️ image",
-                        "🖼️ immagine",
-                        "🖼️ photo",
-                        "🎬 video",
-                        "🎵 audio",
-                        "🎨 sticker",
-                        "📎 file",
-                    }
-                ):
+                if is_caption_like(info) and info != file_name:
                     text = info
         direction = "out" if row["is_mine"] else "in"
         messages.append(

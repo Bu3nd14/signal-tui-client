@@ -171,6 +171,43 @@ def is_media_quote_placeholder_composite(text: str | None) -> bool:
     return any(text.endswith(f" — {p}") for p in MEDIA_QUOTE_PLACEHOLDERS.values())
 
 
+_CAPTION_FILENAME_RE = re.compile(r"^[^\s/\\]+\.[a-z0-9]{1,5}$", re.IGNORECASE)
+_MEDIA_LABELS = {
+    "photo",
+    "image",
+    "immagine",
+    "video",
+    "audio",
+    "document",
+    "documento",
+    "file",
+    "allegato",
+    "sticker",
+    "🖼️ image",
+    "🖼️ immagine",
+    "🖼️ photo",
+    "🎬 video",
+    "🎵 audio",
+    "🎨 sticker",
+    "📎 file",
+}
+
+
+def is_caption_like(value: str | None) -> bool:
+    """Return whether *value* looks like a user caption rather than media metadata."""
+    stripped = (value or "").strip()
+    if not stripped or is_media_quote_placeholder_composite(stripped):
+        return False
+    lowered = stripped.lower()
+    if lowered in _MEDIA_LABELS or _CAPTION_FILENAME_RE.fullmatch(stripped):
+        return False
+    if re.fullmatch(r"[a-z0-9.+-]+/[a-z0-9.+-]+(?:\s*;.*)?", lowered):
+        return False
+    return not (
+        lowered.startswith("media:") and re.fullmatch(r"\S+", stripped[6:].strip())
+    )
+
+
 # ─── Data models ─────────────────────────────────────────────────────────────
 
 
