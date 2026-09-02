@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import mimetypes
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -77,6 +78,74 @@ def test_non_thumbnail_media_and_invalid_width_serve_original(monkeypatch, tmp_p
     assert response.status_code == 422
     assert response.json() == {"detail": "Video thumbnail unavailable"}
     assert client.get(_url(gif.name, 241)).content == gif.read_bytes()
+
+
+def test_m4a_media_uses_audio_mp4_content_type(monkeypatch, tmp_path):
+    source = tmp_path / "media" / "voice.m4a"
+    source.parent.mkdir()
+    source.write_bytes(b"m4a")
+    client = _client(monkeypatch, tmp_path, {source.name: source})
+
+    response = client.get(f"/api/media/signal/{source.name}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/mp4"
+
+
+def test_m4a_media_ignores_mimetypes_contamination(monkeypatch, tmp_path):
+    source = tmp_path / "media" / "voice.m4a"
+    source.parent.mkdir()
+    source.write_bytes(b"m4a")
+    client = _client(monkeypatch, tmp_path, {source.name: source})
+    previous = mimetypes.guess_type(source.name)[0]
+    mimetypes.add_type("audio/m4a", ".m4a")
+
+    try:
+        response = client.get(f"/api/media/signal/{source.name}")
+    finally:
+        if previous is None:
+            mimetypes.types_map.pop(".m4a", None)
+        else:
+            mimetypes.add_type(previous, ".m4a")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/mp4"
+
+
+def test_aac_media_keeps_audio_aac_content_type(monkeypatch, tmp_path):
+    source = tmp_path / "media" / "voice.aac"
+    source.parent.mkdir()
+    source.write_bytes(b"aac")
+    client = _client(monkeypatch, tmp_path, {source.name: source})
+
+    response = client.get(f"/api/media/signal/{source.name}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/aac"
+
+
+def test_oga_media_uses_audio_ogg_content_type(monkeypatch, tmp_path):
+    source = tmp_path / "media" / "voice.oga"
+    source.parent.mkdir()
+    source.write_bytes(b"oga")
+    client = _client(monkeypatch, tmp_path, {source.name: source})
+
+    response = client.get(f"/api/media/signal/{source.name}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "audio/ogg"
+
+
+def test_non_thumbnail_image_keeps_guessed_content_type(monkeypatch, tmp_path):
+    source = tmp_path / "media" / "image.png"
+    source.parent.mkdir()
+    source.write_bytes(b"png")
+    client = _client(monkeypatch, tmp_path, {source.name: source})
+
+    response = client.get(f"/api/media/signal/{source.name}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
 
 
 def test_thumbnail_request_keeps_path_validation(monkeypatch, tmp_path):
