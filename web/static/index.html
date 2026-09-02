@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>Signal TUI Reader</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%227%22 fill=%22%234f8cff%22/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/style.css?v=47">
+  <link rel="stylesheet" href="/style.css?v=49">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -17,7 +17,7 @@
         </div>
         <div class="header-actions">
           <button id="refresh-contacts" class="icon-button" type="button" aria-label="Ricarica conversazioni" title="Ricarica">↻</button>
-          <button id="open-token" class="icon-button" type="button" aria-label="Imposta token" title="Token">⌁</button>
+          <button id="open-token" class="icon-button" type="button" aria-label="Collega backend" title="Collega backend">☰</button>
         </div>
       </header>
       <div id="protocol-tabs" class="protocol-tabs" role="tablist" aria-label="Seleziona backend">
@@ -88,22 +88,48 @@
     </main>
   </div>
 
-  <dialog id="token-dialog" class="token-dialog">
-    <form id="token-form" method="dialog">
-      <p class="eyebrow">Autenticazione</p>
-      <h2>Bearer token</h2>
-      <p class="dialog-copy">Il token viene conservato solo nel localStorage di questo browser.</p>
-      <label for="token-input">Token</label>
-      <input id="token-input" name="token" type="password" autocomplete="current-password" required>
-      <p id="token-error" class="field-error" hidden>Token non valido. Riprova.</p>
-      <div class="dialog-actions">
-        <button id="cancel-token" class="secondary-button" type="button">Annulla</button>
-        <button class="primary-button" type="submit">Salva e connetti</button>
+  <dialog id="link-dialog" class="link-dialog">
+    <div class="link-dialog-content">
+      <div class="link-dialog-header">
+        <h2>Collega backend</h2>
+        <button id="close-link-dialog" class="link-dialog-close" type="button" aria-label="Chiudi">×</button>
       </div>
-    </form>
+      <div class="link-options">
+        <div class="link-option">
+          <span class="link-option-name">Signal</span>
+          <span id="link-status-signal" class="link-option-status">Non collegato</span>
+        </div>
+        <div class="link-option">
+          <span class="link-option-name">WhatsApp</span>
+          <span id="link-status-whatsapp" class="link-option-status">Non collegato</span>
+        </div>
+        <div class="link-option">
+          <span class="link-option-name">Telegram</span>
+          <span id="link-status-telegram" class="link-option-status">Non collegato</span>
+        </div>
+        <div class="link-option link-option-openai">
+          <label class="link-option-name" for="openai-key-input">OpenAI Key</label>
+          <div class="link-key-controls">
+            <input id="openai-key-input" type="password" placeholder="sk-..." autocomplete="new-password">
+            <button id="save-openai-key" class="primary-button" type="button">Salva</button>
+            <button id="change-openai-key" class="primary-button" type="button" hidden>Cambia</button>
+          </div>
+          <span id="openai-key-status" class="link-option-status" aria-live="polite">Non configurata</span>
+        </div>
+        <div class="link-option link-option-token">
+          <label class="link-option-name" for="token-input">Token web</label>
+          <div class="link-key-controls">
+            <input id="token-input" type="password" placeholder="Bearer token" autocomplete="current-password">
+            <button id="save-token" class="primary-button" type="button">Salva</button>
+          </div>
+          <span id="token-error" class="link-option-status field-error" aria-live="polite" hidden>Token non valido. Riprova.</span>
+        </div>
+      </div>
+      <p class="dialog-copy link-dialog-note">Signal, WhatsApp e Telegram si collegano dalla TUI (Ctrl+L).</p>
+    </div>
   </dialog>
 
   <script src="/reconcile.js?v=5" defer></script>
-  <script src="/app.js?v=77" defer></script>
+  <script src="/app.js?v=81" defer></script>
 </body>
 </html>

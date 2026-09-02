@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -1431,6 +1432,46 @@ def create_api_router() -> Any:
             raise HTTPException(status_code=404, detail="Allegato non trovato")
         service.submit(proto, attachment_id, path)
         return {"status": "pending"}
+
+    @router.post("/config/openai-key")
+    def save_openai_key(request: Request, payload: dict[str, Any]) -> dict[str, str]:
+        api_key = payload.get("api_key")
+        if not isinstance(api_key, str):
+            raise HTTPException(status_code=400, detail="Chiave non valida")
+        api_key = api_key.strip()
+        if not api_key or not api_key.startswith("sk-"):
+            raise HTTPException(status_code=400, detail="Chiave non valida")
+
+        from protocols.config import PROJECT_DIR, _load_config
+
+        config_path = PROJECT_DIR / "config.json"
+        data = _load_config()
+        data["openai_api_key"] = api_key
+        try:
+            with config_path.open("w", encoding="utf-8") as config_file:
+                json.dump(data, config_file, indent=2)
+                config_file.write("\n")
+        except OSError:
+            logger.exception("Impossibile salvare la configurazione OpenAI")
+            raise HTTPException(
+                status_code=500, detail="Errore di salvataggio"
+            ) from None
+
+        try:
+            from web.server import _init_transcription_service
+
+            _init_transcription_service(request.app)
+        except Exception:
+            logger.exception("Impossibile inizializzare la trascrizione OpenAI")
+            raise HTTPException(
+                status_code=500, detail="Errore di inizializzazione"
+            ) from None
+        return {"status": "ok"}
+
+    @router.get("/transcribe/config")
+    def transcription_config(request: Request) -> dict[str, bool]:
+        service = getattr(request.app.state, "transcription_service", None)
+        return {"enabled": service is not None}
 
     @router.get("/transcribe/{proto}/{attachment_id:path}")
     def transcription_status(

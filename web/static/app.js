@@ -67,10 +67,17 @@ const elements = {
   connection: document.querySelector("#connection-state"),
   errorBanner: document.querySelector("#error-banner"),
   errorText: document.querySelector("#error-text"),
-  tokenDialog: document.querySelector("#token-dialog"),
+  linkDialog: document.querySelector("#link-dialog"),
+  linkStatusSignal: document.querySelector("#link-status-signal"),
+  linkStatusWhatsapp: document.querySelector("#link-status-whatsapp"),
+  linkStatusTelegram: document.querySelector("#link-status-telegram"),
+  openaiKeyInput: document.querySelector("#openai-key-input"),
+  saveOpenaiKey: document.querySelector("#save-openai-key"),
+  changeOpenaiKey: document.querySelector("#change-openai-key"),
+  openaiKeyStatus: document.querySelector("#openai-key-status"),
   tokenInput: document.querySelector("#token-input"),
   tokenError: document.querySelector("#token-error"),
-  cancelToken: document.querySelector("#cancel-token"),
+  saveToken: document.querySelector("#save-token"),
   composer: document.querySelector("#composer"),
   composerShell: document.querySelector("#composer-shell"),
   messageInput: document.querySelector("#message-input"),
@@ -107,10 +114,11 @@ function scrollThreadToBottom() {
 
 function requestToken(invalid = false) {
   closeEmojiPicker({ focus: false });
+  updateBackendStatuses();
   elements.tokenError.hidden = !invalid;
   elements.tokenInput.value = state.token;
-  elements.cancelToken.hidden = !state.token;
-  if (!elements.tokenDialog.open) elements.tokenDialog.showModal();
+  if (!elements.linkDialog.open) elements.linkDialog.showModal();
+  if (!invalid) loadTranscriptionConfig();
   window.setTimeout(() => elements.tokenInput.focus(), 0);
 }
 
@@ -224,8 +232,83 @@ function protocolIcon(protocol, size = 15) {
   return icons[protocol] || "";
 }
 
+function updateBackendStatuses() {
+  const statuses = {
+    signal: elements.linkStatusSignal,
+    whatsapp: elements.linkStatusWhatsapp,
+    telegram: elements.linkStatusTelegram,
+  };
+  for (const protocol of PROTOCOLS) {
+    const connected = state.contacts.some((contact) => contact.protocol === protocol);
+    statuses[protocol].textContent = connected ? "Collegato" : "Non collegato";
+  }
+}
+
+async function loadTranscriptionConfig() {
+  if (!state.token) {
+    elements.openaiKeyStatus.textContent = "Non configurata";
+    return;
+  }
+  elements.openaiKeyStatus.textContent = "Verifica configurazione…";
+  try {
+    const response = await apiFetch("/api/transcribe/config");
+    const config = await response.json();
+    const enabled = config.enabled === true;
+    remoteLog("[transcribe-config]", { enabled, hasToken: Boolean(state.token) });
+    elements.openaiKeyStatus.textContent = enabled
+      ? "Trascrizione attiva"
+      : "Non configurata";
+    elements.openaiKeyInput.disabled = enabled;
+    elements.saveOpenaiKey.disabled = enabled;
+    elements.saveOpenaiKey.hidden = enabled;
+    elements.changeOpenaiKey.hidden = !enabled;
+  } catch (error) {
+    elements.openaiKeyStatus.textContent = error.message === "unauthorized"
+      ? "Autenticazione richiesta"
+      : "Impossibile verificare la configurazione";
+  }
+}
+
+function enableOpenaiKeyEdit() {
+  elements.openaiKeyInput.disabled = false;
+  elements.saveOpenaiKey.disabled = false;
+  elements.saveOpenaiKey.hidden = false;
+  elements.changeOpenaiKey.hidden = true;
+  elements.openaiKeyStatus.textContent = "Inserisci la nuova chiave";
+  elements.openaiKeyInput.focus();
+}
+
+async function saveOpenaiKey() {
+  const apiKey = elements.openaiKeyInput.value.trim();
+  elements.saveOpenaiKey.disabled = true;
+  elements.openaiKeyStatus.textContent = "Salvataggio…";
+  let saved = false;
+  try {
+    await apiFetch("/api/config/openai-key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+    saved = true;
+    elements.openaiKeyInput.value = "";
+    elements.openaiKeyInput.disabled = true;
+    elements.openaiKeyStatus.textContent = "Chiave salvata, trascrizione attiva";
+    elements.saveOpenaiKey.hidden = true;
+    elements.changeOpenaiKey.hidden = false;
+  } catch (error) {
+    elements.openaiKeyStatus.textContent = error.status === 400
+      ? "Chiave non valida"
+      : error.message === "unauthorized"
+        ? "Autenticazione richiesta"
+        : "Errore di salvataggio";
+  } finally {
+    if (!saved) elements.saveOpenaiKey.disabled = false;
+  }
+}
+
 function renderContacts() {
   elements.contacts.replaceChildren();
+  updateBackendStatuses();
   const base = state.searchResults ?? state.contacts;
   const sortedContacts = [...base].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
   const contacts = sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
@@ -1729,7 +1812,7 @@ async function toggleEmojiPicker() {
   }
   renderEmojiTabs();
   renderEmojiGrid();
-  if (elements.tokenDialog.open) elements.tokenDialog.close();
+  if (elements.linkDialog.open) elements.linkDialog.close();
   elements.emojiPicker.hidden = false;
   elements.emojiToggle.setAttribute("aria-expanded", "true");
   elements.emojiToggle.setAttribute("aria-label", "Chiudi selettore emoji");
@@ -2022,6 +2105,9 @@ function connectSocket() {
 
 document.querySelector("#refresh-contacts").addEventListener("click", () => loadContacts());
 document.querySelector("#open-token").addEventListener("click", () => requestToken());
+document.querySelector("#close-link-dialog").addEventListener("click", () => elements.linkDialog.close());
+elements.saveOpenaiKey.addEventListener("click", saveOpenaiKey);
+elements.changeOpenaiKey.addEventListener("click", enableOpenaiKeyEdit);
 document.querySelector("#back-button").addEventListener("click", () => {
   clearTelegramRefreshTimer();
   elements.app.classList.remove("thread-open");
@@ -2218,15 +2304,16 @@ if (elements.contactSearch) {
     }, 150);
   });
 }
-elements.cancelToken.addEventListener("click", () => elements.tokenDialog.close());
-document.querySelector("#token-form").addEventListener("submit", (event) => {
-  event.preventDefault();
+elements.saveToken.addEventListener("click", () => {
   const token = elements.tokenInput.value.trim();
-  if (!token) return;
+  if (!token) {
+    elements.tokenError.hidden = false;
+    return;
+  }
   state.token = token;
   localStorage.setItem(TOKEN_KEY, token);
   elements.tokenError.hidden = true;
-  elements.tokenDialog.close();
+  elements.linkDialog.close();
   updateTelegramRefreshTimer();
   loadContacts();
   connectSocket();

@@ -28,6 +28,41 @@ class WebServerHandle:
 _active_server: WebServerHandle | None = None
 
 
+def _init_transcription_service(app: Any) -> Any:
+    from transcription import store
+    from transcription.client import CloudTranscriptionClient
+    from transcription.config import (
+        get_openai_api_key,
+        get_transcription_base_url,
+        get_transcription_language,
+        get_transcription_model,
+        get_transcription_timeout,
+    )
+    from transcription.service import TranscriptionService
+
+    current = getattr(app.state, "transcription_service", None)
+    if current is not None:
+        current.stop()
+    app.state.transcription_service = None
+
+    api_key = get_openai_api_key()
+    if not api_key:
+        logger.info("Trascrizione cloud OpenAI disattivata")
+        return None
+
+    client = CloudTranscriptionClient(
+        api_key,
+        base_url=get_transcription_base_url(),
+        model=get_transcription_model(),
+        language=get_transcription_language(),
+        timeout=get_transcription_timeout(),
+    )
+    service = TranscriptionService(client, store)
+    app.state.transcription_service = service
+    logger.info("Trascrizione cloud OpenAI attiva")
+    return service
+
+
 def start_web_server(
     manager: Any,
     port: int = 4242,
@@ -66,32 +101,7 @@ def start_web_server(
     app.state.token = token
     app.state.websocket_connections = set()
 
-    from transcription import store
-    from transcription.config import (
-        get_openai_api_key,
-        get_transcription_base_url,
-        get_transcription_language,
-        get_transcription_model,
-        get_transcription_timeout,
-    )
-
-    api_key = get_openai_api_key()
-    if api_key:
-        from transcription.client import CloudTranscriptionClient
-        from transcription.service import TranscriptionService
-
-        client = CloudTranscriptionClient(
-            api_key,
-            base_url=get_transcription_base_url(),
-            model=get_transcription_model(),
-            language=get_transcription_language(),
-            timeout=get_transcription_timeout(),
-        )
-        app.state.transcription_service = TranscriptionService(client, store)
-        logger.info("Trascrizione cloud OpenAI attiva")
-    else:
-        app.state.transcription_service = None
-        logger.info("Trascrizione cloud OpenAI disattivata")
+    _init_transcription_service(app)
 
     from web.api import create_api_router
     from web.auth import install_auth
@@ -113,6 +123,15 @@ def start_web_server(
         StaticFiles(directory=Path(__file__).with_name("static"), html=True),
         name="web-ui",
     )
+
+    @app.middleware("http")
+    async def no_cache_html(request: Any, call_next: Any) -> Any:
+        """L'HTML non va cachato: ogni reload deve vedere i nuovi ``?v=`` dei
+        file statici (CSS/JS). CSS/JS e media restano cachati normalmente."""
+        response = await call_next(request)
+        if request.url.path in ("/", "/index.html"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
     config = uvicorn.Config(
         app,
