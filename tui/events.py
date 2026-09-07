@@ -520,6 +520,19 @@ class EventHandlingMixin:
         # Refresh del label del contatto (in-place, solo la riga interessata:
         # niente rebuild dell'intera lista a ogni evento typing).
         self.call_from_thread(self._update_typing_label, cache_key)
+        if getattr(self, "_web_enabled", False):
+            from web.bridge import push_event
+
+            push_event(
+                {
+                    "type": "typing",
+                    "payload": {
+                        "protocol": event.protocol,
+                        "contact_id": event.contact_id,
+                        "action": action,
+                    },
+                }
+            )
         return True
 
     def _update_typing_label(self, cache_key: str) -> None:
