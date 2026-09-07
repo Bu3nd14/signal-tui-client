@@ -287,6 +287,7 @@ class SendMixin:
                             "protocol": protocol,
                             "contact_id": persist_contact_id,
                             "timestamp": ts,
+                            "is_mine": True,
                         },
                     }
                 )

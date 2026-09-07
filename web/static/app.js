@@ -2183,9 +2183,15 @@ function connectSocket() {
           if (attachmentId != null) state.mediaFailures.delete(String(attachmentId));
           console.debug("[web] ws push", { protocol: update.payload.protocol, contact_id: update.payload.contact_id, id: update.payload?.id });
           loadContacts({ quiet: true });
-          if (state.active?.id === String(update.payload.contact_id) && state.active?.protocol === update.payload.protocol) {
+          if (
+            state.active?.id === String(update.payload.contact_id)
+            && state.active?.protocol === update.payload.protocol
+            && state.protocolFilter === state.active.protocol
+          ) {
             loadMessages();
-            markRead(state.active.protocol, state.active.id);
+            if (!update.payload.is_mine && document.visibilityState === "visible") {
+              markRead(state.active.protocol, state.active.id);
+            }
           }
           break;
         }
@@ -2218,6 +2224,16 @@ function connectSocket() {
 document.querySelector("#refresh-contacts").addEventListener("click", () => loadContacts());
 document.querySelector("#open-token").addEventListener("click", () => requestToken());
 document.querySelector("#close-link-dialog").addEventListener("click", () => elements.linkDialog.close());
+document.addEventListener("visibilitychange", () => {
+  if (
+    document.visibilityState === "visible"
+    && state.active
+    && state.active.protocol === state.protocolFilter
+  ) {
+    markRead(state.active.protocol, state.active.id);
+    loadContacts({ quiet: true });
+  }
+});
 elements.saveOpenaiKey.addEventListener("click", saveOpenaiKey);
 elements.changeOpenaiKey.addEventListener("click", enableOpenaiKeyEdit);
 document.querySelector("#back-button").addEventListener("click", () => {

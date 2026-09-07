@@ -1327,7 +1327,11 @@ def create_api_router() -> Any:
         push_event(
             {
                 "type": "message",
-                "payload": {"protocol": protocol, "contact_id": contact_id},
+                "payload": {
+                    "protocol": protocol,
+                    "contact_id": contact_id,
+                    "is_mine": True,
+                },
             }
         )
         return {"ok": True}
