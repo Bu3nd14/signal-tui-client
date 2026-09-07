@@ -60,6 +60,7 @@ def _require_user_number() -> str:
 
 USER_NUMBER = _get_user_number()  # "" se non configurato, il numero altrimenti
 DAEMON_HTTP_PORT = 8080
+SUBPROCESS_TIMEOUT = 120
 DAEMON_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/rpc"
 SSE_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/events"
 # Directory where signal-cli stores downloaded attachments
@@ -123,7 +124,7 @@ def _run_subprocess(args: list[str]) -> str:
         [str(cli), "-u", num] + args,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=SUBPROCESS_TIMEOUT,
     )
     if result.returncode != 0:
         raise RuntimeError(
