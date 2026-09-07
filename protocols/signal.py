@@ -88,6 +88,7 @@ _SEND_DEDUP_WINDOW_MS = 5000
 _INCOMING_DEDUP_WINDOW_MS = 2000
 
 _MAX_SENT_ATTACHMENT_PATHS = 1024
+DAEMON_PROBE_ATTEMPTS = 90
 
 _RE_CONTACT_LINE = re.compile(
     r"Number:(?P<number>\S+)\s+"
@@ -350,7 +351,7 @@ class SignalBackend(ChatBackend):
             # downloads in the first few seconds of daemon startup.
             self._start_sse_listener()
 
-            for _ in range(15):
+            for _ in range(DAEMON_PROBE_ATTEMPTS):
                 try:
                     test = self._rpc._call("listContacts")
                     if "result" in test:
