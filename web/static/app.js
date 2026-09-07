@@ -1652,6 +1652,41 @@ function applyReactionUpdate(payload) {
   buildReactionChips(entry.reactionsEl, reactions);
 }
 
+let typingTimer = null;
+
+function removeTypingMessage() {
+  elements.messages.querySelector(".typing-message")?.remove();
+}
+
+function handleTyping(payload) {
+  if (!state.active || state.active.protocol !== payload.protocol || state.active.id !== String(payload.contact_id)) return;
+  if (payload.action === "STARTED") {
+    const wasAtBottom = !state.userScrolledUp;
+    if (!elements.messages.querySelector(".typing-message")) {
+      const message = document.createElement("div");
+      message.className = "message in typing-message";
+      const bubble = document.createElement("div");
+      bubble.className = "bubble typing-bubble";
+      bubble.setAttribute("aria-label", "sta scrivendo");
+      for (let index = 0; index < 3; index += 1) {
+        const dot = document.createElement("span");
+        dot.className = "typing-dot";
+        bubble.append(dot);
+      }
+      message.append(bubble);
+      elements.messages.append(message);
+    }
+    if (wasAtBottom) scrollThreadToBottom();
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(() => {
+      removeTypingMessage();
+    }, 10000);
+  } else if (payload.action === "STOPPED") {
+    clearTimeout(typingTimer);
+    removeTypingMessage();
+  }
+}
+
 function markRead(protocol, contactId) {
   const key = `${protocol}:${contactId}`;
   // Persistenza DB immediata (i badge tornano azzerati dopo un refresh).
@@ -2203,6 +2238,9 @@ function connectSocket() {
           break;
         case "reaction_update":
           applyReactionUpdate(update.payload);
+          break;
+        case "typing":
+          handleTyping(update.payload);
           break;
       }
     } catch {
