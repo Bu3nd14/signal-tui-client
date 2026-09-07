@@ -297,6 +297,7 @@ class TestSendPersistOffthread:
                     "protocol": PROTOCOL_SIGNAL,
                     "contact_id": contact.id,
                     "timestamp": ts,
+                    "is_mine": True,
                 },
             }
         )

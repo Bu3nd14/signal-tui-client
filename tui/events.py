@@ -115,6 +115,7 @@ class EventHandlingMixin:
                         "protocol": event.protocol,
                         "contact_id": contact.id,
                         "timestamp": ts,
+                        "is_mine": bool(event.payload.get("is_mine")),
                     },
                 }
             )
