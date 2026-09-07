@@ -324,6 +324,28 @@ async function saveOpenaiKey() {
   }
 }
 
+let faviconRed = false;
+
+function unreadOf(contact) {
+  const unread = Number(contact.unread);
+  return Number.isFinite(unread) ? Math.max(0, unread) : 0;
+}
+
+function updateFavicon() {
+  const unreadTotal = state.contacts.reduce((sum, contact) => sum + unreadOf(contact), 0);
+  const shouldBeRed = unreadTotal > 0;
+  let favicon = document.querySelector('link[rel="icon"]');
+  if (favicon && faviconRed === shouldBeRed) return;
+  if (!favicon) {
+    favicon = document.createElement("link");
+    favicon.rel = "icon";
+    document.head.append(favicon);
+  }
+  const color = shouldBeRed ? "%23e53935" : "%234f8cff";
+  favicon.href = `data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%227%22 fill=%22${color}%22/%3E%3C/svg%3E`;
+  faviconRed = shouldBeRed;
+}
+
 function renderContacts() {
   elements.contacts.replaceChildren();
   updateBackendStatuses();
@@ -341,7 +363,7 @@ function renderContacts() {
     if (dot) {
       const total = state.contacts
         .filter((contact) => contact.protocol === tab.dataset.protocol)
-        .reduce((sum, contact) => sum + Number(contact.unread || 0), 0);
+        .reduce((sum, contact) => sum + unreadOf(contact), 0);
       // Pallino solo sui backend NON selezionati con non letti (quello attivo
       // ha già i badge nella lista).
       dot.hidden = !(total > 0 && tab.dataset.protocol !== state.protocolFilter);
@@ -385,6 +407,7 @@ function renderContacts() {
     button.addEventListener("click", () => openThread(contact));
     elements.contacts.append(button);
   }
+  updateFavicon();
 }
 
 async function loadContacts({ quiet = false } = {}) {
