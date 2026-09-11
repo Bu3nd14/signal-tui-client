@@ -455,7 +455,7 @@ const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const linkifyStart = app.indexOf("function linkifyText(");
 const linkifyEnd = app.indexOf("\nfunction timestampMilliseconds", linkifyStart);
-const renderStart = app.indexOf("function renderMessages(");
+const renderStart = app.indexOf("function messageNodeKey(");
 const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
 globalThis.state = {
   active: { protocol: "signal", id: "alice" },

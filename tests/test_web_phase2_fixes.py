@@ -516,7 +516,7 @@ vm.runInThisContext(app.slice(clearStart, loadEnd));
   assert.equal(calls, 3);
   assert.equal(target.image.loaded, true);
   assert.equal(target.loading.removed, true);
-  assert.equal(state.mediaCache.get("sent-image"), "blob:image");
+  assert.equal(state.mediaCache.get("sent-image").url, "blob:image");
 
   calls = 0;
   now = 0;
@@ -543,7 +543,7 @@ vm.runInThisContext(app.slice(clearStart, loadEnd));
   await loadImage(target.container, target.image, "/media", "aborted-image");
   assert.equal(calls, 1);
   assert.equal(target.container.children.length, 0);
-  assert.equal(state.mediaCache.get("sent-image"), "blob:image");
+  assert.equal(state.mediaCache.get("sent-image").url, "blob:image");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
     completed = subprocess.run(
@@ -561,7 +561,7 @@ const app = fs.readFileSync("./web/static/app.js", "utf8");
 const reconcile = fs.readFileSync("./web/static/reconcile.js", "utf8");
 const mediaStart = app.indexOf("const MEDIA_CACHE_LIMIT");
 const mediaEnd = app.indexOf("\nfunction attachmentName", mediaStart);
-const renderStart = app.indexOf("function renderMessages(");
+const renderStart = app.indexOf("function messageNodeKey(");
 const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
 globalThis.state = {
   mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(), objectUrls: new Set(["blob:preview"]), mediaCache: new Map(),
@@ -594,7 +594,7 @@ function node(tag) {
   return value;
 }
 globalThis.document = { createElement: node };
-globalThis.elements = { messages: { children: [], replaceChildren() { this.children = []; }, append(child) { this.children.push(child); }, scrollTop: 0, scrollHeight: 0 } };
+globalThis.elements = { messages: { children: [], replaceChildren(...children) { this.children = children; }, append(child) { this.children.push(child); }, scrollTop: 0, scrollHeight: 0 } };
 const real = { id: "wa-1", direction: "out", text: "", timestamp: 2, attachment: { type: "image/png", attachment_id: "sent-real.png" } };
 const messages = [real];
 globalThis.window = {};
@@ -603,7 +603,7 @@ vm.runInThisContext(app.slice(mediaStart, mediaEnd));
 vm.runInThisContext(app.slice(renderStart, renderEnd));
 renderMessages(messages, "signal");
 assert.equal(messages[0].localPreviewUrl, "blob:preview");
-assert.equal(state.mediaCache.get("sent-real.png"), "blob:preview");
+assert.equal(state.mediaCache.get("sent-real.png").url, "blob:preview");
 assert.equal(state.optimistic[0].localPreviewUrl, undefined);
 assert.deepEqual(revoked, []);
 
@@ -645,7 +645,7 @@ vm.runInThisContext(app.slice(cacheStart, cacheEnd));
 for (let index = 0; index < 51; index += 1) cacheMedia(`image-${index}`, `blob:${index}`);
 assert.equal(state.mediaCache.size, 50);
 assert.equal(state.mediaCache.has("image-0"), false);
-assert.equal(state.mediaCache.get("image-50"), "blob:50");
+assert.equal(state.mediaCache.get("image-50").url, "blob:50");
 assert.deepEqual(revoked, ["blob:0"]);
 assert.equal(state.objectUrls.has("blob:0"), false);
 assert.equal(state.objectUrls.has("blob:50"), true);
@@ -664,7 +664,7 @@ const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const mediaStart = app.indexOf("const MEDIA_CACHE_LIMIT");
 const mediaEnd = app.indexOf("\nfunction attachmentName", mediaStart);
-const renderStart = app.indexOf("function renderMessages(");
+const renderStart = app.indexOf("function messageNodeKey(");
 const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
 globalThis.state = {
   mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(),

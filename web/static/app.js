@@ -52,6 +52,8 @@ const state = {
   fileTabUrls: new Map(),
   pinnedUrls: new Set(),
   modalObjectUrl: null,
+  // Map<attachmentId, { url, width, height }>. width/height sono null finché
+  // non noti: vengono catturati da naturalWidth/Height al primo load reale.
   mediaCache: new Map(),
   transcriptions: new Map(),
   messages: [],
@@ -431,26 +433,43 @@ async function loadContacts({ quiet = false } = {}) {
 
 const MEDIA_CACHE_LIMIT = 50;
 
-function cacheMedia(attachmentId, url) {
+function cacheMedia(attachmentId, url, width, height) {
   if (!attachmentId || !url) return;
   const key = String(attachmentId);
   state.mediaFailures.delete(key);
   const previous = state.mediaCache.get(key);
+  const previousUrl = previous?.url;
   state.mediaCache.delete(key);
-  state.mediaCache.set(key, url);
+  state.mediaCache.set(key, {
+    url,
+    // Ri-caching della stessa URL senza dims esplicite: preserva quelle note.
+    width: width ?? (previousUrl === url ? previous.width : null),
+    height: height ?? (previousUrl === url ? previous.height : null),
+  });
   state.objectUrls.add(url);
-  if (previous && previous !== url && ![...state.mediaCache.values()].includes(previous)) {
-    state.objectUrls.delete(previous);
-    URL.revokeObjectURL(previous);
+  if (previousUrl && previousUrl !== url && ![...state.mediaCache.values()].some((entry) => entry.url === previousUrl)) {
+    state.objectUrls.delete(previousUrl);
+    URL.revokeObjectURL(previousUrl);
   }
   while (state.mediaCache.size > MEDIA_CACHE_LIMIT) {
-    const [oldestKey, oldestUrl] = state.mediaCache.entries().next().value;
+    const [oldestKey, oldest] = state.mediaCache.entries().next().value;
     state.mediaCache.delete(oldestKey);
-    if (![...state.mediaCache.values()].includes(oldestUrl)) {
-      state.objectUrls.delete(oldestUrl);
-      URL.revokeObjectURL(oldestUrl);
+    if (![...state.mediaCache.values()].some((entry) => entry.url === oldest.url)) {
+      state.objectUrls.delete(oldest.url);
+      URL.revokeObjectURL(oldest.url);
     }
   }
+}
+
+// Cattura le dimensioni naturali della miniatura decodificata. Mutazione in
+// place dell'entry: l'ordine LRU NON cambia (il touch LRU resta competenza
+// di cacheMedia/setupLazyThumbnail).
+function captureMediaDims(key, image) {
+  const entry = state.mediaCache.get(key);
+  if (!entry || !image.naturalWidth || !image.naturalHeight) return;
+  if (entry.width === image.naturalWidth && entry.height === image.naturalHeight) return;
+  entry.width = image.naturalWidth;
+  entry.height = image.naturalHeight;
 }
 
 function abortMediaRequests() {
@@ -465,7 +484,7 @@ function abortMediaRequests() {
 }
 
 function pruneOrphanObjectUrls() {
-  const cachedUrls = new Set(state.mediaCache.values());
+  const cachedUrls = new Set([...state.mediaCache.values()].map((entry) => entry.url));
   const optimisticUrls = new Set(state.optimistic.map((item) => item.localPreviewUrl).filter(Boolean));
   const fileTabUrls = new Set();
   for (const [url, tab] of state.fileTabUrls || []) {
@@ -689,10 +708,14 @@ async function loadThumbnail(container, image, path, attachmentId, direction, on
     const url = await request;
     if (!url) return;
     image.addEventListener("load", () => {
+      captureMediaDims(key, image);
       container.querySelector(".attachment-loading")?.remove();
       onLoad?.();
     }, { once: true });
     image.src = url;
+    // Se il load fosse già avvenuto (src ri-assegnato / decode sincrono) l'evento
+    // non ripartirebbe: cattura subito. No-op nei path attuali (img fresco).
+    if (image.complete && image.naturalWidth) captureMediaDims(key, image);
   } catch (error) {
     if (error.name !== "AbortError") {
       console.debug("[web] media failed", { attachment_id: attachmentId });
@@ -709,15 +732,25 @@ function loadImage(container, image, path, attachmentId, direction, onLoad) {
 
 function setupLazyThumbnail(container, image, path, attachmentId, direction, onLoad, showFallback) {
   console.debug("[web] media", { attachment_id: attachmentId, cache: state.mediaCache.has(attachmentId) ? "hit" : "miss" });
-  const cachedUrl = state.mediaCache.get(attachmentId);
-  if (cachedUrl) {
+  const cached = state.mediaCache.get(attachmentId);
+  if (cached) {
     state.mediaCache.delete(attachmentId);
-    state.mediaCache.set(attachmentId, cachedUrl);
+    state.mediaCache.set(attachmentId, cached);
+    if (cached.width && cached.height) {
+      // Riserva lo spazio PRIMA di src: gli attributi width/height diventano
+      // le dimensioni intrinseche dell'img; il CSS (width:auto;height:auto +
+      // max-width/max-height) le clamp-a preservando l'aspect ratio, con lo
+      // stesso risultato del post-load. La bolla non parte mai da 90px.
+      image.width = cached.width;
+      image.height = cached.height;
+    }
     image.addEventListener("load", () => {
+      captureMediaDims(attachmentId, image);
       container.querySelector(".attachment-loading")?.remove();
       onLoad?.();
     }, { once: true });
-    image.src = cachedUrl;
+    image.src = cached.url;
+    if (image.complete && image.naturalWidth) captureMediaDims(attachmentId, image);
     return;
   }
   const load = () => loadThumbnail(container, image, path, attachmentId, direction, onLoad, showFallback);
@@ -1129,6 +1162,148 @@ function appendRenderedQuote(bubble, item) {
   bubble.append(quote);
 }
 
+// Chiave stabile per un messaggio nella message list: gli optimistic non
+// hanno `id` (solo `optimistic_id`), quindi useremmo tutti la stessa chiave
+// "undefined" collidendo tra loro nella mappa dei nodi.
+function messageNodeKey(item) {
+  return item.optimistic_id ? `opt:${item.optimistic_id}` : String(item.id);
+}
+
+// Vero per gli item che passano da imageAttachment/videoThumbAttachment con
+// un callback onLoad dipendente dallo scroll corrente (stickToBottom): per
+// questi il fingerprint deve includere anche lo stato "a fondo pagina",
+// altrimenti riusare il nodo con un onLoad ormai stantio (calcolato su uno
+// scroll diverso) lascerebbe un riancoraggio scorretto per un load lazy
+// ancora pendente.
+function isLazyMediaItem(item) {
+  if (item.localPreviewUrl) return false;
+  const mediaKind = item.attachment?.media_kind;
+  const mediaType = item.attachment?.type?.toLowerCase();
+  const isVideo = mediaKind === "video" || mediaType?.startsWith("video/");
+  const isImage = mediaKind === "image" || (!mediaKind && mediaType?.startsWith("image/"));
+  return isImage || isVideo;
+}
+
+function buildMessageNode(item, protocol, stickToBottom) {
+  const message = document.createElement("article");
+  message.className = `message ${item.direction === "out" ? "out" : "in"}`;
+  message.setAttribute("data-mid", String(item.id));
+  message.setAttribute("data-ts", String(item.timestamp));
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  // Chat di gruppo: nome del mittente in alto nella bolla (come la TUI).
+  if (item.direction === "in" && item.is_group && item.sender) {
+    const sender = document.createElement("span");
+    sender.className = "message-sender";
+    sender.textContent = item.sender;
+    bubble.append(sender);
+  }
+  appendRenderedQuote(bubble, item);
+  const mediaKind = item.attachment?.media_kind;
+  const mediaType = item.attachment?.type?.toLowerCase();
+  const isVideo = mediaKind === "video" || mediaType?.startsWith("video/");
+  const isImage = mediaKind === "image" || (!mediaKind && mediaType?.startsWith("image/"));
+  if (isImage) {
+    if (item.localPreviewUrl) {
+      const preview = document.createElement("div");
+      preview.className = "attachment local-preview";
+      const image = document.createElement("img");
+      const previewKey = item.attachment?.attachment_id != null ? String(item.attachment.attachment_id) : null;
+      if (previewKey && typeof cacheMedia === "function" && state.mediaCache) {
+        // Idempotente: stesso url → preserva dims (righe 446-447), solo LRU touch.
+        cacheMedia(previewKey, item.localPreviewUrl);
+        const cached = state.mediaCache.get(previewKey);
+        if (cached?.width && cached?.height) {
+          image.width = cached.width;   // riserva lo spazio PRIMA di src
+          image.height = cached.height;
+        }
+        image.addEventListener("load", () => captureMediaDims(previewKey, image), { once: true });
+      }
+      image.src = item.localPreviewUrl;
+      image.alt = item.attachment.name || "Immagine allegata";
+      preview.append(image);
+      bubble.append(preview);
+    } else {
+      bubble.append(imageAttachment(item.attachment, protocol, item.direction, stickToBottom));
+    }
+  } else if (isVideo) {
+    bubble.append(videoThumbAttachment(item.attachment, protocol, item.direction, stickToBottom));
+  } else if (item.attachment) {
+    bubble.append(fileAttachment(item.attachment, protocol, item.direction));
+  }
+  const safeText = window.SignalTuiReconcile.messageDisplayText(item);
+  // Le immagini con caption reale (il server la espone in item.text) la
+  // mostrano sotto l'allegato; messageDisplayText le azzera.
+  const caption = isImage && item.text ? item.text : "";
+  const displayText = safeText || caption;
+  let textEl = null;
+  if (displayText) {
+    textEl = document.createElement("div");
+    textEl.className = "message-text";
+    textEl.replaceChildren(linkifyText(displayText));
+    bubble.append(textEl);
+  }
+  const time = document.createElement("time");
+  time.className = "message-time";
+  time.textContent = formatTimestamp(item.timestamp);
+  let tickEl = null;
+  if (item.optimisticStatus) {
+    const status = document.createElement("span");
+    status.className = `message-status ${item.optimisticStatus}`;
+    status.textContent = item.optimisticStatus === "failed" ? " · fallito" : item.optimisticStatus === "sent" ? " · inviato" : " · invio…";
+    time.append(status);
+  } else {
+    if (item.edited) {
+      const editedEl = document.createElement("span");
+      editedEl.className = "message-edited";
+      editedEl.textContent = " · modificato";
+      time.append(editedEl);
+    }
+    if (item.direction === "out") {
+      tickEl = document.createElement("span");
+      tickEl.className = "message-tick";
+      time.append(tickEl);
+      setMessageTick({ tickEl }, item.status);
+    }
+  }
+  bubble.append(time);
+  const reactionsEl = item.reactions?.length ? appendReactionChips(bubble, item) : null;
+  message.append(bubble);
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+  if (!item.optimistic_id) {
+    const reply = document.createElement("button");
+    reply.type = "button";
+    reply.className = "message-reply";
+    reply.textContent = "↩";
+    reply.setAttribute("aria-label", "Rispondi al messaggio");
+    reply.title = "Rispondi";
+    reply.addEventListener("click", () => startReply(item));
+    actions.append(reply);
+
+    const reaction = document.createElement("button");
+    reaction.type = "button";
+    reaction.className = "message-reaction";
+    reaction.textContent = "🙂";
+    reaction.setAttribute("aria-label", "Reagisci al messaggio");
+    reaction.title = "Reagisci";
+    reaction.addEventListener("click", (event) => startReaction(item, event));
+    if (item.direction === "in") actions.append(reaction);
+  }
+  if (item.direction === "out" && item.edit_id && !item.optimistic_id && item.text) {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "message-edit";
+    edit.textContent = "✎";
+    edit.setAttribute("aria-label", "Modifica il messaggio");
+    edit.title = "Modifica";
+    edit.addEventListener("click", () => startEdit(item));
+    actions.append(edit);
+  }
+  if (actions.childElementCount) message.append(actions);
+  return { el: message, textEl, timeEl: time, tickEl, reactionsEl };
+}
+
 function renderMessages(messages, protocol) {
   pruneOrphanObjectUrls();
   const prevScrollTop = elements.messages.scrollTop;
@@ -1142,9 +1317,7 @@ function renderMessages(messages, protocol) {
   const stickToBottom = wasAtBottom
     ? () => { if (!state.userScrolledUp) scrollThreadToBottom(); }
     : null;
-  elements.messages.replaceChildren();
-  state.messageNodes ??= new Map();
-  state.messageNodes.clear();
+  const previousNodes = state.messageNodes ?? new Map();
   const active = state.active;
   const reconciliation = window.SignalTuiReconcile.reconcileOptimisticMessages(
     messages,
@@ -1161,7 +1334,12 @@ function renderMessages(messages, protocol) {
         window.SignalTuiReconcile.messageIdentity(m, x) === String(item.confirmed_message_id));
       if (idx >= 0) {
         console.debug("[web] deliver blob", { confirmed_message_id: item.confirmed_message_id, idx });
-        cacheMedia(messages[idx].attachment?.attachment_id, item.localPreviewUrl);
+        const optimisticKey = item.attachment?.attachment_id != null ? String(item.attachment.attachment_id) : null;
+        const optimisticEntry = optimisticKey ? state.mediaCache.get(optimisticKey) : null;
+        // Trasferisce le dims solo se è lo STESSO blob (stessa immagine): evita
+        // collisioni da attachment_id riutilizzati (stesso filename, immagini diverse).
+        const knownDims = optimisticEntry?.url === item.localPreviewUrl ? optimisticEntry : null;
+        cacheMedia(messages[idx].attachment?.attachment_id, item.localPreviewUrl, knownDims?.width, knownDims?.height);
         messages[idx] = { ...messages[idx], localPreviewUrl: item.localPreviewUrl };
       } else {
         console.debug("[web] deliver blob MISS", { confirmed_message_id: item.confirmed_message_id });
@@ -1187,131 +1365,52 @@ function renderMessages(messages, protocol) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = "Nessun messaggio archiviato in questa conversazione.";
-    elements.messages.append(empty);
+    elements.messages.replaceChildren(empty);
+    state.messageNodes = new Map();
     if (wasAtBottom) scrollThreadToBottom();
     else elements.messages.scrollTop = Math.min(prevScrollTop, elements.messages.scrollHeight);
     return;
   }
+  const nextNodes = new Map();
+  const orderedEls = [];
   for (const item of displayed) {
-    const message = document.createElement("article");
-    message.className = `message ${item.direction === "out" ? "out" : "in"}`;
-    message.setAttribute("data-mid", String(item.id));
-    message.setAttribute("data-ts", String(item.timestamp));
-    const bubble = document.createElement("div");
-    bubble.className = "bubble";
-    // Chat di gruppo: nome del mittente in alto nella bolla (come la TUI).
-    if (item.direction === "in" && item.is_group && item.sender) {
-      const sender = document.createElement("span");
-      sender.className = "message-sender";
-      sender.textContent = item.sender;
-      bubble.append(sender);
-    }
-    appendRenderedQuote(bubble, item);
-    const mediaKind = item.attachment?.media_kind;
-    const mediaType = item.attachment?.type?.toLowerCase();
-    const isVideo = mediaKind === "video" || mediaType?.startsWith("video/");
-    const isImage = mediaKind === "image" || (!mediaKind && mediaType?.startsWith("image/"));
-    if (isImage) {
-      if (item.localPreviewUrl) {
-        const preview = document.createElement("div");
-        preview.className = "attachment local-preview";
-        const image = document.createElement("img");
-        image.src = item.localPreviewUrl;
-        image.alt = item.attachment.name || "Immagine allegata";
-        preview.append(image);
-        bubble.append(preview);
-      } else {
-        bubble.append(imageAttachment(item.attachment, protocol, item.direction, stickToBottom));
-      }
-    } else if (isVideo) {
-      bubble.append(videoThumbAttachment(item.attachment, protocol, item.direction, stickToBottom));
-    } else if (item.attachment) {
-      bubble.append(fileAttachment(item.attachment, protocol, item.direction));
-    }
-    const safeText = window.SignalTuiReconcile.messageDisplayText(item);
-    // Le immagini con caption reale (il server la espone in item.text) la
-    // mostrano sotto l'allegato; messageDisplayText le azzera.
-    const caption = isImage && item.text ? item.text : "";
-    const displayText = safeText || caption;
-    let textEl = null;
-    if (displayText) {
-      textEl = document.createElement("div");
-      textEl.className = "message-text";
-      textEl.replaceChildren(linkifyText(displayText));
-      bubble.append(textEl);
-    }
-    const time = document.createElement("time");
-    time.className = "message-time";
-    time.textContent = formatTimestamp(item.timestamp);
-    let tickEl = null;
-    if (item.optimisticStatus) {
-      const status = document.createElement("span");
-      status.className = `message-status ${item.optimisticStatus}`;
-      status.textContent = item.optimisticStatus === "failed" ? " · fallito" : item.optimisticStatus === "sent" ? " · inviato" : " · invio…";
-      time.append(status);
+    const key = messageNodeKey(item);
+    // Fingerprint del contenuto: se identico a quello con cui il nodo
+    // esistente è stato costruito, riusiamo il nodo DOM così com'è (niente
+    // ricreazione di <img> già decodificate → niente flicker). Un messaggio
+    // patchato in place da applyReceiptUpdates/applyRemoteEdit/
+    // applyReactionUpdate aggiorna anche `state.messages`, quindi qui il
+    // fingerprint cambia e SOLO quella bolla viene ricostruita, non l'intera lista.
+    const fingerprint = JSON.stringify(item) + (isLazyMediaItem(item) ? `|bottom:${Boolean(stickToBottom)}` : "");
+    const existing = previousNodes.get(key);
+    let nodeEntry;
+    if (existing && existing.fingerprint === fingerprint) {
+      nodeEntry = existing;
     } else {
-      if (item.edited) {
-        const editedEl = document.createElement("span");
-        editedEl.className = "message-edited";
-        editedEl.textContent = " · modificato";
-        time.append(editedEl);
-      }
-      if (item.direction === "out") {
-        tickEl = document.createElement("span");
-        tickEl.className = "message-tick";
-        time.append(tickEl);
-        setMessageTick({ tickEl }, item.status);
-      }
+      const built = buildMessageNode(item, protocol, stickToBottom);
+      nodeEntry = {
+        el: built.el,
+        textEl: built.textEl,
+        timeEl: built.timeEl,
+        tickEl: built.tickEl,
+        reactionsEl: built.reactionsEl,
+        fingerprint,
+        ts: item.timestamp,
+        text: item.text,
+        status: item.status,
+        edited: Boolean(item.edited),
+        direction: item.direction,
+        reactions: copyReactions(item.reactions),
+      };
     }
-    bubble.append(time);
-    const reactionsEl = item.reactions?.length ? appendReactionChips(bubble, item) : null;
-    message.append(bubble);
-    if (!item.optimistic_id) {
-      const reply = document.createElement("button");
-      reply.type = "button";
-      reply.className = "message-reply";
-      reply.textContent = "↩";
-      reply.setAttribute("aria-label", "Rispondi al messaggio");
-      reply.title = "Rispondi";
-      reply.addEventListener("click", () => startReply(item));
-      message.append(reply);
-
-      const reaction = document.createElement("button");
-      reaction.type = "button";
-      reaction.className = "message-reaction";
-      reaction.textContent = "🙂";
-      reaction.setAttribute("aria-label", "Reagisci al messaggio");
-      reaction.title = "Reagisci";
-      reaction.addEventListener("click", (event) => startReaction(item, event));
-      if (item.direction === "in") message.append(reaction);
-    }
-    if (item.direction === "out" && item.edit_id && !item.optimistic_id && item.text) {
-      const edit = document.createElement("button");
-      edit.type = "button";
-      edit.className = "message-edit";
-      edit.textContent = "✎";
-      edit.setAttribute("aria-label", "Modifica il messaggio");
-      edit.title = "Modifica";
-      edit.addEventListener("click", () => startEdit(item));
-      message.append(edit);
-    }
-    state.messageNodes.set(String(item.id), {
-      textEl,
-      timeEl: time,
-      tickEl,
-      ts: item.timestamp,
-      text: item.text,
-      status: item.status,
-      edited: Boolean(item.edited),
-      direction: item.direction,
-      reactionsEl,
-      reactions: copyReactions(item.reactions),
-    });
-    elements.messages.append(message);
-    // Bollone lungo: i bottoni action vanno centrati verticalmente rispetto
-    // alla bolla (per quelle corte restano ancorati in cima, dove non sforano).
-    if (bubble.offsetHeight > 72) message.classList.add("tall");
+    nextNodes.set(key, nodeEntry);
+    orderedEls.push(nodeEntry.el);
   }
+  // replaceChildren con nodi già esistenti li sposta (detach+reattach),
+  // non li ricrea: i nodi riusati (fingerprint invariato) restano gli stessi
+  // elementi DOM, quindi niente re-fetch di immagini/quote né spinner.
+  elements.messages.replaceChildren(...orderedEls);
+  state.messageNodes = nextNodes;
   if (wasAtBottom) scrollThreadToBottom();
   else elements.messages.scrollTop = Math.min(prevScrollTop, elements.messages.scrollHeight);
 }
@@ -1751,6 +1850,11 @@ function openThread(contact) {
   elements.app.classList.add("thread-open");
   elements.composerShell.hidden = false;
   state.messages = [];
+  // Reset esplicito: il diff di renderMessages riusa i nodi DOM per `id` di
+  // messaggio tra una chiamata e l'altra, ma id sono validi solo all'interno
+  // della stessa chat — senza questo reset una chat diversa con un id
+  // coincidente riuserebbe per errore il nodo sbagliato.
+  state.messageNodes = new Map();
   renderContacts();
   markRead(contact.protocol, contact.id);
   elements.messages.replaceChildren();
@@ -1926,7 +2030,15 @@ function mediaKindFromMime(mime) {
 }
 
 function clearStagedAttachment({ revoke = true } = {}) {
-  if (state.stagedAttachment?.previewUrl && revoke) URL.revokeObjectURL(state.stagedAttachment.previewUrl);
+  if (state.stagedAttachment?.previewUrl && revoke) {
+    URL.revokeObjectURL(state.stagedAttachment.previewUrl);
+    // Scarta il seeding P1b SOLO se l'allegato non verrà inviato: nel path di
+    // invio (revoke:false) l'entry serve al primo paint optimistic.
+    const seeded = state.mediaCache.get(String(state.stagedAttachment.filename));
+    if (seeded?.url === state.stagedAttachment.previewUrl) {
+      state.mediaCache.delete(String(state.stagedAttachment.filename));
+    }
+  }
   state.stagedAttachment = null;
   elements.attachmentPreview.hidden = true;
   elements.attachmentPreview.classList?.remove("attachment-preview-file");
@@ -1942,6 +2054,8 @@ async function stageAttachment(file) {
   const mediaKind = mediaKindFromMime(file.type);
   const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
   let previewBlob = null;
+  let previewWidth = null;
+  let previewHeight = null;
   if (isImage) {
     if (!extensions[file.type]) {
       showError("Formato immagine non supportato.");
@@ -1955,6 +2069,8 @@ async function stageAttachment(file) {
       const canvas = document.createElement("canvas");
       canvas.width = Math.max(1, Math.round(bitmap.width * scale));
       canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      previewWidth = canvas.width;
+      previewHeight = canvas.height;
       const context = canvas.getContext("2d");
       context.fillStyle = "#fff";
       context.fillRect(0, 0, canvas.width, canvas.height);
@@ -1989,6 +2105,11 @@ async function stageAttachment(file) {
   const filename = file.name || `clipboard-${Date.now()}`;
   const previewUrl = isImage && previewBlob ? URL.createObjectURL(previewBlob) : null;
   state.stagedAttachment = { file, filename, previewUrl };
+  // P1b: riserva lo spazio GIÀ al primo paint optimistic. La chiave DEVE essere
+  // `filename`: submitMessage (~2094) la usa come attachment_id dell'optimistic,
+  // e il branch localPreviewUrl di renderMessages la cerca in mediaCache.
+  // Stessa URL → cacheMedia preserva le dims (446-447) al re-cache del render.
+  if (previewUrl) cacheMedia(filename, previewUrl, previewWidth, previewHeight);
   elements.attachmentPreview.classList?.toggle("attachment-preview-file", !isImage);
   elements.attachmentPreviewImage.hidden = !isImage;
   if (isImage) elements.attachmentPreviewImage.src = previewUrl;

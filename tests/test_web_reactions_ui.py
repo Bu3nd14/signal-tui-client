@@ -21,7 +21,7 @@ const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const linkifyStart = app.indexOf("function linkifyText(");
 const linkifyEnd = app.indexOf("\nfunction timestampMilliseconds", linkifyStart);
-const start = app.indexOf("function renderMessages(");
+const start = app.indexOf("function messageNodeKey(");
 const end = app.indexOf("\nasync function loadMessages", start);
 globalThis.state = { optimistic: [], active: { protocol: "signal", id: "42" } };
 globalThis.window = { SignalTuiReconcile: {
@@ -47,6 +47,7 @@ function node(tag) {
     setAttribute(name, value) { this.attributes[name] = value; },
     addEventListener() {}, classList: { add() {} },
     remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter((child) => child !== this); },
+    get childElementCount() { return this.children.length; },
   };
 }
 globalThis.document = {
@@ -78,11 +79,15 @@ assert.equal(reactionGroup.children[0].title, "Giovanni, You");
 assert.equal(reactionGroup.children[0].children[0].className, "reaction-count");
 assert.equal(reactionGroup.children[0].children[0].textContent, "2");
 assert.equal(reactionGroup.children[1].children.length, 0);
-assert.equal(elements.messages.children[0].children[1].className, "message-reply");
+const firstActions = elements.messages.children[0].children[1];
+assert.equal(firstActions.className, "message-actions");
+assert.equal(firstActions.children[0].className, "message-reply");
 // I messaggi OUT non hanno il bottone reaction (solo reply); IN sì.
 assert.equal(elements.messages.children[0].children.length, 2);
-assert.equal(elements.messages.children[1].children[1].className, "message-reply");
-assert.equal(elements.messages.children[1].children[2].className, "message-reaction");
+const secondActions = elements.messages.children[1].children[1];
+assert.equal(secondActions.className, "message-actions");
+assert.equal(secondActions.children[0].className, "message-reply");
+assert.equal(secondActions.children[1].className, "message-reaction");
 assert.equal(elements.messages.children[1].children[0].children.at(-1).className, "message-time");
 assert.equal(elements.messages.children[2].children[0].children.at(-1).className, "message-time");
 assert.deepEqual(state.messageNodes.get("1").reactions, reactions);
@@ -288,7 +293,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
-const start = app.indexOf("function renderMessages(");
+const start = app.indexOf("function messageNodeKey(");
 const end = app.indexOf("\nfunction copyReactions", start);
 let bottomCalls = 0;
 globalThis.state = {
@@ -329,7 +334,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
-const start = app.indexOf("function renderMessages(");
+const start = app.indexOf("function messageNodeKey(");
 const end = app.indexOf("\nfunction copyReactions", start);
 let bottomCalls = 0;
 globalThis.state = {
@@ -374,7 +379,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
-const start = app.indexOf("function renderMessages(");
+const start = app.indexOf("function messageNodeKey(");
 const end = app.indexOf("\nfunction copyReactions", start);
 let bottomCalls = 0;
 globalThis.state = {
@@ -419,7 +424,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
-const start = app.indexOf("function renderMessages(");
+const start = app.indexOf("function messageNodeKey(");
 const end = app.indexOf("\nfunction copyReactions", start);
 let bottomCalls = 0;
 let capturedOnLoad = "not-set";
@@ -481,7 +486,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
-const start = app.indexOf("function renderMessages(");
+const start = app.indexOf("function messageNodeKey(");
 const end = app.indexOf("\nfunction copyReactions", start);
 let bottomCalls = 0;
 globalThis.state = {

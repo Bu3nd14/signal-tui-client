@@ -18,7 +18,7 @@ const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const linkifyStart = app.indexOf("function linkifyText(");
 const linkifyEnd = app.indexOf("\nfunction timestampMilliseconds", linkifyStart);
-const start = app.indexOf("function renderMessages(");
+const start = app.indexOf("function messageNodeKey(");
 const end = app.indexOf("\nasync function loadMessages", start);
 globalThis.state = { optimistic: [], active: { protocol: "signal", id: "42" } };
 globalThis.window = { SignalTuiReconcile: {
@@ -42,6 +42,7 @@ function node(tag) {
     },
     setAttribute(name, value) { this.attributes[name] = value; },
     addEventListener() {}, classList: { add() {} },
+    get childElementCount() { return this.children.length; },
   };
 }
 globalThis.document = {
@@ -49,7 +50,7 @@ globalThis.document = {
   createDocumentFragment: () => node("#fragment"),
   createTextNode: (text) => ({ tag: "#text", text }),
 };
-globalThis.elements = { messages: { children: [], replaceChildren() { this.children = []; }, append(child) { this.children.push(child); } } };
+globalThis.elements = { messages: { children: [], replaceChildren(...children) { this.children = children; }, append(child) { this.children.push(child); } } };
 vm.runInThisContext(app.slice(linkifyStart, linkifyEnd));
 vm.runInThisContext(app.slice(start, end));
 renderMessages([
@@ -69,9 +70,11 @@ assert.equal(state.messageNodes.get("3").tickEl, null);
 const editable = { id: "4", edit_id: "edit-4", direction: "out", text: "edit", timestamp: 4, status: "sent" };
 renderMessages([editable], "signal");
 // Outgoing: niente bottone reaction (solo reply + edit).
-assert.equal(elements.messages.children[0].children[1].className, "message-reply");
-assert.equal(elements.messages.children[0].children[2].className, "message-edit");
-assert.equal(elements.messages.children[0].children[2].textContent, "✎");
+const actions = elements.messages.children[0].children[1];
+assert.equal(actions.className, "message-actions");
+assert.equal(actions.children[0].className, "message-reply");
+assert.equal(actions.children[1].className, "message-edit");
+assert.equal(actions.children[1].textContent, "✎");
 """)
 
 
