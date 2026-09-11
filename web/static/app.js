@@ -60,7 +60,7 @@ const state = {
   optimistic: [],
   optimisticSequence: 0,
   readTimers: new Map(),
-  sending: false,
+  sending: 0, // conteggio invii /api/send in corso: piu' invii possono essere in volo insieme
   editing: null,
   editSending: false,
   stagedAttachment: null,
@@ -2011,13 +2011,18 @@ function resizeComposer() {
 }
 
 function updateComposer() {
-  const busy = state.sending || state.editSending;
+  // state.editSending blocca il composer (si sta modificando un messaggio
+  // esistente riusando lo stesso textarea). Un invio normale in corso
+  // (state.sending > 0) NON blocca piu' nulla: l'utente deve poter scrivere
+  // e inviare il messaggio successivo senza aspettare che il precedente
+  // arrivi a destinazione (ogni invio ha un optimistic_id indipendente).
+  const busy = state.editSending;
+  const spinning = busy || state.sending > 0;
   elements.sendMessage.disabled = busy || (!elements.messageInput.value.trim() && !state.stagedAttachment);
   elements.messageInput.disabled = busy;
-  elements.removeAttachment.disabled = state.sending;
   elements.cancelReply.disabled = busy;
-  elements.sendIcon.hidden = busy;
-  elements.sendSpinner.hidden = !busy;
+  elements.sendIcon.hidden = spinning;
+  elements.sendSpinner.hidden = !spinning;
 }
 
 function mediaKindFromMime(mime) {
@@ -2049,7 +2054,7 @@ function clearStagedAttachment({ revoke = true } = {}) {
 }
 
 async function stageAttachment(file) {
-  if (!file || state.sending) return;
+  if (!file) return;
   const isImage = file.type.startsWith("image/");
   const mediaKind = mediaKindFromMime(file.type);
   const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
@@ -2095,7 +2100,6 @@ async function stageAttachment(file) {
       bitmap?.close?.();
     }
   }
-  if (state.sending) return;
   const maxMiB = { image: 20, gif: 20, video: 100, audio: 50, document: 50 }[mediaKind];
   if (file.size > maxMiB * 1024 * 1024) {
     showError(`Il file supera il limite di ${maxMiB} MiB.`);
@@ -2120,7 +2124,7 @@ async function stageAttachment(file) {
 }
 
 async function submitMessage() {
-  if (state.sending || !state.active) return;
+  if (!state.active) return;
   const text = elements.messageInput.value;
   const attachment = state.stagedAttachment;
   const reply = state.replyTo ? { ...state.replyTo } : null;
@@ -2170,7 +2174,7 @@ async function submitMessage() {
   }
   console.debug("[web] optimistic", { protocol: active.protocol, optimistic_id: optimistic.optimistic_id, attachment_id: attachment?.filename, hasPreview: !!optimistic.localPreviewUrl });
   state.optimistic.push(optimistic);
-  state.sending = true;
+  state.sending += 1;
   elements.messageInput.value = "";
   if (attachment) clearStagedAttachment({ revoke: false });
   resizeComposer();
@@ -2209,10 +2213,15 @@ async function submitMessage() {
     optimistic.optimisticStatus = "failed";
     if (error.message !== "unauthorized") showError("Impossibile inviare il messaggio.");
   } finally {
-    state.sending = false;
+    state.sending -= 1;
     updateComposer();
-    if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
-    elements.messageInput.focus();
+    // Non spostare il focus se nel frattempo l'utente ha cambiato chat:
+    // con piu' invii in volo insieme, questo invio potrebbe risolversi
+    // molto dopo che si e' passati a un'altra conversazione.
+    if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
+      renderMessages(state.messages, active.protocol);
+      elements.messageInput.focus();
+    }
   }
 }
 
@@ -2428,7 +2437,7 @@ elements.messageInput.addEventListener("keydown", (event) => {
   }
   if (event.key !== "Enter" || event.shiftKey) return;
   event.preventDefault();
-  if (!state.sending && !state.editSending) {
+  if (!state.editSending) {
     state.editing ? submitEdit() : submitMessage();
   }
 });
