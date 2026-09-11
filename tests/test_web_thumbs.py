@@ -327,7 +327,7 @@ vm.runInThisContext(media);
     assert.ok(state.mediaFailures.has(id));
   }
 
-  const renderStart = app.indexOf("function renderMessages(");
+  const renderStart = app.indexOf("function messageNodeKey(");
   const renderEnd = app.indexOf("\nfunction copyReactions", renderStart);
   let videoCalls = 0;
   let imageCalls = 0;
