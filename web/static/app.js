@@ -2129,6 +2129,11 @@ async function submitMessage() {
   const attachment = state.stagedAttachment;
   const reply = state.replyTo ? { ...state.replyTo } : null;
   if (!text.trim() && !attachment) return;
+  // Il banner "Rispondendo a..." si chiude subito, non ad invio riuscito:
+  // con piu' invii in volo insieme un secondo messaggio composto mentre il
+  // primo (con citazione) e' ancora in corso non deve erediare la stessa
+  // citazione solo perche' il banner era ancora a schermo.
+  if (reply) cancelReply();
   const active = { ...state.active };
   const timestamp = Date.now();
   const optimistic = {
@@ -2208,7 +2213,6 @@ async function submitMessage() {
       });
     }
     optimistic.optimisticStatus = "sent";
-    if (state.replyTo && reply && state.replyTo.timestamp === reply.timestamp) cancelReply();
   } catch (error) {
     optimistic.optimisticStatus = "failed";
     if (error.message !== "unauthorized") showError("Impossibile inviare il messaggio.");
