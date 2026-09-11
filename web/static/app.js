@@ -335,6 +335,13 @@ function unreadOf(contact) {
 
 function updateFavicon() {
   const unreadTotal = state.contacts.reduce((sum, contact) => sum + unreadOf(contact), 0);
+  // Badge stile app nativa sull'icona Dock/taskbar quando installata come PWA
+  // (manifest.json). Non supportato ovunque (es. Firefox): feature-detect,
+  // nessun effetto dove manca l'API.
+  if (navigator.setAppBadge) {
+    if (unreadTotal > 0) navigator.setAppBadge(unreadTotal).catch(() => {});
+    else navigator.clearAppBadge?.().catch(() => {});
+  }
   const shouldBeRed = unreadTotal > 0;
   let favicon = document.querySelector('link[rel="icon"]');
   if (favicon && faviconRed === shouldBeRed) return;
