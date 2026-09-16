@@ -9,7 +9,6 @@ PATH, so no real downloads or installs happen.
 
 from __future__ import annotations
 
-import ast
 import io
 import json
 import os
@@ -774,20 +773,63 @@ class TestAliasIsolation:
         real_bashrc_after = real_bashrc.read_bytes() if real_bashrc.exists() else None
         assert real_bashrc_after == real_bashrc_before
 
-    def test_web_bg_alias_python_syntax_is_valid(self, tmp_path: Path):
-        """Il comando python3 -c dell'alias web-signal-tui-bg deve essere sintatticamente
-        valido: una parentesi extra lo rompe (bug osservato: token mai estratto)."""
+    def test_background_alias_is_idempotent_and_stop_alias_works(self, tmp_path: Path):
         script = tmp_path / "install.sh"
+        home = tmp_path / "home"
+        fake_bin = tmp_path / "fakebin"
+        tmux_state = tmp_path / "tmux.state"
+        home.mkdir()
+        fake_bin.mkdir()
         shutil.copy(INSTALL_SCRIPT, script)
-        text = script.read_text(encoding="utf-8")
-        line = next(ln for ln in text.splitlines() if "alias web-signal-tui-bg=" in ln)
-        marker = 'python3 -c "'
-        start = line.index(marker) + len(marker)
-        # Il codice finisce alla prima " non preceduta da backslash.
-        i = start
-        while i < len(line):
-            if line[i] == '"' and line[i - 1] != "\\":
-                break
-            i += 1
-        code = line[start:i].replace('\\"', '"')
-        ast.parse(code)  # deve essere Python valido (no parentesi sbilanciate)
+        _make_executable(script)
+        _write_stub(
+            fake_bin / "tmux",
+            "#!/bin/sh\n"
+            f"state={str(tmux_state)!r}\n"
+            'case "$1" in\n'
+            '  has-session) [ -f "$state" ] ;;\n'
+            '  new-session) touch "$state" ;;\n'
+            '  kill-session) rm -f "$state" ;;\n'
+            "esac\n",
+        )
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "SHELL": "/bin/bash",
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        }
+        install = subprocess.run(
+            ["bash", str(script), "--aliases"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env=env,
+            timeout=30,
+            check=False,
+        )
+        assert install.returncode == 0, install.stderr
+        runner = tmp_path / "run-aliases.sh"
+        runner.write_text(
+            "shopt -s expand_aliases\n"
+            f"source {str(home / '.bashrc')!r}\n"
+            "web-signal-tui-bg\n"
+            "signal-tui-bg\n"
+            "signal-tui-stop\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            ["bash", str(runner)],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env=env,
+            timeout=30,
+            check=False,
+        )
+
+        token = json.loads((tmp_path / "config.json").read_text())["web"]["token"]
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.count(f"token: {token}") == 2
+        assert "TUI bg fermata." in result.stdout
+        assert not tmux_state.exists()

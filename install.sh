@@ -194,11 +194,33 @@ install_aliases() {
     read -r -d '' ALIASES_BLOCK <<'EOF' || true
 # ─── Signal TUI Client: web reader + background via tmux ─────────────────
 # Web su 0.0.0.0:4242. Token Bearer: config.json (web.token) o SIGNAL_TUI_WEB_TOKEN.
-# web-signal-tui-bg esporta il token nella shell (fast cycle: curl + login Web UI).
+# web-signal-tui-bg stampa ed esporta il token (fast cycle: curl + login Web UI).
 SIGNAL_TUI_DIR="__PROJECT_DIR__"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
-alias web-signal-tui-bg='tmux new-session -d -s tui "cd $SIGNAL_TUI_DIR && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0" && export SIGNAL_TUI_WEB_TOKEN="$(python3 -c "import json; print(json.load(open(\"$SIGNAL_TUI_DIR/config.json\"))[\"web\"][\"token\"])")" && echo "TUI bg avviata — token: $SIGNAL_TUI_WEB_TOKEN"'
-alias web-signal-tui-stop='[ -f /tmp/signal-tui.lock ] && kill -INT "$(cat /tmp/signal-tui.lock)" 2>/dev/null; for i in $(seq 1 12); do [ ! -f /tmp/signal-tui.lock ] && break; sleep 0.5; done; tmux kill-session -t tui 2>/dev/null; sleep 0.5; [ -f /tmp/signal-tui.lock ] && rm -f /tmp/signal-tui.lock'
+_signal_tui_web_bg() {
+    if ! tmux has-session -t tui 2>/dev/null; then
+        tmux new-session -d -s tui "cd \"$SIGNAL_TUI_DIR\" && exec .venv/bin/python -m signal_tui" || return 1
+    fi
+    SIGNAL_TUI_WEB_TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["web"]["token"])' "$SIGNAL_TUI_DIR/config.json")" || return 1
+    export SIGNAL_TUI_WEB_TOKEN
+    echo "TUI bg attiva — token: $SIGNAL_TUI_WEB_TOKEN"
+}
+_signal_tui_web_stop() {
+    if [ -f /tmp/signal-tui.lock ]; then
+        kill -INT "$(cat /tmp/signal-tui.lock)" 2>/dev/null || true
+    fi
+    for i in $(seq 1 12); do
+        [ ! -f /tmp/signal-tui.lock ] && break
+        sleep 0.5
+    done
+    tmux kill-session -t tui 2>/dev/null || true
+    rm -f /tmp/signal-tui.lock
+    echo "TUI bg fermata."
+}
+alias web-signal-tui-bg='_signal_tui_web_bg'
+alias web-signal-tui-stop='_signal_tui_web_stop'
+alias signal-tui-bg='_signal_tui_web_bg'
+alias signal-tui-stop='_signal_tui_web_stop'
 EOF
     ALIASES_BLOCK="${ALIASES_BLOCK//__PROJECT_DIR__/$PROJECT_DIR}"
 

@@ -601,6 +601,10 @@ The automatic installer enables the Web UI in `config.json`, so a normal
 | `web-signal-tui-bg` | Starts the TUI + web server in a **detached tmux session** (background) and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN` |
 | `web-signal-tui-stop` | Cleanly stops the tmux session and removes `/tmp/signal-tui.lock` |
 
+`signal-tui-bg` and `signal-tui-stop` are shorter aliases for the two background commands.
+Starting the background command is idempotent: when the session is already active it still prints
+and exports the current token instead of failing.
+
 > The web server requires the optional dependencies in requirements-web.txt (installed by default; if you used --no-web: .venv/bin/pip install -r requirements-web.txt). Without them the TUI logs "optional dependencies are missing (web down)" and continues normally.
 
 ### Fast cycle (background + token)
