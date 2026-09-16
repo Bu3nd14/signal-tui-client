@@ -286,15 +286,32 @@ WEBHOOK_PORT="${CLIENT_WEBHOOK_PORT:-8088}"
 check_port() {
     local port="$1" label="$2"
     info "Controllo porta ${label} (${port})..."
-    if ! ss -tlnp 2>/dev/null | grep -q ":${port}[[:space:]]"; then
+    local line="" pid="" pname=""
+    if [ "$(uname -s)" = "Darwin" ] && command -v lsof >/dev/null 2>&1; then
+        line="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR == 2 {print; exit}')" || true
+        if [ -n "$line" ]; then
+            pname="$(printf '%s\n' "$line" | awk '{print $1}')"
+            pid="$(printf '%s\n' "$line" | awk '{print $2}')"
+        fi
+    elif command -v ss >/dev/null 2>&1; then
+        line="$(ss -tlnp 2>/dev/null | grep ":${port}[[:space:]]" | head -1)" || true
+        pid="$(printf '%s\n' "$line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
+        pname="$(printf '%s\n' "$line" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')"
+    elif command -v lsof >/dev/null 2>&1; then
+        line="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR == 2 {print; exit}')" || true
+        if [ -n "$line" ]; then
+            pname="$(printf '%s\n' "$line" | awk '{print $1}')"
+            pid="$(printf '%s\n' "$line" | awk '{print $2}')"
+        fi
+    else
+        warn "  Impossibile verificare la porta ${port}: servono lsof o ss."
+        return 1
+    fi
+    if [ -z "$line" ]; then
         ok "  Porta ${port} disponibile"
         return 0
     fi
-    local line pid pname
-    line="$(ss -tlnp 2>/dev/null | grep ":${port}[[:space:]]" | head -1)"
-    pid="$(echo "$line" | sed -n 's/.*pid=\([0-9]*\).*/\1/p')"
-    pname="$(echo "$line" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')"
-    if [ "$port" = "$WEBHOOK_PORT" ] && [ "$pname" = "python" ]; then
+    if [ "$port" = "$WEBHOOK_PORT" ] && [[ "$pname" = [Pp]ython* ]]; then
         ok "  Porta ${port} gia in uso (pid ${pid}, webhook server) - OK"
         return 0
     fi
