@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import sys
 from asyncio import run
 from pathlib import Path
@@ -217,6 +218,192 @@ class TestDeviceLinkReconnectWiring:
         app._reconnect_touched_backends.assert_called_once_with({"telegram"})
 
 
+class TestSignalLinkPersistence:
+    def test_persists_only_linked_account_and_preserves_config(
+        self, tmp_path, monkeypatch
+    ):
+        from protocols import rpc as signal_rpc
+
+        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps({"web": {"token": "existing"}}), encoding="utf-8"
+        )
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout="+391111111111\n+392222222222\n",
+        )
+
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(
+                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
+            ),
+            patch(
+                "device_link_screen.subprocess.run", return_value=completed
+            ) as run_cli,
+        ):
+            account = DeviceLinkPickerScreen._resolve_linked_signal_account(
+                "+39 222 222 2222"
+            )
+            DeviceLinkPickerScreen._persist_signal_account(account)
+
+        assert account == "+392222222222"
+        assert json.loads(config_file.read_text(encoding="utf-8")) == {
+            "web": {"token": "existing"},
+            "user_number": "+392222222222",
+        }
+        run_cli.assert_called_once_with(
+            ["signal-cli", "listAccounts"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    def test_single_linked_account_does_not_require_phone_input(
+        self, tmp_path, monkeypatch
+    ):
+        from protocols import rpc as signal_rpc
+
+        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
+        completed = SimpleNamespace(returncode=0, stdout="+391111111111\n")
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(
+                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
+            ),
+            patch("device_link_screen.subprocess.run", return_value=completed),
+        ):
+            account = DeviceLinkPickerScreen._resolve_linked_signal_account("")
+
+        assert account == "+391111111111"
+
+    def test_new_account_is_selected_from_pre_link_snapshot(
+        self, tmp_path, monkeypatch
+    ):
+        from protocols import rpc as signal_rpc
+
+        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout="+391111111111\n+392222222222\n",
+        )
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(
+                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
+            ),
+            patch("device_link_screen.subprocess.run", return_value=completed),
+        ):
+            account = DeviceLinkPickerScreen._resolve_linked_signal_account(
+                "", {"+391111111111"}
+            )
+
+        assert account == "+392222222222"
+
+    def test_new_account_overrides_stale_entered_phone(self, tmp_path, monkeypatch):
+        from protocols import rpc as signal_rpc
+
+        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout="+391111111111\n+392222222222\n",
+        )
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(
+                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
+            ),
+            patch("device_link_screen.subprocess.run", return_value=completed),
+        ):
+            account = DeviceLinkPickerScreen._resolve_linked_signal_account(
+                "+391111111111", {"+391111111111"}
+            )
+
+        assert account == "+392222222222"
+
+    def test_multiple_accounts_without_match_are_rejected(self, tmp_path, monkeypatch):
+        from protocols import rpc as signal_rpc
+
+        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout="+391111111111\n+392222222222\n",
+        )
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(
+                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
+            ),
+            patch("device_link_screen.subprocess.run", return_value=completed),
+            pytest.raises(RuntimeError, match="multiple linked accounts"),
+        ):
+            DeviceLinkPickerScreen._resolve_linked_signal_account("")
+
+        assert not (tmp_path / "config.json").exists()
+
+    def test_environment_account_conflict_is_rejected(self, tmp_path, monkeypatch):
+        from protocols import rpc as signal_rpc
+
+        monkeypatch.setenv("SIGNAL_USER_NUMBER", "+399999999999")
+        completed = SimpleNamespace(returncode=0, stdout="+391111111111\n")
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(
+                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
+            ),
+            patch("device_link_screen.subprocess.run", return_value=completed),
+            pytest.raises(RuntimeError, match="SIGNAL_USER_NUMBER"),
+        ):
+            DeviceLinkPickerScreen._resolve_linked_signal_account("")
+
+    def test_finalize_updates_active_backend(self):
+        screen = DeviceLinkPickerScreen()
+        backend = SimpleNamespace(user_number="")
+        with (
+            patch.object(
+                screen,
+                "_resolve_linked_signal_account",
+                return_value="+391111111111",
+            ),
+            patch.object(screen, "_persist_signal_account") as persist,
+            patch.object(
+                DeviceLinkPickerScreen,
+                "app",
+                new_callable=PropertyMock,
+                return_value=SimpleNamespace(signal_backend=backend),
+            ),
+        ):
+            run(screen._finalize_signal_link(""))
+
+        assert screen._signal_number == "+391111111111"
+        assert backend.user_number == "+391111111111"
+        persist.assert_called_once_with("+391111111111")
+
+    def test_finalize_rejects_switch_before_persisting(self):
+        screen = DeviceLinkPickerScreen()
+        backend = SimpleNamespace(user_number="+391111111111")
+        with (
+            patch.object(
+                screen,
+                "_resolve_linked_signal_account",
+                return_value="+392222222222",
+            ),
+            patch.object(screen, "_persist_signal_account") as persist,
+            patch.object(
+                DeviceLinkPickerScreen,
+                "app",
+                new_callable=PropertyMock,
+                return_value=SimpleNamespace(signal_backend=backend),
+            ),
+            pytest.raises(RuntimeError, match="switching Signal accounts"),
+        ):
+            run(screen._finalize_signal_link(""))
+
+        persist.assert_not_called()
+
+
 class TestDeviceLinkScreenFlows:
     @pytest.mark.integration
     async def test_mount_populates_picker_and_phase_visibility(self, app_for_test):
@@ -351,10 +538,13 @@ class TestDeviceLinkScreenFlows:
 
         screen._phase = "qr"
         screen._check_signal_done = AsyncMock(return_value=True)
+        screen._finalize_signal_link = AsyncMock()
         screen.query_one = MagicMock(side_effect=[status, code])
         screen.dismiss = MagicMock()
         with patch("asyncio.sleep", AsyncMock()):
             run(screen._poll_completion(""))
+        screen._finalize_signal_link.assert_awaited_once_with("")
+        assert screen._touched_protocols == {"signal"}
         screen.dismiss.assert_called_once_with(None)
 
         screen.query_one = MagicMock(side_effect=[code, status])
