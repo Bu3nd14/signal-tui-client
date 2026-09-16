@@ -92,7 +92,9 @@ A terminal-based (TUI) multi-protocol messaging client built with [Textual](http
 
 The easiest way is to use the provided `install.sh` script, which checks prerequisites, downloads the
 correct `signal-cli` build, optionally starts the WAHA Docker container for WhatsApp, creates a
-virtual environment and installs the Python dependencies:
+virtual environment and installs the Python dependencies. By default it also creates or updates
+`config.json`, enables the local Web UI on `127.0.0.1:4242`, and generates a secure Bearer token
+without overwriting existing settings:
 
 ```bash
 git clone https://github.com/Bu3nd14/signal-tui-client.git
@@ -109,8 +111,8 @@ Supported options:
 ./install.sh --update             # update signal-cli to the latest version
 ./install.sh --whatsapp           # start the WAHA Docker container for WhatsApp
 ./install.sh --check-whatsapp     # check WhatsApp prerequisites (Docker, ports, firewall)
-./install.sh --no-web             # skip optional Web UI dependencies
-./install.sh --aliases            # install only the Web UI shell aliases
+./install.sh --no-web             # skip Web UI dependencies and configuration
+./install.sh --aliases            # configure the Web UI and install only its shell aliases
 ./install.sh --help               # show usage
 ```
 
@@ -590,11 +592,18 @@ below it, labeled with that protocol's icon and color.
 
 Three shell aliases (bash/zsh) launch the optional web reader and manage its lifecycle:
 
+The automatic installer enables the Web UI in `config.json`, so a normal
+`python3 signal_tui.py` start also serves it locally on `http://127.0.0.1:4242`.
+
 | Alias | What it does |
 |---|---|
 | `web-signal-tui` | Starts the TUI with the web server in the **foreground** on `0.0.0.0:4242` |
 | `web-signal-tui-bg` | Starts the TUI + web server in a **detached tmux session** (background) and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN` |
 | `web-signal-tui-stop` | Cleanly stops the tmux session and removes `/tmp/signal-tui.lock` |
+
+`signal-tui-bg` and `signal-tui-stop` are shorter aliases for the two background commands.
+Starting the background command is idempotent: when the session is already active it still prints
+and exports the current token instead of failing.
 
 > The web server requires the optional dependencies in requirements-web.txt (installed by default; if you used --no-web: .venv/bin/pip install -r requirements-web.txt). Without them the TUI logs "optional dependencies are missing (web down)" and continues normally.
 
