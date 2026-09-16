@@ -235,8 +235,66 @@ check_firewall() {
     ok "  Nessun firewall restrittivo rilevato"
 }
 
+ensure_waha_env() {
+    local env_file="$PROJECT_DIR/.env"
+    local env_example="$PROJECT_DIR/.env.example"
+    local existed=0
+    [ -f "$env_file" ] && existed=1
+
+    python3 - "$env_file" "$env_example" "$(uname -m)" <<'PY'
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+env_file = Path(sys.argv[1])
+env_example = Path(sys.argv[2])
+architecture = sys.argv[3].lower()
+if env_file.exists():
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+elif env_example.exists():
+    lines = env_example.read_text(encoding="utf-8").splitlines()
+else:
+    lines = []
+
+credentials = (
+    ("WAHA_API_KEY", lambda: secrets.token_urlsafe(32)),
+    ("WAHA_DASHBOARD_USERNAME", lambda: "admin"),
+    ("WAHA_DASHBOARD_PASSWORD", lambda: secrets.token_urlsafe(32)),
+    ("WHATSAPP_SWAGGER_USERNAME", lambda: "admin"),
+    ("WHATSAPP_SWAGGER_PASSWORD", lambda: secrets.token_urlsafe(32)),
+)
+image = "devlikeapro/waha:arm" if architecture in ("arm64", "aarch64") else "devlikeapro/waha:latest"
+values = [("WAHA_IMAGE", image)]
+for key, generate in credentials:
+    prefix = f"{key}="
+    existing = next(
+        (line.split("=", 1)[1].strip() for line in reversed(lines) if line.startswith(prefix) and line.split("=", 1)[1].strip()),
+        "",
+    )
+    values.append((key, existing or generate()))
+
+managed = tuple(f"{key}=" for key, _ in values)
+lines = [line for line in lines if not line.startswith(managed)]
+if lines and lines[-1]:
+    lines.append("")
+lines.extend(f"{key}={value}" for key, value in values)
+content = "\n".join(lines) + "\n"
+if not env_file.exists() or env_file.read_text(encoding="utf-8") != content:
+    env_file.write_text(content, encoding="utf-8")
+env_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+PY
+
+    if [ "$existed" -eq 1 ]; then
+        ok "Credenziali WAHA verificate in $env_file"
+    else
+        ok "Credenziali WAHA generate in $env_file (permessi 0600)"
+    fi
+}
+
 setup_whatsapp() {
     local should_start="${1:-0}"
+    local api_key="" ready=0
     echo
     echo "${C_BLUE}${C_BOLD}-- WhatsApp (WAHA) ------------------------------------------------------------${C_RESET}"
     echo
@@ -255,19 +313,28 @@ setup_whatsapp() {
     check_firewall "$WA_PORT" "WAHA API"
     check_firewall "$WEBHOOK_PORT" "webhook"
     if [ "$should_start" -eq 1 ]; then
+        ensure_waha_env
         echo
         info "Avvio WAHA via Docker Compose..."
         docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d
         ok "WAHA avviato. API: http://127.0.0.1:${WA_PORT}"
         echo
         info "In attesa che WAHA sia pronto..."
+        api_key="$(sed -n 's/^WAHA_API_KEY=//p' "$PROJECT_DIR/.env" | tail -1)"
         for i in $(seq 1 30); do
-            if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${WA_PORT}/api/sessions" 2>/dev/null | grep -q '^[23]'; then
+            if curl -s -o /dev/null -w '%{http_code}' \
+                -H "X-Api-Key: ${api_key}" \
+                "http://127.0.0.1:${WA_PORT}/api/sessions" 2>/dev/null \
+                | grep -q '^[23]'; then
                 ok "WAHA pronto! (dopo ${i}s)"
+                ready=1
                 break
             fi
             sleep 1
         done
+        if [ "$ready" -ne 1 ]; then
+            warn "WAHA avviato ma non pronto dopo 30s; controlla: docker compose logs whatsapp"
+        fi
     fi
     echo
 }

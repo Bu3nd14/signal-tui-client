@@ -215,14 +215,18 @@ or use the installer:
 ./install.sh --whatsapp
 ```
 
-The API then listens on `127.0.0.1:3005` by default (override with
-`WHATSAPP_API_PORT`); session + media persist in `./whatsapp-data/` (git-ignored).
+The installer creates `.env` with secure WAHA credentials and `0600` permissions,
+preserving any existing WAHA or Telegram values. The API then listens on
+`127.0.0.1:3005` by default (override with `WHATSAPP_API_PORT`); session + media
+persist in `./whatsapp-data/` (git-ignored).
+On ARM hosts such as Apple Silicon, the installer selects WAHA's native `:arm`
+image; x86_64 hosts continue to use `:latest`.
 If Docker isn't installed, the configuration below still lets you point the
 backend at any compatible Baileys API.
 
-> **API key (authentication):** WAHA generates credentials on its **first** start
-> and requires them afterwards — REST calls without the correct key return `401`.
-> Copy the defaults and fill in the values the container printed/logged:
+> **API key (authentication):** REST calls without the correct key return `401`.
+> `./install.sh --whatsapp` generates and persists the credentials automatically.
+> For a manual Docker Compose setup, copy the defaults and fill in secure values:
 >
 > ```bash
 > cp .env.example .env       # then edit `.env` and set WAHA_API_KEY etc.
