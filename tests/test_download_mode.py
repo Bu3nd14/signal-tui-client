@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,27 @@ def _bar_app(download_mode: bool = False, reply_to=None):
 
 
 class TestDownloadMode:
+    def test_open_media_uses_macos_open(self, tmp_path):
+        path = tmp_path / "manual.pdf"
+        process = MagicMock()
+        app = DownloadModeMixin()
+        app.run_worker = MagicMock()
+
+        with (
+            patch("tui.download.sys.platform", "darwin"),
+            patch("tui.download.shutil.which", return_value="/usr/bin/open") as which,
+            patch("tui.download.subprocess.Popen", return_value=process) as popen,
+        ):
+            app._open_media_path(path)
+
+        which.assert_called_once_with("open")
+        popen.assert_called_once_with(
+            ["/usr/bin/open", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
     def test_open_media_reports_path_when_xdg_open_exits_unsuccessfully(self, tmp_path):
         path = tmp_path / "manual.pdf"
         process = MagicMock()

@@ -3,6 +3,7 @@
 import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from textual.containers import Horizontal
@@ -27,8 +28,9 @@ class DownloadModeMixin:
     _MEDIA_OPEN_STARTUP_TIMEOUT = 0.5
 
     def _open_media_path(self, path: Path) -> None:
-        """Open a local media file with the Linux desktop handler."""
-        opener = shutil.which("xdg-open")
+        """Open a local media file with the platform desktop handler."""
+        opener_name = "open" if sys.platform == "darwin" else "xdg-open"
+        opener = shutil.which(opener_name)
         if opener is None:
             self._status(f"📎 File available at: {path}")
             return
@@ -45,7 +47,7 @@ class DownloadModeMixin:
                 exclusive=False,
             )
         except OSError:
-            logger.debug("Unable to launch xdg-open", exc_info=True)
+            logger.debug("Unable to launch media opener", exc_info=True)
             self._status(f"📎 File available at: {path}")
 
     def _check_media_opener_worker(self, process: subprocess.Popen, path: Path) -> None:
@@ -55,7 +57,7 @@ class DownloadModeMixin:
         except subprocess.TimeoutExpired:
             return
         except OSError:
-            logger.debug("Unable to wait for xdg-open", exc_info=True)
+            logger.debug("Unable to wait for media opener", exc_info=True)
             self.call_from_thread(self._status, f"📎 File available at: {path}")
             return
         if return_code != 0:

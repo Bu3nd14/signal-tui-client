@@ -237,7 +237,7 @@ def _run_install(tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         cwd=str(tmp_path),
-        env={**os.environ, "HOME": str(fake_home)},
+        env={**os.environ, "HOME": str(fake_home), "SHELL": "/bin/bash"},
         timeout=60,
     )
 
@@ -427,6 +427,85 @@ exit 0
         assert result.returncode == 0
         assert "Java 17 trovato" in result.stdout
         assert "richiede Java 25" in result.stdout
+
+
+class TestPortCheck:
+    def _run_check(self, tmp_path: Path, lsof_output: str, lsof_exit: int = 0):
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        _write_stub(
+            fake_bin / "lsof",
+            f"#!/bin/sh\nprintf '%b\\n' '{lsof_output}'\nexit {lsof_exit}\n",
+        )
+        _write_stub(fake_bin / "uname", "#!/bin/sh\necho Darwin\n")
+        func = _extract_function(INSTALL_SCRIPT, "check_port")
+        script = tmp_path / "check-port.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            "info() { :; }\n"
+            "ok() { printf '%s\\n' \"$*\"; }\n"
+            "warn() { printf '%s\\n' \"$*\"; }\n"
+            "WEBHOOK_PORT=8088\n"
+            f"{func}\n"
+            'check_port 3005 "WAHA API"\n',
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{fake_bin}:/usr/bin:/bin"},
+            timeout=30,
+            check=False,
+        )
+
+    def test_lsof_reports_free_port(self, tmp_path: Path):
+        result = self._run_check(tmp_path, "", lsof_exit=1)
+
+        assert result.returncode == 0
+        assert "Porta 3005 disponibile" in result.stdout
+
+    def test_lsof_reports_occupied_port(self, tmp_path: Path):
+        result = self._run_check(
+            tmp_path,
+            "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\\nnode 4321 user 1u IPv4 0 0t0 TCP *:3005 (LISTEN)",
+        )
+
+        assert result.returncode == 1
+        assert "Porta 3005 gia in uso da pid 4321 (node)" in result.stdout
+
+    def test_lsof_recognizes_macos_python_webhook(self, tmp_path: Path):
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        _write_stub(
+            fake_bin / "lsof",
+            "#!/bin/sh\nprintf '%s\\n' 'COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME' 'Python 4321 user 1u IPv4 0 0t0 TCP *:8088 (LISTEN)'\n",
+        )
+        _write_stub(fake_bin / "uname", "#!/bin/sh\necho Darwin\n")
+        func = _extract_function(INSTALL_SCRIPT, "check_port")
+        script = tmp_path / "check-webhook-port.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            "info() { :; }\n"
+            "ok() { printf '%s\\n' \"$*\"; }\n"
+            "warn() { printf '%s\\n' \"$*\"; }\n"
+            "WEBHOOK_PORT=8088\n"
+            f"{func}\n"
+            'check_port 8088 "webhook"\n',
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{fake_bin}:/usr/bin:/bin"},
+            timeout=30,
+            check=False,
+        )
+
+        assert result.returncode == 0
+        assert "webhook server" in result.stdout
 
 
 class TestVenv:
