@@ -110,6 +110,66 @@ require_cmd() {
     fi
 }
 
+ensure_web_config() {
+    local config_file="$PROJECT_DIR/config.json"
+    local existed=0
+    [ -f "$config_file" ] && existed=1
+
+    if ! python3 - "$config_file" <<'PY'
+import json
+import os
+import secrets
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+config_file = Path(sys.argv[1])
+if config_file.exists():
+    try:
+        config = json.loads(config_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"config.json non valido: {exc}") from exc
+    if not isinstance(config, dict):
+        raise SystemExit("config.json deve contenere un oggetto JSON")
+else:
+    config = {}
+
+web = config.get("web")
+if not isinstance(web, dict):
+    web = {}
+web.setdefault("enabled", True)
+web.setdefault("host", "127.0.0.1")
+web.setdefault("port", 4242)
+if not str(web.get("token") or "").strip():
+    web["token"] = secrets.token_urlsafe(32)
+config["web"] = web
+
+fd, temporary_name = tempfile.mkstemp(prefix=".config.json.", dir=config_file.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as temporary:
+        json.dump(config, temporary, ensure_ascii=False, indent=2)
+        temporary.write("\n")
+    os.chmod(temporary_name, stat.S_IRUSR | stat.S_IWUSR)
+    os.replace(temporary_name, config_file)
+finally:
+    try:
+        os.unlink(temporary_name)
+    except FileNotFoundError:
+        pass
+PY
+    then
+        err "Impossibile preparare la configurazione Web in $config_file"
+        return 1
+    fi
+
+    if [ "$existed" -eq 1 ]; then
+        ok "Configurazione Web verificata in $config_file"
+    else
+        ok "Configurazione Web creata in $config_file (permessi 0600)"
+    fi
+}
+
 install_aliases() {
     local shell_name="${SHELL:-}"
     shell_name="${shell_name##*/}"
@@ -468,7 +528,10 @@ install_python_deps() {
     "$pip_cmd" install -r "$PROJECT_DIR/requirements.txt" || die "Installazione delle dipendenze Python fallita."
 
     if [ "$DO_WEB" -eq 1 ]; then
-        "$pip_cmd" install -r "$PROJECT_DIR/requirements-web.txt" || warn "Dipendenze Web UI non installate; la Web UI resterà disabilitata. Riprovare: $pip_cmd install -r requirements-web.txt"
+        "$pip_cmd" install -r "$PROJECT_DIR/requirements-web.txt" || {
+            warn "Dipendenze Web UI non installate; la Web UI resterà disabilitata. Riprovare: $pip_cmd install -r requirements-web.txt"
+            DO_WEB=0
+        }
     else
         info "Dipendenze Web UI saltate (--no-web)."
     fi
@@ -483,6 +546,7 @@ install_python_deps() {
 
 if [ "$DO_ALIASES_ONLY" -eq 1 ]; then
     info "Aggiunta alias web…"
+    ensure_web_config || die "Configurazione Web non riuscita."
     install_aliases
     exit $?
 fi
@@ -549,6 +613,11 @@ fi
 # 5. Installazione dipendenze Python
 install_python_deps
 
+# 5.1 Configurazione Web — abilita il server al normale avvio della TUI
+if [ "$DO_WEB" -eq 1 ]; then
+    ensure_web_config || die "Configurazione Web non riuscita."
+fi
+
 # 5.5 WhatsApp — check prerequisiti o avvio
 if [ "$DO_CHECK_WHATSAPP" -eq 1 ]; then
     setup_whatsapp 0
@@ -591,6 +660,10 @@ if [ "$DO_VENV" -eq 1 ]; then
     echo "       source .venv/bin/activate"
 fi
 echo "       python3 signal_tui.py"
+if [ "$DO_WEB" -eq 1 ]; then
+    echo "       Web UI: http://127.0.0.1:4242"
+    echo "       Token:  config.json → web.token"
+fi
 echo
 if [ "$DO_WHATSAPP" -eq 0 ] && [ "$DO_CHECK_WHATSAPP" -eq 0 ]; then
     if command -v docker >/dev/null 2>&1; then

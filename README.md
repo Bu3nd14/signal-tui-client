@@ -92,7 +92,9 @@ A terminal-based (TUI) multi-protocol messaging client built with [Textual](http
 
 The easiest way is to use the provided `install.sh` script, which checks prerequisites, downloads the
 correct `signal-cli` build, optionally starts the WAHA Docker container for WhatsApp, creates a
-virtual environment and installs the Python dependencies:
+virtual environment and installs the Python dependencies. By default it also creates or updates
+`config.json`, enables the local Web UI on `127.0.0.1:4242`, and generates a secure Bearer token
+without overwriting existing settings:
 
 ```bash
 git clone https://github.com/Bu3nd14/signal-tui-client.git
@@ -109,8 +111,8 @@ Supported options:
 ./install.sh --update             # update signal-cli to the latest version
 ./install.sh --whatsapp           # start the WAHA Docker container for WhatsApp
 ./install.sh --check-whatsapp     # check WhatsApp prerequisites (Docker, ports, firewall)
-./install.sh --no-web             # skip optional Web UI dependencies
-./install.sh --aliases            # install only the Web UI shell aliases
+./install.sh --no-web             # skip Web UI dependencies and configuration
+./install.sh --aliases            # configure the Web UI and install only its shell aliases
 ./install.sh --help               # show usage
 ```
 
@@ -589,6 +591,9 @@ below it, labeled with that protocol's icon and color.
 ## Web reader aliases
 
 Three shell aliases (bash/zsh) launch the optional web reader and manage its lifecycle:
+
+The automatic installer enables the Web UI in `config.json`, so a normal
+`python3 signal_tui.py` start also serves it locally on `http://127.0.0.1:4242`.
 
 | Alias | What it does |
 |---|---|
