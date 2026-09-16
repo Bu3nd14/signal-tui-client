@@ -208,6 +208,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
     BINDINGS: ClassVar[list[Binding]] = [
         Binding("escape", "dismiss(None)", "Close", priority=True),
         Binding("enter", "select_item", "Select", priority=True),
+        Binding("ctrl+q", "quit_app", "Quit", priority=True),
     ]
 
     # ── Constructor ────────────────────────────────────────────────────────
@@ -294,14 +295,15 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         lv = ListView(id="link-protocol-list")
         container.mount(lv)
         for item in _PROTOCOL_ITEMS:
-            if item["id"] == "whatsapp" and not self._has_whatsapp:
-                continue
-            if item["id"] == "telegram" and not self._has_telegram:
-                continue
-            label = Label(item["label"])
-            if item["disabled"]:
+            unavailable_reason = self._protocol_unavailable_reason(item["id"])
+            label_text = item["label"]
+            if unavailable_reason:
+                label_text = f"{label_text}  ({unavailable_reason})"
+            disabled = item["disabled"] or bool(unavailable_reason)
+            label = Label(label_text)
+            if disabled:
                 label.add_class("disabled-item")
-            li = ListItem(label, disabled=item["disabled"])
+            li = ListItem(label, disabled=disabled)
             lv.append(li)
 
         container.mount(
@@ -468,7 +470,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         def _run() -> tuple[bool, bool]:
             status = wa._rest.get_session_status() or {}
             s = str(status.get("status") or "").lower()
-            if s == "working":
+            if self._whatsapp_status_is_linked(status):
                 return True, False  # done, no refresh needed
             # Check QR age for refresh
             age = time.time() - self._qr_start_time
@@ -710,7 +712,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             status = wa._rest.get_session_status() or {}
             s = str(status.get("status") or "").lower()
 
-            if s == "working":
+            if self._whatsapp_status_is_linked(status):
                 return "ALREADY_CONNECTED"
 
             # If the session is in a dead/failed state, restart it
@@ -753,6 +755,12 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         if result == "ALREADY_CONNECTED":
             return "INFO: WhatsApp is already linked and working ✅\nNo QR needed."
         return result
+
+    @staticmethod
+    def _whatsapp_status_is_linked(status: dict) -> bool:
+        """Require both WORKING state and an authenticated account identity."""
+        state = str(status.get("status") or "").lower()
+        return state == "working" and bool(status.get("me"))
 
     async def _get_telegram_qr_link(self) -> str:
         """Get a Telegram pairing QR link via the backend."""
@@ -853,19 +861,26 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             except Exception as _e:
                 logger.debug("Failed to read 2FA input", exc_info=True)
 
+    def action_quit_app(self) -> None:
+        """Let the global quit shortcut work while this modal has focus."""
+        self.app.action_quit()
+
     # ── Internal helpers ───────────────────────────────────────────────────
+
+    def _protocol_unavailable_reason(self, protocol: str) -> str:
+        """Explain why an optional protocol cannot start its linking flow."""
+        if protocol == "whatsapp" and not self._has_whatsapp:
+            return "start or configure WAHA"
+        if protocol == "telegram" and not self._has_telegram:
+            return "set TELEGRAM_API_ID and TELEGRAM_API_HASH"
+        return ""
 
     def _select_protocol(self, index: int) -> None:
         """Handle protocol selection from the picker list."""
-        filtered = [
-            item
-            for item in _PROTOCOL_ITEMS
-            if not (item["id"] == "whatsapp" and not self._has_whatsapp)
-        ]
-        if index < 0 or index >= len(filtered):
+        if index < 0 or index >= len(_PROTOCOL_ITEMS):
             return
-        item = filtered[index]
-        if item["disabled"]:
+        item = _PROTOCOL_ITEMS[index]
+        if item["disabled"] or self._protocol_unavailable_reason(item["id"]):
             return
 
         self._selected_protocol = item["id"]
