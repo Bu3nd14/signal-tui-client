@@ -534,7 +534,7 @@ class TestWahaEnv:
             "info() { :; }; ok() { :; }; err() { :; }; warn() { :; }\n"
             "check_port() { return 0; }; check_firewall() { :; }\n"
             f"PROJECT_DIR={str(tmp_path)!r}\nWA_PORT=3005\nWEBHOOK_PORT=8088\n"
-            "C_BLUE=\"\"\nC_BOLD=\"\"\nC_RESET=\"\"\n"
+            'C_BLUE=""\nC_BOLD=""\nC_RESET=""\n'
             f"{setup}\nsetup_whatsapp 0\n",
             encoding="utf-8",
         )
@@ -573,7 +573,7 @@ class TestWahaEnv:
             "info() { :; }; ok() { :; }; err() { :; }; warn() { :; }\n"
             "check_port() { return 0; }; check_firewall() { :; }\n"
             f"PROJECT_DIR={str(tmp_path)!r}\nWA_PORT=3005\nWEBHOOK_PORT=8088\n"
-            "C_BLUE=\"\"\nC_BOLD=\"\"\nC_RESET=\"\"\n"
+            'C_BLUE=""\nC_BOLD=""\nC_RESET=""\n'
             f"{ensure}\n{setup}\nsetup_whatsapp 1\n",
             encoding="utf-8",
         )
