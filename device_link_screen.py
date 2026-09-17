@@ -12,10 +12,14 @@ Provides:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import subprocess
+import tempfile
 import time
+from pathlib import Path
 from typing import ClassVar
 
 from textual.app import ComposeResult
@@ -228,6 +232,9 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         self._phase: str = "picker"
         self._selected_protocol: str = ""
         self._device_name: str = _DEFAULT_SIGNAL_DEVICE_NAME
+        self._signal_accounts_before_link: set[str] = set()
+        self._signal_finalizing = False
+        self._dismiss_after_finalize = False
         # Protocolli il cui flusso QR è stato effettivamente avviato in questa
         # schermata: al dismiss servono a riconnettere solo i backend toccati.
         self._touched_protocols: set[str] = set()
@@ -391,7 +398,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
 
     def _transition_to_qr(self, phone: str) -> None:
         """Move from phone to QR phase, fetching a real QR code."""
-        self._touched_protocols.add(self._selected_protocol)
+        if self._selected_protocol != "signal":
+            self._touched_protocols.add(self._selected_protocol)
         self._populate_qr_phase("⏳ Generating QR code...", phone)
         self._show_phase("qr")
         self._linking_proc: subprocess.Popen | None = None
@@ -426,6 +434,36 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 return  # dismissed during check
 
             if done:
+                if proto == "signal":
+                    self._signal_finalizing = True
+                    try:
+                        await self._finalize_signal_link(phone)
+                    except Exception as exc:
+                        self._signal_finalizing = False
+                        if self._dismiss_after_finalize:
+                            self.dismiss(None)
+                            return
+                        logger.exception("Failed to configure linked Signal account")
+                        try:
+                            status = self.query_one("#link-qr-status", Static)
+                            status.update(
+                                "❌ Device linked, but account configuration failed: "
+                                f"{exc}"
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to update Signal configuration error",
+                                exc_info=True,
+                            )
+                        return
+                    except BaseException:
+                        self._signal_finalizing = False
+                        raise
+                    self._signal_finalizing = False
+                    self._touched_protocols.add("signal")
+                    if self._dismiss_after_finalize:
+                        self.dismiss(None)
+                        return
                 try:
                     status = self.query_one("#link-qr-status", Static)
                     status.update("✅ Device linked successfully!")
@@ -457,6 +495,108 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         if rc is None:
             return False  # still running
         return rc == 0  # 0 = success
+
+    async def _finalize_signal_link(self, phone: str) -> None:
+        """Persist the linked account and update the active Signal backend."""
+        import asyncio as _asyncio
+
+        account = await _asyncio.to_thread(
+            self._resolve_linked_signal_account,
+            phone,
+            self._signal_accounts_before_link,
+        )
+        backend = getattr(self.app, "signal_backend", None)
+        current_account = getattr(backend, "user_number", "")
+        if current_account and current_account != account:
+            raise RuntimeError(
+                "switching Signal accounts in an active profile is not supported"
+            )
+        await _asyncio.to_thread(self._persist_signal_account, account)
+        self._signal_number = account
+        if backend is not None:
+            backend.user_number = account
+
+    @staticmethod
+    def _list_signal_accounts() -> list[str]:
+        """Return canonical E.164 account numbers reported by signal-cli."""
+        from protocols import rpc as signal_rpc
+
+        result = subprocess.run(
+            [str(signal_rpc.find_signal_cli()), "listAccounts"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("signal-cli could not list the linked accounts")
+        return list(
+            dict.fromkeys(re.findall(r"(?<!\d)\+\d{7,15}(?!\d)", result.stdout))
+        )
+
+    @classmethod
+    def _resolve_linked_signal_account(
+        cls, phone: str, previous_accounts: set[str] | None = None
+    ) -> str:
+        """Resolve the linked account without changing local configuration."""
+        accounts = cls._list_signal_accounts()
+        new_accounts = set(accounts) - (previous_accounts or set())
+        normalized_phone = re.sub(r"[\s()-]", "", phone)
+        if len(new_accounts) == 1:
+            account = new_accounts.pop()
+        elif normalized_phone in accounts:
+            account = normalized_phone
+        elif len(accounts) == 1:
+            account = accounts[0]
+        elif not accounts:
+            raise RuntimeError("signal-cli did not report a linked account")
+        else:
+            raise RuntimeError(
+                "multiple linked accounts found; select the account number"
+            )
+
+        environment_account = os.environ.get("SIGNAL_USER_NUMBER")
+        if environment_account and environment_account != account:
+            raise RuntimeError(
+                "SIGNAL_USER_NUMBER selects a different account; unset it and retry"
+            )
+        return account
+
+    @staticmethod
+    def _persist_signal_account(account: str) -> None:
+        """Atomically save the linked account while preserving other settings."""
+        from protocols import rpc as signal_rpc
+
+        config_file = signal_rpc.PROJECT_DIR / "config.json"
+        config: dict[str, object] = {}
+        if config_file.exists():
+            try:
+                loaded = json.loads(config_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                raise RuntimeError(
+                    "existing config.json is invalid or unreadable"
+                ) from exc
+            if not isinstance(loaded, dict):
+                raise RuntimeError("existing config.json must contain a JSON object")
+            config = loaded
+        config["user_number"] = account
+
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=config_file.parent,
+                prefix=".config.json.",
+                delete=False,
+            ) as temporary:
+                json.dump(config, temporary, indent=2)
+                temporary.write("\n")
+                temporary_path = Path(temporary.name)
+            os.replace(temporary_path, config_file)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
 
     async def _check_whatsapp_done(self) -> bool:
         """Check WAHA session status; refresh QR if expired."""
@@ -657,6 +797,11 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         from protocols.rpc import find_signal_cli
 
         def _run() -> str:
+            try:
+                self._signal_accounts_before_link = set(self._list_signal_accounts())
+            except Exception:
+                self._signal_accounts_before_link = set()
+                logger.debug("Could not snapshot Signal accounts", exc_info=True)
             args = [
                 str(find_signal_cli()),
                 "link",
@@ -676,16 +821,15 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             link_found = None
             for line in iter(proc.stdout.readline, ""):
                 line = line.rstrip()
-                logger.debug("signal-cli: %s", line)
                 match = re.search(r"((?:sgnl|signal)://link[^\s]*)", line)
                 if match:
                     link_found = match.group(1)
                     break
                 if "error" in line.lower() or "cannot" in line.lower():
-                    logger.warning("signal-cli error line: %s", line)
+                    logger.warning("signal-cli reported an error during linking")
 
             if link_found:
-                logger.info("Signal link URL found: %s...", link_found[:40])
+                logger.info("Signal link URL found")
                 return link_found
             raise RuntimeError(
                 "Could not find Signal link URL in signal-cli output. "
@@ -802,6 +946,9 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
 
     def dismiss(self, result: None = None) -> None:
         """Kill any running subprocess and stop workers before dismissing."""
+        if self._signal_finalizing:
+            self._dismiss_after_finalize = True
+            return
         # Signal polling worker to stop
         self._phase = "done"
         # Kill subprocess if still running
