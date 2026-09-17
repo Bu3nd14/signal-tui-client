@@ -15,7 +15,7 @@
 
 services:
   whatsapp:
-    image: devlikeapro/waha:latest
+    image: "${WAHA_IMAGE:-devlikeapro/waha:latest}"
     container_name: signal-tui-whatsapp
     restart: unless-stopped
     deploy:

@@ -110,6 +110,66 @@ require_cmd() {
     fi
 }
 
+ensure_web_config() {
+    local config_file="$PROJECT_DIR/config.json"
+    local existed=0
+    [ -f "$config_file" ] && existed=1
+
+    if ! python3 - "$config_file" <<'PY'
+import json
+import os
+import secrets
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+config_file = Path(sys.argv[1])
+if config_file.exists():
+    try:
+        config = json.loads(config_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"config.json non valido: {exc}") from exc
+    if not isinstance(config, dict):
+        raise SystemExit("config.json deve contenere un oggetto JSON")
+else:
+    config = {}
+
+web = config.get("web")
+if not isinstance(web, dict):
+    web = {}
+web.setdefault("enabled", True)
+web.setdefault("host", "127.0.0.1")
+web.setdefault("port", 4242)
+if not str(web.get("token") or "").strip():
+    web["token"] = secrets.token_urlsafe(32)
+config["web"] = web
+
+fd, temporary_name = tempfile.mkstemp(prefix=".config.json.", dir=config_file.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as temporary:
+        json.dump(config, temporary, ensure_ascii=False, indent=2)
+        temporary.write("\n")
+    os.chmod(temporary_name, stat.S_IRUSR | stat.S_IWUSR)
+    os.replace(temporary_name, config_file)
+finally:
+    try:
+        os.unlink(temporary_name)
+    except FileNotFoundError:
+        pass
+PY
+    then
+        err "Impossibile preparare la configurazione Web in $config_file"
+        return 1
+    fi
+
+    if [ "$existed" -eq 1 ]; then
+        ok "Configurazione Web verificata in $config_file"
+    else
+        ok "Configurazione Web creata in $config_file (permessi 0600)"
+    fi
+}
+
 install_aliases() {
     local shell_name="${SHELL:-}"
     shell_name="${shell_name##*/}"
@@ -134,11 +194,33 @@ install_aliases() {
     read -r -d '' ALIASES_BLOCK <<'EOF' || true
 # ─── Signal TUI Client: web reader + background via tmux ─────────────────
 # Web su 0.0.0.0:4242. Token Bearer: config.json (web.token) o SIGNAL_TUI_WEB_TOKEN.
-# web-signal-tui-bg esporta il token nella shell (fast cycle: curl + login Web UI).
+# web-signal-tui-bg stampa ed esporta il token (fast cycle: curl + login Web UI).
 SIGNAL_TUI_DIR="__PROJECT_DIR__"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
-alias web-signal-tui-bg='tmux new-session -d -s tui "cd $SIGNAL_TUI_DIR && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0" && export SIGNAL_TUI_WEB_TOKEN="$(python3 -c "import json; print(json.load(open(\"$SIGNAL_TUI_DIR/config.json\"))[\"web\"][\"token\"])")" && echo "TUI bg avviata — token: $SIGNAL_TUI_WEB_TOKEN"'
-alias web-signal-tui-stop='[ -f /tmp/signal-tui.lock ] && kill -INT "$(cat /tmp/signal-tui.lock)" 2>/dev/null; for i in $(seq 1 12); do [ ! -f /tmp/signal-tui.lock ] && break; sleep 0.5; done; tmux kill-session -t tui 2>/dev/null; sleep 0.5; [ -f /tmp/signal-tui.lock ] && rm -f /tmp/signal-tui.lock'
+_signal_tui_web_bg() {
+    if ! tmux has-session -t tui 2>/dev/null; then
+        tmux new-session -d -s tui "cd \"$SIGNAL_TUI_DIR\" && exec .venv/bin/python -m signal_tui" || return 1
+    fi
+    SIGNAL_TUI_WEB_TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["web"]["token"])' "$SIGNAL_TUI_DIR/config.json")" || return 1
+    export SIGNAL_TUI_WEB_TOKEN
+    echo "TUI bg attiva — token: $SIGNAL_TUI_WEB_TOKEN"
+}
+_signal_tui_web_stop() {
+    if [ -f /tmp/signal-tui.lock ]; then
+        kill -INT "$(cat /tmp/signal-tui.lock)" 2>/dev/null || true
+    fi
+    for i in $(seq 1 12); do
+        [ ! -f /tmp/signal-tui.lock ] && break
+        sleep 0.5
+    done
+    tmux kill-session -t tui 2>/dev/null || true
+    rm -f /tmp/signal-tui.lock
+    echo "TUI bg fermata."
+}
+alias web-signal-tui-bg='_signal_tui_web_bg'
+alias web-signal-tui-stop='_signal_tui_web_stop'
+alias signal-tui-bg='_signal_tui_web_bg'
+alias signal-tui-stop='_signal_tui_web_stop'
 EOF
     ALIASES_BLOCK="${ALIASES_BLOCK//__PROJECT_DIR__/$PROJECT_DIR}"
 
@@ -235,8 +317,66 @@ check_firewall() {
     ok "  Nessun firewall restrittivo rilevato"
 }
 
+ensure_waha_env() {
+    local env_file="$PROJECT_DIR/.env"
+    local env_example="$PROJECT_DIR/.env.example"
+    local existed=0
+    [ -f "$env_file" ] && existed=1
+
+    python3 - "$env_file" "$env_example" "$(uname -m)" <<'PY'
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+env_file = Path(sys.argv[1])
+env_example = Path(sys.argv[2])
+architecture = sys.argv[3].lower()
+if env_file.exists():
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+elif env_example.exists():
+    lines = env_example.read_text(encoding="utf-8").splitlines()
+else:
+    lines = []
+
+credentials = (
+    ("WAHA_API_KEY", lambda: secrets.token_urlsafe(32)),
+    ("WAHA_DASHBOARD_USERNAME", lambda: "admin"),
+    ("WAHA_DASHBOARD_PASSWORD", lambda: secrets.token_urlsafe(32)),
+    ("WHATSAPP_SWAGGER_USERNAME", lambda: "admin"),
+    ("WHATSAPP_SWAGGER_PASSWORD", lambda: secrets.token_urlsafe(32)),
+)
+image = "devlikeapro/waha:arm" if architecture in ("arm64", "aarch64") else "devlikeapro/waha:latest"
+values = [("WAHA_IMAGE", image)]
+for key, generate in credentials:
+    prefix = f"{key}="
+    existing = next(
+        (line.split("=", 1)[1].strip() for line in reversed(lines) if line.startswith(prefix) and line.split("=", 1)[1].strip()),
+        "",
+    )
+    values.append((key, existing or generate()))
+
+managed = tuple(f"{key}=" for key, _ in values)
+lines = [line for line in lines if not line.startswith(managed)]
+if lines and lines[-1]:
+    lines.append("")
+lines.extend(f"{key}={value}" for key, value in values)
+content = "\n".join(lines) + "\n"
+if not env_file.exists() or env_file.read_text(encoding="utf-8") != content:
+    env_file.write_text(content, encoding="utf-8")
+env_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
+PY
+
+    if [ "$existed" -eq 1 ]; then
+        ok "Credenziali WAHA verificate in $env_file"
+    else
+        ok "Credenziali WAHA generate in $env_file (permessi 0600)"
+    fi
+}
+
 setup_whatsapp() {
     local should_start="${1:-0}"
+    local api_key="" ready=0
     echo
     echo "${C_BLUE}${C_BOLD}-- WhatsApp (WAHA) ------------------------------------------------------------${C_RESET}"
     echo
@@ -255,19 +395,28 @@ setup_whatsapp() {
     check_firewall "$WA_PORT" "WAHA API"
     check_firewall "$WEBHOOK_PORT" "webhook"
     if [ "$should_start" -eq 1 ]; then
+        ensure_waha_env
         echo
         info "Avvio WAHA via Docker Compose..."
         docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d
         ok "WAHA avviato. API: http://127.0.0.1:${WA_PORT}"
         echo
         info "In attesa che WAHA sia pronto..."
+        api_key="$(sed -n 's/^WAHA_API_KEY=//p' "$PROJECT_DIR/.env" | tail -1)"
         for i in $(seq 1 30); do
-            if curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${WA_PORT}/api/sessions" 2>/dev/null | grep -q '^[23]'; then
+            if curl -s -o /dev/null -w '%{http_code}' \
+                -H "X-Api-Key: ${api_key}" \
+                "http://127.0.0.1:${WA_PORT}/api/sessions" 2>/dev/null \
+                | grep -q '^[23]'; then
                 ok "WAHA pronto! (dopo ${i}s)"
+                ready=1
                 break
             fi
             sleep 1
         done
+        if [ "$ready" -ne 1 ]; then
+            warn "WAHA avviato ma non pronto dopo 30s; controlla: docker compose logs whatsapp"
+        fi
     fi
     echo
 }
@@ -401,7 +550,10 @@ install_python_deps() {
     "$pip_cmd" install -r "$PROJECT_DIR/requirements.txt" || die "Installazione delle dipendenze Python fallita."
 
     if [ "$DO_WEB" -eq 1 ]; then
-        "$pip_cmd" install -r "$PROJECT_DIR/requirements-web.txt" || warn "Dipendenze Web UI non installate; la Web UI resterà disabilitata. Riprovare: $pip_cmd install -r requirements-web.txt"
+        "$pip_cmd" install -r "$PROJECT_DIR/requirements-web.txt" || {
+            warn "Dipendenze Web UI non installate; la Web UI resterà disabilitata. Riprovare: $pip_cmd install -r requirements-web.txt"
+            DO_WEB=0
+        }
     else
         info "Dipendenze Web UI saltate (--no-web)."
     fi
@@ -416,6 +568,7 @@ install_python_deps() {
 
 if [ "$DO_ALIASES_ONLY" -eq 1 ]; then
     info "Aggiunta alias web…"
+    ensure_web_config || die "Configurazione Web non riuscita."
     install_aliases
     exit $?
 fi
@@ -482,6 +635,11 @@ fi
 # 5. Installazione dipendenze Python
 install_python_deps
 
+# 5.1 Configurazione Web — abilita il server al normale avvio della TUI
+if [ "$DO_WEB" -eq 1 ]; then
+    ensure_web_config || die "Configurazione Web non riuscita."
+fi
+
 # 5.5 WhatsApp — check prerequisiti o avvio
 if [ "$DO_CHECK_WHATSAPP" -eq 1 ]; then
     setup_whatsapp 0
@@ -524,6 +682,10 @@ if [ "$DO_VENV" -eq 1 ]; then
     echo "       source .venv/bin/activate"
 fi
 echo "       python3 signal_tui.py"
+if [ "$DO_WEB" -eq 1 ]; then
+    echo "       Web UI: http://127.0.0.1:4242"
+    echo "       Token:  config.json → web.token"
+fi
 echo
 if [ "$DO_WHATSAPP" -eq 0 ] && [ "$DO_CHECK_WHATSAPP" -eq 0 ]; then
     if command -v docker >/dev/null 2>&1; then

@@ -9,8 +9,8 @@ PATH, so no real downloads or installs happen.
 
 from __future__ import annotations
 
-import ast
 import io
+import json
 import os
 import shutil
 import stat
@@ -429,6 +429,171 @@ exit 0
         assert "richiede Java 25" in result.stdout
 
 
+class TestWahaEnv:
+    def _run_ensure_waha_env(self, tmp_path: Path, architecture: str | None = None):
+        func = _extract_function(INSTALL_SCRIPT, "ensure_waha_env")
+        script = tmp_path / "ensure-waha-env.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            "ok() { :; }\n"
+            f"PROJECT_DIR={str(tmp_path)!r}\n"
+            f"{func}\n"
+            "ensure_waha_env\n",
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        if architecture:
+            fake_bin = tmp_path / "waha-fakebin"
+            fake_bin.mkdir(exist_ok=True)
+            _write_stub(fake_bin / "uname", f"#!/bin/sh\necho {architecture}\n")
+            env["PATH"] = f"{fake_bin}:{env['PATH']}"
+        return subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+            check=False,
+        )
+
+    def test_creates_secure_waha_credentials(self, tmp_path: Path):
+        shutil.copy(PROJECT_ROOT / ".env.example", tmp_path / ".env.example")
+
+        result = self._run_ensure_waha_env(tmp_path)
+
+        assert result.returncode == 0, result.stderr
+        env_file = tmp_path / ".env"
+        values = dict(
+            line.split("=", 1)
+            for line in env_file.read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        )
+        expected_image = (
+            "devlikeapro/waha:arm"
+            if os.uname().machine.lower() in ("arm64", "aarch64")
+            else "devlikeapro/waha:latest"
+        )
+        assert values["WAHA_IMAGE"] == expected_image
+        assert len(values["WAHA_API_KEY"]) >= 32
+        assert values["WAHA_DASHBOARD_USERNAME"] == "admin"
+        assert len(values["WAHA_DASHBOARD_PASSWORD"]) >= 32
+        assert values["WHATSAPP_SWAGGER_USERNAME"] == "admin"
+        assert len(values["WHATSAPP_SWAGGER_PASSWORD"]) >= 32
+        assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+
+    def test_preserves_existing_values_and_is_idempotent(self, tmp_path: Path):
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "TELEGRAM_API_ID=12345\n"
+            "WAHA_API_KEY=existing-key\n"
+            "WAHA_DASHBOARD_PASSWORD=\n",
+            encoding="utf-8",
+        )
+
+        first = self._run_ensure_waha_env(tmp_path)
+        first_content = env_file.read_text(encoding="utf-8")
+        second = self._run_ensure_waha_env(tmp_path)
+
+        assert first.returncode == 0, first.stderr
+        assert second.returncode == 0, second.stderr
+        assert env_file.read_text(encoding="utf-8") == first_content
+        assert "TELEGRAM_API_ID=12345" in first_content
+        assert "WAHA_API_KEY=existing-key" in first_content
+
+    @pytest.mark.parametrize(
+        ("architecture", "expected"),
+        [
+            ("arm64", "devlikeapro/waha:arm"),
+            ("aarch64", "devlikeapro/waha:arm"),
+            ("x86_64", "devlikeapro/waha:latest"),
+            ("amd64", "devlikeapro/waha:latest"),
+        ],
+    )
+    def test_recalculates_image_for_current_architecture(
+        self, tmp_path: Path, architecture: str, expected: str
+    ):
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "WAHA_IMAGE=devlikeapro/waha:opposite-architecture\n",
+            encoding="utf-8",
+        )
+
+        result = self._run_ensure_waha_env(tmp_path, architecture)
+
+        assert result.returncode == 0, result.stderr
+        assert f"WAHA_IMAGE={expected}\n" in env_file.read_text(encoding="utf-8")
+
+    def test_check_only_does_not_create_env(self, tmp_path: Path):
+        fake_bin = tmp_path / "check-fakebin"
+        fake_bin.mkdir()
+        _write_stub(fake_bin / "docker", "#!/bin/sh\nexit 0\n")
+        setup = _extract_function(INSTALL_SCRIPT, "setup_whatsapp")
+        script = tmp_path / "check-whatsapp.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            "info() { :; }; ok() { :; }; err() { :; }; warn() { :; }\n"
+            "check_port() { return 0; }; check_firewall() { :; }\n"
+            f"PROJECT_DIR={str(tmp_path)!r}\nWA_PORT=3005\nWEBHOOK_PORT=8088\n"
+            'C_BLUE=""\nC_BOLD=""\nC_RESET=""\n'
+            f"{setup}\nsetup_whatsapp 0\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            timeout=30,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert not (tmp_path / ".env").exists()
+
+    def test_start_uses_api_key_for_readiness_probe(self, tmp_path: Path):
+        fake_bin = tmp_path / "start-fakebin"
+        fake_bin.mkdir()
+        docker_log = tmp_path / "docker.log"
+        curl_log = tmp_path / "curl.log"
+        _write_stub(
+            fake_bin / "docker",
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {str(docker_log)!r}\nexit 0\n",
+        )
+        _write_stub(
+            fake_bin / "curl",
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {str(curl_log)!r}\nprintf '200'\n",
+        )
+        _write_stub(fake_bin / "uname", "#!/bin/sh\necho x86_64\n")
+        ensure = _extract_function(INSTALL_SCRIPT, "ensure_waha_env")
+        setup = _extract_function(INSTALL_SCRIPT, "setup_whatsapp")
+        script = tmp_path / "start-whatsapp.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            "info() { :; }; ok() { :; }; err() { :; }; warn() { :; }\n"
+            "check_port() { return 0; }; check_firewall() { :; }\n"
+            f"PROJECT_DIR={str(tmp_path)!r}\nWA_PORT=3005\nWEBHOOK_PORT=8088\n"
+            'C_BLUE=""\nC_BOLD=""\nC_RESET=""\n'
+            f"{ensure}\n{setup}\nsetup_whatsapp 1\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            timeout=30,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "compose -f" in docker_log.read_text(encoding="utf-8")
+        curl_args = curl_log.read_text(encoding="utf-8")
+        assert "X-Api-Key:" in curl_args
+        assert "/api/sessions" in curl_args
+
+
 class TestVenv:
     """📦 Gestione virtualenv."""
 
@@ -471,6 +636,7 @@ class TestWebDependencies:
         pip_args = (tmp_path / "pip_args.log").read_text(encoding="utf-8")
         assert "requirements.txt" in pip_args
         assert "requirements-web.txt" not in pip_args
+        assert not (tmp_path / "config.json").exists()
 
     def test_web_deps_failure_is_soft(
         self,
@@ -493,7 +659,105 @@ class TestWebDependencies:
         assert "--no-web" in result.stdout
 
 
+class TestWebConfig:
+    def _run_ensure_web_config(self, tmp_path: Path):
+        func = _extract_function(INSTALL_SCRIPT, "ensure_web_config")
+        script = tmp_path / "ensure-web-config.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            "ok() { :; }; err() { :; }\n"
+            f"PROJECT_DIR={str(tmp_path)!r}\n"
+            f"{func}\n"
+            "ensure_web_config\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    def test_creates_enabled_web_config_with_secure_token(self, tmp_path: Path):
+        result = self._run_ensure_web_config(tmp_path)
+
+        assert result.returncode == 0, result.stderr
+        config_file = tmp_path / "config.json"
+        config = json.loads(config_file.read_text(encoding="utf-8"))
+        assert config["web"]["enabled"] is True
+        assert config["web"]["host"] == "127.0.0.1"
+        assert config["web"]["port"] == 4242
+        assert len(config["web"]["token"]) >= 32
+        assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+
+    def test_preserves_existing_config_and_is_idempotent(self, tmp_path: Path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "user_number": "+391234",
+                    "web": {
+                        "enabled": False,
+                        "host": "0.0.0.0",
+                        "port": 5000,
+                        "token": "existing-token",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        first = self._run_ensure_web_config(tmp_path)
+        first_content = config_file.read_text(encoding="utf-8")
+        second = self._run_ensure_web_config(tmp_path)
+
+        assert first.returncode == 0, first.stderr
+        assert second.returncode == 0, second.stderr
+        assert config_file.read_text(encoding="utf-8") == first_content
+        config = json.loads(first_content)
+        assert config["user_number"] == "+391234"
+        assert config["web"] == {
+            "enabled": False,
+            "host": "0.0.0.0",
+            "port": 5000,
+            "token": "existing-token",
+        }
+
+    def test_rejects_invalid_config_without_overwriting_it(self, tmp_path: Path):
+        config_file = tmp_path / "config.json"
+        config_file.write_text("{invalid", encoding="utf-8")
+
+        result = self._run_ensure_web_config(tmp_path)
+
+        assert result.returncode != 0
+        assert config_file.read_text(encoding="utf-8") == "{invalid"
+
+
 class TestAliasIsolation:
+    def test_aliases_mode_generates_web_config(self, tmp_path: Path):
+        script = tmp_path / "install.sh"
+        home = tmp_path / "home"
+        home.mkdir()
+        shutil.copy(INSTALL_SCRIPT, script)
+        _make_executable(script)
+
+        result = subprocess.run(
+            ["bash", str(script), "--aliases"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env={**os.environ, "HOME": str(home), "SHELL": "/bin/bash"},
+            timeout=30,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        assert config["web"]["enabled"] is True
+        assert config["web"]["token"]
+        assert (home / ".bashrc").exists()
+
     def test_install_writes_aliases_only_to_isolated_home(
         self, tmp_path: Path, fake_path: Path, test_helpers: Path
     ):
@@ -509,20 +773,63 @@ class TestAliasIsolation:
         real_bashrc_after = real_bashrc.read_bytes() if real_bashrc.exists() else None
         assert real_bashrc_after == real_bashrc_before
 
-    def test_web_bg_alias_python_syntax_is_valid(self, tmp_path: Path):
-        """Il comando python3 -c dell'alias web-signal-tui-bg deve essere sintatticamente
-        valido: una parentesi extra lo rompe (bug osservato: token mai estratto)."""
+    def test_background_alias_is_idempotent_and_stop_alias_works(self, tmp_path: Path):
         script = tmp_path / "install.sh"
+        home = tmp_path / "home"
+        fake_bin = tmp_path / "fakebin"
+        tmux_state = tmp_path / "tmux.state"
+        home.mkdir()
+        fake_bin.mkdir()
         shutil.copy(INSTALL_SCRIPT, script)
-        text = script.read_text(encoding="utf-8")
-        line = next(ln for ln in text.splitlines() if "alias web-signal-tui-bg=" in ln)
-        marker = 'python3 -c "'
-        start = line.index(marker) + len(marker)
-        # Il codice finisce alla prima " non preceduta da backslash.
-        i = start
-        while i < len(line):
-            if line[i] == '"' and line[i - 1] != "\\":
-                break
-            i += 1
-        code = line[start:i].replace('\\"', '"')
-        ast.parse(code)  # deve essere Python valido (no parentesi sbilanciate)
+        _make_executable(script)
+        _write_stub(
+            fake_bin / "tmux",
+            "#!/bin/sh\n"
+            f"state={str(tmux_state)!r}\n"
+            'case "$1" in\n'
+            '  has-session) [ -f "$state" ] ;;\n'
+            '  new-session) touch "$state" ;;\n'
+            '  kill-session) rm -f "$state" ;;\n'
+            "esac\n",
+        )
+        env = {
+            **os.environ,
+            "HOME": str(home),
+            "SHELL": "/bin/bash",
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        }
+        install = subprocess.run(
+            ["bash", str(script), "--aliases"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env=env,
+            timeout=30,
+            check=False,
+        )
+        assert install.returncode == 0, install.stderr
+        runner = tmp_path / "run-aliases.sh"
+        runner.write_text(
+            "shopt -s expand_aliases\n"
+            f"source {str(home / '.bashrc')!r}\n"
+            "web-signal-tui-bg\n"
+            "signal-tui-bg\n"
+            "signal-tui-stop\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            ["bash", str(runner)],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env=env,
+            timeout=30,
+            check=False,
+        )
+
+        token = json.loads((tmp_path / "config.json").read_text())["web"]["token"]
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.count(f"token: {token}") == 2
+        assert "TUI bg fermata." in result.stdout
+        assert not tmux_state.exists()

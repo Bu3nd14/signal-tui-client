@@ -111,6 +111,17 @@ class TestDeviceLinkPickerScreen:
         data = screen._get_qr_data("")
         assert data == "WA:fake-pairing-code-12345-for-ui-testing"
 
+    def test_whatsapp_working_requires_authenticated_identity(self):
+        assert DeviceLinkPickerScreen._whatsapp_status_is_linked(
+            {"status": "WORKING", "me": {"id": "123@c.us"}}
+        )
+        assert not DeviceLinkPickerScreen._whatsapp_status_is_linked(
+            {"status": "WORKING", "me": None}
+        )
+        assert not DeviceLinkPickerScreen._whatsapp_status_is_linked(
+            {"status": "FAILED", "me": {"id": "123@c.us"}}
+        )
+
     def test_select_protocol_out_of_range_is_noop(self):
         """Selecting an invalid index does nothing."""
         screen = DeviceLinkPickerScreen()
@@ -119,14 +130,41 @@ class TestDeviceLinkPickerScreen:
         screen._select_protocol(999)
         assert screen._selected_protocol == ""
 
-    def test_select_disabled_item_is_noop(self):
-        """Selecting the disabled Telegram item does nothing."""
+    def test_unavailable_protocols_explain_required_setup(self):
         screen = DeviceLinkPickerScreen()
-        # Telegram is index 2 in the full list
-        telegram_idx = next(
-            i for i, item in enumerate(_PROTOCOL_ITEMS) if item["id"] == "telegram"
+
+        assert screen._protocol_unavailable_reason("whatsapp") == (
+            "start or configure WAHA"
         )
-        screen._select_protocol(telegram_idx)
+        assert screen._protocol_unavailable_reason("telegram") == (
+            "set TELEGRAM_API_ID and TELEGRAM_API_HASH"
+        )
+        assert screen._protocol_unavailable_reason("signal") == ""
+
+    def test_select_unavailable_protocol_is_noop(self):
+        screen = DeviceLinkPickerScreen()
+        screen._transition_to_phone = MagicMock()
+        screen._transition_to_qr = MagicMock()
+
+        screen._select_protocol(1)
+        screen._select_protocol(2)
+
+        assert screen._selected_protocol == ""
+        screen._transition_to_phone.assert_not_called()
+        screen._transition_to_qr.assert_not_called()
+
+    def test_ctrl_q_delegates_to_app_quit(self):
+        screen = DeviceLinkPickerScreen()
+        app = MagicMock()
+        with patch.object(
+            DeviceLinkPickerScreen,
+            "app",
+            new_callable=PropertyMock,
+            return_value=app,
+        ):
+            screen.action_quit_app()
+
+        app.action_quit.assert_called_once_with()
 
 
 class TestDeviceLinkBinding:
@@ -176,15 +214,14 @@ class TestDeviceLinkTouchedTracking:
         assert screen._touched_protocols == {"telegram"}
 
     def test_select_telegram_marks_touched_via_qr(self):
-        screen = DeviceLinkPickerScreen()
+        screen = DeviceLinkPickerScreen(has_telegram=True)
         with (
             patch.object(screen, "_populate_qr_phase"),
             patch.object(screen, "_show_phase"),
             patch.object(screen, "run_worker"),
             patch.object(screen, "_fetch_real_qr", new=MagicMock()),
         ):
-            # has_whatsapp=False -> filtered = [signal, telegram], index 1 = telegram
-            screen._select_protocol(1)
+            screen._select_protocol(2)
         assert screen._selected_protocol == "telegram"
         assert screen._touched_protocols == {"telegram"}
 
@@ -747,6 +784,42 @@ class TestSignalLinkPersistenceEdgeCases:
 
 class TestDeviceLinkScreenFlows:
     @pytest.mark.integration
+    async def test_ctrl_q_quits_with_link_modal_open(self, app_for_test):
+        screen = DeviceLinkPickerScreen()
+        async with app_for_test.run_test() as pilot:
+            await app_for_test.push_screen(screen)
+            await pilot.pause()
+
+            await pilot.press("ctrl+q")
+            await pilot.pause()
+
+            assert app_for_test._exit is True
+
+    @pytest.mark.integration
+    @pytest.mark.parametrize(
+        ("has_whatsapp", "has_telegram"),
+        [(False, False), (True, False), (False, True), (True, True)],
+    )
+    async def test_picker_always_shows_all_protocols(
+        self, app_for_test, has_whatsapp, has_telegram
+    ):
+        screen = DeviceLinkPickerScreen(
+            has_whatsapp=has_whatsapp,
+            has_telegram=has_telegram,
+        )
+        async with app_for_test.run_test() as pilot:
+            await app_for_test.push_screen(screen)
+            await pilot.pause()
+            protocols = screen.query_one("#link-protocol-list", ListView)
+
+            assert len(protocols.children) == 3
+            assert [item.disabled for item in protocols.children] == [
+                False,
+                not has_whatsapp,
+                not has_telegram,
+            ]
+
+    @pytest.mark.integration
     async def test_mount_populates_picker_and_phase_visibility(self, app_for_test):
         screen = DeviceLinkPickerScreen(has_whatsapp=True, has_telegram=True)
         async with app_for_test.run_test() as pilot:
@@ -848,7 +921,10 @@ class TestDeviceLinkScreenFlows:
     def test_whatsapp_and_telegram_qr_helpers(self):
         screen = DeviceLinkPickerScreen()
         wa = SimpleNamespace(_rest=MagicMock())
-        wa._rest.get_session_status.return_value = {"status": "working"}
+        wa._rest.get_session_status.return_value = {
+            "status": "working",
+            "me": {"id": "123@c.us"},
+        }
         with patch.object(
             DeviceLinkPickerScreen,
             "app",
@@ -856,6 +932,16 @@ class TestDeviceLinkScreenFlows:
             return_value=SimpleNamespace(whatsapp_backend=wa),
         ):
             assert run(screen._get_whatsapp_qr()).startswith("INFO:")
+
+        wa._rest.get_session_status.return_value = {"status": "working", "me": None}
+        wa._rest.get_pairing_qr.return_value = "fresh-qr"
+        with patch.object(
+            DeviceLinkPickerScreen,
+            "app",
+            new_callable=PropertyMock,
+            return_value=SimpleNamespace(whatsapp_backend=wa),
+        ):
+            assert run(screen._get_whatsapp_qr()) == "fresh-qr"
 
         tb = MagicMock()
         tb.get_pairing_qr.return_value = "tg-url"
@@ -919,6 +1005,18 @@ class TestDeviceLinkScreenFlows:
             screen.query_one = MagicMock(return_value=code)
             assert run(screen._check_whatsapp_done()) is False
         code.update.assert_called_once()
+
+        wa._rest.get_session_status.return_value = {
+            "status": "working",
+            "me": {"id": "123@c.us"},
+        }
+        with patch.object(
+            DeviceLinkPickerScreen,
+            "app",
+            new_callable=PropertyMock,
+            return_value=SimpleNamespace(whatsapp_backend=wa),
+        ):
+            assert run(screen._check_whatsapp_done()) is True
 
         tb = MagicMock(_connected=False, _needs_2fa=True)
         container = MagicMock()
