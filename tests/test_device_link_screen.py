@@ -404,6 +404,347 @@ class TestSignalLinkPersistence:
         persist.assert_not_called()
 
 
+class TestSignalLinkPersistenceEdgeCases:
+    """Edge cases of the Signal link persistence patch (PR #214)."""
+
+    def test_list_signal_accounts_failure(self, tmp_path, monkeypatch):
+        """signal-cli listAccounts with non-zero exit raises RuntimeError."""
+        from protocols import rpc as signal_rpc
+
+        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
+        completed = SimpleNamespace(returncode=1, stdout="")
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(
+                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
+            ),
+            patch("device_link_screen.subprocess.run", return_value=completed),
+            pytest.raises(RuntimeError, match="could not list the linked accounts"),
+        ):
+            DeviceLinkPickerScreen._list_signal_accounts()
+
+    def test_single_account_matching_previous_snapshot(self, tmp_path, monkeypatch):
+        """Only one account, already in the pre-link snapshot: use it."""
+        from protocols import rpc as signal_rpc
+
+        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
+        completed = SimpleNamespace(returncode=0, stdout="+391111111111\n")
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(
+                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
+            ),
+            patch("device_link_screen.subprocess.run", return_value=completed),
+        ):
+            account = DeviceLinkPickerScreen._resolve_linked_signal_account(
+                "", {"+391111111111"}
+            )
+
+        assert account == "+391111111111"
+
+    def test_no_accounts_reported_is_rejected(self, tmp_path, monkeypatch):
+        """Empty listAccounts output raises RuntimeError."""
+        from protocols import rpc as signal_rpc
+
+        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
+        completed = SimpleNamespace(returncode=0, stdout="")
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(
+                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
+            ),
+            patch("device_link_screen.subprocess.run", return_value=completed),
+            pytest.raises(RuntimeError, match="did not report a linked account"),
+        ):
+            DeviceLinkPickerScreen._resolve_linked_signal_account("")
+
+    def test_persist_rejects_invalid_config(self, tmp_path, monkeypatch):
+        """Malformed config.json raises RuntimeError without overwriting."""
+        from protocols import rpc as signal_rpc
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text("{not valid json", encoding="utf-8")
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            pytest.raises(RuntimeError, match="invalid or unreadable"),
+        ):
+            DeviceLinkPickerScreen._persist_signal_account("+391111111111")
+
+        assert config_file.read_text(encoding="utf-8") == "{not valid json"
+
+    def test_persist_rejects_non_dict_config(self, tmp_path, monkeypatch):
+        """config.json containing a non-object JSON value raises RuntimeError."""
+        from protocols import rpc as signal_rpc
+
+        config_file = tmp_path / "config.json"
+        config_file.write_text("[1, 2]", encoding="utf-8")
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            pytest.raises(RuntimeError, match="must contain a JSON object"),
+        ):
+            DeviceLinkPickerScreen._persist_signal_account("+391111111111")
+
+    def test_finalize_without_backend(self):
+        """Finalize works even when no Signal backend is attached."""
+        screen = DeviceLinkPickerScreen()
+        with (
+            patch.object(
+                screen,
+                "_resolve_linked_signal_account",
+                return_value="+391111111111",
+            ),
+            patch.object(screen, "_persist_signal_account"),
+            patch.object(
+                DeviceLinkPickerScreen,
+                "app",
+                new_callable=PropertyMock,
+                return_value=SimpleNamespace(signal_backend=None),
+            ),
+        ):
+            run(screen._finalize_signal_link(""))
+
+        assert screen._signal_number == "+391111111111"
+
+    def test_check_signal_done_without_proc(self):
+        """No linking subprocess yet: not done."""
+        screen = DeviceLinkPickerScreen()
+        assert run(screen._check_signal_done()) is False
+
+    def test_poll_completion_finalize_error_updates_status(self):
+        """Finalize failure shows the error on the QR status widget."""
+        screen = DeviceLinkPickerScreen()
+        screen._phase = "qr"
+        screen._selected_protocol = "signal"
+        screen._check_signal_done = AsyncMock(return_value=True)
+        screen._finalize_signal_link = AsyncMock(side_effect=RuntimeError("boom"))
+        status = MagicMock()
+        screen.query_one = MagicMock(return_value=status)
+        screen.dismiss = MagicMock()
+        with patch("asyncio.sleep", AsyncMock()):
+            run(screen._poll_completion(""))
+        status.update.assert_called_once()
+        assert "account configuration failed" in status.update.call_args.args[0]
+        screen.dismiss.assert_not_called()
+
+    def test_poll_completion_finalize_error_query_fails(self):
+        """Finalize failure with missing status widget is logged, not raised."""
+        screen = DeviceLinkPickerScreen()
+        screen._phase = "qr"
+        screen._selected_protocol = "signal"
+        screen._check_signal_done = AsyncMock(return_value=True)
+        screen._finalize_signal_link = AsyncMock(side_effect=RuntimeError("boom"))
+        screen.query_one = MagicMock(side_effect=Exception("no widget"))
+        screen.dismiss = MagicMock()
+        with patch("asyncio.sleep", AsyncMock()):
+            run(screen._poll_completion(""))
+        screen.dismiss.assert_not_called()
+
+    def test_poll_completion_finalize_error_dismisses_if_requested(self):
+        """A dismiss requested during a failed finalize is honoured."""
+        screen = DeviceLinkPickerScreen()
+        screen._phase = "qr"
+        screen._selected_protocol = "signal"
+        screen._check_signal_done = AsyncMock(return_value=True)
+        screen._finalize_signal_link = AsyncMock(side_effect=RuntimeError("boom"))
+        screen._dismiss_after_finalize = True
+        screen.dismiss = MagicMock()
+        with patch("asyncio.sleep", AsyncMock()):
+            run(screen._poll_completion(""))
+        screen.dismiss.assert_called_once_with(None)
+
+    def test_poll_completion_dismisses_after_finalize(self):
+        """A dismiss requested during a successful finalize is honoured."""
+        screen = DeviceLinkPickerScreen()
+        screen._phase = "qr"
+        screen._selected_protocol = "signal"
+        screen._check_signal_done = AsyncMock(return_value=True)
+        screen._finalize_signal_link = AsyncMock()
+        screen._dismiss_after_finalize = True
+        screen.dismiss = MagicMock()
+        with patch("asyncio.sleep", AsyncMock()):
+            run(screen._poll_completion(""))
+        screen._finalize_signal_link.assert_awaited_once_with("")
+        screen.dismiss.assert_called_once_with(None)
+
+    def test_poll_completion_status_update_failure_logs(self):
+        """Missing status widget after a successful finalize is logged."""
+        screen = DeviceLinkPickerScreen()
+        screen._phase = "qr"
+        screen._selected_protocol = "signal"
+        screen._check_signal_done = AsyncMock(return_value=True)
+        screen._finalize_signal_link = AsyncMock()
+        screen.query_one = MagicMock(side_effect=Exception("no widget"))
+        screen.dismiss = MagicMock()
+        with patch("asyncio.sleep", AsyncMock()):
+            run(screen._poll_completion(""))
+        screen.dismiss.assert_called_once_with(None)
+
+    def test_get_signal_link_url_snapshot_failure_continues(self):
+        """A failed pre-link snapshot does not block QR generation."""
+        screen = DeviceLinkPickerScreen()
+        stdout = MagicMock()
+        stdout.readline.side_effect = ["sgnl://linkdevice?uuid=abc", ""]
+        with (
+            patch.object(
+                DeviceLinkPickerScreen,
+                "_list_signal_accounts",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch("device_link_screen.subprocess.Popen") as popen,
+            patch("protocols.rpc.find_signal_cli", return_value=Path("signal-cli")),
+        ):
+            popen.return_value.stdout = stdout
+            link = run(screen._get_signal_link_url())
+        assert link == "sgnl://linkdevice?uuid=abc"
+        assert screen._signal_accounts_before_link == set()
+
+    def test_get_signal_link_url_logs_error_lines(self):
+        """Error lines from signal-cli are tolerated while scanning for a link."""
+        screen = DeviceLinkPickerScreen()
+        stdout = MagicMock()
+        stdout.readline.side_effect = [
+            "some error occurred",
+            "sgnl://linkdevice?uuid=abc",
+            "",
+        ]
+        with (
+            patch.object(
+                DeviceLinkPickerScreen, "_list_signal_accounts", return_value=set()
+            ),
+            patch("device_link_screen.subprocess.Popen") as popen,
+            patch("protocols.rpc.find_signal_cli", return_value=Path("signal-cli")),
+        ):
+            popen.return_value.stdout = stdout
+            link = run(screen._get_signal_link_url())
+        assert link == "sgnl://linkdevice?uuid=abc"
+
+    def test_get_signal_link_url_no_link_raises(self):
+        """signal-cli output without a link URL raises RuntimeError."""
+        screen = DeviceLinkPickerScreen()
+        stdout = MagicMock()
+        stdout.readline.side_effect = ["no link here", ""]
+        with (
+            patch.object(
+                DeviceLinkPickerScreen, "_list_signal_accounts", return_value=set()
+            ),
+            patch("device_link_screen.subprocess.Popen") as popen,
+            patch("protocols.rpc.find_signal_cli", return_value=Path("signal-cli")),
+            pytest.raises(RuntimeError, match="Could not find Signal link URL"),
+        ):
+            popen.return_value.stdout = stdout
+            run(screen._get_signal_link_url())
+
+    def test_dismiss_during_finalize_defers(self):
+        """Dismiss while finalizing defers cleanup instead of killing the proc."""
+        screen = DeviceLinkPickerScreen()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        screen._linking_proc = proc
+        screen._signal_finalizing = True
+        with patch("textual.screen.Screen.dismiss") as dismiss:
+            screen.dismiss(None)
+        assert screen._dismiss_after_finalize is True
+        proc.terminate.assert_not_called()
+        dismiss.assert_not_called()
+
+    def test_dismiss_terminate_failure_logs(self):
+        """A failing proc.terminate() does not prevent dismissal."""
+        screen = DeviceLinkPickerScreen()
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.terminate.side_effect = Exception("kill failed")
+        screen._linking_proc = proc
+        with patch("textual.screen.Screen.dismiss") as dismiss:
+            screen.dismiss(None)
+        proc.terminate.assert_called_once()
+        dismiss.assert_called_once()
+
+    def test_dismiss_without_proc(self):
+        """Dismiss works when no linking subprocess was started."""
+        screen = DeviceLinkPickerScreen()
+        with patch("textual.screen.Screen.dismiss") as dismiss:
+            screen.dismiss(None)
+        dismiss.assert_called_once()
+
+    def test_transition_to_qr_signal_does_not_mark_touched(self):
+        """Signal QR flow is not added to touched protocols (handled on finalize)."""
+        screen = DeviceLinkPickerScreen()
+        screen._selected_protocol = "signal"
+        with (
+            patch.object(screen, "_populate_qr_phase"),
+            patch.object(screen, "_show_phase"),
+            patch.object(screen, "run_worker"),
+            patch.object(screen, "_fetch_real_qr", new=MagicMock()),
+        ):
+            screen._transition_to_qr(phone="")
+        assert screen._touched_protocols == set()
+
+    def test_poll_completion_whatsapp_done_skips_signal_finalize(self):
+        """A done WhatsApp link skips the Signal finalize block."""
+        screen = DeviceLinkPickerScreen()
+        screen._phase = "qr"
+        screen._selected_protocol = "whatsapp"
+        screen._check_whatsapp_done = AsyncMock(return_value=True)
+        status, code = MagicMock(), MagicMock()
+        screen.query_one = MagicMock(side_effect=[status, code])
+        screen.dismiss = MagicMock()
+        with patch("asyncio.sleep", AsyncMock()):
+            run(screen._poll_completion(""))
+        screen._finalize_signal_link = AsyncMock()
+        assert (
+            not hasattr(screen, "_signal_finalizing") or not screen._signal_finalizing
+        )
+        screen.dismiss.assert_called_once_with(None)
+
+    def test_poll_completion_finalize_base_exception_propagates(self):
+        """A BaseException from finalize is re-raised after resetting state."""
+        screen = DeviceLinkPickerScreen()
+        screen._phase = "qr"
+        screen._selected_protocol = "signal"
+        screen._check_signal_done = AsyncMock(return_value=True)
+        screen._finalize_signal_link = AsyncMock(side_effect=KeyboardInterrupt())
+        with (
+            patch("asyncio.sleep", AsyncMock()),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            run(screen._poll_completion(""))
+        assert screen._signal_finalizing is False
+
+    def test_persist_creates_config_when_missing(self, tmp_path, monkeypatch):
+        """A missing config.json is created with just the user_number."""
+        from protocols import rpc as signal_rpc
+
+        config_file = tmp_path / "config.json"
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(
+                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
+            ),
+        ):
+            DeviceLinkPickerScreen._persist_signal_account("+391111111111")
+
+        assert json.loads(config_file.read_text(encoding="utf-8")) == {
+            "user_number": "+391111111111"
+        }
+
+    def test_persist_cleans_temp_file_on_replace_failure(self, tmp_path, monkeypatch):
+        """A failed os.replace leaves no temporary files behind."""
+        from protocols import rpc as signal_rpc
+
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch(
+                "device_link_screen.os.replace",
+                side_effect=OSError("disk full"),
+            ),
+            pytest.raises(OSError, match="disk full"),
+        ):
+            DeviceLinkPickerScreen._persist_signal_account("+391111111111")
+
+        leftovers = list(tmp_path.glob(".config.json.*"))
+        assert leftovers == []
+
+
 class TestDeviceLinkScreenFlows:
     @pytest.mark.integration
     async def test_mount_populates_picker_and_phase_visibility(self, app_for_test):
