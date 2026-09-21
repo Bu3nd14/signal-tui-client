@@ -260,6 +260,9 @@ class BackendManager:
             reply_to_message_id=reply_to_message_id,
             quote_attachments=quote_attachments,
         )
+        if not message_ids:
+            # Degenerate batch (empty file list): nothing to mirror.
+            return message_ids
         if protocol == "signal":
             # The Signal backend mirrors its own rows inside the atomic send
             # barrier: enqueue only the lightweight "sent-mirror" notification
@@ -326,12 +329,13 @@ class BackendManager:
         batch_index: int | None = None,
         **kwargs,
     ) -> None:
-        # Forward the batch metadata only when set: backends that have not
-        # been extended yet would reject the extra kwargs and lose the whole
+        # Forward the batch metadata only when the whole batch is identified
+        # by a batch_id: ``batch_index`` alone is always set (0 for a single
+        # attachment routed through the batch API) and backends that have not
+        # been extended yet would reject the extra kwarg and lose the whole
         # mirror (the TypeError is absorbed below).
         if batch_id is not None:
             kwargs["batch_id"] = batch_id
-        if batch_index is not None:
             kwargs["batch_index"] = batch_index
         try:
             backend.enqueue_sent_message(contact_id, message_id, text, **kwargs)

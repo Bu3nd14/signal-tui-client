@@ -1530,6 +1530,70 @@ def test_send_multipart_rejects_batch_over_total_byte_cap(web_client):
     assert list(_upload_dir(db_file).iterdir()) == []
 
 
+def test_send_multipart_chunked_enforces_total_cap_while_storing(web_client):
+    """RISCHIO-5: senza Content-Length (upload chunked) il cap totale va
+    rispettato MENTRE ogni file viene scritto, non dopo averli memorizzati
+    tutti su disco."""
+    from web import uploads as uploads_module
+
+    client, manager, db_file = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    boundary = "----testboundary"
+
+    def _field(name, value):
+        return (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n'
+            f"\r\n{value}\r\n"
+        ).encode()
+
+    def _file_part(name, filename, content_type, data):
+        return (
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"; '
+                f'filename="{filename}"\r\n'
+                f"Content-Type: {content_type}\r\n"
+                f"\r\n"
+            ).encode()
+            + data
+            + b"\r\n"
+        )
+
+    def _chunked(data, chunk_size=64):
+        def stream():
+            for start in range(0, len(data), chunk_size):
+                yield data[start : start + chunk_size]
+
+        return stream()
+
+    body = (
+        _field("protocol", "signal")
+        + _field("contact_id", "alice")
+        + _field("text", "")
+        + _file_part("file", "one.png", "image/png", _PNG_1X1)
+        + _file_part("file", "two.png", "image/png", b"not an image at all")
+        + f"--{boundary}--\r\n".encode()
+    )
+    # Cap between the first file and the two files together: the second
+    # file must abort mid-read (413) BEFORE its content is sniffed — a
+    # post-storage check would fully store it and answer 400 instead.
+    with patch.object(uploads_module, "_MAX_TOTAL_BYTES", len(_PNG_1X1) + 4):
+        response = client.post(
+            "/api/send",
+            content=_chunked(body),
+            headers={
+                **AUTH,
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Upload too large"
+    assert manager.attachments_calls == []
+    assert list(_upload_dir(db_file).iterdir()) == []
+
+
 def test_send_multipart_cleanup_when_second_file_is_invalid_media(web_client):
     client, manager, db_file = web_client
     manager.contacts = [ChatContact("alice", "Alice", "signal")]

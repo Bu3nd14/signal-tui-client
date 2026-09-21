@@ -123,7 +123,7 @@ def _max_bytes_for_kind(media_kind: str) -> int:
     return _MAX_BYTES_BY_KIND[limit_kind]
 
 
-def _store_upload_sync(upload: Any) -> StoredUpload:
+def _store_upload_sync(upload: Any, *, max_bytes: int | None = None) -> StoredUpload:
     directory = ensure_upload_directory()
     temporary_path: Path | None = None
     total = 0
@@ -136,6 +136,11 @@ def _store_upload_sync(upload: Any) -> StoredUpload:
             os.chmod(temporary_path, 0o600)
             while chunk := upload.file.read(_CHUNK_SIZE):
                 total += len(chunk)
+                # Cross-file budget: the caller caps this file at what is
+                # left of the request-wide total, so a batch exceeding the
+                # total is rejected while reading, not after storing it all.
+                if max_bytes is not None and total > max_bytes:
+                    raise UploadValidationError(413)
                 if total > max(_MAX_BYTES_BY_KIND.values()):
                     raise UploadValidationError(413)
                 if len(header) < 32:
@@ -165,8 +170,15 @@ def _store_upload_sync(upload: Any) -> StoredUpload:
         raise
 
 
-async def store_upload(upload: Any) -> StoredUpload:
+async def store_upload(upload: Any, *, max_bytes: int | None = None) -> StoredUpload:
+    """Store *upload* and return its metadata.
+
+    ``max_bytes`` optionally caps this single file (e.g. to what remains of
+    the request-wide ``_MAX_TOTAL_BYTES`` budget): exceeding it aborts the
+    read with a 413 ``UploadValidationError`` before the whole file is on
+    disk.  ``None`` keeps the per-kind limits only.
+    """
     try:
-        return await asyncio.to_thread(_store_upload_sync, upload)
+        return await asyncio.to_thread(_store_upload_sync, upload, max_bytes=max_bytes)
     finally:
         await upload.close()

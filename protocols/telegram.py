@@ -1162,12 +1162,81 @@ class TelegramBackend(ChatBackend):
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
         return future.result(timeout=self.attachment_send_timeout)
 
+    def send_attachments_sync(
+        self,
+        contact_id: str,
+        file_paths: list[Path],
+        *,
+        captions: list[str | None],
+        mime_types: list[str],
+        media_kinds: list[str | None],
+        filenames: list[str | None],
+        batch_id: str | None = None,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> list[str]:
+        """Send N attachments as a single Telegram album.
+
+        Telethon ``send_file`` with a media list issues one album request
+        and automatically chunks lists longer than 10 media into
+        consecutive albums.  Known Telegram limitations (documented, not
+        worked around — design §4.3.3): documents inside an album are
+        delivered as separate messages outside the album, and audio/voice
+        cannot join an album at all.  The caption (from ``captions``)
+        applies to the first media of the album only; ``media_kinds`` /
+        ``mime_types`` are consumed by the mirror events, not by the album
+        request.  Atomic semantics: any failure aborts the whole batch and
+        the exception propagates.
+        """
+        if not file_paths:
+            return []
+        if self._loop is None or self._client is None:
+            raise RuntimeError("Telegram backend not connected")
+
+        async def _send() -> list[str]:
+            try:
+                eid = int(contact_id)
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid Telegram contact id: {contact_id}")
+            reply_to = self._validated_reply_to_message_id(reply_to_message_id)
+            entity = await self._resolve_input_entity(eid)
+            uploads = []
+            for index, file_path in enumerate(file_paths):
+                upload = str(file_path)
+                if filenames[index] is not None:
+                    upload = await self._client.upload_file(
+                        upload, file_name=filenames[index]
+                    )
+                uploads.append(upload)
+            caption = captions[0] if captions else None
+            msgs = await self._client.send_file(
+                entity,
+                uploads,
+                caption=caption or None,
+                reply_to=reply_to,
+                force_document=False,
+            )
+            # An album returns a list of messages; a single media (or a
+            # document-only batch delivered outside the album) may come
+            # back as a bare message.
+            if not isinstance(msgs, list):
+                msgs = [msgs]
+            return [str(msg.id) for msg in msgs]
+
+        future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
+        return future.result(timeout=self.attachment_send_timeout * len(file_paths))
+
     def enqueue_sent_message(
         self,
         contact_id: str,
         message_id: str,
         text: str,
         *,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
@@ -1219,6 +1288,8 @@ class TelegramBackend(ChatBackend):
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
                     "media_kind": media_kind,
+                    "batch_id": batch_id,
+                    "batch_index": batch_index,
                 },
             )
         )
@@ -1884,6 +1955,8 @@ class TelegramBackend(ChatBackend):
             quote_attachment_id=data.get("quote_attachment_id"),
             quote_attachment_path=data.get("quote_attachment_path"),
             quote_content_type=data.get("quote_content_type"),
+            batch_id=data.get("batch_id"),
+            batch_index=data.get("batch_index"),
         )
 
     def ingest_message(

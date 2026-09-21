@@ -704,11 +704,21 @@ class SignalBackend(ChatBackend):
         ``_ingest_lock`` (re-entrant with ``ingest_message``): the persistent
         copies are registered in ``_sent_attachment_paths`` BEFORE the
         inserts — so the rows are already "sent" attachments while being
-        ingested — and the SSE echo thread stays blocked for the whole
-        barrier, making any mirror/echo interleaving impossible.  A failure
-        part-way through the barrier rolls the partial mirror back (cache +
-        DB + persistent files) before re-raising.
+        ingested — and once the barrier starts, the SSE echo thread stays
+        blocked until every mirror row exists, making any interleaving from
+        that point on impossible.  The window BETWEEN the signal-cli send
+        returning and the barrier acquiring the lock is not covered,
+        though: if the SSE thread ingests the sent-message echo there, the
+        mirror rows dedup onto the pre-existing echo rows and no row ends
+        up carrying the batch slot.  ``_repair_batch_slots`` (still inside
+        the barrier) stamps those rows afterwards.  A failure part-way
+        through the barrier rolls the partial mirror back (cache + DB +
+        persistent files + registry) before re-raising.
         """
+        if not file_paths:
+            # signal-cli would happily send an empty message for an empty
+            # attachment list (telegram.py guards the same way).
+            return []
         SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
         persistent_paths: list[Path] = []
         caption = captions[0] if captions else None
@@ -841,10 +851,109 @@ class SignalBackend(ChatBackend):
                         "Rollback failed: %s (degrado accettato: righe mirror parziali)",
                         rollback_exc,
                     )
+                with self._sent_attachment_paths_lock:
+                    stale_sources = [
+                        source
+                        for source, persistent in self._sent_attachment_paths.items()
+                        if persistent in persistent_paths
+                    ]
+                    for source in stale_sources:
+                        del self._sent_attachment_paths[source]
                 for path in persistent_paths:
                     path.unlink(missing_ok=True)
                 raise
+            # Post-barrier repair, still under _ingest_lock: when the SSE
+            # echo won the send→barrier race the mirror rows above dedup'ed
+            # onto the pre-existing echo rows and no row carries the batch
+            # slot.  Stamp it now (k-th row ↔ k-th file).
+            self._repair_batch_slots(
+                contact_id,
+                message_id,
+                batch_id=batch_id,
+                file_count=len(file_paths),
+            )
         return [message_id]
+
+    def _repair_batch_slots(
+        self,
+        contact_id: str,
+        message_id: str,
+        *,
+        batch_id: str | None,
+        file_count: int,
+    ) -> None:
+        """Stamp the batch slot on rows that lost it to the echo race.
+
+        ``send_attachments_sync`` acquires ``_ingest_lock`` only after the
+        signal-cli send returns, so an SSE echo ingested in that window
+        makes every mirror row dedup onto the pre-existing echo rows: the
+        rows survive with the remote attachment ids but none carries
+        ``batch_id``/``batch_index``.  This repair (design alternative 2,
+        chosen over holding the lock across the whole send because that
+        would block all ingestion for the full RPC round-trip) detects the
+        situation — no row for this message id has a slot yet — and stamps
+        the existing rows in deterministic ``(timestamp, id)`` order, the
+        k-th row ↔ the k-th file, both in the DB and in the cached dicts.
+        Best-effort: failures are logged, never propagated — the send has
+        already succeeded.
+        """
+        try:
+            import sqlite3
+
+            from protocols.db import _DB_LOCK, DB_FILE
+
+            with _DB_LOCK:
+                connection = sqlite3.connect(DB_FILE)
+                try:
+                    rows = connection.execute(
+                        "SELECT id, timestamp, batch_index FROM messages "
+                        "WHERE protocol = ? AND contact_number = ? AND msg_id = ? "
+                        "ORDER BY timestamp, id",
+                        (PROTOCOL_SIGNAL, contact_id, str(message_id)),
+                    ).fetchall()
+                finally:
+                    connection.close()
+            if any(row[2] is not None for row in rows):
+                # The barrier materialized the mirror rows normally.
+                return
+            slot_count = min(len(rows), file_count)
+            if slot_count <= 0:
+                return
+            with _DB_LOCK:
+                connection = sqlite3.connect(DB_FILE)
+                try:
+                    for index, row in enumerate(rows[:slot_count]):
+                        connection.execute(
+                            "UPDATE messages SET batch_id = ?, batch_index = ? "
+                            "WHERE id = ?",
+                            (batch_id, index, row[0]),
+                        )
+                    connection.commit()
+                finally:
+                    connection.close()
+            # Mirror the same stamping onto the cached rows: for one message
+            # id the cache order equals the DB (timestamp, id) order.
+            cached = [
+                message
+                for message in self.cache.get(contact_id, [])
+                if message.get("id") == str(message_id) and message.get("is_mine")
+            ]
+            for index, message in enumerate(cached[:slot_count]):
+                message["batch_id"] = batch_id
+                message["batch_index"] = index
+            if slot_count < len(rows):
+                logger.warning(
+                    "Batch slot repair found %d rows for %d files: "
+                    "extra rows left without a slot",
+                    len(rows),
+                    file_count,
+                )
+        except Exception:
+            logger.exception(
+                "Batch slot repair failed: contact=%s message_id=%s",
+                contact_id,
+                message_id,
+            )
 
     @staticmethod
     def _copy_sent_attachment(file_path: Path, filename: str = "") -> Path:

@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import stat
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from models import ChatContact, ChatEvent
 from protocols.manager import BackendManager
 from protocols.signal import SignalBackend
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
+from tui.events import EventHandlingMixin
 
 
 def _backend(protocol: str):
@@ -544,6 +548,26 @@ def test_signal_send_attachments_sync_materializes_batch_rows(tmp_path, monkeypa
     assert [row[3] for row in rows] == [0, 1, 2]
 
 
+def test_signal_send_attachments_sync_empty_list_sends_nothing(tmp_path, monkeypatch):
+    backend, media_dir = _batch_backend(tmp_path, monkeypatch)
+
+    message_ids = backend.send_attachments_sync(
+        "42",
+        [],
+        captions=[],
+        mime_types=[],
+        media_kinds=[],
+        filenames=[],
+    )
+
+    # An empty batch must be a no-op: signal-cli would otherwise send an
+    # empty message and the barrier would mirror a bogus row for it.
+    assert message_ids == []
+    backend._send_message_sync.assert_not_called()
+    assert list(media_dir.iterdir()) == []
+    assert "42" not in backend.cache
+
+
 def test_signal_send_attachments_barrier_blocks_echo_until_complete(
     tmp_path, monkeypatch
 ):
@@ -607,6 +631,44 @@ def test_signal_send_attachments_barrier_blocks_echo_until_complete(
     assert [row[2] for row in rows] == ["batch-1"] * 3
     assert [row[3] for row in rows] == [0, 1, 2]
     assert rows[0][1] == remote.name  # the blocked echo upgraded mirror 0
+
+
+def test_signal_batch_echo_before_barrier_still_gets_batch_slots(tmp_path, monkeypatch):
+    """T3/BUG-3: an echo ingested between the send and the barrier must not
+    leave the batch rows without batch_id/batch_index."""
+    backend, media_dir = _batch_backend(tmp_path, monkeypatch)
+    files = _uploads(tmp_path)
+    remotes = []
+    for index in range(3):
+        remote = media_dir / f"remote-{index}"
+        remote.write_bytes(b"remote")
+        remotes.append(remote)
+
+    def send_then_echo(contact_id, text, **kwargs):
+        # The SSE thread ingests the sent-message echo while the sender is
+        # still between the signal-cli response and the barrier: the echo
+        # rows exist BEFORE any mirror row is materialized.
+        for remote in remotes:
+            backend.ingest_message("42", _echo_payload(remote.name), 1787250931234)
+        return "1787250931234"
+
+    backend._send_message_sync = MagicMock(side_effect=send_then_echo)
+
+    assert _send_batch(backend, files, batch_id="batch-1") == ["1787250931234"]
+
+    # The mirror rows dedup'ed onto the echo rows: 3 rows survive with the
+    # remote attachment ids, and the post-barrier repair stamped them with
+    # the batch slot (k-th row ↔ k-th file) in cache...
+    assert [message["attachment_id"] for message in backend.cache["42"]] == [
+        remote.name for remote in remotes
+    ]
+    assert [message["batch_index"] for message in backend.cache["42"]] == [0, 1, 2]
+    assert {message["batch_id"] for message in backend.cache["42"]} == {"batch-1"}
+    # ...and in the DB.
+    rows = _batch_rows()
+    assert [row[1] for row in rows] == [remote.name for remote in remotes]
+    assert [row[2] for row in rows] == ["batch-1"] * 3
+    assert [row[3] for row in rows] == [0, 1, 2]
 
 
 def test_signal_multi_attachment_echo_upgrades_each_mirror_row(tmp_path, monkeypatch):
@@ -783,3 +845,600 @@ def test_signal_send_attachments_barrier_rollback_cleans_partial_rows(
         ("other-message", "file-0.png"),
         ("1787250931234", "unrelated.png"),
     ]
+
+
+def test_signal_barrier_rollback_clears_sent_attachment_registry(tmp_path, monkeypatch):
+    """T4/BUG-4: the rollback must also drop the _sent_attachment_paths
+    entries, otherwise _is_sent_attachment() stays True for deleted files."""
+    backend, _media_dir = _batch_backend(tmp_path, monkeypatch)
+    files = _uploads(tmp_path)
+    original_ingest = backend.ingest_message
+
+    def failing_ingest(contact_id, data, ts, persist=True):
+        result = original_ingest(contact_id, data, ts, persist=persist)
+        if data.get("batch_index") == 0:
+            # Fail AFTER the registry was populated and the first row hit
+            # the DB: the rollback must undo the registration too.
+            raise RuntimeError("boom during barrier")
+        return result
+
+    backend.ingest_message = failing_ingest
+
+    with pytest.raises(RuntimeError, match="boom during barrier"):
+        _send_batch(backend, files, batch_id="batch-1")
+
+    assert backend._sent_attachment_paths == {}
+    assert not backend._is_sent_attachment("file-0.png")
+    assert not backend._is_sent_attachment("file-1.png")
+    assert not backend._is_sent_attachment("file-2.png")
+
+
+# ─── Multi-attachment batch send: WhatsApp / Telegram (design §4.4/§4.8) ─────
+
+
+def _wa_batch_backend(tmp_path, monkeypatch):
+    backend = WhatsAppBackend(api_url="http://api.test", media_dir=str(tmp_path / "wa"))
+    monkeypatch.setattr(backend, "_resolve_send_chat_id", lambda cid: cid)
+    return backend
+
+
+def _wa_files(tmp_path, count=3):
+    files = []
+    for index in range(count):
+        upload = tmp_path / f"photo-{index}.png"
+        upload.write_bytes(b"image-data")
+        files.append(upload)
+    return files
+
+
+def test_whatsapp_send_attachments_sync_sends_one_call_per_file(tmp_path, monkeypatch):
+    backend = _wa_batch_backend(tmp_path, monkeypatch)
+    backend._rest.send_image = MagicMock(
+        side_effect=lambda chat, path, **kw: {"id": f"wa-{kw['filename']}"}
+    )
+    files = _wa_files(tmp_path, count=3)
+
+    message_ids = backend.send_attachments_sync(
+        "39333@c.us",
+        files,
+        captions=["batch caption"] + [None] * 2,
+        mime_types=["image/png"] * 3,
+        media_kinds=["image"] * 3,
+        filenames=["file-0.png", "file-1.png", "file-2.png"],
+        batch_id="batch-9",
+        reply_to_message_id="quote-id",
+    )
+
+    assert message_ids == ["wa-file-0.png", "wa-file-1.png", "wa-file-2.png"]
+    assert backend._rest.send_image.call_count == 3
+    first, second, third = backend._rest.send_image.call_args_list
+    assert first.args == ("39333@c.us", files[0])
+    assert first.kwargs["caption"] == "batch caption"
+    assert first.kwargs["reply_to_message_id"] == "quote-id"
+    assert second.kwargs["caption"] is None
+    assert second.kwargs["reply_to_message_id"] is None
+    assert third.kwargs["caption"] is None
+    assert third.kwargs["reply_to_message_id"] is None
+    assert [
+        call.kwargs["filename"] for call in backend._rest.send_image.call_args_list
+    ] == [
+        "file-0.png",
+        "file-1.png",
+        "file-2.png",
+    ]
+
+
+def test_whatsapp_send_attachments_sync_routes_kind_per_file(tmp_path, monkeypatch):
+    backend = _wa_batch_backend(tmp_path, monkeypatch)
+    backend._rest.send_image = MagicMock(return_value={"id": "wa-img"})
+    backend._rest.send_video = MagicMock(return_value={"id": "wa-vid"})
+    backend._rest.send_file = MagicMock(return_value={"id": "wa-doc"})
+    files = _wa_files(tmp_path, count=3)
+
+    message_ids = backend.send_attachments_sync(
+        "39333@c.us",
+        files,
+        captions=[None] * 3,
+        mime_types=["image/png", "video/mp4", "application/pdf"],
+        media_kinds=["image", None, None],
+        filenames=["a.png", "b.mp4", "c.pdf"],
+    )
+
+    assert message_ids == ["wa-img", "wa-vid", "wa-doc"]
+    backend._rest.send_image.assert_called_once()
+    backend._rest.send_video.assert_called_once()
+    backend._rest.send_file.assert_called_once()
+
+
+def test_whatsapp_send_attachments_sync_stops_early_on_failure(
+    tmp_path, monkeypatch, caplog
+):
+    backend = _wa_batch_backend(tmp_path, monkeypatch)
+    backend._rest.last_status = 502
+    backend._rest.last_error = "boom"
+    backend._rest.send_image = MagicMock(
+        side_effect=[{"id": "wa-0"}, None, {"id": "wa-2"}]
+    )
+    files = _wa_files(tmp_path, count=3)
+
+    with pytest.raises(RuntimeError, match="status=502.*boom"):
+        backend.send_attachments_sync(
+            "39333@c.us",
+            files,
+            captions=[None] * 3,
+            mime_types=["image/png"] * 3,
+            media_kinds=["image"] * 3,
+            filenames=["file-0.png", "file-1.png", "file-2.png"],
+        )
+
+    # Stop-early: the 3rd file is never sent, the 1st is already delivered.
+    assert backend._rest.send_image.call_count == 2
+    assert "multi-attach failed at index 1/3: 1 messages already sent" in caplog.text
+
+
+def test_whatsapp_manager_batch_mirrors_n_events_with_batch_index(
+    tmp_path, monkeypatch
+):
+    from protocols import db
+
+    backend = _wa_batch_backend(tmp_path, monkeypatch)
+    manager = BackendManager()
+    manager.register(backend)
+    backend._rest.send_image = MagicMock(
+        side_effect=[{"id": "wa-0"}, {"id": "wa-1"}, {"id": "wa-2"}]
+    )
+    files = _wa_files(tmp_path, count=3)
+
+    message_ids = manager.send_attachments_sync(
+        "whatsapp",
+        "39333@c.us",
+        files,
+        captions=["batch caption"] + [None] * 2,
+        mime_types=["image/png"] * 3,
+        media_kinds=["image"] * 3,
+        filenames=["file-0.png", "file-1.png", "file-2.png"],
+        batch_id="batch-1",
+    )
+
+    assert message_ids == ["wa-0", "wa-1", "wa-2"]
+    events = backend.poll_once()
+    assert [event.payload["id"] for event in events] == ["wa-0", "wa-1", "wa-2"]
+    assert [event.payload["attachment_info"] for event in events] == [
+        "batch caption",
+        "file-1.png",
+        "file-2.png",
+    ]
+    for index, event in enumerate(events):
+        assert event.type == "message"
+        assert event.payload["batch_id"] == "batch-1"
+        assert event.payload["batch_index"] == index
+        assert backend.ingest_message(
+            "39333@c.us", event.payload, event.payload["timestamp"]
+        )
+
+    with sqlite3.connect(db.DB_FILE) as connection:
+        rows = connection.execute(
+            "SELECT msg_id, batch_id, batch_index FROM messages "
+            "WHERE protocol = 'whatsapp' AND contact_number = '39333@c.us' "
+            "ORDER BY batch_index"
+        ).fetchall()
+    assert rows == [
+        ("wa-0", "batch-1", 0),
+        ("wa-1", "batch-1", 1),
+        ("wa-2", "batch-1", 2),
+    ]
+
+
+def test_manager_batch_without_batch_id_keeps_legacy_backend_mirror(
+    tmp_path, monkeypatch
+):
+    """T1/BUG-1: without a batch_id the manager must not forward
+    ``batch_index`` — backends with the historical ``enqueue_sent_message``
+    signature would reject the extra kwarg and silently lose the mirror
+    (single attachments are routed through the batch API too)."""
+    backend = _wa_batch_backend(tmp_path, monkeypatch)
+    backend.send_attachments_sync = MagicMock(return_value=["wa-0"])
+    enqueued = []
+
+    def legacy_enqueue_sent_message(
+        contact_id,
+        message_id,
+        text,
+        *,
+        quote_timestamp=None,
+        quote_author=None,
+        quote_message=None,
+        reply_to_message_id=None,
+        attachment_path=None,
+        mime_type=None,
+        media_kind=None,
+        filename=None,
+    ):
+        # Historical signature: no batch_id/batch_index parameters.
+        enqueued.append((contact_id, message_id, text))
+
+    backend.enqueue_sent_message = legacy_enqueue_sent_message
+    manager = BackendManager()
+    manager.register(backend)
+    upload = tmp_path / "photo-0.png"
+    upload.write_bytes(b"image-data")
+
+    message_ids = manager.send_attachments_sync(
+        "whatsapp",
+        "39333@c.us",
+        [upload],
+        captions=[None],
+        mime_types=["image/png"],
+        media_kinds=["image"],
+        filenames=["file-0.png"],
+    )
+
+    assert message_ids == ["wa-0"]
+    assert enqueued == [("39333@c.us", "wa-0", "")]
+
+
+def test_manager_batch_with_batch_id_forwards_batch_metadata(tmp_path, monkeypatch):
+    """The BUG-1 fix must not drop the batch metadata for backends that DO
+    accept it: a batch_id-carrying send still forwards both kwargs."""
+    backend = _wa_batch_backend(tmp_path, monkeypatch)
+    backend.send_attachments_sync = MagicMock(return_value=["wa-0", "wa-1"])
+    enqueued = []
+
+    def enqueue_sent_message(contact_id, message_id, text, **kwargs):
+        enqueued.append((message_id, kwargs.get("batch_id"), kwargs.get("batch_index")))
+
+    backend.enqueue_sent_message = enqueue_sent_message
+    manager = BackendManager()
+    manager.register(backend)
+    files = _wa_files(tmp_path, count=2)
+
+    manager.send_attachments_sync(
+        "whatsapp",
+        "39333@c.us",
+        files,
+        captions=[None, None],
+        mime_types=["image/png"] * 2,
+        media_kinds=["image"] * 2,
+        filenames=["file-0.png", "file-1.png"],
+        batch_id="batch-4",
+    )
+
+    assert enqueued == [
+        ("wa-0", "batch-4", 0),
+        ("wa-1", "batch-4", 1),
+    ]
+
+
+def _tg_batch_backend():
+    backend = TelegramBackend()
+    backend._loop = MagicMock()
+    backend._resolve_input_entity = AsyncMock(return_value="entity")
+
+    class CompletedFuture:
+        def __init__(self, value):
+            self.value = value
+
+        def result(self, timeout):
+            self.timeout = timeout
+            return self.value
+
+    return backend, CompletedFuture
+
+
+def test_telegram_send_attachments_sync_sends_album(monkeypatch, tmp_path):
+    backend, CompletedFuture = _tg_batch_backend()
+    uploaded = SimpleNamespace(name="uploaded-0")
+    backend._client = SimpleNamespace(
+        upload_file=AsyncMock(return_value=uploaded),
+        send_file=AsyncMock(
+            return_value=[SimpleNamespace(id=71), SimpleNamespace(id=72)]
+        ),
+    )
+
+    def schedule(coro, _loop):
+        return CompletedFuture(asyncio.run(coro))
+
+    monkeypatch.setattr("protocols.telegram.asyncio.run_coroutine_threadsafe", schedule)
+    files = []
+    for index in range(2):
+        upload = tmp_path / f"photo-{index}.png"
+        upload.write_bytes(b"image-data")
+        files.append(upload)
+
+    message_ids = backend.send_attachments_sync(
+        "42",
+        files,
+        captions=["album caption", None],
+        mime_types=["image/png"] * 2,
+        media_kinds=["image"] * 2,
+        filenames=["file-0.png", "file-1.png"],
+        batch_id="batch-1",
+        reply_to_message_id="12",
+    )
+
+    # One album request carrying both media, caption on the first only.
+    assert message_ids == ["71", "72"]
+    backend._client.upload_file.assert_any_await(str(files[0]), file_name="file-0.png")
+    backend._client.upload_file.assert_any_await(str(files[1]), file_name="file-1.png")
+    backend._client.send_file.assert_awaited_once_with(
+        "entity",
+        [uploaded, uploaded],
+        caption="album caption",
+        reply_to=12,
+        force_document=False,
+    )
+
+
+def test_telegram_send_attachments_sync_scales_timeout_with_batch_size(
+    monkeypatch, tmp_path
+):
+    backend, _CompletedFuture = _tg_batch_backend()
+    backend._client = SimpleNamespace(
+        upload_file=AsyncMock(),
+        send_file=AsyncMock(return_value=[SimpleNamespace(id=71)]),
+    )
+    future = MagicMock()
+    future.result.return_value = ["71"]
+
+    def schedule(coro, _loop):
+        coro.close()
+        return future
+
+    monkeypatch.setattr("protocols.telegram.asyncio.run_coroutine_threadsafe", schedule)
+    files = []
+    for index in range(3):
+        upload = tmp_path / f"photo-{index}.png"
+        upload.write_bytes(b"image-data")
+        files.append(upload)
+
+    backend.send_attachments_sync(
+        "42",
+        files,
+        captions=[None] * 3,
+        mime_types=["image/png"] * 3,
+        media_kinds=["image"] * 3,
+        filenames=[None] * 3,
+    )
+
+    # The timeout scales with the batch size (design §4.4.3).
+    future.result.assert_called_once_with(timeout=360)
+
+
+def test_telegram_send_attachments_sync_normalizes_single_message(
+    monkeypatch, tmp_path
+):
+    backend, CompletedFuture = _tg_batch_backend()
+    # A single media (or documents delivered outside the album) makes
+    # Telethon return a bare message instead of a list.
+    backend._client = SimpleNamespace(
+        upload_file=AsyncMock(),
+        send_file=AsyncMock(return_value=SimpleNamespace(id=71)),
+    )
+
+    def schedule(coro, _loop):
+        return CompletedFuture(asyncio.run(coro))
+
+    monkeypatch.setattr("protocols.telegram.asyncio.run_coroutine_threadsafe", schedule)
+    upload = tmp_path / "photo.png"
+    upload.write_bytes(b"image-data")
+
+    message_ids = backend.send_attachments_sync(
+        "42",
+        [upload],
+        captions=[None],
+        mime_types=["image/png"],
+        media_kinds=["image"],
+        filenames=[None],
+    )
+
+    assert message_ids == ["71"]
+
+
+def test_telegram_send_attachments_sync_rejects_invalid_ids(monkeypatch, tmp_path):
+    backend, CompletedFuture = _tg_batch_backend()
+    backend._client = SimpleNamespace(upload_file=AsyncMock(), send_file=AsyncMock())
+    upload = tmp_path / "photo.png"
+    upload.write_bytes(b"image-data")
+
+    def schedule(coro, _loop):
+        return CompletedFuture(asyncio.run(coro))
+
+    monkeypatch.setattr("protocols.telegram.asyncio.run_coroutine_threadsafe", schedule)
+    with pytest.raises(ValueError, match="Invalid Telegram contact id"):
+        backend.send_attachments_sync(
+            "bad",
+            [upload],
+            captions=[None],
+            mime_types=["image/png"],
+            media_kinds=["image"],
+            filenames=[None],
+        )
+
+
+def test_telegram_manager_batch_mirrors_n_events_with_batch_index(
+    monkeypatch, tmp_path
+):
+    from protocols import db
+
+    backend, CompletedFuture = _tg_batch_backend()
+    backend._client = SimpleNamespace(
+        upload_file=AsyncMock(),
+        send_file=AsyncMock(
+            return_value=[SimpleNamespace(id=71), SimpleNamespace(id=72)]
+        ),
+    )
+    manager = BackendManager()
+    manager.register(backend)
+
+    def schedule(coro, _loop):
+        return CompletedFuture(asyncio.run(coro))
+
+    monkeypatch.setattr("protocols.telegram.asyncio.run_coroutine_threadsafe", schedule)
+    monkeypatch.setattr("protocols.telegram._media_dir", lambda: tmp_path / "tg-media")
+    files = []
+    for index in range(2):
+        upload = tmp_path / f"photo-{index}.png"
+        upload.write_bytes(b"image-data")
+        files.append(upload)
+
+    message_ids = manager.send_attachments_sync(
+        "telegram",
+        "42",
+        files,
+        captions=["album caption", None],
+        mime_types=["image/png"] * 2,
+        media_kinds=["image"] * 2,
+        filenames=["file-0.png", "file-1.png"],
+        batch_id="batch-2",
+    )
+
+    assert message_ids == ["71", "72"]
+    events = backend.poll_once()
+    assert len(events) == 2
+    for index, event in enumerate(events):
+        assert event.payload["id"] == str(71 + index)
+        assert event.payload["batch_id"] == "batch-2"
+        assert event.payload["batch_index"] == index
+
+    for event in events:
+        assert backend.ingest_message("42", event.payload, event.payload["timestamp"])
+    with sqlite3.connect(db.DB_FILE) as connection:
+        rows = connection.execute(
+            "SELECT msg_id, batch_id, batch_index FROM messages "
+            "WHERE protocol = 'telegram' AND contact_number = '42' "
+            "ORDER BY batch_index"
+        ).fetchall()
+    assert rows == [
+        ("71", "batch-2", 0),
+        ("72", "batch-2", 1),
+    ]
+
+
+# ─── TUI routing of the "sent-mirror" event (design §4.6.1) ──────────────────
+
+
+class _MirrorApp(EventHandlingMixin):
+    """Minimal app instance exposing the attributes the handler touches."""
+
+    def __init__(self, contacts=None, *, web_enabled=False, backend=None):
+        self.manager = SimpleNamespace(get=lambda _protocol: backend)
+        self.contacts = list(contacts or [])
+        self.selected_contact = None
+        self._contact_list_dirty = False
+        self._dirty_contact_keys = set()
+        self._web_enabled = web_enabled
+
+
+def _mirror_app(contacts=None, backend=None, web_enabled=False):
+    if backend is None:
+        backend = SimpleNamespace(
+            contacts=list(contacts or []),
+            _identify_contact=MagicMock(return_value=None),
+        )
+    return _MirrorApp(contacts=contacts, backend=backend, web_enabled=web_enabled)
+
+
+def _mirror_event(contact, ts=1_787_250_931_234, protocol="signal"):
+    return ChatEvent(
+        type="sent-mirror",
+        protocol=protocol,
+        contact_id=contact.id,
+        payload={"id": "1787250931234", "timestamp": ts, "batch_id": "batch-1"},
+    )
+
+
+def test_sent_mirror_event_is_routed_to_dedicated_handler():
+    contact = ChatContact(id="+391234567890", display_name="Alice", protocol="signal")
+    app = _mirror_app(contacts=[contact])
+    event = _mirror_event(contact)
+
+    with (
+        patch.object(app, "_handle_sent_mirror_event", return_value=True) as handler,
+        patch.object(app, "_handle_message_event") as message_handler,
+    ):
+        assert app._handle_event(event)
+
+    handler.assert_called_once_with(event)
+    message_handler.assert_not_called()
+
+
+def test_sent_mirror_updates_real_contact_object_and_flags():
+    contact = ChatContact(id="+391234567890", display_name="Alice", protocol="signal")
+    app = _mirror_app(contacts=[contact])
+    event = _mirror_event(contact)
+
+    assert app._handle_sent_mirror_event(event) is True
+    # The REAL object in self.contacts (not a placeholder) was updated.
+    assert contact.last_message_ts == 1_787_250_931_234
+    assert app._contact_list_dirty is True
+    assert app._dirty_contact_keys == {contact.cache_key}
+    # No placeholder duplicate was created.
+    assert app.contacts == [contact]
+    app.manager.get("signal")._identify_contact.assert_not_called()
+
+
+def test_sent_mirror_prefers_self_contacts_over_rebuilt_payload_copy():
+    rebuilt = ChatContact(id="+391234567890", display_name="Alice", protocol="signal")
+    real = ChatContact(id="+391234567890", display_name="Alice", protocol="signal")
+    app = _mirror_app(contacts=[real])
+    # The payload (and the backend) carry the rebuilt object, but the TUI
+    # list holds its own copy: THAT one must be updated.
+    event = _mirror_event(rebuilt)
+    event.payload["contact"] = rebuilt
+    app.manager.get("signal")._identify_contact.return_value = rebuilt
+
+    assert app._handle_sent_mirror_event(event) is True
+    assert real.last_message_ts == 1_787_250_931_234
+    assert rebuilt.last_message_ts == 0
+    assert app.contacts == [real]
+
+
+def test_sent_mirror_uses_backend_identify_when_not_in_tui_list():
+    known = ChatContact(id="42", display_name="Ada", protocol="telegram")
+    app = _mirror_app(contacts=[])
+    app.manager.get("telegram")._identify_contact.return_value = known
+    event = _mirror_event(known, protocol="telegram")
+
+    assert app._handle_sent_mirror_event(event) is True
+    assert known.last_message_ts == 1_787_250_931_234
+    # Known contact: no placeholder appended, no duplicates.
+    assert app.contacts == []
+
+
+def test_sent_mirror_creates_placeholder_for_unknown_contact():
+    app = _mirror_app(contacts=[])
+    event = _mirror_event(
+        ChatContact(id="+391111111111", display_name="+391111111111", protocol="signal")
+    )
+
+    assert app._handle_sent_mirror_event(event) is True
+    assert len(app.contacts) == 1
+    placeholder = app.contacts[0]
+    assert placeholder.id == "+391111111111"
+    assert placeholder.cache_key == "signal:+391111111111"
+    assert placeholder.last_message_ts == 1_787_250_931_234
+    assert app.manager.get("signal").contacts == [placeholder]
+    assert app._contact_list_dirty is True
+    assert app._dirty_contact_keys == {placeholder.cache_key}
+
+
+def test_sent_mirror_does_not_ingest_or_push_web_event():
+    contact = ChatContact(id="+391234567890", display_name="Alice", protocol="signal")
+    backend = SimpleNamespace(
+        contacts=[contact],
+        _identify_contact=MagicMock(return_value=None),
+        ingest_message=MagicMock(),
+    )
+    app = _mirror_app(contacts=[contact], backend=backend, web_enabled=True)
+    app.selected_contact = contact
+    event = _mirror_event(contact)
+
+    with patch("web.bridge.push_event") as push_event:
+        assert app._handle_sent_mirror_event(event) is True
+
+    # No double DB write and no duplicate web push: the selected contact's
+    # timestamp is refreshed but the list stays clean.
+    backend.ingest_message.assert_not_called()
+    push_event.assert_not_called()
+    assert app._contact_list_dirty is False
+    assert app._dirty_contact_keys == set()

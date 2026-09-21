@@ -1365,37 +1365,33 @@ class WhatsAppBackend(ChatBackend):
             )
         return self._extract_message_id(result)
 
-    def send_attachment_sync(
+    def _send_media_sync(
         self,
-        contact_id: str,
+        send_chat_id: str,
         file_path: Path,
         *,
-        caption: str | None = None,
+        caption: str | None,
         mime_type: str,
-        quote_timestamp: int | None = None,
-        quote_author: str | None = None,
-        quote_message: str | None = None,
-        reply_to_message_id: str | None = None,
-        media_kind: str | None = None,
-        filename: str | None = None,
+        media_kind: str | None,
+        filename: str | None,
+        reply_to_message_id: str | None,
     ) -> str | None:
+        """Send one media file via the WAHA endpoint matching its kind.
+
+        Shared by the single- and the multi-attachment send paths: routes
+        to ``sendImage``/``sendVideo``/``sendFile`` and falls back to
+        ``sendFile`` when the media endpoint is missing (older WAHA builds
+        answer 404/501).  Returns the extracted Baileys message id.
+        """
         if not self._rest:
             raise RuntimeError("WhatsApp API is not configured")
-        send_chat_id = self._resolve_send_chat_id(contact_id)
         kind = media_kind or media_kind_from_mime(mime_type) or "document"
-        send_method = (
-            self._rest.send_image
+        endpoint, send_method = (
+            ("sendImage", self._rest.send_image)
             if kind in {"image", "gif"}
-            else self._rest.send_video
+            else ("sendVideo", self._rest.send_video)
             if kind == "video"
-            else self._rest.send_file
-        )
-        endpoint = (
-            "sendImage"
-            if kind in {"image", "gif"}
-            else "sendVideo"
-            if kind == "video"
-            else "sendFile"
+            else ("sendFile", self._rest.send_file)
         )
         kwargs = {
             "caption": caption,
@@ -1415,14 +1411,7 @@ class WhatsAppBackend(ChatBackend):
             }
         ):
             endpoint = "sendFile"
-            result = self._rest.send_file(
-                send_chat_id,
-                file_path,
-                caption=caption,
-                reply_to_message_id=reply_to_message_id,
-                mime_type=mime_type,
-                **({"filename": filename} if filename is not None else {}),
-            )
+            result = self._rest.send_file(send_chat_id, file_path, **kwargs)
         if result is None:
             status = self._rest.last_status
             detail = self._rest.last_error or "unreachable"
@@ -1431,12 +1420,100 @@ class WhatsAppBackend(ChatBackend):
             )
         return self._extract_message_id(result)
 
+    def send_attachment_sync(
+        self,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        media_kind: str | None = None,
+        filename: str | None = None,
+    ) -> str | None:
+        if not self._rest:
+            raise RuntimeError("WhatsApp API is not configured")
+        send_chat_id = self._resolve_send_chat_id(contact_id)
+        return self._send_media_sync(
+            send_chat_id,
+            file_path,
+            caption=caption,
+            mime_type=mime_type,
+            media_kind=media_kind,
+            filename=filename,
+            reply_to_message_id=reply_to_message_id,
+        )
+
+    def send_attachments_sync(
+        self,
+        contact_id: str,
+        file_paths: list[Path],
+        *,
+        captions: list[str | None],
+        mime_types: list[str],
+        media_kinds: list[str | None],
+        filenames: list[str | None],
+        batch_id: str | None = None,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> list[str | None]:
+        """Send N attachments as N separate WhatsApp messages.
+
+        WAHA has no batch API, so every attachment becomes its own message
+        (one ``sendImage``/``sendVideo``/``sendFile`` call per file).  The
+        caption (from ``captions``) and the quote/reply metadata apply to
+        the FIRST message only.  Atomic stop-early semantics (design §4.8):
+        the first failure aborts the remaining sends and raises — WhatsApp
+        has no reliable delete API, so messages already delivered stay.
+        """
+        if not self._rest:
+            raise RuntimeError("WhatsApp API is not configured")
+        send_chat_id = self._resolve_send_chat_id(contact_id)
+        message_ids: list[str | None] = []
+        for index, file_path in enumerate(file_paths):
+            try:
+                message_ids.append(
+                    self._send_media_sync(
+                        send_chat_id,
+                        file_path,
+                        caption=captions[index] if index == 0 else None,
+                        mime_type=mime_types[index],
+                        media_kind=media_kinds[index],
+                        filename=filenames[index],
+                        reply_to_message_id=(
+                            reply_to_message_id if index == 0 else None
+                        ),
+                    )
+                )
+            except Exception as exc:
+                # Rollback is impossible (no reliable WhatsApp delete API):
+                # log how far the batch got and re-raise so the caller can
+                # answer with a single failure for the whole batch.
+                logger.error(
+                    "WhatsApp multi-attach failed at index %d/%d: "
+                    "%d messages already sent (%s)",
+                    index,
+                    len(file_paths),
+                    len(message_ids),
+                    exc,
+                )
+                raise
+        return message_ids
+
     def enqueue_sent_message(
         self,
         contact_id: str,
         message_id: str,
         text: str,
         *,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
@@ -1485,6 +1562,8 @@ class WhatsAppBackend(ChatBackend):
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
                     "media_kind": media_kind,
+                    "batch_id": batch_id,
+                    "batch_index": batch_index,
                 },
             )
         )
@@ -1990,6 +2069,8 @@ class WhatsAppBackend(ChatBackend):
             quote_attachment_id=data.get("quote_attachment_id"),
             quote_attachment_path=data.get("quote_attachment_path"),
             quote_content_type=data.get("quote_content_type"),
+            batch_id=data.get("batch_id"),
+            batch_index=data.get("batch_index"),
         )
 
     def _upgrade_outgoing_attachment(

@@ -1299,10 +1299,20 @@ def create_api_router() -> Any:
 
                 # Sequential validation keeps error messages stable (the
                 # first invalid file wins) and lets the finally block clean
-                # up every stored upload when a later one fails.
+                # up every stored upload when a later one fails.  The
+                # request-wide byte cap is enforced WHILE each file is
+                # stored (each file gets the remaining budget), so a
+                # chunked request cannot write far beyond _MAX_TOTAL_BYTES
+                # before being rejected.
+                total_stored_bytes = 0
                 for upload_file in upload_files:
                     try:
-                        uploads.append(await store_upload(upload_file))
+                        uploads.append(
+                            await store_upload(
+                                upload_file,
+                                max_bytes=_MAX_TOTAL_BYTES - total_stored_bytes,
+                            )
+                        )
                     except UploadValidationError as exc:
                         detail = (
                             "Upload too large"
@@ -1312,11 +1322,7 @@ def create_api_router() -> Any:
                         raise HTTPException(
                             status_code=exc.status_code, detail=detail
                         ) from None
-                if (
-                    sum(upload.path.stat().st_size for upload in uploads)
-                    > _MAX_TOTAL_BYTES
-                ):
-                    raise HTTPException(status_code=413, detail="Upload too large")
+                    total_stored_bytes += uploads[-1].path.stat().st_size
                 batch_id = payload.get("batch_id")
                 if not isinstance(batch_id, str) or not batch_id.strip():
                     batch_id = None
