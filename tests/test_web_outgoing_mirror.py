@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import stat
+import threading
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -404,7 +405,12 @@ def test_signal_named_attachment_is_upgraded_by_outgoing_echo(tmp_path, monkeypa
     assert len(backend.cache["42"]) == 1
     assert message["attachment_id"] == incoming.name
     update.assert_called_once_with(
-        "signal", "42", "1787250931234", 1787250931234, incoming.name
+        "signal",
+        "42",
+        "1787250931234",
+        1787250931234,
+        incoming.name,
+        expected_attachment_id=current.name,
     )
 
 
@@ -455,3 +461,325 @@ def test_facade_send_echo_upgrades_optimistic_without_duplicate(protocol):
     assert added is False
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["id"] == event.payload["id"]
+
+
+# ─── Multi-attachment batch send (Signal barrier, design §4.4/§4.5) ──────────
+
+
+def _batch_backend(tmp_path, monkeypatch, message_id="1787250931234"):
+    media_dir = tmp_path / "signal-media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("protocols.signal.SIGNAL_CLI_ATTACHMENTS_DIR", media_dir)
+    backend = SignalBackend()
+    backend._send_message_sync = MagicMock(return_value=message_id)
+    return backend, media_dir
+
+
+def _uploads(tmp_path, count=3):
+    files = []
+    for index in range(count):
+        upload = tmp_path / f"upload-{index}.png"
+        upload.write_bytes(b"image-data")
+        files.append(upload)
+    return files
+
+
+def _send_batch(backend, files, *, batch_id="batch-1", filenames=None):
+    return backend.send_attachments_sync(
+        "42",
+        files,
+        captions=["batch caption"] + [None] * (len(files) - 1),
+        mime_types=["image/png"] * len(files),
+        media_kinds=["image"] * len(files),
+        filenames=filenames or [f"file-{index}.png" for index in range(len(files))],
+        batch_id=batch_id,
+    )
+
+
+def _echo_payload(attachment_id: str) -> dict:
+    return {
+        "id": "1787250931234",
+        "text": "",
+        "is_mine": True,
+        "sender": "You",
+        "quote_text": None,
+        "msg_type": "image",
+        "attachment_info": None,
+        "attachment_id": attachment_id,
+        "content_type": "image/png",
+        "media_kind": "image",
+    }
+
+
+def _batch_rows():
+    from protocols import db
+
+    with sqlite3.connect(db.DB_FILE) as connection:
+        return connection.execute(
+            "SELECT msg_id, attachment_id, batch_id, batch_index FROM messages "
+            "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
+        ).fetchall()
+
+
+def test_signal_send_attachments_sync_materializes_batch_rows(tmp_path, monkeypatch):
+    backend, _media_dir = _batch_backend(tmp_path, monkeypatch)
+    files = _uploads(tmp_path)
+
+    message_ids = _send_batch(backend, files, batch_id="batch-7")
+
+    assert message_ids == ["1787250931234"]
+    attachments = backend._send_message_sync.call_args.kwargs["attachments"]
+    assert [Path(path).name for path in attachments] == [
+        "file-0.png",
+        "file-1.png",
+        "file-2.png",
+    ]
+    assert all(Path(path).is_file() for path in attachments)
+    assert len(backend.cache["42"]) == 3
+
+    rows = _batch_rows()
+    assert [row[0] for row in rows] == ["1787250931234"] * 3
+    assert len({row[1] for row in rows}) == 3
+    assert [row[2] for row in rows] == ["batch-7"] * 3
+    assert [row[3] for row in rows] == [0, 1, 2]
+
+
+def test_signal_send_attachments_barrier_blocks_echo_until_complete(
+    tmp_path, monkeypatch
+):
+    backend, media_dir = _batch_backend(tmp_path, monkeypatch)
+    files = _uploads(tmp_path)
+    remote = media_dir / "remote-echo-0"
+    remote.write_bytes(b"remote")
+
+    inside_barrier = threading.Event()
+    echo_attempted = threading.Event()
+    release_barrier = threading.Event()
+    ingest_order: list[str] = []
+    original_ingest = backend.ingest_message
+
+    def wrapped_ingest(contact_id, data, ts, persist=True):
+        if str(data.get("attachment_id", "")).startswith("remote-"):
+            result = original_ingest(contact_id, data, ts, persist=persist)
+            ingest_order.append("echo")
+            return result
+        if data.get("batch_index") == 0:
+            # Frozen while holding _ingest_lock: the echo below must block.
+            inside_barrier.set()
+            release_barrier.wait(timeout=10)
+        result = original_ingest(contact_id, data, ts, persist=persist)
+        ingest_order.append(f"mirror:{data.get('batch_index')}")
+        return result
+
+    backend.ingest_message = wrapped_ingest
+    echo_data = _echo_payload(remote.name)
+    outcome = {}
+
+    def run_send():
+        try:
+            outcome["ids"] = _send_batch(backend, files, batch_id="batch-1")
+        except Exception as exc:  # noqa: BLE001 - pragma: no cover, defensive
+            outcome["error"] = exc
+
+    def run_echo():
+        echo_attempted.set()
+        backend.ingest_message("42", echo_data, 1787250931234)
+
+    sender = threading.Thread(target=run_send)
+    sender.start()
+    assert inside_barrier.wait(timeout=10)
+    echo_thread = threading.Thread(target=run_echo)
+    echo_thread.start()
+    assert echo_attempted.wait(timeout=10)
+    # Give the echo thread time to reach (and block on) _ingest_lock.
+    time.sleep(0.2)
+    release_barrier.set()
+
+    sender.join(timeout=10)
+    echo_thread.join(timeout=10)
+    assert not sender.is_alive()
+    assert not echo_thread.is_alive()
+    assert outcome == {"ids": ["1787250931234"]}
+    # The echo ran only after the whole barrier completed: no interleaving.
+    assert ingest_order == ["mirror:0", "mirror:1", "mirror:2", "echo"]
+
+    rows = _batch_rows()
+    assert [row[2] for row in rows] == ["batch-1"] * 3
+    assert [row[3] for row in rows] == [0, 1, 2]
+    assert rows[0][1] == remote.name  # the blocked echo upgraded mirror 0
+
+
+def test_signal_multi_attachment_echo_upgrades_each_mirror_row(tmp_path, monkeypatch):
+    backend, media_dir = _batch_backend(tmp_path, monkeypatch)
+    files = _uploads(tmp_path)
+    assert _send_batch(backend, files) == ["1787250931234"]
+    remotes = []
+    for index in range(3):
+        remote = media_dir / f"remote-{index}"
+        remote.write_bytes(b"remote")
+        remotes.append(remote)
+
+    results = [
+        backend.ingest_message("42", _echo_payload(remote.name), 1787250931234)
+        for remote in remotes
+    ]
+
+    assert results == ["changed", "changed", "changed"]
+    assert len(backend.cache["42"]) == 3
+    assert [message["attachment_id"] for message in backend.cache["42"]] == [
+        remote.name for remote in remotes
+    ]
+
+    from protocols import db
+
+    with sqlite3.connect(db.DB_FILE) as connection:
+        rows = connection.execute(
+            "SELECT batch_index, attachment_id FROM messages "
+            "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
+        ).fetchall()
+    assert rows == [(index, remote.name) for index, remote in enumerate(remotes)]
+
+
+def test_signal_same_filename_attachments_keep_unambiguous_association(
+    tmp_path, monkeypatch
+):
+    backend, media_dir = _batch_backend(tmp_path, monkeypatch)
+    files = _uploads(tmp_path, count=2)
+
+    assert _send_batch(backend, files, filenames=["foto.png", "foto.png"]) == [
+        "1787250931234"
+    ]
+    assert sorted(path.name for path in media_dir.iterdir()) == [
+        "foto (1).png",
+        "foto.png",
+    ]
+
+    remotes = []
+    for index in range(2):
+        remote = media_dir / f"remote-{index}"
+        remote.write_bytes(b"remote")
+        remotes.append(remote)
+    for remote in remotes:
+        assert (
+            backend.ingest_message("42", _echo_payload(remote.name), 1787250931234)
+            == "changed"
+        )
+
+    assert [message["attachment_id"] for message in backend.cache["42"]] == [
+        remote.name for remote in remotes
+    ]
+    from protocols import db
+
+    with sqlite3.connect(db.DB_FILE) as connection:
+        rows = connection.execute(
+            "SELECT batch_index, attachment_id FROM messages "
+            "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
+        ).fetchall()
+    assert rows == [(index, remote.name) for index, remote in enumerate(remotes)]
+
+
+def test_signal_multi_attachment_echo_without_full_mirror_never_duplicates(
+    tmp_path, monkeypatch
+):
+    backend, media_dir = _batch_backend(tmp_path, monkeypatch)
+    # A registered (non-legacy) mirror row: upgradable to the remote id.
+    mirror = media_dir / "mirror-file.png"
+    mirror.write_bytes(b"mirror")
+    upload = tmp_path / "upload-mirror.png"
+    upload.write_bytes(b"mirror")
+    backend._sent_attachment_paths[str(upload.resolve())] = mirror
+
+    assert backend.ingest_message("42", _echo_payload(mirror.name), 1787250931234)
+
+    remotes = []
+    for index in range(3):
+        remote = media_dir / f"remote-{index}"
+        remote.write_bytes(b"remote")
+        remotes.append(remote)
+    results = [
+        backend.ingest_message("42", _echo_payload(remote.name), 1787250931234)
+        for remote in remotes
+    ]
+
+    # First echo upgrades the mirrored row, the others become NEW rows: the
+    # pre-fix behaviour overwrote the first row with every incoming id.
+    assert results == ["changed", True, True]
+    assert len(backend.cache["42"]) == 3
+    assert [message["attachment_id"] for message in backend.cache["42"]] == [
+        remote.name for remote in remotes
+    ]
+    from protocols import db
+
+    with sqlite3.connect(db.DB_FILE) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM messages WHERE protocol = 'signal' "
+                "AND contact_number = '42'"
+            ).fetchone()[0]
+            == 3
+        )
+
+
+def test_signal_send_attachments_barrier_rollback_cleans_partial_rows(
+    tmp_path, monkeypatch
+):
+    from protocols.db import _add_message_to_cache
+
+    backend, media_dir = _batch_backend(tmp_path, monkeypatch)
+    files = _uploads(tmp_path)
+    # Stranger rows sharing identity pieces with the batch: same attachment
+    # id (different msg_id) and same msg_id (different attachment id) must
+    # both survive the rollback DELETE.
+    _add_message_to_cache(
+        "42",
+        "",
+        is_mine=True,
+        sender="You",
+        timestamp=999_000,
+        msg_type="image",
+        attachment_id="file-0.png",
+        protocol="signal",
+        msg_id="other-message",
+    )
+    _add_message_to_cache(
+        "42",
+        "",
+        is_mine=True,
+        sender="You",
+        timestamp=1_787_250_931_234,
+        msg_type="image",
+        attachment_id="unrelated.png",
+        protocol="signal",
+        msg_id="1787250931234",
+    )
+
+    original_ingest = backend.ingest_message
+
+    def failing_ingest(contact_id, data, ts, persist=True):
+        result = original_ingest(contact_id, data, ts, persist=persist)
+        if data.get("batch_index") == 1:
+            # Fail AFTER the row hit the DB: the append-before-ingest
+            # tracking must still roll it back.
+            raise RuntimeError("boom during barrier")
+        return result
+
+    backend.ingest_message = failing_ingest
+
+    with pytest.raises(RuntimeError, match="boom during barrier"):
+        _send_batch(backend, files, batch_id="batch-1")
+
+    assert backend.cache.get("42") == []
+    for index in range(3):
+        assert not (media_dir / f"file-{index}.png").exists()
+
+    from protocols import db
+
+    with sqlite3.connect(db.DB_FILE) as connection:
+        rows = connection.execute(
+            "SELECT msg_id, attachment_id FROM messages "
+            "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
+        ).fetchall()
+    assert rows == [
+        ("other-message", "file-0.png"),
+        ("1787250931234", "unrelated.png"),
+    ]

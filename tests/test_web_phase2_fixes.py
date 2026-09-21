@@ -161,6 +161,114 @@ def test_signal_outgoing_attachment_is_resolvable_or_null(monkeypatch, tmp_path)
         )
 
 
+# ─── Multi-attachment batch persistence (design §6.4) ────────────────────────
+
+
+def _table_columns(db_file: Path) -> set[str]:
+    with sqlite3.connect(db_file) as connection:
+        return {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
+
+
+def test_batch_columns_added_to_modern_versioned_db(monkeypatch, tmp_path):
+    """Un DB preesistente a ``user_version >= _LEGACY_MIGRATION_VERSION`` riceve
+    comunque le colonne batch: la migrazione è incondizionata (stile
+    ``edited``/``content_type``), non gated dall'early-return."""
+    db_file = _db(monkeypatch, tmp_path)
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            """CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                protocol TEXT NOT NULL DEFAULT 'signal',
+                contact_number TEXT NOT NULL,
+                text TEXT,
+                is_mine INTEGER NOT NULL DEFAULT 0,
+                sender TEXT,
+                timestamp INTEGER NOT NULL,
+                msg_type TEXT DEFAULT 'text',
+                attachment_info TEXT,
+                attachment_id TEXT,
+                content_type TEXT,
+                media_kind TEXT,
+                msg_id TEXT,
+                edited INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        connection.execute(f"PRAGMA user_version = {backend_mod._SCHEMA_VERSION}")
+
+    backend_mod._init_db()
+
+    columns = _table_columns(db_file)
+    assert {"batch_id", "batch_index"} <= columns
+    with sqlite3.connect(db_file) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (
+            backend_mod._SCHEMA_VERSION
+        )
+
+
+def test_batch_columns_present_on_fresh_db(monkeypatch, tmp_path):
+    db_file = _db(monkeypatch, tmp_path)
+
+    backend_mod._init_db()
+
+    assert {"batch_id", "batch_index"} <= _table_columns(db_file)
+
+
+def test_messages_exposes_batch_fields(monkeypatch, tmp_path):
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    for index in range(3):
+        _add_message_to_cache(
+            "42",
+            "",
+            is_mine=True,
+            sender="You",
+            timestamp=1_787_250_931_234,
+            msg_type="image",
+            attachment_id=f"file-{index}.png",
+            protocol="signal",
+            msg_id="1787250931234",
+            batch_id="batch-1",
+            batch_index=index,
+        )
+
+    messages = _messages("signal", "42")
+
+    assert [message["batch_index"] for message in messages] == [0, 1, 2]
+    assert {message["batch_id"] for message in messages} == {"batch-1"}
+
+
+def test_load_cache_orders_same_timestamp_rows_deterministically(monkeypatch, tmp_path):
+    """N righe mirror con lo stesso timestamp vengono ricaricate in ordine di
+    inserimento (tie-breaker ``id``): l'eco k-esima continua a matchare la
+    riga mirror k-esima dopo un restart."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache, _load_cache
+
+    for index in range(3):
+        _add_message_to_cache(
+            "42",
+            "",
+            is_mine=True,
+            sender="You",
+            timestamp=1_787_250_931_234,
+            msg_type="image",
+            attachment_id=f"file-{index}.png",
+            protocol="signal",
+            msg_id="1787250931234",
+            batch_id="batch-1",
+            batch_index=index,
+        )
+
+    loaded = _load_cache("signal")
+
+    assert [message["attachment_id"] for message in loaded["42"]] == [
+        "file-0.png",
+        "file-1.png",
+        "file-2.png",
+    ]
+
+
 def test_telegram_persists_content_type_and_api_marks_tgref_as_image(
     monkeypatch, tmp_path
 ):

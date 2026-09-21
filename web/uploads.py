@@ -13,6 +13,8 @@ from typing import Any
 from filename_utils import sanitize_filename
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+#: Hard cap on the total bytes of a single multi-attachment request.
+_MAX_TOTAL_BYTES = 250 * 1024 * 1024
 _MAX_BYTES_BY_KIND = {
     "image": MAX_UPLOAD_BYTES,
     "video": 100 * 1024 * 1024,

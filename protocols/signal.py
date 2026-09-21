@@ -680,6 +680,172 @@ class SignalBackend(ChatBackend):
                 self._sent_attachment_paths.pop(oldest)
         return message_id
 
+    def send_attachments_sync(
+        self,
+        contact_id: str,
+        file_paths: list[Path],
+        *,
+        captions: list[str | None],
+        mime_types: list[str],
+        media_kinds: list[str | None],
+        filenames: list[str | None],
+        batch_id: str | None = None,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> list[str]:
+        """Send N attachments as ONE Signal message (signal-cli batch send).
+
+        signal-cli already accepts an ``attachments`` list, so the whole batch
+        becomes a single message and a single message id is returned.  The N
+        mirror rows are materialized inside an atomic barrier under
+        ``_ingest_lock`` (re-entrant with ``ingest_message``): the persistent
+        copies are registered in ``_sent_attachment_paths`` BEFORE the
+        inserts — so the rows are already "sent" attachments while being
+        ingested — and the SSE echo thread stays blocked for the whole
+        barrier, making any mirror/echo interleaving impossible.  A failure
+        part-way through the barrier rolls the partial mirror back (cache +
+        DB + persistent files) before re-raising.
+        """
+        SIGNAL_CLI_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        persistent_paths: list[Path] = []
+        caption = captions[0] if captions else None
+        try:
+            # Copy under the registry lock: two concurrent sends with the same
+            # filename cannot pick the same destination (atomic exists() check).
+            with self._sent_attachment_paths_lock:
+                for index, file_path in enumerate(file_paths):
+                    safe_filename = sanitize_filename(filenames[index] or "")
+                    persistent_paths.append(
+                        self._copy_sent_attachment(file_path, safe_filename)
+                    )
+            message_id = self._send_message_sync(
+                contact_id,
+                caption or "",
+                quote_timestamp=quote_timestamp,
+                quote_author=quote_author,
+                quote_message=quote_message,
+                reply_to_message_id=reply_to_message_id,
+                quote_attachments=quote_attachments,
+                attachments=[str(path) for path in persistent_paths],
+            )
+        except Exception:
+            for path in persistent_paths:
+                path.unlink(missing_ok=True)
+            raise
+
+        # The Signal message id is the server timestamp; fall back to the
+        # local clock when it is not numeric (row id and ts may then diverge,
+        # which is acceptable: the row id is a string, the ts an int).
+        ts = int(message_id) if str(message_id).isdigit() else int(time.time() * 1000)
+
+        inserted_mirror_ids: list[str] = []
+        with self._ingest_lock:
+            try:
+                # Register the persistent copies BEFORE the inserts (the
+                # barrier already holds _ingest_lock, so no echo can run here).
+                with self._sent_attachment_paths_lock:
+                    for file_path, persistent_path in zip(file_paths, persistent_paths):
+                        self._sent_attachment_paths[str(file_path.resolve())] = (
+                            persistent_path
+                        )
+                        while (
+                            len(self._sent_attachment_paths)
+                            > _MAX_SENT_ATTACHMENT_PATHS
+                        ):
+                            oldest = next(iter(self._sent_attachment_paths))
+                            self._sent_attachment_paths.pop(oldest)
+
+                for index, (file_path, persistent_path) in enumerate(
+                    zip(file_paths, persistent_paths)
+                ):
+                    media_kind = (
+                        media_kinds[index]
+                        or media_kind_from_mime(mime_types[index])
+                        or "document"
+                    )
+                    mirror_data = {
+                        "id": str(message_id),
+                        "text": caption or "" if index == 0 else "",
+                        "is_mine": True,
+                        "sender": "You",
+                        "timestamp": ts,
+                        "quote_text": quote_message,
+                        "quote_timestamp": quote_timestamp,
+                        "quote_author": quote_author,
+                        "reply_to_message_id": reply_to_message_id,
+                        "msg_type": msg_type_for_media_kind(media_kind),
+                        "attachment_info": (
+                            caption or filenames[index] or None
+                            if index == 0 and media_kind == "image"
+                            else filenames[index] or caption or None
+                        ),
+                        "attachment_id": persistent_path.name,
+                        "content_type": mime_types[index],
+                        "media_kind": media_kind,
+                        "batch_id": batch_id,
+                        "batch_index": index,
+                    }
+                    # Track the row BEFORE ingesting it: an ingest that fails
+                    # right after the DB write must still be rolled back.
+                    inserted_mirror_ids.append(persistent_path.name)
+                    self.ingest_message(contact_id, mirror_data, ts, persist=True)
+            except Exception as exc:
+                logger.error(
+                    "Barrier ingest failed at index %d/%d: %s",
+                    len(inserted_mirror_ids),
+                    len(file_paths),
+                    exc,
+                )
+                try:
+                    # Rollback under _ingest_lock: remove the rows materialized
+                    # so far from cache and DB.  The DELETE matches on msg_id +
+                    # the exact attachment ids inserted here, so no unrelated
+                    # row (same attachment id, different msg_id) is touched.
+                    self.cache[contact_id] = [
+                        message
+                        for message in self.cache.get(contact_id, [])
+                        if not (
+                            message.get("id") == str(message_id)
+                            and message.get("attachment_id") in inserted_mirror_ids
+                        )
+                    ]
+                    if inserted_mirror_ids:
+                        import sqlite3
+
+                        from protocols.db import _DB_LOCK, DB_FILE
+
+                        with _DB_LOCK:
+                            connection = sqlite3.connect(DB_FILE)
+                            try:
+                                connection.execute(
+                                    "DELETE FROM messages WHERE protocol = ? "
+                                    "AND contact_number = ? AND msg_id = ? "
+                                    "AND attachment_id IN ({})".format(
+                                        ",".join("?" * len(inserted_mirror_ids))
+                                    ),
+                                    [
+                                        PROTOCOL_SIGNAL,
+                                        contact_id,
+                                        str(message_id),
+                                        *inserted_mirror_ids,
+                                    ],
+                                )
+                                connection.commit()
+                            finally:
+                                connection.close()
+                except Exception as rollback_exc:  # noqa: BLE001
+                    logger.error(
+                        "Rollback failed: %s (degrado accettato: righe mirror parziali)",
+                        rollback_exc,
+                    )
+                for path in persistent_paths:
+                    path.unlink(missing_ok=True)
+                raise
+        return [message_id]
+
     @staticmethod
     def _copy_sent_attachment(file_path: Path, filename: str = "") -> Path:
         if not filename:
@@ -705,6 +871,8 @@ class SignalBackend(ChatBackend):
         message_id: str,
         text: str,
         *,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
@@ -767,9 +935,48 @@ class SignalBackend(ChatBackend):
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
                     "media_kind": media_kind,
+                    "batch_id": batch_id,
+                    "batch_index": batch_index,
                 },
             )
         )
+
+    def enqueue_sent_notification(
+        self,
+        contact_id: str,
+        message_id: str,
+        timestamp: int,
+        batch_id: str | None = None,
+    ) -> None:
+        """Publish the lightweight ``sent-mirror`` event for a batch send.
+
+        The atomic send barrier has already materialized the N mirror rows in
+        cache/DB; this notification only tells the UI to refresh the contact
+        ordering/dirty flags — no second DB write, no duplicate ingestion.
+        """
+        self._event_queue.put(
+            ChatEvent(
+                type="sent-mirror",
+                protocol=self.protocol,
+                contact_id=contact_id,
+                payload={
+                    "id": str(message_id),
+                    "timestamp": timestamp,
+                    "batch_id": batch_id,
+                    "contact": self._identify_contact(contact_id),
+                },
+            )
+        )
+
+    def _identify_contact(self, contact_id: str) -> ChatContact | None:
+        """Resolve a Signal contact id to a known ``ChatContact``.
+
+        Like Telegram (``_contacts_by_id``) and WhatsApp (``_contacts_by_jid``),
+        Signal resolves from ``_contacts_by_key`` (populated during
+        ``list_contacts``) so event handlers can update the real contact
+        object instead of a placeholder.
+        """
+        return self._contacts_by_key.get(f"{self.protocol}:{contact_id}")
 
     def edit_message_sync(
         self, contact_id: str, message_id: str, new_text: str
@@ -1360,6 +1567,28 @@ class SignalBackend(ChatBackend):
             or self._is_sent_attachment(incoming_id)
         )
 
+    def _same_attachment_slot(
+        self, cached_attachment_id: str | None, incoming_attachment_id: str | None
+    ) -> bool:
+        """Whether two outgoing attachment ids identify the same *slot*.
+
+        Equal ids (or either side still unknown) share a slot; otherwise the
+        ids share a slot only when exactly one of them is a locally mirrored
+        "sent" attachment — the mirror→remote upgrade direction.  Two
+        different mirrored files are distinct attachments of the same
+        multi-attachment message, never each other's echo (design §4.5,
+        ``same_slot``).
+        """
+        if (
+            cached_attachment_id == incoming_attachment_id
+            or not cached_attachment_id
+            or not incoming_attachment_id
+        ):
+            return True
+        return self._is_sent_attachment(
+            cached_attachment_id
+        ) != self._is_sent_attachment(incoming_attachment_id)
+
     def _message_already_cached(
         self,
         contact_id: str,
@@ -1391,13 +1620,12 @@ class SignalBackend(ChatBackend):
             same_attachment = self._outgoing_attachments_match(
                 cached_attachment_id, attachment_id
             )
-            if (
-                is_mine
-                and msg_id
-                and msg.get("id")
-                and msg.get("id") == msg_id
-                and same_attachment
-            ):
+            if is_mine and msg_id and msg.get("id") and msg.get("id") == msg_id:
+                # Outgoing identity = the same attachment *slot*: two mirrored
+                # "sent" files with different ids are distinct attachments of
+                # one multi-attachment message, not echoes of each other.
+                if not self._same_attachment_slot(cached_attachment_id, attachment_id):
+                    continue
                 return msg
             if msg.get("text") != text:
                 continue
@@ -1408,7 +1636,13 @@ class SignalBackend(ChatBackend):
                     return msg
             elif msg_id:
                 cached_id = msg.get("id")
-                if cached_id and cached_id == msg_id:
+                if (
+                    cached_id
+                    and cached_id == msg_id
+                    # Same guard as the id branch above: a different
+                    # attachment slot is a different row of the same batch.
+                    and self._same_attachment_slot(cached_attachment_id, attachment_id)
+                ):
                     return msg
                 if not cached_id and same_attachment:
                     delta = abs(msg.get("timestamp", 0) - ts)
@@ -1464,6 +1698,7 @@ class SignalBackend(ChatBackend):
             message.get("id") or data.get("id"),
             int(message.get("timestamp", ts)),
             incoming_id,
+            expected_attachment_id=current_id,
         )
         return True
 
@@ -1515,6 +1750,8 @@ class SignalBackend(ChatBackend):
             quote_attachment_id=data.get("quote_attachment_id"),
             quote_attachment_path=data.get("quote_attachment_path"),
             quote_content_type=data.get("quote_content_type"),
+            batch_id=data.get("batch_id"),
+            batch_index=data.get("batch_index"),
         )
 
     def ingest_message(
@@ -1553,18 +1790,29 @@ class SignalBackend(ChatBackend):
             # through to the normal dedup below.
             mid = data.get("id")
             if mid and is_mine:
+                incoming_attachment_id = data.get("attachment_id")
+                incoming_is_sent = self._is_sent_attachment(incoming_attachment_id)
                 best_optimistic: dict | None = None
                 best_optimistic_delta: int | None = None
                 for m in self.cache.get(contact_id, []):
                     if not m.get("is_mine"):
                         continue
                     cached_attachment_id = m.get("attachment_id")
-                    incoming_attachment_id = data.get("attachment_id")
                     same_attachment = self._outgoing_attachments_match(
                         cached_attachment_id, incoming_attachment_id
                     )
+                    cached_is_sent = self._is_sent_attachment(cached_attachment_id)
+                    same_slot = self._same_attachment_slot(
+                        cached_attachment_id, incoming_attachment_id
+                    )
+                    # One-way upgrade: only a locally mirrored (sent) row may
+                    # take the remote (non-sent) id — never the opposite
+                    # direction.  A row with no attachment yet may be filled.
+                    valid_direction = not cached_attachment_id or (
+                        cached_is_sent and not incoming_is_sent
+                    )
                     id_matches_timestamp = (
-                        str(m.get("id")) == str(ts) and same_attachment
+                        str(m.get("id")) == str(ts) and same_slot and valid_direction
                     )
                     delta = abs(int(m.get("timestamp", 0)) - ts)
                     optimistic_match = (
@@ -1595,7 +1843,25 @@ class SignalBackend(ChatBackend):
                         )
                     except Exception:
                         logger.exception("Signal: _update_message_id failed")
-                    changed = self._upgrade_outgoing_attachment(contact_id, m, data, ts)
+                    # Never upgrade when the incoming attachment already lives
+                    # in another row of the same message, and only in the
+                    # one-way mirror→remote direction (see above).
+                    already_present = any(
+                        other.get("id") == str(mid)
+                        and other.get("attachment_id") == incoming_attachment_id
+                        and other is not m
+                        for other in self.cache.get(contact_id, [])
+                    )
+                    cached_is_sent = self._is_sent_attachment(m.get("attachment_id"))
+                    valid_direction = not m.get("attachment_id") or (
+                        cached_is_sent and not incoming_is_sent
+                    )
+                    if not already_present and valid_direction:
+                        changed = self._upgrade_outgoing_attachment(
+                            contact_id, m, data, ts
+                        )
+                    else:
+                        changed = False
                     changed = (
                         self._heal_image_caption(contact_id, m, data, ts) or changed
                     )
@@ -1620,9 +1886,29 @@ class SignalBackend(ChatBackend):
             )
             if existing is not None:
                 if is_mine:
-                    changed = self._upgrade_outgoing_attachment(
-                        contact_id, existing, data, ts
+                    # Same two protections as the optimistic branch above: no
+                    # upgrade when the incoming attachment already lives in
+                    # another row of the same message, and only in the one-way
+                    # mirror→remote direction (never remote→local).
+                    incoming_attachment_id = data.get("attachment_id")
+                    already_present = any(
+                        other.get("id") == str(data.get("id"))
+                        and other.get("attachment_id") == incoming_attachment_id
+                        and other is not existing
+                        for other in self.cache.get(contact_id, [])
                     )
+                    cached_attachment_id = existing.get("attachment_id")
+                    cached_is_sent = self._is_sent_attachment(cached_attachment_id)
+                    incoming_is_sent = self._is_sent_attachment(incoming_attachment_id)
+                    valid_direction = not cached_attachment_id or (
+                        cached_is_sent and not incoming_is_sent
+                    )
+                    if not already_present and valid_direction:
+                        changed = self._upgrade_outgoing_attachment(
+                            contact_id, existing, data, ts
+                        )
+                    else:
+                        changed = False
                     changed = (
                         self._heal_image_caption(contact_id, existing, data, ts)
                         or changed
