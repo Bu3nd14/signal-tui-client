@@ -203,10 +203,37 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
   const consumed = new Set(local
     .filter((item) => !item.optimistic_id && item.confirmed_message_id)
     .map((item) => item.confirmed_message_id));
+  // Multi-allegato (batch_id != null): passata dedicata PRIMA del loop
+  // generico. N allegati omonimi hanno signature identiche, quindi il
+  // pairing usa lo slot batch_id+batch_index persistito nel DB. Signal
+  // materializza le N righe di un batch con lo STESSO msg_id: il claiming
+  // qui e' per slot, non per identity, che sarebbe ambigua.
+  const multiCandidates = local
+    .filter((item) => item.optimistic_id && item.optimisticStatus !== "failed" && item.batch_id != null)
+    .sort((a, b) => b.timestamp - a.timestamp);
+  // Il loop generico resta riservato ai single (batch_id == null): evita che
+  // consumi per signature le righe reali di un batch prima della passata
+  // dedicata (che gira prima e le marca come consumed).
   const candidates = local
-    .filter((item) => item.optimistic_id && item.optimisticStatus !== "failed")
+    .filter((item) => item.optimistic_id && item.optimisticStatus !== "failed" && item.batch_id == null)
     .sort((a, b) => b.timestamp - a.timestamp);
   const reconciled = new Map();
+  const claimedSlots = new Set();
+
+  for (const item of multiCandidates) {
+    const slot = `${item.batch_id}\u0000${item.batch_index}`;
+    const realIndex = messages.findIndex((message) =>
+      message.batch_id === item.batch_id
+      && message.batch_index === item.batch_index
+      && !claimedSlots.has(`${message.batch_id}\u0000${message.batch_index}`));
+    if (realIndex < 0 || claimedSlots.has(slot)) continue;
+    claimedSlots.add(slot);
+    const { optimistic_id: ignored, ...confirmed } = item;
+    void ignored;
+    confirmed.confirmed_message_id = messageIdentity(messages[realIndex]);
+    reconciled.set(item.optimistic_id, confirmed);
+    consumed.add(confirmed.confirmed_message_id);
+  }
 
   for (const item of candidates) {
     const known = new Set(item.known_message_ids || []);

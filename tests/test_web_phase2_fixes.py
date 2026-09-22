@@ -867,7 +867,7 @@ const inflight = Promise.resolve();
 globalThis.state = {
   mediaRequests: new Set([controller]), mediaLoads: new Map([["old", inflight]]),
   active: null, messages: [], optimistic: [], optimisticSequence: 0,
-  sending: false, stagedAttachment: null, replyTo: null,
+  sending: false, stagedAttachments: [], replyTo: null,
 };
 function node() { return { children: [], classList: { add() {} }, append(child) { this.children.push(child); }, replaceChildren() { this.children = []; }, focus() {} }; }
 globalThis.elements = {

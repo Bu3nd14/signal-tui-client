@@ -63,7 +63,7 @@ const state = {
   sending: 0, // conteggio invii /api/send in corso: piu' invii possono essere in volo insieme
   editing: null,
   editSending: false,
-  stagedAttachment: null,
+  stagedAttachments: [],
   replyTo: null,
   emojiData: null,
   emojiRequest: null,
@@ -104,10 +104,7 @@ const elements = {
   sendMessage: document.querySelector("#send-message"),
   sendIcon: document.querySelector(".send-icon"),
   sendSpinner: document.querySelector(".send-spinner"),
-  attachmentPreview: document.querySelector("#attachment-preview"),
-  attachmentPreviewImage: document.querySelector("#attachment-preview-image"),
-  attachmentPreviewName: document.querySelector("#attachment-preview-name"),
-  removeAttachment: document.querySelector("#remove-attachment"),
+  attachmentsPreview: document.querySelector("#attachments-preview"),
   replyBanner: document.querySelector("#reply-banner"),
   replyMark: document.querySelector(".reply-mark"),
   replyAuthor: document.querySelector("#reply-author"),
@@ -1176,6 +1173,19 @@ function messageNodeKey(item) {
   return item.optimistic_id ? `opt:${item.optimistic_id}` : String(item.id);
 }
 
+// Riguarda la riga reale confermata per un optimistic riconciliato. Per il
+// multi-allegato (batch_id != null) le N righe di Signal condividono lo
+// STESSO msg_id: la lookup per identity sarebbe ambigua (tornerebbe sempre
+// la prima riga, scambiando le preview), quindi si usa lo slot batch.
+function confirmedMessageIndex(item, messages) {
+  if (item.batch_id != null) {
+    return messages.findIndex((message) =>
+      message.batch_id === item.batch_id && message.batch_index === item.batch_index);
+  }
+  return messages.findIndex((message, index) =>
+    window.SignalTuiReconcile.messageIdentity(message, index) === String(item.confirmed_message_id));
+}
+
 // Vero per gli item che passano da imageAttachment/videoThumbAttachment con
 // un callback onLoad dipendente dallo scroll corrente (stickToBottom): per
 // questi il fingerprint deve includere anche lo stato "a fondo pagina",
@@ -1337,10 +1347,9 @@ function renderMessages(messages, protocol) {
   console.debug("[web] reconciled", state.optimistic.filter((o) => o.protocol === active.protocol && o.contactId === active.id && o.confirmed_message_id).map((o) => o.confirmed_message_id));
   for (const item of state.optimistic) {
     if (item.localPreviewUrl && !item.optimistic_id) {
-      const idx = messages.findIndex((m, x) =>
-        window.SignalTuiReconcile.messageIdentity(m, x) === String(item.confirmed_message_id));
+      const idx = confirmedMessageIndex(item, messages);
       if (idx >= 0) {
-        console.debug("[web] deliver blob", { confirmed_message_id: item.confirmed_message_id, idx });
+        console.debug("[web] deliver blob", { confirmed_message_id: item.confirmed_message_id, batch_id: item.batch_id, idx });
         const optimisticKey = item.attachment?.attachment_id != null ? String(item.attachment.attachment_id) : null;
         const optimisticEntry = optimisticKey ? state.mediaCache.get(optimisticKey) : null;
         // Trasferisce le dims solo se è lo STESSO blob (stessa immagine): evita
@@ -1360,8 +1369,7 @@ function renderMessages(messages, protocol) {
   // l'URL calcolato sulla bolla optimistic, come per localPreviewUrl.
   for (const item of state.optimistic) {
     if (item.quote_thumb_url && item.confirmed_message_id) {
-      const idx = messages.findIndex((m, x) =>
-        window.SignalTuiReconcile.messageIdentity(m, x) === String(item.confirmed_message_id));
+      const idx = confirmedMessageIndex(item, messages);
       if (idx >= 0 && !messages[idx].quote_thumb_url) {
         messages[idx] = { ...messages[idx], quote_thumb_url: item.quote_thumb_url };
       }
@@ -2025,7 +2033,7 @@ function updateComposer() {
   // arrivi a destinazione (ogni invio ha un optimistic_id indipendente).
   const busy = state.editSending;
   const spinning = busy || state.sending > 0;
-  elements.sendMessage.disabled = busy || (!elements.messageInput.value.trim() && !state.stagedAttachment);
+  elements.sendMessage.disabled = busy || (!elements.messageInput.value.trim() && !state.stagedAttachments.length);
   elements.messageInput.disabled = busy;
   elements.cancelReply.disabled = busy;
   elements.sendIcon.hidden = spinning;
@@ -2041,27 +2049,101 @@ function mediaKindFromMime(mime) {
   return "document";
 }
 
-function clearStagedAttachment({ revoke = true } = {}) {
-  if (state.stagedAttachment?.previewUrl && revoke) {
-    URL.revokeObjectURL(state.stagedAttachment.previewUrl);
-    // Scarta il seeding P1b SOLO se l'allegato non verrà inviato: nel path di
-    // invio (revoke:false) l'entry serve al primo paint optimistic.
-    const seeded = state.mediaCache.get(String(state.stagedAttachment.filename));
-    if (seeded?.url === state.stagedAttachment.previewUrl) {
-      state.mediaCache.delete(String(state.stagedAttachment.filename));
+// Allineato al cap del backend (_MAX_ATTACHMENTS in web/api.py): oltre, la
+// richiesta verrebbe respinta con 400 "Too many attachments".
+const MAX_STAGED_ATTACHMENTS = 10;
+
+function clearStagedAttachments({ revoke = true } = {}) {
+  // Nel path di invio (revoke:false) gli object URL NON si revocano: sono i
+  // localPreviewUrl degli optimistic N e servono al primo paint; la revoca
+  // arriva alla reconciliation (deliver del blob) o al prune degli orfani.
+  if (revoke) {
+    for (const attachment of state.stagedAttachments) {
+      if (!attachment.previewUrl) continue;
+      URL.revokeObjectURL(attachment.previewUrl);
+      state.objectUrls.delete(attachment.previewUrl);
+      // Scarta il seeding P1b SOLO se l'allegato non verra' inviato: nel path
+      // di invio (revoke:false) l'entry serve al primo paint optimistic.
+      const seeded = state.mediaCache.get(attachment.attachmentId);
+      if (seeded?.url === attachment.previewUrl) {
+        state.mediaCache.delete(attachment.attachmentId);
+      }
     }
   }
-  state.stagedAttachment = null;
-  elements.attachmentPreview.hidden = true;
-  elements.attachmentPreview.classList?.remove("attachment-preview-file");
-  elements.attachmentPreviewImage.hidden = false;
-  elements.attachmentPreviewImage.removeAttribute("src");
-  elements.attachmentPreviewName.textContent = "";
+  state.stagedAttachments = [];
+  renderAttachmentsPreview();
   updateComposer();
 }
 
-async function stageAttachment(file) {
-  if (!file) return;
+function renderAttachmentsPreview() {
+  const container = elements.attachmentsPreview;
+  container.replaceChildren();
+  for (const attachment of state.stagedAttachments) {
+    const item = document.createElement("div");
+    item.className = "attachment-preview-item";
+    const thumb = document.createElement("div");
+    thumb.className = "attachment-preview-thumb";
+    if (attachment.previewUrl) {
+      const image = document.createElement("img");
+      image.src = attachment.previewUrl;
+      image.alt = attachment.filename;
+      thumb.append(image);
+    } else {
+      const icon = document.createElement("span");
+      icon.className = "attachment-preview-icon";
+      const kind = mediaKindFromMime(attachment.file.type);
+      icon.textContent = { video: "🎬", voice: "🎤", audio: "🎵", document: "📎" }[kind] || "📎";
+      thumb.append(icon);
+    }
+    item.append(thumb);
+    const name = document.createElement("span");
+    name.className = "attachment-preview-name";
+    name.textContent = attachment.filename;
+    name.title = attachment.filename;
+    item.append(name);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `Rimuovi ${attachment.filename}`);
+    // indexOf sull'istanza (non indice catturato al render): dopo ogni
+    // rimozione la preview e' rigenerata, ma resta robusto a doppi click.
+    remove.addEventListener("click", () => removeStagedAttachment(state.stagedAttachments.indexOf(attachment)));
+    item.append(remove);
+    container.append(item);
+  }
+  container.hidden = state.stagedAttachments.length === 0;
+}
+
+function removeStagedAttachment(index) {
+  if (index < 0 || index >= state.stagedAttachments.length) return;
+  const [attachment] = state.stagedAttachments.splice(index, 1);
+  if (attachment.previewUrl) {
+    URL.revokeObjectURL(attachment.previewUrl);
+    state.objectUrls.delete(attachment.previewUrl);
+    const seeded = state.mediaCache.get(attachment.attachmentId);
+    if (seeded?.url === attachment.previewUrl) {
+      state.mediaCache.delete(attachment.attachmentId);
+    }
+  }
+  renderAttachmentsPreview();
+  updateComposer();
+}
+
+async function stageAttachments(files) {
+  let incoming = [...files].filter(Boolean);
+  if (!incoming.length) return;
+  if (state.stagedAttachments.length + incoming.length > MAX_STAGED_ATTACHMENTS) {
+    showError(`Puoi allegare al massimo ${MAX_STAGED_ATTACHMENTS} file per messaggio.`);
+    incoming = incoming.slice(0, Math.max(0, MAX_STAGED_ATTACHMENTS - state.stagedAttachments.length));
+  }
+  // I file non validi (formato/dimensione) sono saltati con errore: i validi
+  // restano staged (stesso comportamento per-file del vecchio staging).
+  for (const file of incoming) await stageOneAttachment(file);
+  renderAttachmentsPreview();
+  updateComposer();
+}
+
+async function stageOneAttachment(file) {
   const isImage = file.type.startsWith("image/");
   const mediaKind = mediaKindFromMime(file.type);
   const extensions = { "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp" };
@@ -2112,30 +2194,36 @@ async function stageAttachment(file) {
     showError(`Il file supera il limite di ${maxMiB} MiB.`);
     return;
   }
-  clearStagedAttachment();
   const filename = file.name || `clipboard-${Date.now()}`;
   const previewUrl = isImage && previewBlob ? URL.createObjectURL(previewBlob) : null;
-  state.stagedAttachment = { file, filename, previewUrl };
+  // Chiave per indice (design §6.2): distingue allegati omonimi nella
+  // mediaCache e nell'attachment_id degli optimistic. L'indice è il più
+  // piccolo LIBERO tra gli attachmentId correnti, NON la lunghezza
+  // dell'array: dopo remove+re-add di un omonimo la lunghezza si riavvolge
+  // e riuserebbe la chiave del sopravvissuto, con revoca del suo object URL
+  // in cacheMedia. Calcolo e push sono nello stesso blocco sincrono, quindi
+  // nemmeno stageAttachments concorrenti possono collidere. La chiave resta
+  // memorizzata sull'item: remove, clear e invio non la ricalcolano mai.
+  const usedIndexes = new Set(
+    state.stagedAttachments.map((item) => Number(item.attachmentId.slice(item.attachmentId.lastIndexOf("[") + 1, -1))),
+  );
+  let attachmentIndex = 0;
+  while (usedIndexes.has(attachmentIndex)) attachmentIndex += 1;
+  const attachmentId = `${filename}[${attachmentIndex}]`;
+  state.stagedAttachments.push({ file, filename, previewUrl, previewWidth, previewHeight, attachmentId });
   // P1b: riserva lo spazio GIÀ al primo paint optimistic. La chiave DEVE essere
-  // `filename`: submitMessage (~2094) la usa come attachment_id dell'optimistic,
+  // l'attachmentId: submitMessage la usa come attachment_id dell'optimistic,
   // e il branch localPreviewUrl di renderMessages la cerca in mediaCache.
-  // Stessa URL → cacheMedia preserva le dims (446-447) al re-cache del render.
-  if (previewUrl) cacheMedia(filename, previewUrl, previewWidth, previewHeight);
-  elements.attachmentPreview.classList?.toggle("attachment-preview-file", !isImage);
-  elements.attachmentPreviewImage.hidden = !isImage;
-  if (isImage) elements.attachmentPreviewImage.src = previewUrl;
-  const icon = { video: "🎬", voice: "🎤", audio: "🎵", document: "📎" }[mediaKind] || "📎";
-  elements.attachmentPreviewName.textContent = isImage ? filename : `${icon} ${filename}`;
-  elements.attachmentPreview.hidden = false;
-  updateComposer();
+  // Stessa URL → cacheMedia preserva le dims al re-cache del render.
+  if (previewUrl) cacheMedia(attachmentId, previewUrl, previewWidth, previewHeight);
 }
 
 async function submitMessage() {
   if (!state.active) return;
   const text = elements.messageInput.value;
-  const attachment = state.stagedAttachment;
+  const attachments = [...state.stagedAttachments];
   const reply = state.replyTo ? { ...state.replyTo } : null;
-  if (!text.trim() && !attachment) return;
+  if (!text.trim() && !attachments.length) return;
   // Il banner "Rispondendo a..." si chiude subito, non ad invio riuscito:
   // con piu' invii in volo insieme un secondo messaggio composto mentre il
   // primo (con citazione) e' ancora in corso non deve erediare la stessa
@@ -2143,52 +2231,86 @@ async function submitMessage() {
   if (reply) cancelReply();
   const active = { ...state.active };
   const timestamp = Date.now();
-  const optimistic = {
-    optimistic_id: `${timestamp}-${++state.optimisticSequence}`,
-    protocol: active.protocol,
-    contactId: active.id,
-    text: text,
-    direction: "out",
-    timestamp,
-    optimisticStatus: "sending",
-    known_message_ids: state.messages.map(window.SignalTuiReconcile.messageIdentity),
-  };
+  const knownMessageIds = state.messages.map(window.SignalTuiReconcile.messageIdentity);
+  const quoteFields = {};
   if (reply) {
-    optimistic.quote_timestamp = reply.timestamp;
-    optimistic.quote_author = reply.quoteAuthor;
-    optimistic.quote_message = reply.quoteMessage;
-    optimistic.quote_text = reply.quoteMessage;
-    if (reply.contentType) optimistic.quote_content_type = reply.contentType;
+    quoteFields.quote_timestamp = reply.timestamp;
+    quoteFields.quote_author = reply.quoteAuthor;
+    quoteFields.quote_message = reply.quoteMessage;
+    quoteFields.quote_text = reply.quoteMessage;
+    if (reply.contentType) quoteFields.quote_content_type = reply.contentType;
     if ((reply.isImage || reply.isVideo) && active.protocol !== "signal") {
-      optimistic.quote_media_type = reply.isVideo ? "video" : "image";
+      quoteFields.quote_media_type = reply.isVideo ? "video" : "image";
     }
     if ((reply.isImage || reply.isVideo) && reply.attachmentId) {
       const quoteAttachmentId = String(reply.attachmentId).split("/").map(encodeURIComponent).join("/");
-      optimistic.quote_thumb_url = `/api/media/${active.protocol}/${quoteAttachmentId}?w=96`;
+      quoteFields.quote_thumb_url = `/api/media/${active.protocol}/${quoteAttachmentId}?w=96`;
       // Senza caption reale la bolla optimistic mostra SOLO la miniatura
       // (come il messaggio confermato): evita il nome file accanto alla
       // thumb e il flash "testo che sparisce" alla reconciliation.
-      optimistic.quote_media_placeholder = !reply.caption;
+      quoteFields.quote_media_placeholder = !reply.caption;
       if (!reply.caption) {
-        optimistic.quote_text = "";
-        optimistic.quote_message = "";
+        quoteFields.quote_text = "";
+        quoteFields.quote_message = "";
       }
     }
   }
-  if (attachment) {
-    optimistic.attachment = {
-      type: attachment.file.type,
-      name: attachment.filename,
-      attachment_id: attachment.filename,
-      media_kind: mediaKindFromMime(attachment.file.type),
-    };
-    optimistic.localPreviewUrl = attachment.previewUrl;
+  // batch_id solo per il multi-allegato (design §6.3): il singolo resta il
+  // percorso legacy, senza batch_id, cosi' signature e reconciliation del
+  // single-attachment non cambiano.
+  const batchId = attachments.length > 1 ? `${timestamp}-${++state.optimisticSequence}` : null;
+  const optimisticItems = [];
+  if (attachments.length) {
+    attachments.forEach((attachment, index) => {
+      const optimistic = {
+        optimistic_id: batchId ? `${batchId}-att${index}` : `${timestamp}-${++state.optimisticSequence}`,
+        batch_id: batchId,
+        batch_index: batchId ? index : null,
+        protocol: active.protocol,
+        contactId: active.id,
+        // La caption accompagna solo il primo allegato, come le righe reali
+        // (backend: captions[0]). La citazione invece resta su tutte le
+        // bolle per Signal (le N righe mirror la portano tutte) e solo sulla
+        // prima per WhatsApp/Telegram (il manager la mette solo su index 0).
+        text: index === 0 ? text : "",
+        direction: "out",
+        timestamp,
+        optimisticStatus: "sending",
+        known_message_ids: knownMessageIds,
+        ...(index === 0 || active.protocol === "signal" ? quoteFields : {}),
+        attachment: {
+          type: attachment.file.type,
+          name: attachment.filename,
+          attachment_id: attachment.attachmentId,
+          media_kind: mediaKindFromMime(attachment.file.type),
+        },
+        localPreviewUrl: attachment.previewUrl,
+      };
+      // Re-seed idempotente (stessa URL → preserva dims): copre l'evizione
+      // LRU della cache tra staging e invio.
+      if (attachment.previewUrl) {
+        cacheMedia(attachment.attachmentId, attachment.previewUrl, attachment.previewWidth, attachment.previewHeight);
+      }
+      optimisticItems.push(optimistic);
+    });
+  } else {
+    optimisticItems.push({
+      optimistic_id: `${timestamp}-${++state.optimisticSequence}`,
+      protocol: active.protocol,
+      contactId: active.id,
+      text,
+      direction: "out",
+      timestamp,
+      optimisticStatus: "sending",
+      known_message_ids: knownMessageIds,
+      ...quoteFields,
+    });
   }
-  console.debug("[web] optimistic", { protocol: active.protocol, optimistic_id: optimistic.optimistic_id, attachment_id: attachment?.filename, hasPreview: !!optimistic.localPreviewUrl });
-  state.optimistic.push(optimistic);
+  console.debug("[web] optimistic", { protocol: active.protocol, optimistic_ids: optimisticItems.map((item) => item.optimistic_id), attachments: attachments.length, hasPreview: optimisticItems.some((item) => item.localPreviewUrl) });
+  state.optimistic.push(...optimisticItems);
   state.sending += 1;
   elements.messageInput.value = "";
-  if (attachment) clearStagedAttachment({ revoke: false });
+  if (attachments.length) clearStagedAttachments({ revoke: false });
   resizeComposer();
   updateComposer();
   if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
@@ -2204,13 +2326,15 @@ async function submitMessage() {
         }
         : { reply_to_message_id: reply.id }),
     } : {};
-    if (attachment) {
+    if (attachments.length) {
       const body = new FormData();
       body.set("protocol", active.protocol);
       body.set("contact_id", active.id);
       body.set("text", text);
+      if (batchId) body.set("batch_id", batchId);
       for (const [key, value] of Object.entries(quotePayload)) body.set(key, String(value));
-      body.set("file", attachment.file, attachment.filename);
+      // append (non set): il campo "file" e' ripetuto per ciascun allegato.
+      for (const attachment of attachments) body.append("file", attachment.file, attachment.filename);
       await apiFetch("/api/send", { method: "POST", body });
     } else {
       await apiFetch("/api/send", {
@@ -2219,9 +2343,9 @@ async function submitMessage() {
         body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text, ...quotePayload }),
       });
     }
-    optimistic.optimisticStatus = "sent";
+    for (const optimistic of optimisticItems) optimistic.optimisticStatus = "sent";
   } catch (error) {
-    optimistic.optimisticStatus = "failed";
+    for (const optimistic of optimisticItems) optimistic.optimisticStatus = "failed";
     if (error.message !== "unauthorized") showError("Impossibile inviare il messaggio.");
   } finally {
     state.sending -= 1;
@@ -2524,19 +2648,18 @@ elements.composer.addEventListener("paste", (event) => {
     .find((candidate) => candidate.type.startsWith("image/"));
   if (!item) return;
   event.preventDefault();
-  stageAttachment(item.getAsFile());
+  void stageAttachments([item.getAsFile()]);
 });
 elements.attachButton.addEventListener("click", () => {
   elements.fileInput.value = "";
   elements.fileInput.click();
 });
 elements.fileInput.addEventListener("change", () => {
-  const file = elements.fileInput.files?.[0];
-  if (!file) return;
+  const files = [...(elements.fileInput.files || [])];
   elements.fileInput.value = "";
-  stageAttachment(file);
+  if (!files.length) return;
+  void stageAttachments(files);
 });
-elements.removeAttachment.addEventListener("click", () => clearStagedAttachment());
 elements.cancelReply.addEventListener("click", cancelReply);
 if (elements.protocolTabs) {
   elements.protocolTabs.addEventListener("click", (event) => {
@@ -2630,7 +2753,7 @@ window.addEventListener("beforeunload", () => {
   clearTelegramRefreshTimer();
   disconnectSocket();
   abortMediaRequests();
-  clearStagedAttachment();
+  clearStagedAttachments();
   for (const item of state.optimistic) {
     if (item.localPreviewUrl) URL.revokeObjectURL(item.localPreviewUrl);
   }

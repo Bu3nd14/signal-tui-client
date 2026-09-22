@@ -410,19 +410,19 @@ h2 { font-size: 1.05rem; }
   padding: 12px clamp(14px, 5vw, 70px);
 }
 .composer-controls { display: flex; width: 100%; align-items: flex-end; gap: 9px; }
-.attachment-preview {
+.attachments-preview {
   position: absolute;
   left: clamp(14px, 5vw, 70px);
   right: clamp(14px, 5vw, 70px);
   bottom: 100%;
   margin-bottom: 8px;
   z-index: 2;
-  display: grid;
-  width: auto;
-  grid-template-columns: 58px minmax(0, 1fr) 32px;
-  align-items: center;
-  gap: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   padding: 8px;
+  max-height: 34vh;
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel-raised);
@@ -444,12 +444,14 @@ h2 { font-size: 1.05rem; }
 .reply-copy strong { color: #b8d0ff; font-size: .78rem; }
 .reply-copy span { overflow: hidden; color: var(--muted); font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }
 .reply-banner button { border: 0; background: transparent; color: var(--muted); font-size: 1.25rem; cursor: pointer; }
-.attachment-preview[hidden] { display: none; }
-.attachment-preview img { width: 58px; height: 58px; border-radius: 8px; object-fit: cover; }
-.attachment-preview span { overflow: hidden; color: var(--muted); font-size: .8rem; text-overflow: ellipsis; white-space: nowrap; }
-.attachment-preview button { border: 0; background: transparent; color: var(--muted); font-size: 1.25rem; cursor: pointer; }
-.attachment-preview-file { grid-template-columns: minmax(0, 1fr) 32px; }
-.attachment-preview-file span { overflow: visible; overflow-wrap: anywhere; text-overflow: clip; white-space: normal; }
+.attachments-preview[hidden] { display: none; }
+.attachment-preview-item { position: relative; display: flex; width: 80px; flex: none; flex-direction: column; gap: 4px; }
+.attachment-preview-thumb { display: grid; width: 80px; height: 80px; flex: none; place-items: center; overflow: hidden; border-radius: 8px; background: #0d141df2; }
+.attachment-preview-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.attachment-preview-icon { font-size: 1.7rem; }
+.attachment-preview-name { overflow: hidden; color: var(--muted); font-size: .72rem; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-preview-item button { position: absolute; top: 2px; right: 2px; display: grid; width: 22px; height: 22px; place-items: center; border: 0; border-radius: 50%; background: #0d141dd9; color: var(--muted); font-size: 1.05rem; line-height: 1; cursor: pointer; }
+.attachment-preview-item button:hover, .attachment-preview-item button:focus-visible { color: var(--text); }
 .composer textarea {
   min-width: 0;
   flex: 1;

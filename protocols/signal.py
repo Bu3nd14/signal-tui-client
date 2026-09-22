@@ -708,10 +708,13 @@ class SignalBackend(ChatBackend):
         blocked until every mirror row exists, making any interleaving from
         that point on impossible.  The window BETWEEN the signal-cli send
         returning and the barrier acquiring the lock is not covered,
-        though: if the SSE thread ingests the sent-message echo there, the
-        mirror rows dedup onto the pre-existing echo rows and no row ends
-        up carrying the batch slot.  ``_repair_batch_slots`` (still inside
-        the barrier) stamps those rows afterwards.  A failure part-way
+        though: if the SSE thread ingests some sent-message echoes there,
+        each mirror dedups onto its *positional twin* (the k-th mirror pairs
+        with the k-th pre-existing row, ``_message_already_cached``), so a
+        partial echo race still materializes the mirrors past the echoed
+        rows.  ``_repair_batch_slots`` (still inside the barrier) then
+        stamps the batch slot onto every row still missing one — including
+        the echo rows the first mirrors deduped onto.  A failure part-way
         through the barrier rolls the partial mirror back (cache + DB +
         persistent files + registry) before re-raising.
         """
@@ -881,21 +884,27 @@ class SignalBackend(ChatBackend):
         *,
         batch_id: str | None,
         file_count: int,
-    ) -> None:
-        """Stamp the batch slot on rows that lost it to the echo race.
+    ) -> int:
+        """Stamp the missing batch slot on every row that lost it, and return
+        how many slots were repaired.
 
         ``send_attachments_sync`` acquires ``_ingest_lock`` only after the
-        signal-cli send returns, so an SSE echo ingested in that window
-        makes every mirror row dedup onto the pre-existing echo rows: the
-        rows survive with the remote attachment ids but none carries
-        ``batch_id``/``batch_index``.  This repair (design alternative 2,
-        chosen over holding the lock across the whole send because that
-        would block all ingestion for the full RPC round-trip) detects the
-        situation — no row for this message id has a slot yet — and stamps
-        the existing rows in deterministic ``(timestamp, id)`` order, the
-        k-th row ↔ the k-th file, both in the DB and in the cached dicts.
-        Best-effort: failures are logged, never propagated — the send has
-        already succeeded.
+        signal-cli send returns, so SSE echoes ingested in that window make
+        the mirror rows dedup onto the pre-existing echo rows: those rows
+        survive with the remote attachment ids but without their
+        ``batch_id``/``batch_index`` — and when only *some* echoes won the
+        race, the mirrors past them materialize with their slot while the
+        echo rows they paired with keep none.  This repair (design
+        alternative 2, chosen over holding the lock across the whole send
+        because that would block all ingestion for the full RPC round-trip)
+        is global and idempotent: it never stops at the first row that
+        already carries a slot; every slotless row of this message id, in
+        deterministic ``(timestamp, id)`` order, receives a *missing* slot
+        of ``range(file_count)`` (the ``batch_index`` values already present
+        are constraints and are never re-assigned), both in the DB and in
+        the cached dicts.  Rows beyond the file count (e.g. leftover echo
+        rows) stay slotless with a warning.  Best-effort: failures are
+        logged, never propagated — the send has already succeeded.
         """
         try:
             import sqlite3
@@ -906,54 +915,75 @@ class SignalBackend(ChatBackend):
                 connection = sqlite3.connect(DB_FILE)
                 try:
                     rows = connection.execute(
-                        "SELECT id, timestamp, batch_index FROM messages "
+                        "SELECT id, batch_index FROM messages "
                         "WHERE protocol = ? AND contact_number = ? AND msg_id = ? "
                         "ORDER BY timestamp, id",
                         (PROTOCOL_SIGNAL, contact_id, str(message_id)),
                     ).fetchall()
                 finally:
                     connection.close()
-            if any(row[2] is not None for row in rows):
-                # The barrier materialized the mirror rows normally.
-                return
-            slot_count = min(len(rows), file_count)
-            if slot_count <= 0:
-                return
-            with _DB_LOCK:
-                connection = sqlite3.connect(DB_FILE)
-                try:
-                    for index, row in enumerate(rows[:slot_count]):
-                        connection.execute(
-                            "UPDATE messages SET batch_id = ?, batch_index = ? "
-                            "WHERE id = ?",
-                            (batch_id, index, row[0]),
-                        )
-                    connection.commit()
-                finally:
-                    connection.close()
+            assignments = self._missing_batch_slot_assignments(
+                [(row[0], row[1]) for row in rows], file_count
+            )
+            if assignments:
+                with _DB_LOCK:
+                    connection = sqlite3.connect(DB_FILE)
+                    try:
+                        for row_id, index in assignments:
+                            connection.execute(
+                                "UPDATE messages SET batch_id = ?, batch_index = ? "
+                                "WHERE id = ?",
+                                (batch_id, index, row_id),
+                            )
+                        connection.commit()
+                    finally:
+                        connection.close()
             # Mirror the same stamping onto the cached rows: for one message
-            # id the cache order equals the DB (timestamp, id) order.
+            # id the cache order equals the DB (timestamp, id) order, so the
+            # same assignment algorithm yields the same slots.
             cached = [
                 message
                 for message in self.cache.get(contact_id, [])
                 if message.get("id") == str(message_id) and message.get("is_mine")
             ]
-            for index, message in enumerate(cached[:slot_count]):
+            for message, index in self._missing_batch_slot_assignments(
+                [(message, message.get("batch_index")) for message in cached],
+                file_count,
+            ):
                 message["batch_id"] = batch_id
                 message["batch_index"] = index
-            if slot_count < len(rows):
+            if len(rows) > file_count:
                 logger.warning(
                     "Batch slot repair found %d rows for %d files: "
                     "extra rows left without a slot",
                     len(rows),
                     file_count,
                 )
+            return len(assignments)
         except Exception:
             logger.exception(
                 "Batch slot repair failed: contact=%s message_id=%s",
                 contact_id,
                 message_id,
             )
+            return 0
+
+    @staticmethod
+    def _missing_batch_slot_assignments(
+        rows: list[tuple[object, int | None]], file_count: int
+    ) -> list[tuple[object, int]]:
+        """Assign each slotless row the missing batch slot, in order.
+
+        ``rows`` carries ``(row, batch_index)`` per row of one message id in
+        ``(timestamp, id)`` order.  The indexes already present are constraints
+        (never re-assigned); the slotless rows take the missing indexes of
+        ``range(file_count)`` in ascending order.  Slotless rows beyond the
+        available indexes (more rows than files) receive nothing.
+        """
+        taken = {index for _, index in rows if index is not None}
+        missing = (index for index in range(file_count) if index not in taken)
+        slotless = (row for row, index in rows if index is None)
+        return list(zip(slotless, missing))
 
     @staticmethod
     def _copy_sent_attachment(file_path: Path, filename: str = "") -> Path:
@@ -1706,6 +1736,7 @@ class SignalBackend(ChatBackend):
         text: str,
         msg_id: str | None = None,
         attachment_id: str | None = None,
+        batch_index: int | None = None,
     ) -> dict | None:
         """Return the cached message with the same identity, if present.
 
@@ -1716,12 +1747,37 @@ class SignalBackend(ChatBackend):
         Matching ids remain the primary identity, including the post-text
         fallback used by attachment-upgrade echoes.
 
+        A batch mirror (``batch_index`` set, from the ``send_attachments_sync``
+        barrier) may only dedup onto its *positional twin*: the
+        ``batch_index``-th row, in ``(timestamp, id)`` order, among the cached
+        rows sharing this message id.  Rows at lower positions are already
+        paired with lower-index mirrors — with a partial echo-before-barrier
+        race (only k of N echo rows exist when the barrier starts) letting a
+        mirror match any slot-compatible row would collapse the whole batch
+        onto echo row 0, and the late echoes would then materialize rows
+        without ``batch_id``/``batch_index`` (design §4.5, tester §5.1).
+
         For incoming messages a window is also used (instead of exact timestamp
         match) so that signal-cli re-deliveries (e.g. sync from another device)
         with a slightly different timestamp are still recognised as duplicates.
         """
         best_idless: dict | None = None
         best_idless_delta: int | None = None
+        # Position of each same-id row in cache order (== ``(timestamp, id)``
+        # order for one message id): the free slot of a batch mirror is the
+        # row at index ``batch_index``; every earlier row is already paired.
+        batch_slot_positions: dict[int, int] = (
+            {
+                id(message): position
+                for position, message in enumerate(
+                    message
+                    for message in self.cache.get(contact_id, [])
+                    if message.get("is_mine") and message.get("id") == msg_id
+                )
+            }
+            if is_mine and msg_id and batch_index is not None
+            else {}
+        )
         for msg in self.cache.get(contact_id, []):
             if msg.get("is_mine") != is_mine:
                 continue
@@ -1730,10 +1786,12 @@ class SignalBackend(ChatBackend):
                 cached_attachment_id, attachment_id
             )
             if is_mine and msg_id and msg.get("id") and msg.get("id") == msg_id:
-                # Outgoing identity = the same attachment *slot*: two mirrored
-                # "sent" files with different ids are distinct attachments of
-                # one multi-attachment message, not echoes of each other.
                 if not self._same_attachment_slot(cached_attachment_id, attachment_id):
+                    continue
+                if batch_slot_positions and (
+                    batch_slot_positions.get(id(msg)) != batch_index
+                ):
+                    # Another mirror's twin: a different row of the same batch.
                     continue
                 return msg
             if msg.get("text") != text:
@@ -1751,6 +1809,10 @@ class SignalBackend(ChatBackend):
                     # Same guard as the id branch above: a different
                     # attachment slot is a different row of the same batch.
                     and self._same_attachment_slot(cached_attachment_id, attachment_id)
+                    and (
+                        not batch_slot_positions
+                        or batch_slot_positions.get(id(msg)) == batch_index
+                    )
                 ):
                     return msg
                 if not cached_id and same_attachment:
@@ -1992,6 +2054,7 @@ class SignalBackend(ChatBackend):
                 text,
                 msg_id=data.get("id"),
                 attachment_id=data.get("attachment_id"),
+                batch_index=data.get("batch_index"),
             )
             if existing is not None:
                 if is_mine:

@@ -376,17 +376,18 @@ try:
     # Validazione sequenziale (non parallela) per messaggi d'errore stabili
     for upload_file in upload_files:
         uploads.append(await store_upload(upload_file))
-    
+
     # Cap totale byte (v3, non-bloccante 1: 250 MiB, non 1000 MiB vacuo)
     total_bytes = sum(upload.path.stat().st_size for upload in uploads)
     if total_bytes > _MAX_TOTAL_BYTES:
         raise HTTPException(status_code=413, detail="Upload too large")
-    
+
     # Invia (v4, RB-3: batch_id propagato)
     batch_id = form.get("batch_id")  # solo se presente
     await asyncio.to_thread(
         manager.send_attachments_sync,
-        protocol, contact_id,
+        protocol,
+        contact_id,
         [u.path for u in uploads],
         batch_id=batch_id,  # v4, RB-3
         caption=text or None,
@@ -721,8 +722,10 @@ def send_attachments_sync(
         for i, file_path in enumerate(file_paths):
             kind = media_kinds[i] or media_kind_from_mime(mime_types[i]) or "document"
             send_method = (
-                self._rest.send_image if kind in {"image", "gif"}
-                else self._rest.send_video if kind == "video"
+                self._rest.send_image
+                if kind in {"image", "gif"}
+                else self._rest.send_video
+                if kind == "video"
                 else self._rest.send_file
             )
             kwargs = {
@@ -736,7 +739,9 @@ def send_attachments_sync(
             if result is None:
                 status = self._rest.last_status
                 detail = self._rest.last_error or "unreachable"
-                raise RuntimeError(f"WhatsApp API send failed (status={status}): {detail}")
+                raise RuntimeError(
+                    f"WhatsApp API send failed (status={status}): {detail}"
+                )
             message_id = self._extract_message_id(result)
             message_ids.append(message_id)
     except Exception:
@@ -745,7 +750,9 @@ def send_attachments_sync(
         # L'API catcherà l'eccezione e farà cleanup degli upload.
         logger.error(
             "WhatsApp multi-attach failed at index %d/%d: %d messages already sent",
-            i, len(file_paths), len(message_ids)
+            i,
+            len(file_paths),
+            len(message_ids),
         )
         raise
     return message_ids  # N messaggi
@@ -777,7 +784,7 @@ def send_attachments_sync(
 ) -> list[str]:
     if self._loop is None or self._client is None:
         raise RuntimeError("Telegram backend not connected")
-    
+
     async def _send() -> list[str]:
         try:
             eid = int(contact_id)
@@ -785,7 +792,7 @@ def send_attachments_sync(
             raise ValueError(f"Invalid Telegram contact id: {contact_id}")
         reply_to = self._validated_reply_to_message_id(reply_to_message_id)
         entity = await self._resolve_input_entity(eid)
-        
+
         # Telethon supporta album nativamente: send_file(entity, [files...])
         # Max 10 media per album (chunk automatico)
         # Limitazione (v2, non-bloccante 3): documenti appaiono come messaggi separati,
@@ -798,10 +805,11 @@ def send_attachments_sync(
             if filenames[i] is not None:
                 upload = await self._client.upload_file(upload, file_name=filenames[i])
             uploads.append(upload)
-        
+
         # Caption solo sul primo media dell'album
         msgs = await self._client.send_file(
-            entity, uploads,
+            entity,
+            uploads,
             caption=caption or None,
             reply_to=reply_to,
             force_document=False,  # album
@@ -810,7 +818,7 @@ def send_attachments_sync(
         if not isinstance(msgs, list):
             msgs = [msgs]
         return [str(msg.id) for msg in msgs]
-    
+
     future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
     return future.result(timeout=self.attachment_send_timeout * len(file_paths))
 ```
@@ -873,7 +881,7 @@ def send_attachments_sync(
         for p in persistent_paths:
             p.unlink(missing_ok=True)
         raise
-    
+
     # v8, RB-1: BARRIERA ATOMICA — esegui registrazione percorsi + inserimenti
     # sotto lo stesso _ingest_lock (RLock, re-entrante con ingest_message).
     # Registra percorsi PRIMA degli inserimenti → durante inserimenti righe già `sent`
@@ -882,7 +890,7 @@ def send_attachments_sync(
     # v8, non-bloccante 1: documenta assunzione message_id numerico (timestamp server Signal)
     # Se non numerico, fallback a time.time() * 1000 → id riga e ts possono divergere
     # (accettabile: id riga è stringa, ts è intero)
-    
+
     inserted_mirror_ids = []  # per rollback se ingest fallisce a metà
     # v10, fix 5: try/except DENTRO with self._ingest_lock (non fuori)
     with self._ingest_lock:  # v8, RB-1: lock annidato (RLock, re-entrante)
@@ -890,13 +898,17 @@ def send_attachments_sync(
             # Registra percorsi PRIMA degli inserimenti (sotto _ingest_lock)
             with self._sent_attachment_paths_lock:
                 for i, file_path in enumerate(file_paths):
-                    self._sent_attachment_paths[str(file_path.resolve())] = persistent_paths[i]
+                    self._sent_attachment_paths[str(file_path.resolve())] = (
+                        persistent_paths[i]
+                    )
                     while len(self._sent_attachment_paths) > _MAX_SENT_ATTACHMENT_PATHS:
                         oldest = next(iter(self._sent_attachment_paths))
                         self._sent_attachment_paths.pop(oldest)
-            
+
             # Inserisci N righe mirror (sotto _ingest_lock → thread SSE bloccato)
-            for i, (file_path, persistent_path) in enumerate(zip(file_paths, persistent_paths)):
+            for i, (file_path, persistent_path) in enumerate(
+                zip(file_paths, persistent_paths)
+            ):
                 mirror_data = {
                     "id": str(message_id),
                     "text": caption or "" if i == 0 else "",
@@ -907,8 +919,14 @@ def send_attachments_sync(
                     "quote_timestamp": quote_timestamp,
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
-                    "msg_type": msg_type_for_media_kind(media_kinds[i] or media_kind_from_mime(mime_types[i]) or "document"),
-                    "attachment_info": (caption or filenames[i] or None) if i == 0 and media_kinds[i] == "image" else (filenames[i] or caption or None),
+                    "msg_type": msg_type_for_media_kind(
+                        media_kinds[i]
+                        or media_kind_from_mime(mime_types[i])
+                        or "document"
+                    ),
+                    "attachment_info": (caption or filenames[i] or None)
+                    if i == 0 and media_kinds[i] == "image"
+                    else (filenames[i] or caption or None),
                     "attachment_id": persistent_path.name,
                     "content_type": mime_types[i],
                     "media_kind": media_kinds[i],
@@ -923,11 +941,17 @@ def send_attachments_sync(
             # v10, fix 5: rollback SOTTO _ingest_lock (try/except dentro il with)
             # v10, fix 5: DELETE usa msg_id = ? (non id = ?, che è rowid autoincrement)
             # Rimuovi righe 1..k da cache+DB (nessuna riga estranea cancellata)
-            logger.error("Barrier ingest failed at index %d/%d: %s", len(inserted_mirror_ids), len(file_paths), exc)
+            logger.error(
+                "Barrier ingest failed at index %d/%d: %s",
+                len(inserted_mirror_ids),
+                len(file_paths),
+                exc,
+            )
             try:
                 # Rimuovi da cache (sotto _ingest_lock → ancora acquisito)
                 self.cache[contact_id] = [
-                    msg for msg in self.cache.get(contact_id, [])
+                    msg
+                    for msg in self.cache.get(contact_id, [])
                     if not (
                         msg.get("id") == str(message_id)
                         and msg.get("attachment_id") in inserted_mirror_ids
@@ -936,6 +960,7 @@ def send_attachments_sync(
                 # Rimuovi da DB (sotto _ingest_lock → ancora acquisito)
                 from protocols.db import _DB_LOCK, DB_FILE
                 import sqlite3
+
                 with _DB_LOCK:
                     conn = sqlite3.connect(DB_FILE)
                     try:
@@ -944,18 +969,22 @@ def send_attachments_sync(
                             "DELETE FROM messages WHERE protocol = ? AND contact_number = ? AND msg_id = ? AND attachment_id IN ({})".format(
                                 ",".join("?" * len(inserted_mirror_ids))
                             ),
-                            ["signal", contact_id, str(message_id)] + inserted_mirror_ids,
+                            ["signal", contact_id, str(message_id)]
+                            + inserted_mirror_ids,
                         )
                         conn.commit()
                     finally:
                         conn.close()
             except Exception as rollback_exc:
-                logger.error("Rollback failed: %s (degrado accettato: righe mirror parziali)", rollback_exc)
+                logger.error(
+                    "Rollback failed: %s (degrado accettato: righe mirror parziali)",
+                    rollback_exc,
+                )
             # Rimuovi file persistenti
             for p in persistent_paths:
                 p.unlink(missing_ok=True)
             raise
-    
+
     return [message_id]
 ```
 
@@ -1087,9 +1116,7 @@ else:
 ```python
 # PRIMA (signal.py:1623)
 if is_mine:
-    changed = self._upgrade_outgoing_attachment(
-        contact_id, existing, data, ts
-    )
+    changed = self._upgrade_outgoing_attachment(contact_id, existing, data, ts)
 
 # DOPO (v7, RB-1)
 if is_mine:
@@ -1109,9 +1136,7 @@ if is_mine:
     # v7, RB-1: valid_direction one-way — upgrade solo mirror(sent)→remoto(non-sent)
     valid_direction = cached_is_sent and not incoming_is_sent
     if not already_present and valid_direction:
-        changed = self._upgrade_outgoing_attachment(
-            contact_id, existing, data, ts
-        )
+        changed = self._upgrade_outgoing_attachment(contact_id, existing, data, ts)
     else:
         changed = False
 ```
@@ -1233,10 +1258,11 @@ def _handle_event(self, event: ChatEvent) -> bool:
         return self._handle_sent_mirror_event(event)
     return False
 
+
 # v11, RB-1b-A: handler dedicato con risoluzione contatto reale
 def _handle_sent_mirror_event(self, event: ChatEvent) -> bool:
     """v11, RB-1b-A: gestisci evento leggero "sent-mirror" (no doppia scrittura DB).
-    
+
     Aggiorna solo contatto/dirty (promozione in lista TUI).
     NON chiama ingest_message (barriera ha già materializzato le righe mirror).
     NON emette push_event (web/api.py:1327-1336 fa già la push generica).
@@ -1244,23 +1270,24 @@ def _handle_sent_mirror_event(self, event: ChatEvent) -> bool:
     backend = self.manager.get(event.protocol)
     if backend is None:
         return False
-    
+
     # v11, RB-1b-A: risolvi contatto REALE prima di tutto
     # 1. Prova dal payload (se backend lo ha incluso)
     contact = event.payload.get("contact")
-    
+
     # 2. Se non nel payload, cerca in self.contacts per cache_key
     if contact is None:
         from models import contact_cache_key
+
         target_key = contact_cache_key(event.protocol, event.contact_id)
         contact = next((c for c in self.contacts if c.cache_key == target_key), None)
-    
+
     # 3. Se ancora non trovato, prova backend._identify_contact (v11: Signal ora lo implementa)
     if contact is None:
         identify = getattr(backend, "_identify_contact", None)
         if identify is not None:
             contact = identify(event.contact_id)
-    
+
     # 4. Fallback: crea placeholder solo se contatto non esiste davvero
     if contact is None:
         contact = ChatContact(
@@ -1276,10 +1303,10 @@ def _handle_sent_mirror_event(self, event: ChatEvent) -> bool:
                 backend.contacts.append(contact)
             self._contact_list_dirty = True
             self._dirty_contact_keys.add(contact.cache_key)
-    
+
     cache_key = contact.cache_key
     ts = event.payload.get("timestamp", 0)
-    
+
     # v11, RB-1b-A: aggiorna il contatto REALE (non placeholder)
     # Usa (contact.last_message_ts or 0) come tui/events.py:80
     if isinstance(ts, int) and ts > (contact.last_message_ts or 0):
@@ -1289,7 +1316,7 @@ def _handle_sent_mirror_event(self, event: ChatEvent) -> bool:
         ):
             self._contact_list_dirty = True
             self._dirty_contact_keys.add(cache_key)
-    
+
     # v10, non bloccante 2: NON emette push_event (web/api.py:1327-1336 fa già la push)
     # v10: NON chiama ingest_message (barriera ha già materializzato le righe mirror)
     return True
@@ -1339,7 +1366,9 @@ def send_attachment_sync(self, protocol, contact_id, file_path, **kwargs):
     media_kind = kwargs.pop("media_kind", None)
     filename = kwargs.pop("filename", None)
     return self.send_attachments_sync(
-        protocol, contact_id, [file_path],
+        protocol,
+        contact_id,
+        [file_path],
         mime_types=[mime_type],
         media_kinds=[media_kind],
         filenames=[filename],
@@ -1374,7 +1403,7 @@ def send_attachments_sync(
     quote_attachments: list[str] | None = None,
 ) -> list[str]:
     """Default implementation: loop sui send_attachment_sync singoli.
-    
+
     Backend specifici (Signal, WhatsApp, Telegram) sovrascrivono con implementazione ottimizzata.
     """
     message_ids = []
@@ -1390,6 +1419,7 @@ def send_attachments_sync(
         # send_attachment_sync è sempre presente (metodo astratto in base.py)
         if i == 0:
             import inspect
+
             sig = inspect.signature(self.send_attachment_sync)
             if "quote_attachments" in sig.parameters:
                 kwargs["quote_attachments"] = quote_attachments
@@ -1401,7 +1431,7 @@ def send_attachments_sync(
             kwargs["quote_author"] = quote_author
         if quote_message is not None and i == 0:
             kwargs["quote_message"] = quote_message
-        
+
         message_id = self.send_attachment_sync(contact_id, file_path, **kwargs)
         message_ids.append(message_id)
     return message_ids

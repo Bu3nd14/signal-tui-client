@@ -671,6 +671,116 @@ def test_signal_batch_echo_before_barrier_still_gets_batch_slots(tmp_path, monke
     assert [row[3] for row in rows] == [0, 1, 2]
 
 
+def test_signal_batch_partial_echo_before_barrier_still_gets_all_slots(
+    tmp_path, monkeypatch
+):
+    """T5/BUG-5 (partial race): only ONE echo row exists when the barrier
+    starts, the remaining echoes land after it.  Every row must still end up
+    with its own batch slot — no row without one, no duplicate, and the
+    mirrors must not collapse onto the already-paired echo row."""
+    backend, media_dir = _batch_backend(tmp_path, monkeypatch)
+    files = _uploads(tmp_path)
+    remotes = []
+    for index in range(3):
+        remote = media_dir / f"remote-{index}"
+        remote.write_bytes(b"remote")
+        remotes.append(remote)
+
+    def send_then_first_echo(contact_id, text, **kwargs):
+        # The SSE thread wins the send→barrier race for ONE echo only: a
+        # single row exists when the barrier starts.
+        backend.ingest_message("42", _echo_payload(remotes[0].name), 1787250931234)
+        return "1787250931234"
+
+    backend._send_message_sync = MagicMock(side_effect=send_then_first_echo)
+
+    assert _send_batch(backend, files, batch_id="batch-1") == ["1787250931234"]
+    # The remaining echoes are ingested only after the barrier completed.
+    for remote in remotes[1:]:
+        backend.ingest_message("42", _echo_payload(remote.name), 1787250931234)
+
+    # Mirror 0 dedup'ed onto the early echo row, mirrors 1/2 materialized
+    # beside it: three rows survive, none without a slot, none duplicated...
+    assert len(backend.cache["42"]) == 3
+    assert [message["attachment_id"] for message in backend.cache["42"]] == [
+        remote.name for remote in remotes
+    ]
+    assert [message["batch_index"] for message in backend.cache["42"]] == [0, 1, 2]
+    assert {message["batch_id"] for message in backend.cache["42"]} == {"batch-1"}
+    # ...and the DB agrees.
+    rows = _batch_rows()
+    assert len(rows) == 3
+    assert [row[1] for row in rows] == [remote.name for remote in remotes]
+    assert [row[2] for row in rows] == ["batch-1"] * 3
+    assert [row[3] for row in rows] == [0, 1, 2]
+
+
+def test_signal_batch_repair_more_rows_than_files_leaves_extras_slotless(
+    tmp_path, monkeypatch, caplog
+):
+    """More rows than files (leftover echo rows): the repair stamps the first
+    rows with the available slots, the extras stay slotless and a warning is
+    logged — never a crash nor a re-assignment of taken slots."""
+    backend, media_dir = _batch_backend(tmp_path, monkeypatch)
+    files = _uploads(tmp_path)
+    remotes = []
+    for index in range(4):
+        remote = media_dir / f"remote-{index}"
+        remote.write_bytes(b"remote")
+        remotes.append(remote)
+
+    def send_then_echoes(contact_id, text, **kwargs):
+        # Four echoes for a three-file batch win the race together.
+        for remote in remotes:
+            backend.ingest_message("42", _echo_payload(remote.name), 1787250931234)
+        return "1787250931234"
+
+    backend._send_message_sync = MagicMock(side_effect=send_then_echoes)
+
+    with caplog.at_level("WARNING"):
+        assert _send_batch(backend, files, batch_id="batch-1") == ["1787250931234"]
+
+    assert len(backend.cache["42"]) == 4
+    assert [message["attachment_id"] for message in backend.cache["42"]] == [
+        remote.name for remote in remotes
+    ]
+    assert [message.get("batch_index") for message in backend.cache["42"]] == [
+        0,
+        1,
+        2,
+        None,
+    ]
+    assert [message.get("batch_id") for message in backend.cache["42"]] == [
+        "batch-1",
+        "batch-1",
+        "batch-1",
+        None,
+    ]
+    assert "found 4 rows for 3 files" in caplog.text
+    assert "extra rows left without a slot" in caplog.text
+
+    rows = _batch_rows()
+    assert len(rows) == 4
+    assert [row[2] for row in rows] == ["batch-1"] * 3 + [None]
+    assert [row[3] for row in rows] == [0, 1, 2, None]
+
+
+def test_signal_batch_slots_survive_cache_reload(tmp_path, monkeypatch):
+    """FIX-3: ``_load_cache`` must expose ``batch_id``/``batch_index`` so the
+    ``(timestamp, id)`` positional matching keeps working across restarts
+    (design §4.5)."""
+    from protocols.db import _load_cache
+
+    backend, _media_dir = _batch_backend(tmp_path, monkeypatch)
+    files = _uploads(tmp_path)
+    assert _send_batch(backend, files, batch_id="batch-7") == ["1787250931234"]
+
+    reloaded = _load_cache(protocol="signal")["42"]
+
+    assert [message["batch_id"] for message in reloaded] == ["batch-7"] * 3
+    assert [message["batch_index"] for message in reloaded] == [0, 1, 2]
+
+
 def test_signal_multi_attachment_echo_upgrades_each_mirror_row(tmp_path, monkeypatch):
     backend, media_dir = _batch_backend(tmp_path, monkeypatch)
     files = _uploads(tmp_path)

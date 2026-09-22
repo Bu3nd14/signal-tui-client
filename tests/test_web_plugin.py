@@ -413,12 +413,19 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
-const helper = app.slice(app.indexOf("function mediaKindFromMime("), app.indexOf("\nfunction clearStagedAttachment"));
+const helper = app.slice(app.indexOf("function mediaKindFromMime("), app.indexOf("\nfunction clearStagedAttachments"));
 const submit = helper + "\n" + app.slice(app.indexOf("async function submitMessage("), app.indexOf("\nfunction encodeToken"));
 globalThis.state = {
   sending: false,
   active: { id: "alice", protocol: "signal" },
-  stagedAttachment: { file: new Blob(["image"], { type: "image/png" }), filename: "photo.png", previewUrl: "blob:photo" },
+  stagedAttachments: [{
+    file: new Blob(["image"], { type: "image/png" }),
+    filename: "photo.png",
+    previewUrl: "blob:photo",
+    previewWidth: 640,
+    previewHeight: 480,
+    attachmentId: "photo.png[0]",
+  }],
   replyTo: null,
   messages: [],
   optimistic: [],
@@ -429,7 +436,10 @@ globalThis.window = { SignalTuiReconcile: { messageIdentity: (message) => messag
 globalThis.resizeComposer = () => {};
 globalThis.updateComposer = () => {};
 globalThis.renderMessages = () => {};
-globalThis.clearStagedAttachment = () => { state.stagedAttachment = null; };
+const cached = [];
+globalThis.cacheMedia = (key, url, width, height) => cached.push([key, url, width, height]);
+let clearedWithOptions = null;
+globalThis.clearStagedAttachments = (options) => { clearedWithOptions = options; state.stagedAttachments = []; };
 globalThis.showError = assert.fail;
 let request;
 globalThis.apiFetch = async (url, options) => { request = { url, options }; return { status: 200 }; };
@@ -440,9 +450,17 @@ vm.runInThisContext(submit);
   assert.equal(state.optimistic[0].text, "la caption");
   assert.equal(state.optimistic[0].attachment.type, "image/png");
   assert.equal(state.optimistic[0].attachment.media_kind, "image");
+  assert.equal(state.optimistic[0].attachment.attachment_id, "photo.png[0]");
   assert.equal(state.optimistic[0].localPreviewUrl, "blob:photo");
+  // Single-attachment: percorso legacy, niente batch.
+  assert.equal(state.optimistic[0].batch_id, null);
+  assert.equal(state.optimistic[0].batch_index, null);
+  assert.deepEqual(cached, [["photo.png[0]", "blob:photo", 640, 480]]);
+  assert.deepEqual(clearedWithOptions, { revoke: false });
   assert.equal(request.url, "/api/send");
   assert.equal(request.options.body.get("text"), "la caption");
+  assert.equal(request.options.body.getAll("file").length, 1);
+  assert.equal(request.options.body.get("batch_id"), null);
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
     completed = subprocess.run(

@@ -9,7 +9,7 @@
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/icon.svg">
   <meta name="theme-color" content="#101720">
-  <link rel="stylesheet" href="/style.css?v=54">
+  <link rel="stylesheet" href="/style.css?v=55">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -65,14 +65,10 @@
           </span>
           <button id="cancel-reply" type="button" aria-label="Annulla risposta" title="Annulla risposta">×</button>
         </div>
-        <div id="attachment-preview" class="attachment-preview" hidden>
-          <img id="attachment-preview-image" alt="Anteprima immagine da inviare">
-          <span id="attachment-preview-name"></span>
-          <button id="remove-attachment" type="button" aria-label="Rimuovi allegato">×</button>
-        </div>
+        <div id="attachments-preview" class="attachments-preview" hidden></div>
         <div class="composer-controls">
           <textarea id="message-input" rows="1" maxlength="65536" placeholder="Scrivi un messaggio" aria-label="Messaggio"></textarea>
-          <input id="file-input" type="file" hidden accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip,.txt">
+          <input id="file-input" type="file" hidden accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.zip,.txt" multiple>
           <button id="attach-button" class="composer-icon-button" type="button" aria-label="Allega file" aria-controls="file-input" title="Allega file">📎</button>
           <button id="emoji-toggle" class="composer-icon-button" type="button" aria-label="Apri selettore emoji" aria-expanded="false" aria-controls="emoji-picker" title="Emoji (Ctrl+Shift+X)">😀</button>
           <button id="send-message" class="send-button" type="submit" disabled aria-label="Invia messaggio">
@@ -132,7 +128,7 @@
     </div>
   </dialog>
 
-  <script src="/reconcile.js?v=5" defer></script>
-  <script src="/app.js?v=91" defer></script>
+  <script src="/reconcile.js?v=6" defer></script>
+  <script src="/app.js?v=92" defer></script>
 </body>
 </html>

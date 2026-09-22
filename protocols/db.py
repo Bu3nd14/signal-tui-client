@@ -460,6 +460,8 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
                 "read": bool(row["read"]),
                 "status": row["status"],
                 "protocol": row["protocol"],
+                "batch_id": row["batch_id"],
+                "batch_index": row["batch_index"],
             }
         )
     return cache
