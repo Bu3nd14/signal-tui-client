@@ -1,6 +1,6 @@
 # Alias shell della Web UI
 
-Alias di shell (bash/zsh) per avviare la **Web UI** del Signal TUI Client e gestirne il ciclo di
+Alias di shell (bash/zsh/ash) per avviare la **Web UI** del Signal TUI Client e gestirne il ciclo di
 vita: una sessione **foreground** interattiva, una sessione **background** in tmux (che esporta il
 token Bearer nella shell) e un comando di **stop** pulito.
 
@@ -75,7 +75,8 @@ alias signal-tui-stop='_signal_tui_web_stop'
 
 ### Installazione manuale
 
-1. Incolla il blocco sopra in `~/.bashrc` (bash) oppure in `~/.zshrc` (zsh).
+1. Incolla il blocco sopra in `~/.bashrc` (bash), `~/.zshrc` (zsh) oppure `~/.ashrc` (ash — assicurati
+   che `$ENV` punti lì).
 2. Ricarica il file o riapri la shell:
 
 ```bash
@@ -93,13 +94,14 @@ shell, il blocco non è proprio utilizzabile.
 |---|---|---|
 | **bash** | `~/.bashrc` | Supportata nativamente; sintassi `alias` + `export` + `$(...)` + `&&` usata così com'è |
 | **zsh** | `~/.zshrc` | **Compatibile**: alias, `export`, `$(...)` e `&&` sono costrutti standard (POSIX/ksh) supportati da zsh; cambia **solo** il file rc. zsh supporta gli stessi alias |
+| **ash** (BusyBox, Alpine) | `~/.ashrc` | **Compatibile**: il blocco è POSIX (nessun `[[`, nessuna funzione bash-specifica), quindi funziona così com'è; **attenzione**: ash legge gli alias da `~/.ashrc` solo se la variabile `$ENV` punta lì (tipico default su Alpine via `/etc/profile`) — altrimenti vanno sourcati a mano |
 | **fish** | `~/.config/fish/config.fish` | **Non compatibile**: fish non usa `alias nome='...'` né `export VAR=...`; richiederebbe `function`/`abbr` e `set -gx` |
-| **dash / sh** (POSIX minimale) | — | **Non supportati**: l'auto-installazione (`install.sh`) è uno script bash e rileva solo bash/zsh; per le altre shell avvisa e salta |
+| **dash / sh** (POSIX minimale) | — | **Non supportati**: l'auto-installazione (`install.sh`) è uno script bash e rileva solo bash/zsh/ash; per le altre shell avvisa e salta |
 
 ## 5. Auto-installazione
 
 `./install.sh --aliases` aggiunge il blocco degli alias al file rc della shell rilevata
-(bash → `~/.bashrc`, zsh → `~/.zshrc`) **con il path reale del progetto**:
+(bash → `~/.bashrc`, zsh → `~/.zshrc`, ash → `~/.ashrc`) **con il path reale del progetto**:
 
 ```bash
 ./install.sh --aliases
@@ -107,6 +109,8 @@ shell, il blocco non è proprio utilizzabile.
 
 - **Idempotente**: il blocco è delimitato dai marcatori `# ── BEGIN signal-tui aliases ──` /
   `# ── END signal-tui aliases ──`; se è già presente viene **sostituito**, non duplicato.
-- La shell è rilevata da `$SHELL`; se non è bash/zsh, lo script **avvisa e salta** (es. fish).
+- La shell è rilevata da `$SHELL`; se non è bash/zsh/ash, lo script **avvisa e salta** (es. fish).
+- Per ash lo script avvisa anche se `$ENV` non punta a `~/.ashrc`, dato che è quella variabile
+  (non il nome del file) a determinare cosa ash sorge all'avvio di una shell interattiva.
 - Gli alias vengono installati anche al termine di un'installazione completa (`./install.sh`),
   ma solo se la shell è supportata.
