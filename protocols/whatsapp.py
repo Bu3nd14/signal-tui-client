@@ -477,6 +477,11 @@ class WhatsAppBackend(ChatBackend):
         return True
 
     @property
+    def is_connected(self) -> bool:
+        """Whether ``connect()``/``_connect_sync()`` has completed successfully."""
+        return self._connected
+
+    @property
     def needs_pairing(self) -> bool:
         """Whether the backend is not authenticated and needs QR pairing."""
         if not self._rest:

@@ -400,6 +400,13 @@ class SignalBackend(ChatBackend):
             # ensures it wakes up and exits within that window.
             sse_thread.join(timeout=5)
 
+    # ─── Status ───────────────────────────────────────────────────────
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether ``_connect_sync`` reached a working daemon RPC session."""
+        return self._use_daemon
+
     # ─── Contact loading ──────────────────────────────────────────────
 
     @staticmethod
