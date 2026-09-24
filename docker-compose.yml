@@ -12,18 +12,22 @@
 # The session and media files persist in ./whatsapp-data (git-ignored).
 # Pair the device with:  python3 link_whatsapp.py
 #
+# CPU/RAM caps: NOT set here by default. `deploy.resources.limits` requires
+# the memory cgroup controller to be delegated to the Docker host — inside an
+# unprivileged Proxmox/LXC container without `nesting=1` (and cgroup
+# delegation) this makes the container fail to start with:
+#   "error setting cgroup config for procHooks process: ... memory.max: no
+#   such file or directory"
+# If your host supports cgroup resource limits and you want them enforced,
+# layer docker-compose.resources.yml on top:
+#   docker compose -f docker-compose.yml -f docker-compose.resources.yml up -d
+#
 
 services:
   whatsapp:
     image: "${WAHA_IMAGE:-devlikeapro/waha:latest}"
     container_name: signal-tui-whatsapp
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '1.5'      # Impedisce di usare tutta la CPU
-          memory: 2048M    # Massimo 2GB di RAM per tutto il container
-
     ports:
       # External port defaults to 3005 (configurable via WHATSAPP_API_PORT);
       # WAHA itself listens on 3000 inside the container.

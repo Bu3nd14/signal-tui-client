@@ -1,0 +1,24 @@
+#
+# docker-compose.resources.yml — optional CPU/RAM caps for the WAHA container
+#
+# `deploy.resources.limits` needs the memory cgroup controller delegated to
+# the Docker host; inside an unprivileged Proxmox/LXC container without
+# `nesting=1` (and matching cgroup delegation) it makes `docker compose up`
+# fail with:
+#   "error setting cgroup config for procHooks process: ... memory.max: no
+#   such file or directory"
+#
+# Left out of docker-compose.yml for that reason. On a host where cgroup
+# resource limits work (bare metal, a VM, a privileged/nested LXC), layer
+# this file on top to cap the WAHA container's CPU and RAM:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.resources.yml up -d
+#
+
+services:
+  whatsapp:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'      # Impedisce di usare tutta la CPU
+          memory: 2048M    # Massimo 2GB di RAM per tutto il container

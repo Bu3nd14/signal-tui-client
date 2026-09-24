@@ -241,6 +241,19 @@ backend at any compatible Baileys API.
 > `WHATSAPP_API_KEY` (see below). To grab the current values from a running
 > container: `docker exec signal-tui-whatsapp env | grep WAHA_API_KEY`.
 
+> **Running inside an unprivileged Proxmox/LXC container:** `docker compose up`
+> may fail with `error setting cgroup config for procHooks process: ...
+> memory.max: no such file or directory`. This means the memory cgroup
+> controller isn't delegated to the container — fix it on the Proxmox **host**
+> with `pct set <vmid> --features nesting=1,keyctl=1` (then reboot the CT), or
+> just don't set CPU/RAM caps: `docker-compose.yml` no longer sets them by
+> default for this reason. If your host does support cgroup resource limits
+> and you want the WAHA container capped at 1.5 CPU / 2GB RAM, layer
+> `docker-compose.resources.yml` on top:
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.resources.yml up -d
+> ```
+
 #### Configuration (env or `config.json`)
 
 Environment variables:
