@@ -7,9 +7,12 @@
 # contemporaneamente. Questi script centralizzano il passaggio pulito.
 #
 # Uso:
-#   ./scripts/tui_handover.sh to-server    # spegni locale → accendi il server Hetzner
-#   ./scripts/tui_handover.sh to-local     # spegni il server → accendi il locale
-#   ./scripts/tui_handover.sh status       # stato TUI/WAHA/daemon su entrambe
+#   ./scripts/tui_handover.sh to-server [--no-docker-limits]  # spegni locale → accendi il server Hetzner
+#   ./scripts/tui_handover.sh to-local  [--no-docker-limits]  # spegni il server → accendi il locale
+#   ./scripts/tui_handover.sh status                          # stato TUI/WAHA/daemon su entrambe
+#
+# --no-docker-limits avvia WAHA (sulla macchina di destinazione) senza i cap
+# CPU/RAM di docker-compose.resources.yml (applicati di default).
 #
 # Configurazione:
 #   HZ_HOST   — IP del server Hetzner (default 167.233.140.207)
@@ -36,6 +39,7 @@ fi
 HZ_HOST="${HZ_HOST:-167.233.140.207}"
 HZ_USER="${HZ_USER:-root}"
 HZ="ssh -o StrictHostKeyChecking=accept-new $HZ_USER@$HZ_HOST"
+DOCKER_LIMITS=1
 
 # Identità della macchina: "local" = dove gira questo script.
 if [ -d "$PROJECT_DIR/.git" ]; then
@@ -82,9 +86,10 @@ waha_stop() {
 waha_start() {
     # Attende che WAHA sia pronto (con wait) così la TUI lo trova subito attivo:
     # se la TUI parte prima di WAHA il backend WhatsApp resta idle (nessun retry).
-    bash "$1/scripts/start_whatsapp.sh" >/dev/null 2>&1 && ok "WAHA avviato e pronto" || {
+    WAHA_DOCKER_LIMITS="$DOCKER_LIMITS" bash "$1/scripts/start_whatsapp.sh" >/dev/null 2>&1 \
+        && ok "WAHA avviato e pronto" || {
         info "avvio WAHA non riuscito o timeout; provo comunque a far partire la TUI"
-        bash "$1/scripts/start_whatsapp.sh" --no-wait >/dev/null 2>&1 || true
+        WAHA_DOCKER_LIMITS="$DOCKER_LIMITS" bash "$1/scripts/start_whatsapp.sh" --no-wait >/dev/null 2>&1 || true
     }
 }
 
@@ -112,8 +117,8 @@ to_server() {
     waha_stop "$PROJECT_DIR"
 
     info "Accendo il client sul SERVER ($HZ_HOST)..."
-    $HZ "cd /root/signal-tui-client && bash scripts/start_whatsapp.sh --no-wait >/dev/null 2>&1; tmux kill-session -t tui 2>/dev/null; rm -f /tmp/signal-tui.lock; true"
-    $HZ 'bash -s' <<'REMOTE'
+    $HZ "cd /root/signal-tui-client && WAHA_DOCKER_LIMITS=$DOCKER_LIMITS bash scripts/start_whatsapp.sh --no-wait >/dev/null 2>&1; tmux kill-session -t tui 2>/dev/null; rm -f /tmp/signal-tui.lock; true"
+    $HZ "WAHA_DOCKER_LIMITS=$DOCKER_LIMITS bash -s" <<'REMOTE'
         cd /root/signal-tui-client
         bash scripts/start_whatsapp.sh --no-wait >/dev/null 2>&1 || true
         tmux new-session -d -s tui "cd /root/signal-tui-client && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0"
@@ -157,9 +162,15 @@ REMOTE
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+case "${2:-}" in
+    --no-docker-limits) DOCKER_LIMITS=0 ;;
+    "") ;;
+    *) die "Opzione sconosciuta: $2" ;;
+esac
+
 case "${1:-}" in
     to-server) to_server ;;
     to-local)  to_local ;;
     status)    status ;;
-    *) die "uso: $0 {to-server|to-local|status}" ;;
+    *) die "uso: $0 {to-server|to-local|status} [--no-docker-limits]" ;;
 esac

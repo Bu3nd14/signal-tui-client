@@ -207,8 +207,8 @@ gracefully skips WhatsApp.
 #### One-command startup (Docker)
 
 ```bash
-docker compose up -d            # start WAHA (WhatsApp HTTP API) on http://127.0.0.1:3005
-./scripts/start_whatsapp.sh     # (optional) start + wait until the API is ready
+docker compose up -d            # start WAHA (WhatsApp HTTP API) on http://127.0.0.1:3005 — no CPU/RAM caps
+./scripts/start_whatsapp.sh     # (optional) start + wait until the API is ready — CPU/RAM caps applied by default
 ```
 
 or use the installer:
@@ -216,6 +216,10 @@ or use the installer:
 ```bash
 ./install.sh --whatsapp
 ```
+
+`./scripts/start_whatsapp.sh` and `./install.sh --whatsapp` both apply the WAHA container's CPU/RAM
+caps (1.5 CPU / 2GB RAM) by default; pass `--no-docker-limits` to either to skip them. A bare
+`docker compose up -d` never applies the caps (see [below](#running-without-cpuram-caps---no-docker-limits)).
 
 The installer creates `.env` with secure WAHA credentials and `0600` permissions,
 preserving any existing WAHA or Telegram values. The API then listens on
@@ -240,6 +244,29 @@ backend at any compatible Baileys API.
 > `WAHA_API_KEY` from `.env` automatically; it can also be set explicitly with
 > `WHATSAPP_API_KEY` (see below). To grab the current values from a running
 > container: `docker exec signal-tui-whatsapp env | grep WAHA_API_KEY`.
+
+#### Running without CPU/RAM caps (`--no-docker-limits`)
+
+`./install.sh --whatsapp`, `./scripts/start_whatsapp.sh`, `./scripts/restart_backend.sh`,
+`./scripts/start_on_server.sh start`, and `./scripts/tui_handover.sh {to-server,to-local}` all layer
+`docker-compose.resources.yml` on top of `docker-compose.yml` **by default**, capping the WAHA
+container at 1.5 CPU / 2GB RAM. Pass `--no-docker-limits` to any of them to skip that:
+
+```bash
+./scripts/start_whatsapp.sh --no-docker-limits
+./install.sh --whatsapp --no-docker-limits
+```
+
+> **Running inside an unprivileged Proxmox/LXC container:** those CPU/RAM caps need the memory
+> cgroup controller delegated to the Docker host. Without it, `docker compose up` fails with
+> `error setting cgroup config for procHooks process: ... memory.max: no such file or directory`.
+> Either fix delegation on the Proxmox **host** with `pct set <vmid> --features nesting=1,keyctl=1`
+> (then reboot the CT), or pass `--no-docker-limits` to skip the caps entirely. A bare
+> `docker compose up -d` (no script/launcher involved) never applies the caps in the first place —
+> to apply them yourself, layer the file manually:
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.resources.yml up -d
+> ```
 
 #### Configuration (env or `config.json`)
 
