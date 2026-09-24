@@ -252,15 +252,27 @@ function protocolIcon(protocol, size = 15) {
   return icons[protocol] || "";
 }
 
-function updateBackendStatuses() {
+async function updateBackendStatuses() {
   const statuses = {
     signal: elements.linkStatusSignal,
     whatsapp: elements.linkStatusWhatsapp,
     telegram: elements.linkStatusTelegram,
   };
-  for (const protocol of PROTOCOLS) {
-    const connected = state.contacts.some((contact) => contact.protocol === protocol);
-    statuses[protocol].textContent = connected ? "Collegato" : "Non collegato";
+  if (!state.token) {
+    for (const protocol of PROTOCOLS) statuses[protocol].textContent = "Non collegato";
+    return;
+  }
+  // Real backend connection state (protocols/base.py `is_connected`), not
+  // inferred from whether the protocol happens to have any contacts loaded
+  // yet — a freshly connected account with zero chats is still connected.
+  try {
+    const response = await apiFetch("/api/status");
+    const data = await response.json();
+    for (const protocol of PROTOCOLS) {
+      statuses[protocol].textContent = data[protocol] ? "Collegato" : "Non collegato";
+    }
+  } catch {
+    // Best-effort: leave the previously shown labels as-is on failure.
   }
 }
 
