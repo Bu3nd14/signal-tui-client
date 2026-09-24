@@ -153,7 +153,16 @@ def start_web_server(
         while not server.started:
             await asyncio.sleep(0.01)
         handle.status = "up"
-        logger.info("Web server listening on http://%s:%d", host, port)
+        # Only web-signal-tui-bg (the tmux alias) prints the Bearer token to
+        # the console today; a manual `python3 signal_tui.py --web` launch
+        # left the user with no way to find it short of reading config.json
+        # by hand. Log it here too so it's always discoverable.
+        logger.info(
+            "Web server listening on http://%s:%d — Bearer token: %s",
+            host,
+            port,
+            token,
+        )
         ready.set()
 
     def run() -> None:

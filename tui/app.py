@@ -286,6 +286,16 @@ class SignalTUI(
             self._web_server = start_web_server(
                 self.manager, self._web_port, self._web_token, host=self._web_host
             )
+            if self._web_server is not None:
+                # Only the web-signal-tui-bg shell alias used to print the
+                # Bearer token; a plain `python3 signal_tui.py --web` launch
+                # left no way to find it short of reading config.json by
+                # hand. Surface it here too (persistent until dismissed).
+                self._status(
+                    f"🌐 Web UI: http://{self._web_host}:{self._web_port} "
+                    f"— token: {self._web_token}",
+                    0,
+                )
         # Start poll worker immediately — Signal and WhatsApp events flow
         # as soon as their backends are ready (independent workers below).
         self._polling_active = True
