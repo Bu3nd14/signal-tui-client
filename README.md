@@ -617,7 +617,7 @@ below it, labeled with that protocol's icon and color.
 
 ## Web reader aliases
 
-Three shell aliases (bash/zsh) launch the optional web reader and manage its lifecycle:
+Three shell aliases (bash/zsh/ash) launch the optional web reader and manage its lifecycle:
 
 The automatic installer enables the Web UI in `config.json`, so a normal
 `python3 signal_tui.py` start also serves it locally on `http://127.0.0.1:4242`.
@@ -662,16 +662,17 @@ default; pass `--apply` to apply the cleanup).
 
 ### Installing the aliases
 
-Automatic install — detects bash/zsh and writes the real project path:
+Automatic install — detects bash/zsh/ash and writes the real project path:
 
 ```bash
 ./install.sh --aliases
 ```
 
-Or manually copy the alias block from [docs/ALIASES.md](docs/ALIASES.md) into `~/.bashrc` (bash) or
-`~/.zshrc` (zsh), then `source ~/.bashrc` (or reopen the shell).
+Or manually copy the alias block from [docs/ALIASES.md](docs/ALIASES.md) into `~/.bashrc` (bash),
+`~/.zshrc` (zsh), or `~/.ashrc` (ash — make sure `$ENV` points there), then reload the file (or
+reopen the shell).
 
-> **Compatibility:** bash and zsh are supported; other shells (fish, dash/sh) are not — see
+> **Compatibility:** bash, zsh, and ash are supported; other shells (fish, dash/sh) are not — see
 > [docs/ALIASES.md](docs/ALIASES.md).
 
 ## Native inline images (kitty graphics protocol)

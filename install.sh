@@ -189,11 +189,17 @@ install_aliases() {
     case "$shell_name" in
         *zsh*)  rc_file="$HOME/.zshrc" ;;
         *bash*|"") rc_file="$HOME/.bashrc" ;;
+        *ash*)  rc_file="$HOME/.ashrc" ;;
         *)
-            warn "Shell '$shell_name' non supportata: gli alias richiedono bash/zsh; fish richiederebbe funzioni (vedi docs/ALIASES.md)."
+            warn "Shell '$shell_name' non supportata: gli alias richiedono bash/zsh/ash; fish richiederebbe funzioni (vedi docs/ALIASES.md)."
             return 0
             ;;
     esac
+
+    if [ "$shell_name" != "${shell_name#*ash}" ] && [ "${ENV:-}" != "$rc_file" ]; then
+        warn "ash legge gli alias da \$ENV, non automaticamente da $rc_file."
+        warn "Assicurati che \$ENV punti a $rc_file (tipicamente esportato da /etc/profile su Alpine)."
+    fi
 
     if [[ "$PROJECT_DIR" == *[[:space:]]* ]]; then
         warn "Il path del progetto contiene spazi; verifica il quoting degli alias dopo l'installazione: $PROJECT_DIR"
