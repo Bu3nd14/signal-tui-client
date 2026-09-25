@@ -53,7 +53,7 @@ class FakeManager:
         return "attachment-id"
 
 
-def make_app(manager):
+def make_app(manager, *, required: bool = True):
     from web.api import create_api_router
     from web.auth import install_auth
     from web.ws import install_websocket
@@ -61,9 +61,9 @@ def make_app(manager):
     app = FastAPI()
     app.state.manager = manager
     app.state.websocket_connections = set()
-    install_auth(app, TOKEN)
+    install_auth(app, TOKEN, required=required)
     app.include_router(create_api_router())
-    install_websocket(app, TOKEN)
+    install_websocket(app, TOKEN, required=required)
     return app
 
 
@@ -83,6 +83,22 @@ def web_client(tmp_path):
             yield client, manager, db_file
 
 
+@pytest.fixture
+def web_client_no_auth(tmp_path):
+    import protocols.db as backend
+    from protocols.db import _init_db
+
+    db_file = tmp_path / "messages.db"
+    with (
+        patch.object(backend, "DB_FILE", db_file),
+        patch.object(backend, "CACHE_DIR", tmp_path),
+    ):
+        _init_db()
+        manager = FakeManager()
+        with TestClient(make_app(manager, required=False)) as client:
+            yield client, manager, db_file
+
+
 def test_rest_auth_requires_correct_bearer(web_client):
     client, _, _ = web_client
     missing = client.get("/api/contacts")
@@ -91,6 +107,16 @@ def test_rest_auth_requires_correct_bearer(web_client):
     assert missing.status_code == 401
     assert missing.headers["www-authenticate"] == "Bearer"
     assert wrong.status_code == 401
+    assert correct.status_code == 200
+
+
+def test_rest_no_auth_accepts_missing_or_wrong_bearer(web_client_no_auth):
+    client, _, _ = web_client_no_auth
+    missing = client.get("/api/contacts")
+    wrong = client.get("/api/contacts", headers={"Authorization": "Bearer wrong"})
+    correct = client.get("/api/contacts", headers=AUTH)
+    assert missing.status_code == 200
+    assert wrong.status_code == 200
     assert correct.status_code == 200
 
 
@@ -1030,6 +1056,12 @@ def test_websocket_accepts_browser_subprotocol_token(web_client):
         assert websocket.accepted_subprotocol == "signal-tui-bearer"
 
 
+def test_websocket_no_auth_accepts_connection_without_any_token(web_client_no_auth):
+    client, _, _ = web_client_no_auth
+    with client.websocket_connect("/ws") as websocket:
+        assert websocket.accepted_subprotocol is None
+
+
 def _media_url(proto, attachment_id):
     return f"/api/media/{proto}/{quote(attachment_id, safe='')}"
 
@@ -1760,6 +1792,58 @@ def test_clean_start_and_stop_web_server():
     stop_web_server(handle)
     assert handle.status == "down"
     assert not handle.thread.is_alive()
+
+
+def test_start_web_server_requires_token_by_default():
+    from web.server import start_web_server
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    assert start_web_server(FakeManager(), port=port, token="") is None
+
+
+def test_start_web_server_no_auth_works_without_a_token():
+    from web.server import start_web_server, stop_web_server
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    handle = start_web_server(FakeManager(), port=port, token="", require_auth=False)
+    try:
+        assert handle is not None
+        deadline = time.monotonic() + 2
+        while handle.status == "starting" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert handle.status == "up"
+
+        with TestClient(handle.server.config.app) as client:
+            response = client.get("/api/contacts")
+        assert response.status_code == 200
+    finally:
+        stop_web_server(handle)
+
+
+def test_health_reports_auth_required_flag():
+    from web.server import start_web_server, stop_web_server
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    handle = start_web_server(FakeManager(), port=port, token=TOKEN)
+    try:
+        deadline = time.monotonic() + 2
+        while handle.status == "starting" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        with TestClient(handle.server.config.app) as client:
+            response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["auth_required"] is True
+    finally:
+        stop_web_server(handle)
 
 
 def test_default_tui_import_does_not_import_optional_web_package():

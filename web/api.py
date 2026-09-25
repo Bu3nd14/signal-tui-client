@@ -1336,6 +1336,20 @@ def create_api_router() -> Any:
         )
         return {"ok": True}
 
+    @router.get("/status")
+    def backend_status(request: Request) -> dict[str, bool]:
+        """Real per-protocol connection state (not inferred from contacts).
+
+        A protocol with zero chats yet is still connected; a registered but
+        not-yet-connected backend is not.  Missing/unregistered protocols
+        (e.g. Telegram without credentials configured) report ``False``.
+        """
+        manager = request.app.state.manager
+        return {
+            proto: bool(getattr(manager.get(proto), "is_connected", False))
+            for proto in _PROTOCOLS
+        }
+
     @router.get("/contacts")
     def contacts(request: Request, q: str | None = None) -> list[dict[str, Any]]:
         unread = _unread_counts()

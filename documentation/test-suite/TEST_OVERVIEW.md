@@ -170,6 +170,11 @@ Note: `Telegram/conftest.py` ha una fixture autouse che patcha le scritture SQLi
 | File | N. | Cosa copre |
 |---|---|---|
 | `tests/test_install_script.py` | 17 | `install.sh` (opzioni, download signal-cli) |
+| `tests/test_launcher_cli.py` | 8 | `launcher.py` argparse (help, subcomandi, flag mancanti) |
+| `tests/test_launcher_install.py` | 22 | `launcher/install.py`, l'equivalente Python opzionale di `install.sh` |
+| `tests/test_launcher_whatsapp.py` | 16 | `launcher/whatsapp.py`, equivalente di `scripts/start_whatsapp.sh` |
+| `tests/test_launcher_aliases.py` | 15 | `launcher/aliases.py` (stesso blocco alias scritto da `install.sh`) |
+| `tests/test_launcher_misc.py` | 17 | `launcher/{backend,server,handover}.py`, equivalenti di `scripts/*.sh` |
 | `tests/test_docker_compose_extra_hosts.py` | 2 | `host.docker.internal` in docker-compose |
 | `tests/test_qr_ascii.py` | 4 | rendering QR ASCII (`qr_utils.py`) |
 

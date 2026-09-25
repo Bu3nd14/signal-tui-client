@@ -73,13 +73,17 @@ async def _broadcast(app: Any) -> None:
                 await websocket.close()
 
 
-def install_websocket(app: Any, token: str) -> None:
-    """Mount the authenticated socket and its single queue-draining task."""
+def install_websocket(app: Any, token: str, *, required: bool = True) -> None:
+    """Mount the (optionally authenticated) socket and its fan-out task.
+
+    When *required* is ``False`` (``--web-no-auth``), every connection is
+    accepted regardless of what (if anything) it supplies.
+    """
     from fastapi import WebSocket, WebSocketDisconnect
 
     async def websocket_endpoint(websocket: WebSocket) -> None:
         authorization, subprotocol = _browser_authorization(websocket)
-        if not is_authorized(authorization, token):
+        if required and not is_authorized(authorization, token):
             await websocket.close(code=1008)
             return
         await websocket.accept(subprotocol=subprotocol)

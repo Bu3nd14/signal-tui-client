@@ -2220,6 +2220,13 @@ class TelegramBackend(ChatBackend):
             "reactions": reactions,
         }
 
+    # ─── Status ──────────────────────────────────────────────────────────
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether the Telethon client is authenticated and the loop is up."""
+        return self._connected
+
     # ─── Pairing ───────────────────────────────────────────────────────────
 
     @property
