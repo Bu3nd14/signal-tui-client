@@ -69,15 +69,22 @@ def start_web_server(
     token: str | None = None,
     *,
     host: str = "127.0.0.1",
+    require_auth: bool = True,
 ) -> WebServerHandle | None:
-    """Start uvicorn on a dedicated thread and event loop."""
+    """Start uvicorn on a dedicated thread and event loop.
+
+    *require_auth* set to ``False`` (``--web-no-auth``) drops the Bearer
+    token requirement entirely — every REST/media/WebSocket request is
+    accepted with no credential. Explicit opt-in only; the token is still
+    required by default.
+    """
     global _active_server
 
     token = token or os.environ.get("SIGNAL_TUI_WEB_TOKEN", "")
-    if not token:
+    if require_auth and not token:
         logger.error(
-            "Web UI requires a Bearer token; configure SIGNAL_TUI_WEB_TOKEN "
-            "or web.token (web down)"
+            "Web UI requires a Bearer token; configure SIGNAL_TUI_WEB_TOKEN, "
+            "web.token, or pass --web-no-auth (web down)"
         )
         return None
 
@@ -110,13 +117,15 @@ def start_web_server(
     from web.ws import install_websocket
 
     init_bridge()
-    install_auth(app, token)
+    install_auth(app, token, required=require_auth)
     app.include_router(create_api_router())
-    install_websocket(app, token)
+    install_websocket(app, token, required=require_auth)
 
     @app.get("/health")
     async def health() -> dict[str, object]:
-        return {"status": "ok", "port": port}
+        # Unauthenticated by design: the SPA reads auth_required before it
+        # decides whether to show the token login dialog.
+        return {"status": "ok", "port": port, "auth_required": require_auth}
 
     app.mount(
         "/",
@@ -157,12 +166,20 @@ def start_web_server(
         # the console today; a manual `python3 signal_tui.py --web` launch
         # left the user with no way to find it short of reading config.json
         # by hand. Log it here too so it's always discoverable.
-        logger.info(
-            "Web server listening on http://%s:%d — Bearer token: %s",
-            host,
-            port,
-            token,
-        )
+        if require_auth:
+            logger.info(
+                "Web server listening on http://%s:%d — Bearer token: %s",
+                host,
+                port,
+                token,
+            )
+        else:
+            logger.warning(
+                "Web server listening on http://%s:%d — NO AUTH (--web-no-auth): "
+                "anyone who can reach this address/port has full read/send access",
+                host,
+                port,
+            )
         ready.set()
 
     def run() -> None:

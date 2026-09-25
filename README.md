@@ -635,6 +635,21 @@ curl -H "Authorization: Bearer $SIGNAL_TUI_WEB_TOKEN" http://127.0.0.1:4242/api/
 The Bearer token lives in `config.json` under `web.token`; the web server also accepts it via the
 `SIGNAL_TUI_WEB_TOKEN` environment variable. The default port is `4242`.
 
+### Running without a token (`--web-no-auth`)
+
+For a trusted local/LAN setup where you don't want to deal with the Bearer token at all, start the
+web server with `--web-no-auth`:
+
+```bash
+python3 signal_tui.py --web --web-no-auth
+```
+
+This drops authentication entirely on every REST, media, and WebSocket endpoint — **anyone who can
+reach `--web-host`/`--web-port` gets full read/send access with no credential**. The browser also
+skips the login dialog automatically. Only use this on a network you trust (e.g. `127.0.0.1` only,
+or a LAN behind your own firewall); never combine it with `--web-host 0.0.0.0` on a machine exposed
+to the internet.
+
 ### Web UI
 
 The optional web reader gives read-only access to conversations and attachments from a browser:
