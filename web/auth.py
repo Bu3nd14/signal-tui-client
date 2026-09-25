@@ -22,8 +22,21 @@ def is_authorized(authorization: str | None, token: str) -> bool:
     )
 
 
-def install_auth(app: Any, token: str) -> None:
-    """Protect every REST and media endpoint mounted below ``/api``."""
+def install_auth(app: Any, token: str, *, required: bool = True) -> None:
+    """Protect every REST and media endpoint mounted below ``/api``.
+
+    When *required* is ``False`` (``--web-no-auth``), no middleware is
+    installed at all: every request is let through unconditionally. This is
+    an explicit opt-in the caller must request — anyone who can reach the
+    port gets full read/send access with no credential.
+    """
+    if not required:
+        logger.warning(
+            "Web UI auth DISABLED (--web-no-auth): every request is accepted "
+            "with no credential"
+        )
+        return
+
     from fastapi.responses import JSONResponse
 
     @app.middleware("http")

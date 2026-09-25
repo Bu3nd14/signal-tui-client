@@ -110,6 +110,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--web-host", type=str, help="web UI bind host (default 127.0.0.1)"
     )
+    parser.add_argument(
+        "--web-no-auth",
+        action="store_true",
+        help=(
+            "disable the web UI Bearer token requirement (INSECURE: anyone who "
+            "can reach --web-host/--web-port gets full read/send access with no "
+            "credential — only use on a trusted network or behind your own auth)"
+        ),
+    )
     args = parser.parse_args(argv)
     if args.web_port is not None and not 1 <= args.web_port <= 65535:
         parser.error("--web-port must be between 1 and 65535")
@@ -200,6 +209,7 @@ if __name__ == "__main__":
         web_port=args.web_port if args.web_port is not None else web_port(),
         web_host=args.web_host if args.web_host is not None else web_host(),
         web_token=web_token(),
+        web_no_auth=args.web_no_auth,
     )
 
     def _handle_sigint(sig, frame):

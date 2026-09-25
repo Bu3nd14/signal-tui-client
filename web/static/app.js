@@ -2648,9 +2648,26 @@ window.addEventListener("beforeunload", () => {
   }
 });
 
-if (state.token) {
-  loadContacts();
-  connectSocket();
-} else {
-  requestToken();
+async function boot() {
+  // /health is unauthenticated by design: check it first so a server
+  // started with --web-no-auth skips the login dialog entirely instead of
+  // demanding a token it doesn't actually require.
+  try {
+    const response = await fetch("/health");
+    if (response.ok) {
+      const data = await response.json();
+      if (data.auth_required === false && !state.token) {
+        state.token = "no-auth-required";
+      }
+    }
+  } catch {
+    // Best-effort: fall through to the normal token-required flow below.
+  }
+  if (state.token) {
+    loadContacts();
+    connectSocket();
+  } else {
+    requestToken();
+  }
 }
+boot();

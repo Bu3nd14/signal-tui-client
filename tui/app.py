@@ -99,6 +99,7 @@ class SignalTUI(
         web_port: int = 4242,
         web_host: str = "127.0.0.1",
         web_token: str = "",
+        web_no_auth: bool = False,
     ):
         super().__init__()
         # Terminal image backend detected in ``signal_tui`` before ``run()``.
@@ -112,6 +113,7 @@ class SignalTUI(
         self._web_port = web_port
         self._web_host = web_host
         self._web_token = web_token
+        self._web_no_auth = web_no_auth
         self._web_server = None
 
         # Native kitty image rendering state (phase 2).  The renderer is created
@@ -284,18 +286,29 @@ class SignalTUI(
             from web.server import start_web_server
 
             self._web_server = start_web_server(
-                self.manager, self._web_port, self._web_token, host=self._web_host
+                self.manager,
+                self._web_port,
+                self._web_token,
+                host=self._web_host,
+                require_auth=not self._web_no_auth,
             )
             if self._web_server is not None:
                 # Only the web-signal-tui-bg shell alias used to print the
                 # Bearer token; a plain `python3 signal_tui.py --web` launch
                 # left no way to find it short of reading config.json by
                 # hand. Surface it here too (persistent until dismissed).
-                self._status(
-                    f"🌐 Web UI: http://{self._web_host}:{self._web_port} "
-                    f"— token: {self._web_token}",
-                    0,
-                )
+                if self._web_no_auth:
+                    self._status(
+                        f"🌐 Web UI: http://{self._web_host}:{self._web_port} "
+                        "— ⚠️ NO AUTH (--web-no-auth)",
+                        0,
+                    )
+                else:
+                    self._status(
+                        f"🌐 Web UI: http://{self._web_host}:{self._web_port} "
+                        f"— token: {self._web_token}",
+                        0,
+                    )
         # Start poll worker immediately — Signal and WhatsApp events flow
         # as soon as their backends are ready (independent workers below).
         self._polling_active = True
