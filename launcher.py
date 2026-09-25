@@ -173,7 +173,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         return whatsapp.stop()
     if args.command == "backend-restart":
-        return backend.run(no_wait=args.no_wait, docker_limits=not args.no_docker_limits)
+        return backend.run(
+            no_wait=args.no_wait, docker_limits=not args.no_docker_limits
+        )
     if args.command == "server":
         if args.server_command == "start":
             return server.start_all(docker_limits=not args.no_docker_limits)

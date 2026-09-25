@@ -55,6 +55,7 @@ cd {REMOTE_PROJECT_DIR} && docker compose down >/dev/null 2>&1 || true
 echo "server spento"
 """
 
+
 def _remote_start_script(*, docker_limits: bool = True) -> str:
     limits_flag = "" if docker_limits else " --no-docker-limits"
     return f"""
@@ -145,7 +146,9 @@ def to_server(*, docker_limits: bool = True) -> int:
     )
 
     info(f"Accendo il client sul SERVER ({_hz_host()})...")
-    result = _run_remote(_remote_start_script(docker_limits=docker_limits), capture=True)
+    result = _run_remote(
+        _remote_start_script(docker_limits=docker_limits), capture=True
+    )
     print(result.stdout, end="")
     if "OK_TUI_SERVER" not in result.stdout:
         if result.stderr:

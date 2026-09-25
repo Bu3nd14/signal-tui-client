@@ -172,7 +172,9 @@ def _restart_signal_daemon(wait: bool, timeout_s: int) -> None:
     die(f"Timeout: signal-cli non risponde via JSON-RPC entro {timeout_s}s.")
 
 
-def _restart_waha(wait: bool, api_timeout_s: int, *, docker_limits: bool = True) -> None:
+def _restart_waha(
+    wait: bool, api_timeout_s: int, *, docker_limits: bool = True
+) -> None:
     if not command_exists("docker"):
         die("docker non trovato. Installa Docker e riprova.")
         return

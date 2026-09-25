@@ -222,7 +222,9 @@ def setup(should_start: bool, *, docker_limits: bool = True) -> bool:
                 "usa --no-docker-limits per disattivarli)..."
             )
         else:
-            info("Avvio WAHA via Docker Compose (--no-docker-limits: nessun cap CPU/RAM)...")
+            info(
+                "Avvio WAHA via Docker Compose (--no-docker-limits: nessun cap CPU/RAM)..."
+            )
         result = subprocess.run(
             ["docker", "compose", *compose_args(docker_limits), "up", "-d"], check=False
         )
@@ -260,7 +262,9 @@ def start(no_wait: bool, *, docker_limits: bool = True) -> int:
         err("docker non trovato. Installa Docker e riprova.")
         return 1
     if docker_limits:
-        print("🟢 Avvio WhatsApp HTTP API (WAHA) via Docker Compose (cap CPU/RAM attivi)...")
+        print(
+            "🟢 Avvio WhatsApp HTTP API (WAHA) via Docker Compose (cap CPU/RAM attivi)..."
+        )
     else:
         print(
             "🟢 Avvio WhatsApp HTTP API (WAHA) via Docker Compose "

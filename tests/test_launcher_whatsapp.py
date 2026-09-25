@@ -19,7 +19,9 @@ from launcher import whatsapp
 def project(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(whatsapp, "PROJECT_DIR", tmp_path)
     monkeypatch.setattr(whatsapp, "COMPOSE_FILE", tmp_path / "docker-compose.yml")
-    monkeypatch.setattr(whatsapp, "RESOURCES_FILE", tmp_path / "docker-compose.resources.yml")
+    monkeypatch.setattr(
+        whatsapp, "RESOURCES_FILE", tmp_path / "docker-compose.resources.yml"
+    )
     return tmp_path
 
 
@@ -243,7 +245,10 @@ class TestStandaloneStartStop:
         monkeypatch.setattr(
             whatsapp.subprocess,
             "run",
-            lambda cmd, **k: (docker_calls.append(cmd), subprocess.CompletedProcess(cmd, 0))[1],
+            lambda cmd, **k: (
+                docker_calls.append(cmd),
+                subprocess.CompletedProcess(cmd, 0),
+            )[1],
         )
 
         whatsapp.start(no_wait=True)
@@ -258,7 +263,10 @@ class TestStandaloneStartStop:
         monkeypatch.setattr(
             whatsapp.subprocess,
             "run",
-            lambda cmd, **k: (docker_calls.append(cmd), subprocess.CompletedProcess(cmd, 0))[1],
+            lambda cmd, **k: (
+                docker_calls.append(cmd),
+                subprocess.CompletedProcess(cmd, 0),
+            )[1],
         )
 
         whatsapp.start(no_wait=True, docker_limits=False)
