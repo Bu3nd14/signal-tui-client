@@ -1379,6 +1379,15 @@ class TestWhatsAppBackend:
         assert client.last_error == "bad [redacted data URL]"
         assert "c2VjcmV0" not in caplog.text
 
+    def test_is_connected_false_before_connect(self):
+        backend = _make_backend()
+        assert backend.is_connected is False
+
+    def test_is_connected_true_once_connect_completes(self):
+        backend = _make_backend()
+        backend._connected = True
+        assert backend.is_connected is True
+
     def test_needs_pairing(self):
         backend = _make_backend()
         with patch.object(
