@@ -10,6 +10,13 @@
     python3 launcher.py profile pyspy|strace [duration]     # was profiling/run_*.sh
     python3 launcher.py test                           # was tests/run_regression_tests.sh
 
+``install``, ``whatsapp start``, ``backend-restart``, ``server start`` and
+``handover to-server``/``to-local`` all start WAHA with CPU/RAM caps
+(docker-compose.resources.yml) applied by default; pass --no-docker-limits
+to any of them to skip that (e.g. on a host that doesn't delegate the
+memory cgroup controller, such as an unprivileged Proxmox/LXC container
+without nesting=1).
+
 Kept dependency-free (stdlib only) so ``install`` can run before anything in
 requirements.txt is on disk. See ``launcher/`` for the implementation of
 each command.
@@ -70,6 +77,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Install only the web reader shell aliases",
     )
+    p_install.add_argument(
+        "--no-docker-limits",
+        action="store_true",
+        help=(
+            "Start WAHA without CPU/RAM caps (default: docker-compose.resources.yml "
+            "is applied on top). Use this if your host doesn't delegate the memory "
+            "cgroup controller, e.g. an unprivileged Proxmox/LXC container without "
+            "nesting=1."
+        ),
+    )
 
     sub.add_parser("aliases", help="Install only the web reader shell aliases")
 
@@ -79,6 +96,11 @@ def build_parser() -> argparse.ArgumentParser:
     wa_sub = p_wa.add_subparsers(dest="wa_command", required=True)
     p_wa_start = wa_sub.add_parser("start")
     p_wa_start.add_argument("--no-wait", action="store_true")
+    p_wa_start.add_argument(
+        "--no-docker-limits",
+        action="store_true",
+        help="Start WAHA without CPU/RAM caps (default: applied)",
+    )
     wa_sub.add_parser("stop")
 
     p_backend = sub.add_parser(
@@ -86,12 +108,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Restart the signal-cli daemon (configured account) and WAHA",
     )
     p_backend.add_argument("--no-wait", action="store_true")
+    p_backend.add_argument(
+        "--no-docker-limits",
+        action="store_true",
+        help="Restart WAHA without CPU/RAM caps (default: applied)",
+    )
 
     p_server = sub.add_parser(
         "server", help="Start/stop/status the TUI on this machine (tmux + WAHA)"
     )
     server_sub = p_server.add_subparsers(dest="server_command", required=True)
-    server_sub.add_parser("start")
+    p_server_start = server_sub.add_parser("start")
+    p_server_start.add_argument(
+        "--no-docker-limits",
+        action="store_true",
+        help="Start WAHA without CPU/RAM caps (default: applied)",
+    )
     server_sub.add_parser("stop")
     server_sub.add_parser("status")
 
@@ -100,8 +132,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Move the TUI session between this machine and the remote server",
     )
     handover_sub = p_handover.add_subparsers(dest="handover_command", required=True)
-    handover_sub.add_parser("to-server")
-    handover_sub.add_parser("to-local")
+    p_handover_to_server = handover_sub.add_parser("to-server")
+    p_handover_to_server.add_argument(
+        "--no-docker-limits",
+        action="store_true",
+        help="Start WAHA on the remote server without CPU/RAM caps (default: applied)",
+    )
+    p_handover_to_local = handover_sub.add_parser("to-local")
+    p_handover_to_local.add_argument(
+        "--no-docker-limits",
+        action="store_true",
+        help="Start WAHA locally without CPU/RAM caps (default: applied)",
+    )
     handover_sub.add_parser("status")
 
     p_profile = sub.add_parser("profile", help="CPU (py-spy) / I/O (strace) profiling")
@@ -126,21 +168,23 @@ def main(argv: list[str] | None = None) -> int:
         return install.run_aliases_only()
     if args.command == "whatsapp":
         if args.wa_command == "start":
-            return whatsapp.start(no_wait=args.no_wait)
+            return whatsapp.start(
+                no_wait=args.no_wait, docker_limits=not args.no_docker_limits
+            )
         return whatsapp.stop()
     if args.command == "backend-restart":
-        return backend.run(no_wait=args.no_wait)
+        return backend.run(no_wait=args.no_wait, docker_limits=not args.no_docker_limits)
     if args.command == "server":
         if args.server_command == "start":
-            return server.start_all()
+            return server.start_all(docker_limits=not args.no_docker_limits)
         if args.server_command == "stop":
             return server.stop_all()
         return server.status()
     if args.command == "handover":
         if args.handover_command == "to-server":
-            return handover.to_server()
+            return handover.to_server(docker_limits=not args.no_docker_limits)
         if args.handover_command == "to-local":
-            return handover.to_local()
+            return handover.to_local(docker_limits=not args.no_docker_limits)
         return handover.status()
     if args.command == "profile":
         if args.profile_command == "pyspy":

@@ -83,9 +83,9 @@ def _docker_container_running(name: str) -> bool:
     return name in result.stdout.splitlines()
 
 
-def start_all() -> int:
+def start_all(*, docker_limits: bool = True) -> int:
     info("Avvio WAHA (WhatsApp HTTP API)...")
-    if whatsapp_mod.start(no_wait=False) == 0:
+    if whatsapp_mod.start(no_wait=False, docker_limits=docker_limits) == 0:
         ok("WAHA avviato e pronto")
     else:
         info("WAHA non partito (vedi docker compose logs whatsapp)")

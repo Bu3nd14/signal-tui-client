@@ -172,7 +172,7 @@ def _restart_signal_daemon(wait: bool, timeout_s: int) -> None:
     die(f"Timeout: signal-cli non risponde via JSON-RPC entro {timeout_s}s.")
 
 
-def _restart_waha(wait: bool, api_timeout_s: int) -> None:
+def _restart_waha(wait: bool, api_timeout_s: int, *, docker_limits: bool = True) -> None:
     if not command_exists("docker"):
         die("docker non trovato. Installa Docker e riprova.")
         return
@@ -191,7 +191,7 @@ def _restart_waha(wait: bool, api_timeout_s: int) -> None:
         die(f"File Compose non trovato: {compose_file}")
         return
 
-    compose = ["docker", "compose", "-f", str(compose_file)]
+    compose = ["docker", "compose", *whatsapp_mod.compose_args(docker_limits)]
     result = subprocess.run(
         compose + ["config", "--services"], capture_output=True, text=True, check=False
     )
@@ -243,10 +243,10 @@ def _restart_waha(wait: bool, api_timeout_s: int) -> None:
     )
 
 
-def run(no_wait: bool) -> int:
+def run(no_wait: bool, *, docker_limits: bool = True) -> int:
     wait = not no_wait
     signal_timeout = int(os.environ.get("SIGNAL_DAEMON_TIMEOUT_SECONDS", "30") or "30")
     api_timeout = int(os.environ.get("WAHA_API_TIMEOUT_SECONDS", "120") or "120")
     _restart_signal_daemon(wait, signal_timeout)
-    _restart_waha(wait, api_timeout)
+    _restart_waha(wait, api_timeout, docker_limits=docker_limits)
     return 0

@@ -55,9 +55,11 @@ cd {REMOTE_PROJECT_DIR} && docker compose down >/dev/null 2>&1 || true
 echo "server spento"
 """
 
-REMOTE_START = f"""
+def _remote_start_script(*, docker_limits: bool = True) -> str:
+    limits_flag = "" if docker_limits else " --no-docker-limits"
+    return f"""
 cd {REMOTE_PROJECT_DIR}
-python3 launcher.py whatsapp start --no-wait >/dev/null 2>&1 || true
+python3 launcher.py whatsapp start --no-wait{limits_flag} >/dev/null 2>&1 || true
 tmux new-session -d -s tui "cd {REMOTE_PROJECT_DIR} && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0"
 sleep 3
 if tmux list-sessions 2>/dev/null | grep -q "^tui:"; then
@@ -130,7 +132,7 @@ def status() -> int:
     return result.returncode
 
 
-def to_server() -> int:
+def to_server(*, docker_limits: bool = True) -> int:
     info("Fermo il client LOCALE...")
     server_mod._stop_tui()
     subprocess.run(
@@ -143,7 +145,7 @@ def to_server() -> int:
     )
 
     info(f"Accendo il client sul SERVER ({_hz_host()})...")
-    result = _run_remote(REMOTE_START, capture=True)
+    result = _run_remote(_remote_start_script(docker_limits=docker_limits), capture=True)
     print(result.stdout, end="")
     if "OK_TUI_SERVER" not in result.stdout:
         if result.stderr:
@@ -163,16 +165,16 @@ def to_server() -> int:
     return 0
 
 
-def to_local() -> int:
+def to_local(*, docker_limits: bool = True) -> int:
     info(f"Fermo il client sul SERVER ({_hz_host()})...")
     _run_remote(REMOTE_STOP, capture=False)
 
     info("Accendo il client LOCALE...")
-    if whatsapp_mod.start(no_wait=False) == 0:
+    if whatsapp_mod.start(no_wait=False, docker_limits=docker_limits) == 0:
         ok("WAHA avviato e pronto")
     else:
         info("avvio WAHA non riuscito o timeout; provo comunque a far partire la TUI")
-        whatsapp_mod.start(no_wait=True)
+        whatsapp_mod.start(no_wait=True, docker_limits=docker_limits)
 
     subprocess.run(
         [

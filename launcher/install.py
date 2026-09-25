@@ -284,6 +284,7 @@ def run(args) -> int:
     do_web = not args.no_web
     do_whatsapp = args.whatsapp
     do_check_whatsapp = args.check_whatsapp
+    do_docker_limits = not args.no_docker_limits
     specific_version = args.version
 
     if args.aliases:
@@ -348,9 +349,9 @@ def run(args) -> int:
         ensure_web_config()
 
     if do_check_whatsapp:
-        whatsapp_mod.setup(should_start=False)
+        whatsapp_mod.setup(should_start=False, docker_limits=do_docker_limits)
     elif do_whatsapp:
-        whatsapp_mod.setup(should_start=True)
+        whatsapp_mod.setup(should_start=True, docker_limits=do_docker_limits)
 
     if not install_aliases():
         warn("Installazione degli alias shell non riuscita; l'installazione continua.")

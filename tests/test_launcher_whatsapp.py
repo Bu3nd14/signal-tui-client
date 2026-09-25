@@ -19,7 +19,23 @@ from launcher import whatsapp
 def project(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(whatsapp, "PROJECT_DIR", tmp_path)
     monkeypatch.setattr(whatsapp, "COMPOSE_FILE", tmp_path / "docker-compose.yml")
+    monkeypatch.setattr(whatsapp, "RESOURCES_FILE", tmp_path / "docker-compose.resources.yml")
     return tmp_path
+
+
+class TestComposeArgs:
+    def test_default_layers_resources_overlay(self, project: Path):
+        args = whatsapp.compose_args()
+        assert args == [
+            "-f",
+            str(project / "docker-compose.yml"),
+            "-f",
+            str(project / "docker-compose.resources.yml"),
+        ]
+
+    def test_no_docker_limits_omits_resources_overlay(self, project: Path):
+        args = whatsapp.compose_args(False)
+        assert args == ["-f", str(project / "docker-compose.yml")]
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -161,6 +177,46 @@ class TestSetup:
         monkeypatch.setattr(whatsapp, "command_exists", lambda name: False)
         assert whatsapp.setup(should_start=False) is False
 
+    def test_start_default_layers_resources_overlay(self, project: Path, monkeypatch):
+        docker_calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            docker_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="Docker 1.0")
+
+        monkeypatch.setattr(whatsapp, "command_exists", lambda name: True)
+        monkeypatch.setattr(whatsapp.subprocess, "run", fake_run)
+        monkeypatch.setattr(whatsapp, "check_port", lambda *a, **k: True)
+        monkeypatch.setattr(whatsapp, "check_firewall", lambda *a, **k: None)
+        monkeypatch.setattr(whatsapp, "http_get", lambda *a, **k: (200, b"{}"))
+        monkeypatch.setattr(whatsapp.time, "sleep", lambda s: None)
+
+        whatsapp.setup(should_start=True)
+
+        up_call = next(c for c in docker_calls if "up" in c and "-d" in c)
+        assert str(whatsapp.RESOURCES_FILE) in up_call
+
+    def test_start_no_docker_limits_skips_resources_overlay(
+        self, project: Path, monkeypatch
+    ):
+        docker_calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            docker_calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="Docker 1.0")
+
+        monkeypatch.setattr(whatsapp, "command_exists", lambda name: True)
+        monkeypatch.setattr(whatsapp.subprocess, "run", fake_run)
+        monkeypatch.setattr(whatsapp, "check_port", lambda *a, **k: True)
+        monkeypatch.setattr(whatsapp, "check_firewall", lambda *a, **k: None)
+        monkeypatch.setattr(whatsapp, "http_get", lambda *a, **k: (200, b"{}"))
+        monkeypatch.setattr(whatsapp.time, "sleep", lambda s: None)
+
+        whatsapp.setup(should_start=True, docker_limits=False)
+
+        up_call = next(c for c in docker_calls if "up" in c and "-d" in c)
+        assert str(whatsapp.RESOURCES_FILE) not in up_call
+
 
 class TestStandaloneStartStop:
     def test_start_no_wait_skips_readiness_probe(self, project: Path, monkeypatch):
@@ -180,6 +236,34 @@ class TestStandaloneStartStop:
 
         assert whatsapp.start(no_wait=True) == 0
         assert called["http_get"] is False
+
+    def test_start_default_layers_resources_overlay(self, project: Path, monkeypatch):
+        docker_calls: list[list[str]] = []
+        monkeypatch.setattr(whatsapp, "command_exists", lambda name: True)
+        monkeypatch.setattr(
+            whatsapp.subprocess,
+            "run",
+            lambda cmd, **k: (docker_calls.append(cmd), subprocess.CompletedProcess(cmd, 0))[1],
+        )
+
+        whatsapp.start(no_wait=True)
+
+        assert str(whatsapp.RESOURCES_FILE) in docker_calls[0]
+
+    def test_start_no_docker_limits_skips_resources_overlay(
+        self, project: Path, monkeypatch
+    ):
+        docker_calls: list[list[str]] = []
+        monkeypatch.setattr(whatsapp, "command_exists", lambda name: True)
+        monkeypatch.setattr(
+            whatsapp.subprocess,
+            "run",
+            lambda cmd, **k: (docker_calls.append(cmd), subprocess.CompletedProcess(cmd, 0))[1],
+        )
+
+        whatsapp.start(no_wait=True, docker_limits=False)
+
+        assert str(whatsapp.RESOURCES_FILE) not in docker_calls[0]
 
     def test_start_waits_and_reports_timeout(self, project: Path, monkeypatch):
         monkeypatch.setattr(whatsapp, "command_exists", lambda name: True)

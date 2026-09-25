@@ -31,6 +31,21 @@ from .common import (
 WA_PORT = int(os.environ.get("WHATSAPP_API_PORT", "3005") or "3005")
 WEBHOOK_PORT = int(os.environ.get("CLIENT_WEBHOOK_PORT", "8088") or "8088")
 COMPOSE_FILE = PROJECT_DIR / "docker-compose.yml"
+RESOURCES_FILE = PROJECT_DIR / "docker-compose.resources.yml"
+
+
+def compose_args(docker_limits: bool = True) -> list[str]:
+    """``-f`` args for ``docker compose``, adding the resources overlay by default.
+
+    Mirrors the bash scripts: CPU/RAM caps (docker-compose.resources.yml) are
+    layered on top unless *docker_limits* is False (``--no-docker-limits``),
+    which callers set from a host without cgroup memory delegation (e.g. an
+    unprivileged Proxmox/LXC container without ``nesting=1``).
+    """
+    args = ["-f", str(COMPOSE_FILE)]
+    if docker_limits:
+        args += ["-f", str(RESOURCES_FILE)]
+    return args
 
 
 def read_waha_api_key() -> str:
@@ -167,7 +182,7 @@ def ensure_waha_env() -> None:
         ok(f"Credenziali WAHA generate in {env_file} (permessi 0600)")
 
 
-def setup(should_start: bool) -> bool:
+def setup(should_start: bool, *, docker_limits: bool = True) -> bool:
     """Prerequisite check (``--check-whatsapp``) or full start (``--whatsapp``).
 
     Used by the ``install`` command.
@@ -201,9 +216,15 @@ def setup(should_start: bool) -> bool:
     if should_start:
         ensure_waha_env()
         print()
-        info("Avvio WAHA via Docker Compose...")
+        if docker_limits:
+            info(
+                "Avvio WAHA via Docker Compose (cap CPU/RAM attivi — "
+                "usa --no-docker-limits per disattivarli)..."
+            )
+        else:
+            info("Avvio WAHA via Docker Compose (--no-docker-limits: nessun cap CPU/RAM)...")
         result = subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d"], check=False
+            ["docker", "compose", *compose_args(docker_limits), "up", "-d"], check=False
         )
         if result.returncode != 0:
             err("Avvio di WAHA fallito.")
@@ -233,14 +254,20 @@ def setup(should_start: bool) -> bool:
     return True
 
 
-def start(no_wait: bool) -> int:
+def start(no_wait: bool, *, docker_limits: bool = True) -> int:
     """Standalone start (formerly ``scripts/start_whatsapp.sh``)."""
     if not command_exists("docker"):
         err("docker non trovato. Installa Docker e riprova.")
         return 1
-    print("🟢 Avvio WhatsApp HTTP API (WAHA) via Docker Compose...")
+    if docker_limits:
+        print("🟢 Avvio WhatsApp HTTP API (WAHA) via Docker Compose (cap CPU/RAM attivi)...")
+    else:
+        print(
+            "🟢 Avvio WhatsApp HTTP API (WAHA) via Docker Compose "
+            "(--no-docker-limits: nessun cap)..."
+        )
     result = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d"], check=False
+        ["docker", "compose", *compose_args(docker_limits), "up", "-d"], check=False
     )
     if result.returncode != 0:
         return result.returncode
