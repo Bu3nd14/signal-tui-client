@@ -149,6 +149,41 @@ assert.equal(byIndex(2).confirmed_message_id, "wa-2");
 """)
 
 
+def test_reconcile_single_precedes_multi_fallback_on_shared_signature():
+    """R2: a parita' di signature il single conserva il match generico anche
+    se un multi fallback e' piu' recente, perche' i single si processano
+    prima (niente sort unico combinato)."""
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const { reconcileOptimisticMessages } = require("./web/static/reconcile.js");
+const real = {
+  id: "real-1", direction: "out", text: "", timestamp: 1000,
+  attachment: { type: "image/png", name: "same.png", attachment_id: "remote", media_kind: "image" },
+};
+const single = {
+  optimistic_id: "single", batch_id: null, protocol: "whatsapp", contactId: "42",
+  direction: "out", text: "", timestamp: 2000, known_message_ids: [],
+  optimisticStatus: "sent",
+  attachment: { type: "image/png", name: "same.png", attachment_id: "same.png[0]" },
+};
+// Multi senza slot reale: finisce nei fallback, con timestamp piu' recente.
+const multi = {
+  optimistic_id: "multi", batch_id: "missing-batch", batch_index: 0,
+  protocol: "whatsapp", contactId: "42", direction: "out", text: "",
+  timestamp: 3000, known_message_ids: [], optimisticStatus: "sent",
+  attachment: { type: "image/png", name: "same.png", attachment_id: "same.png[1]" },
+};
+const result = reconcileOptimisticMessages([real], [single, multi], "whatsapp", "42");
+// Il single (batch_id null) ha conservato il match.
+const reconciledSingle = result.optimistic.find((item) => item.batch_id == null);
+assert.equal(reconciledSingle.confirmed_message_id, "real-1");
+// Un solo orfano: il multi fallback, non il single.
+assert.equal(result.visible.length, 1);
+assert.equal(result.visible[0].optimistic_id, "multi");
+assert.equal(result.visible[0].confirmed_message_id, undefined);
+""")
+
+
 def test_submit_message_multi_attachment_builds_batch_optimistics_and_formdata():
     _run_node(r"""
 const assert = require("node:assert/strict");
@@ -466,6 +501,97 @@ assert.equal(images.length, 3);
 assert.deepEqual(images.map((image) => image.src), ["blob:0", "blob:1", "blob:2"]);
 assert.deepEqual(images.map((image) => image.width), [640, 320, 160]);
 assert.deepEqual(revoked, []);
+""")
+
+
+def test_confirmed_message_index_falls_back_to_confirmed_id():
+    """R3: se lo slot batch non esiste la lookup ricade su
+    confirmed_message_id (multi riconciliato via fallback)."""
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const start = app.indexOf("function confirmedMessageIndex(");
+const end = app.indexOf("\nfunction ", start + 1);
+globalThis.window = {
+  SignalTuiReconcile: { messageIdentity: (message, index) => String(message.id ?? index) },
+};
+vm.runInThisContext(app.slice(start, end));
+const messages = [{ id: "other" }, { id: "real-1" }];
+// Slot assente -> fallback su confirmed_message_id.
+assert.equal(
+  confirmedMessageIndex({ batch_id: "b1", batch_index: 3, confirmed_message_id: "real-1" }, messages),
+  1,
+);
+// Slot presente -> priorita' al pairing batch_id+batch_index.
+const slotted = [{ id: "real-x", batch_id: "b1", batch_index: 0 }, { id: "real-1" }];
+assert.equal(
+  confirmedMessageIndex({ batch_id: "b1", batch_index: 0, confirmed_message_id: "real-1" }, slotted),
+  0,
+);
+// Single invariato (nessun batch -> identity).
+assert.equal(confirmedMessageIndex({ batch_id: null, confirmed_message_id: "real-1" }, messages), 1);
+assert.equal(confirmedMessageIndex({ batch_id: null, confirmed_message_id: "nope" }, messages), -1);
+""")
+
+
+def test_render_delivers_preview_when_multi_confirmed_without_batch_slot():
+    """R3: un multi riconciliato via fallback (riga reale senza batch) usa
+    confirmed_message_id e trasferisce comunque la preview locale."""
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const reconcile = fs.readFileSync("./web/static/reconcile.js", "utf8");
+const media = app.slice(app.indexOf("const MEDIA_CACHE_LIMIT"), app.indexOf("\nfunction attachmentName"));
+const render = app.slice(app.indexOf("function messageNodeKey("), app.indexOf("\nasync function loadMessages"));
+globalThis.state = {
+  mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(),
+  objectUrls: new Set(), mediaCache: new Map(),
+  optimistic: [{
+    confirmed_message_id: "real-1", batch_id: "batch-1", batch_index: 0,
+    localPreviewUrl: "blob:0", known_message_ids: [],
+    protocol: "telegram", contactId: "42", direction: "out", text: "", timestamp: 5,
+    attachment: { type: "image/png", name: "foto.png", attachment_id: "foto.png[0]" },
+  }],
+  active: { protocol: "telegram", id: "42" }, userScrolledUp: false,
+};
+const revoked = [];
+globalThis.URL = { createObjectURL: () => "blob:fetched", revokeObjectURL: (url) => revoked.push(url) };
+globalThis.scrollThreadToBottom = () => {};
+globalThis.timestampMilliseconds = (value) => Number(value);
+globalThis.formatTimestamp = () => "";
+globalThis.appendRenderedQuote = () => {};
+const images = [];
+function node(tag) {
+  const value = {
+    tag, className: "", children: [], textContent: "", title: "",
+    append(...items) { this.children.push(...items); },
+    addEventListener() {}, setAttribute() {}, remove() {},
+  };
+  if (tag === "img") images.push(value);
+  return value;
+}
+globalThis.document = { createElement: node };
+globalThis.elements = { messages: { children: [], replaceChildren(...items) { this.children = items; }, append(item) { this.children.push(item); }, scrollTop: 0, scrollHeight: 0, clientHeight: 0 } };
+globalThis.window = {};
+vm.runInThisContext(reconcile);
+state.mediaCache.set("foto.png[0]", { url: "blob:0", width: 640, height: 480 });
+// Riga reale confermata SENZA batch_id/batch_index (storica / fallback).
+const messages = [{
+  id: "real-1", direction: "out", text: "", timestamp: 6,
+  attachment: { type: "image/png", media_kind: "image", name: "foto.png", attachment_id: "mirror-0" },
+}];
+vm.runInThisContext(media);
+vm.runInThisContext(render);
+renderMessages(messages, "telegram");
+assert.equal(messages[0].localPreviewUrl, "blob:0");
+assert.equal(state.mediaCache.get("mirror-0").url, "blob:0");
+assert.equal(state.optimistic[0].localPreviewUrl, undefined);
+assert.equal(images.length, 1);
+assert.equal(images[0].src, "blob:0");
 """)
 
 

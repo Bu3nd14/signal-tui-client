@@ -1176,11 +1176,14 @@ function messageNodeKey(item) {
 // Riguarda la riga reale confermata per un optimistic riconciliato. Per il
 // multi-allegato (batch_id != null) le N righe di Signal condividono lo
 // STESSO msg_id: la lookup per identity sarebbe ambigua (tornerebbe sempre
-// la prima riga, scambiando le preview), quindi si usa lo slot batch.
+// la prima riga, scambiando le preview), quindi si usa lo slot batch. Se lo
+// slot non esiste (multi riconciliato via fallback su righe storiche
+// pre-fix / backend senza persistenza batch) si ricade su confirmed_message_id.
 function confirmedMessageIndex(item, messages) {
   if (item.batch_id != null) {
-    return messages.findIndex((message) =>
+    const slotIndex = messages.findIndex((message) =>
       message.batch_id === item.batch_id && message.batch_index === item.batch_index);
+    if (slotIndex >= 0) return slotIndex;
   }
   return messages.findIndex((message, index) =>
     window.SignalTuiReconcile.messageIdentity(message, index) === String(item.confirmed_message_id));

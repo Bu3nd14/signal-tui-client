@@ -2073,6 +2073,74 @@ class WhatsAppBackend(ChatBackend):
             batch_index=data.get("batch_index"),
         )
 
+    def _merge_batch_slot(self, contact_id: str, entry: dict, data: dict) -> bool:
+        """Fuse the batch slot of a mirror event onto an existing row.
+
+        A WhatsApp multi-attachment send materializes one row per file (WAHA
+        has no batch API), each mirrored with ``batch_id``/``batch_index``.
+        When the real echo wins the race and creates the row first, the batch
+        mirror dedups onto it; without this merge the row keeps a NULL slot and
+        the web reconciliation leaves the optimistic bubbles orphaned.  An
+        existing batch is never overwritten (a row belongs to exactly one
+        batch).
+
+        The fusion is only declared when the DB actually owns the row: if the
+        slot UPDATE touches no row (cache-only row from ``persist=False`` or a
+        DB row that no longer exists) we log and return False, so callers do not
+        push a ``"changed"`` the next fetch cannot reproduce.
+        """
+        batch_id = data.get("batch_id")
+        if batch_id is None or entry.get("batch_id") is not None:
+            return False
+        msg_id = entry.get("id") or data.get("id")
+        if not msg_id:
+            logger.warning(
+                "WhatsApp: batch slot merge skipped, no msg_id contact=%s batch_id=%s",
+                contact_id,
+                batch_id,
+            )
+            return False
+        from protocols.db import _DB_LOCK, DB_FILE
+
+        updated = 0
+        try:
+            with _DB_LOCK:
+                connection = sqlite3.connect(DB_FILE)
+                try:
+                    cursor = connection.execute(
+                        "UPDATE messages SET batch_id = ?, batch_index = ? "
+                        "WHERE protocol = ? AND contact_number = ? "
+                        "AND msg_id = ? AND batch_id IS NULL",
+                        (
+                            batch_id,
+                            data.get("batch_index"),
+                            PROTOCOL_WHATSAPP,
+                            contact_id,
+                            str(msg_id),
+                        ),
+                    )
+                    updated = cursor.rowcount
+                    connection.commit()
+                finally:
+                    connection.close()
+        except Exception:
+            logger.exception("WhatsApp: batch slot merge failed")
+            return False
+        # Cache-only rows (persist=False) or rows missing from the DB cannot
+        # confirm the slot: do not push "changed" for something the DB cannot
+        # show, or the next fetch would resurrect the orphaned bubble.
+        if updated <= 0:
+            logger.warning(
+                "WhatsApp: batch slot merge touched no row contact=%s msg_id=%s batch_id=%s",
+                contact_id,
+                msg_id,
+                batch_id,
+            )
+            return False
+        entry["batch_id"] = batch_id
+        entry["batch_index"] = data.get("batch_index")
+        return True
+
     def _upgrade_outgoing_attachment(
         self, contact_id: str, message: dict, data: dict, ts: int
     ) -> bool:
@@ -2331,7 +2399,10 @@ class WhatsAppBackend(ChatBackend):
                     int(existing.get("timestamp", ts)),
                     incoming_info,
                 )
-            return "changed" if attachment_changed or caption_changed else False
+            batch_changed = self._merge_batch_slot(contact_id, existing, data)
+            if attachment_changed or caption_changed or batch_changed:
+                return "changed"
+            return False
 
         if (
             reconcile
@@ -2395,6 +2466,8 @@ class WhatsAppBackend(ChatBackend):
                 "quote_attachment_id": data.get("quote_attachment_id"),
                 "quote_attachment_path": data.get("quote_attachment_path"),
                 "quote_content_type": data.get("quote_content_type"),
+                "batch_id": data.get("batch_id"),
+                "batch_index": data.get("batch_index"),
             },
         )
         return True

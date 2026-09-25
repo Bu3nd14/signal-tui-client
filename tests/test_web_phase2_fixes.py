@@ -565,6 +565,56 @@ assert.equal(result.optimistic[0].confirmed_message_id, undefined);
     assert completed.returncode == 0, completed.stderr
 
 
+def test_reconcile_multi_falls_back_to_signature_without_batch_match():
+    source = r"""
+const assert = require("node:assert/strict");
+const { reconcileOptimisticMessages } = require("./web/static/reconcile.js");
+const optimistic = (index) => ({
+  optimistic_id: `b1-att${index}`, batch_id: "b1", batch_index: index,
+  protocol: "telegram", contactId: "42", direction: "out", text: "",
+  timestamp: 100 + index, optimisticStatus: "sent", known_message_ids: [],
+  attachment: { type: "image/png", name: `photo-${index}.png`, attachment_id: `local-${index}`, media_kind: "image" },
+});
+const real = (index, id) => ({
+  id, direction: "out", text: "", timestamp: 200 + index,
+  batch_id: null, batch_index: null,
+  attachment: { type: "image/png", name: `photo-${index}.png`, attachment_id: `sent-${index}`, media_kind: "image" },
+});
+
+// Nessun reale con batch: l'optimistic multi cade sul matching generico
+// (signature) invece di restare orfano.
+let result = reconcileOptimisticMessages(
+  [real(0, "r0"), real(1, "r1")], [optimistic(0), optimistic(1)], "telegram", "42",
+);
+const confirmed = result.optimistic
+  .filter((item) => item.confirmed_message_id)
+  .map((item) => item.confirmed_message_id);
+assert.equal(confirmed.length, 2);
+assert.deepEqual(new Set(confirmed), new Set(["r0", "r1"]));
+
+// Con batch_id/batch_index il pairing resta per slot, indipendente dalle
+// signature (entrambe identiche).
+result = reconcileOptimisticMessages(
+  [
+    { ...real(0, "x0"), batch_id: "b1", batch_index: 0 },
+    { ...real(1, "x1"), batch_id: "b1", batch_index: 1 },
+  ],
+  [optimistic(0), optimistic(1)],
+  "telegram",
+  "42",
+);
+const bySlot = Object.fromEntries(
+  result.optimistic.map((item) => [`${item.batch_id}\u0000${item.batch_index}`, item.confirmed_message_id]),
+);
+assert.equal(bySlot["b1\u00000"], "x0");
+assert.equal(bySlot["b1\u00001"], "x1");
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_web_image_retry_recovers_expires_and_aborts():
     source = r"""
 const assert = require("node:assert/strict");

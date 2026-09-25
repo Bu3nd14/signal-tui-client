@@ -1424,6 +1424,194 @@ def test_telegram_manager_batch_mirrors_n_events_with_batch_index(
     ]
 
 
+# ─── Batch slot fusion on echo/mirror dedup (Telegram / WhatsApp) ────────────
+
+
+def _telegram_echo(message_id: str, attachment_id: str | None) -> dict:
+    return {
+        "id": message_id,
+        "text": "",
+        "is_mine": True,
+        "sender": "You",
+        "quote_text": None,
+        "msg_type": "image",
+        "attachment_info": None,
+        "attachment_id": attachment_id,
+        "content_type": "image/png",
+        "media_kind": "image",
+    }
+
+
+def _whatsapp_echo(message_id: str, attachment_id: str | None) -> dict:
+    return {
+        "id": message_id,
+        "text": "",
+        "is_mine": True,
+        "sender": "You",
+        "quote_text": None,
+        "msg_type": "image",
+        "attachment_info": None,
+        "attachment_id": attachment_id,
+        "content_type": "image/png",
+        "media_kind": "image",
+    }
+
+
+@pytest.mark.parametrize("order", ["echo-first", "mirror-first"])
+def test_telegram_batch_slot_fuses_on_echo_mirror_dedup(order):
+    from protocols import db
+
+    backend = TelegramBackend()
+    echo = _telegram_echo("71", "remote-71")
+    mirror = {**echo, "batch_id": "batch-2", "batch_index": 0}
+    first, second = (echo, mirror) if order == "echo-first" else (mirror, echo)
+
+    assert backend.ingest_message("42", first, 1787250931234)
+    backend.ingest_message("42", second, 1787250931234)
+
+    assert len(backend.cache["42"]) == 1
+    assert backend.cache["42"][0]["batch_id"] == "batch-2"
+    assert backend.cache["42"][0]["batch_index"] == 0
+    with sqlite3.connect(db.DB_FILE) as connection:
+        rows = connection.execute(
+            "SELECT batch_id, batch_index FROM messages "
+            "WHERE protocol = 'telegram' AND contact_number = '42'"
+        ).fetchall()
+    assert rows == [("batch-2", 0)]
+
+
+def test_telegram_batch_slots_fuse_per_message():
+    from protocols import db
+
+    backend = TelegramBackend()
+    echoes = [_telegram_echo("71", "remote-71"), _telegram_echo("72", "remote-72")]
+    mirrors = [
+        {**echoes[0], "batch_id": "batch-2", "batch_index": 0},
+        {**echoes[1], "batch_id": "batch-2", "batch_index": 1},
+    ]
+    for message in [*echoes, *mirrors]:
+        backend.ingest_message("42", message, 1787250931234)
+
+    assert len(backend.cache["42"]) == 2
+    assert {message["batch_id"] for message in backend.cache["42"]} == {"batch-2"}
+    assert sorted(message["batch_index"] for message in backend.cache["42"]) == [0, 1]
+    with sqlite3.connect(db.DB_FILE) as connection:
+        rows = connection.execute(
+            "SELECT msg_id, batch_id, batch_index FROM messages "
+            "WHERE protocol = 'telegram' AND contact_number = '42' ORDER BY msg_id"
+        ).fetchall()
+    assert rows == [("71", "batch-2", 0), ("72", "batch-2", 1)]
+
+
+def test_telegram_batch_slot_fuses_onto_optimistic_row():
+    from protocols import db
+
+    backend = TelegramBackend()
+    optimistic = {**_telegram_echo(None, None), "id": None}
+    assert backend.ingest_message("42", optimistic, 1787250931234)
+
+    mirror = {**_telegram_echo("71", None), "batch_id": "batch-1", "batch_index": 0}
+    assert backend.ingest_message("42", mirror, 1787250931234) == "changed"
+
+    assert len(backend.cache["42"]) == 1
+    assert backend.cache["42"][0]["batch_id"] == "batch-1"
+    assert backend.cache["42"][0]["batch_index"] == 0
+    with sqlite3.connect(db.DB_FILE) as connection:
+        assert connection.execute(
+            "SELECT batch_id, batch_index FROM messages "
+            "WHERE protocol = 'telegram' AND contact_number = '42'"
+        ).fetchall() == [("batch-1", 0)]
+
+
+def test_telegram_batch_slot_never_overwrites_existing_batch():
+    backend = TelegramBackend()
+    mirror = {
+        **_telegram_echo("71", "remote-71"),
+        "batch_id": "batch-1",
+        "batch_index": 0,
+    }
+    assert backend.ingest_message("42", mirror, 1787250931234)
+    other = {
+        **_telegram_echo("71", "remote-71"),
+        "batch_id": "batch-9",
+        "batch_index": 3,
+    }
+    backend.ingest_message("42", other, 1787250931234)
+
+    assert backend.cache["42"][0]["batch_id"] == "batch-1"
+    assert backend.cache["42"][0]["batch_index"] == 0
+
+
+@pytest.mark.parametrize("order", ["echo-first", "mirror-first"])
+def test_whatsapp_batch_slot_fuses_on_echo_mirror_dedup(order, tmp_path, monkeypatch):
+    from protocols import db
+
+    backend = _wa_batch_backend(tmp_path, monkeypatch)
+    contact = "39333@c.us"
+    echo = _whatsapp_echo("wa-71", "waha-remote")
+    mirror = {**echo, "batch_id": "batch-9", "batch_index": 1}
+    first, second = (echo, mirror) if order == "echo-first" else (mirror, echo)
+
+    assert backend.ingest_message(contact, first, 1787250931234)
+    backend.ingest_message(contact, second, 1787250931234)
+
+    assert len(backend.cache[contact]) == 1
+    assert backend.cache[contact][0]["batch_id"] == "batch-9"
+    assert backend.cache[contact][0]["batch_index"] == 1
+    with sqlite3.connect(db.DB_FILE) as connection:
+        rows = connection.execute(
+            "SELECT batch_id, batch_index FROM messages "
+            "WHERE protocol = 'whatsapp' AND contact_number = ?",
+            (contact,),
+        ).fetchall()
+    assert rows == [("batch-9", 1)]
+
+
+def test_whatsapp_batch_slot_fuses_onto_optimistic_row(tmp_path, monkeypatch):
+    from protocols import db
+
+    backend = _wa_batch_backend(tmp_path, monkeypatch)
+    contact = "39333@c.us"
+    optimistic = {**_whatsapp_echo(None, None), "id": None}
+    assert backend.ingest_message(contact, optimistic, 1787250931234)
+
+    mirror = {
+        **_whatsapp_echo("wa-71", None),
+        "batch_id": "batch-9",
+        "batch_index": 1,
+    }
+    assert backend.ingest_message(contact, mirror, 1787250931234) == "changed"
+
+    assert len(backend.cache[contact]) == 1
+    assert backend.cache[contact][0]["batch_id"] == "batch-9"
+    with sqlite3.connect(db.DB_FILE) as connection:
+        assert connection.execute(
+            "SELECT batch_id, batch_index FROM messages "
+            "WHERE protocol = 'whatsapp' AND contact_number = ?",
+            (contact,),
+        ).fetchall() == [("batch-9", 1)]
+
+
+def test_whatsapp_batch_slot_never_overwrites_existing_batch(tmp_path, monkeypatch):
+    backend = _wa_batch_backend(tmp_path, monkeypatch)
+    contact = "39333@c.us"
+    mirror = {
+        **_whatsapp_echo("wa-71", "waha-remote"),
+        "batch_id": "batch-1",
+        "batch_index": 0,
+    }
+    assert backend.ingest_message(contact, mirror, 1787250931234)
+    other = {
+        **_whatsapp_echo("wa-71", "waha-remote"),
+        "batch_id": "batch-9",
+        "batch_index": 3,
+    }
+    backend.ingest_message(contact, other, 1787250931234)
+
+    assert backend.cache[contact][0]["batch_id"] == "batch-1"
+    assert backend.cache[contact][0]["batch_index"] == 0
+
+
 # ─── TUI routing of the "sent-mirror" event (design §4.6.1) ──────────────────
 
 
