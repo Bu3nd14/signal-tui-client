@@ -105,6 +105,10 @@ class TestChatBackendABC:
         """Default needs_pairing is False."""
         assert _MinimalBackend().needs_pairing is False
 
+    def test_default_is_connected_false(self):
+        """Default is_connected is False for a freshly constructed backend."""
+        assert _MinimalBackend().is_connected is False
+
     def test_default_get_pairing_qr_none(self):
         """Default get_pairing_qr returns None."""
         assert asyncio.run(_MinimalBackend().get_pairing_qr()) is None
@@ -141,6 +145,16 @@ class TestSignalBackend:
 
     def test_protocol_signal(self):
         assert SignalBackend.protocol == PROTOCOL_SIGNAL
+
+    def test_is_connected_false_before_daemon_session(self):
+        """is_connected mirrors _use_daemon, not contact/session presence."""
+        backend = SignalBackend()
+        assert backend.is_connected is False
+
+    def test_is_connected_true_once_daemon_session_up(self):
+        backend = SignalBackend()
+        backend._use_daemon = True
+        assert backend.is_connected is True
 
     def test_to_chat_contact(self):
         """Contact legacy → ChatContact con protocol='signal'."""

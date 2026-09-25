@@ -86,6 +86,17 @@ class DocumentAttributeAnimated:
     pass
 
 
+class TestTelegramStatus:
+    def test_is_connected_false_before_client_up(self):
+        backend = _backend()
+        assert backend.is_connected is False
+
+    def test_is_connected_true_once_client_up(self):
+        backend = _backend()
+        backend._connected = True
+        assert backend.is_connected is True
+
+
 class TestTelegramContacts:
     def test_attachment_path_returns_existing_file_only(self, tmp_path):
         backend = _backend()
