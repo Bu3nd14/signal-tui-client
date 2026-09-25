@@ -4,7 +4,8 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
-COMPOSE=(docker compose -f "$COMPOSE_FILE")
+RESOURCES_FILE="$PROJECT_DIR/docker-compose.resources.yml"
+DOCKER_LIMITS="${WAHA_DOCKER_LIMITS:-1}"
 WAIT=1
 WA_PORT="${WHATSAPP_API_PORT:-3005}"
 API_URL="${WHATSAPP_API_URL:-http://127.0.0.1:${WA_PORT}}"
@@ -17,7 +18,7 @@ die() { echo "❌ $*" >&2; exit 1; }
 info() { echo "ℹ️  $*"; }
 
 usage() {
-    echo "Uso: $0 [--no-wait]"
+    echo "Uso: $0 [--no-wait] [--no-docker-limits]"
 }
 
 get_signal_number() {
@@ -170,8 +171,9 @@ restart_signal_daemon() {
 
 for arg in "$@"; do
     case "$arg" in
-        --no-wait) WAIT=0 ;;
-        --help|-h) usage; exit 0 ;;
+        --no-wait)           WAIT=0 ;;
+        --no-docker-limits)  DOCKER_LIMITS=0 ;;
+        --help|-h)           usage; exit 0 ;;
         *) die "Opzione sconosciuta: $arg" ;;
     esac
 done
@@ -181,6 +183,11 @@ restart_signal_daemon
 command -v docker >/dev/null 2>&1 || die "docker non trovato. Installa Docker e riprova."
 docker compose version >/dev/null 2>&1 || die "Docker Compose non disponibile. Installa il plugin Docker Compose e riprova."
 [ -f "$COMPOSE_FILE" ] || die "File Compose non trovato: $COMPOSE_FILE"
+
+COMPOSE=(docker compose -f "$COMPOSE_FILE")
+if [ "$DOCKER_LIMITS" -eq 1 ]; then
+    COMPOSE+=(-f "$RESOURCES_FILE")
+fi
 
 services="$("${COMPOSE[@]}" config --services)" || die "Impossibile leggere i servizi dal file Compose."
 has_whatsapp=0

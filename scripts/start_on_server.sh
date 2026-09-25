@@ -7,13 +7,15 @@
 # SSH) senza dipendere dagli script di handover che girano sul locale.
 #
 # Uso (dal server, dentro /root/signal-tui-client):
-#   ./scripts/start_on_server.sh start   # WAHA + TUI + Web UI (default)
-#   ./scripts/start_on_server.sh stop    # spegne TUI + WAHA in modo pulito
-#   ./scripts/start_on_server.sh status  # stato attuale
+#   ./scripts/start_on_server.sh start                   # WAHA + TUI + Web UI (default, cap CPU/RAM attivi)
+#   ./scripts/start_on_server.sh start --no-docker-limits # come sopra, senza cap CPU/RAM su WAHA
+#   ./scripts/start_on_server.sh stop                     # spegne TUI + WAHA in modo pulito
+#   ./scripts/start_on_server.sh status                   # stato attuale
 #
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export WAHA_DOCKER_LIMITS="${WAHA_DOCKER_LIMITS:-1}"
 
 info() { echo "ℹ️  $*"; }
 ok()   { echo "✅ $*"; }
@@ -70,9 +72,15 @@ status() {
     ss -tlnp 2>/dev/null | grep -q ":4242" && echo "Web UI: in ascolto su 4242" || echo "Web UI: spenta"
 }
 
+case "${2:-}" in
+    --no-docker-limits) WAHA_DOCKER_LIMITS=0 ;;
+    "") ;;
+    *) die "Opzione sconosciuta: $2" ;;
+esac
+
 case "${1:-start}" in
     start)  start_all ;;
     stop)   stop_all ;;
     status) status ;;
-    *) die "uso: $0 {start|stop|status}" ;;
+    *) die "uso: $0 {start|stop|status} [--no-docker-limits]" ;;
 esac

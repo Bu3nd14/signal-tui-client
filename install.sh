@@ -14,6 +14,7 @@
 #   ./install.sh --update            # aggiorna signal-cli all'ultima versione
 #   ./install.sh --no-web           # non installare le dipendenze opzionali della Web UI
 #   ./install.sh --aliases           # installa solo gli alias shell della Web UI
+#   ./install.sh --no-docker-limits  # avvia WAHA senza i cap CPU/RAM (default: applicati)
 #   ./install.sh --help              # mostra questo aiuto
 #
 set -euo pipefail
@@ -52,6 +53,7 @@ DO_WHATSAPP=0
 DO_CHECK_WHATSAPP=0
 DO_ALIASES_ONLY=0
 DO_WEB=1
+DO_DOCKER_LIMITS=1
 SPECIFIC_VERSION=""
 
 # ─── Parsing argomenti ────────────────────────────────────────────────────────
@@ -71,6 +73,10 @@ Opzioni:
   --check-whatsapp     Verifica i prerequisiti WhatsApp (Docker, porte, firewall)
   --no-web            Non installare le dipendenze opzionali della Web UI (requirements-web.txt)
   --aliases            Installa solo gli alias shell della Web UI
+  --no-docker-limits   Avvia WAHA senza i cap CPU/RAM (default: applicati via
+                       docker-compose.resources.yml; disattiva se il tuo host
+                       non delega il controller cgroup memory, es. LXC senza
+                       nesting=1 — vedi README)
   --help               Mostra questo aiuto
 
 Esempi:
@@ -79,6 +85,7 @@ Esempi:
   ./install.sh --update                 # aggiorna signal-cli
   ./install.sh --check-whatsapp         # controlla solo prerequisiti WhatsApp
   ./install.sh --whatsapp               # avvia WAHA (WhatsApp HTTP API)
+  ./install.sh --whatsapp --no-docker-limits  # avvia WAHA senza cap CPU/RAM
   ./install.sh --aliases                # installa solo gli alias della Web UI
 EOF
 }
@@ -92,6 +99,7 @@ while [ $# -gt 0 ]; do
         --check-whatsapp)   DO_CHECK_WHATSAPP=1; shift ;;
         --no-web)           DO_WEB=0; shift ;;
         --aliases)          DO_ALIASES_ONLY=1; shift ;;
+        --no-docker-limits) DO_DOCKER_LIMITS=0; shift ;;
         --version)
             [ $# -lt 2 ] && die "--version richiede un argomento (es. 0.14.7)"
             SPECIFIC_VERSION="$2"; shift 2 ;;
@@ -403,8 +411,14 @@ setup_whatsapp() {
     if [ "$should_start" -eq 1 ]; then
         ensure_waha_env
         echo
-        info "Avvio WAHA via Docker Compose..."
-        docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d
+        local compose_args=(-f "$PROJECT_DIR/docker-compose.yml")
+        if [ "$DO_DOCKER_LIMITS" -eq 1 ]; then
+            compose_args+=(-f "$PROJECT_DIR/docker-compose.resources.yml")
+            info "Avvio WAHA via Docker Compose (cap CPU/RAM attivi — usa --no-docker-limits per disattivarli)..."
+        else
+            info "Avvio WAHA via Docker Compose (--no-docker-limits: nessun cap CPU/RAM)..."
+        fi
+        docker compose "${compose_args[@]}" up -d
         ok "WAHA avviato. API: http://127.0.0.1:${WA_PORT}"
         echo
         info "In attesa che WAHA sia pronto..."

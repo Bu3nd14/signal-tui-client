@@ -12,14 +12,17 @@
 # The session and media files persist in ./whatsapp-data (git-ignored).
 # Pair the device with:  python3 link_whatsapp.py
 #
-# CPU/RAM caps: NOT set here by default. `deploy.resources.limits` requires
-# the memory cgroup controller to be delegated to the Docker host — inside an
-# unprivileged Proxmox/LXC container without `nesting=1` (and cgroup
-# delegation) this makes the container fail to start with:
+# CPU/RAM caps: NOT set here — this base file alone (a bare `docker compose
+# up -d`) never applies them. install.sh / scripts/*.sh / launcher.py DO
+# layer docker-compose.resources.yml on top BY DEFAULT (1.5 CPU / 2GB RAM on
+# the WAHA container); pass --no-docker-limits to skip it. Do that if your
+# host doesn't delegate the memory cgroup controller — e.g. an unprivileged
+# Proxmox/LXC container without `nesting=1` — where `deploy.resources.limits`
+# makes the container fail to start with:
 #   "error setting cgroup config for procHooks process: ... memory.max: no
 #   such file or directory"
-# If your host supports cgroup resource limits and you want them enforced,
-# layer docker-compose.resources.yml on top:
+# To apply the caps with a bare docker compose invocation, layer the file
+# yourself:
 #   docker compose -f docker-compose.yml -f docker-compose.resources.yml up -d
 #
 
