@@ -573,6 +573,7 @@ class TestWahaEnv:
             "info() { :; }; ok() { :; }; err() { :; }; warn() { :; }\n"
             "check_port() { return 0; }; check_firewall() { :; }\n"
             f"PROJECT_DIR={str(tmp_path)!r}\nWA_PORT=3005\nWEBHOOK_PORT=8088\n"
+            "DO_DOCKER_LIMITS=1\n"
             'C_BLUE=""\nC_BOLD=""\nC_RESET=""\n'
             f"{ensure}\n{setup}\nsetup_whatsapp 1\n",
             encoding="utf-8",
@@ -588,10 +589,54 @@ class TestWahaEnv:
         )
 
         assert result.returncode == 0, result.stderr
-        assert "compose -f" in docker_log.read_text(encoding="utf-8")
+        docker_args = docker_log.read_text(encoding="utf-8")
+        assert "compose -f" in docker_args
+        assert "docker-compose.resources.yml" in docker_args
         curl_args = curl_log.read_text(encoding="utf-8")
         assert "X-Api-Key:" in curl_args
         assert "/api/sessions" in curl_args
+
+    def test_start_no_docker_limits_skips_resources_overlay(self, tmp_path: Path):
+        fake_bin = tmp_path / "start-fakebin"
+        fake_bin.mkdir()
+        docker_log = tmp_path / "docker.log"
+        curl_log = tmp_path / "curl.log"
+        _write_stub(
+            fake_bin / "docker",
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {str(docker_log)!r}\nexit 0\n",
+        )
+        _write_stub(
+            fake_bin / "curl",
+            f"#!/bin/sh\nprintf '%s\\n' \"$*\" >> {str(curl_log)!r}\nprintf '200'\n",
+        )
+        _write_stub(fake_bin / "uname", "#!/bin/sh\necho x86_64\n")
+        ensure = _extract_function(INSTALL_SCRIPT, "ensure_waha_env")
+        setup = _extract_function(INSTALL_SCRIPT, "setup_whatsapp")
+        script = tmp_path / "start-whatsapp.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            "info() { :; }; ok() { :; }; err() { :; }; warn() { :; }\n"
+            "check_port() { return 0; }; check_firewall() { :; }\n"
+            f"PROJECT_DIR={str(tmp_path)!r}\nWA_PORT=3005\nWEBHOOK_PORT=8088\n"
+            "DO_DOCKER_LIMITS=0\n"
+            'C_BLUE=""\nC_BOLD=""\nC_RESET=""\n'
+            f"{ensure}\n{setup}\nsetup_whatsapp 1\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            ["bash", str(script)],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            timeout=30,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
+        docker_args = docker_log.read_text(encoding="utf-8")
+        assert "compose -f" in docker_args
+        assert "docker-compose.resources.yml" not in docker_args
 
 
 class TestVenv:
