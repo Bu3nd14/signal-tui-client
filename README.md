@@ -32,6 +32,7 @@ A terminal-based (TUI) multi-protocol messaging client built with [Textual](http
 - [Virtual environment](#virtual-environment-optional-but-recommended)
 - [Updating signal-cli](#updating-signal-cli)
 - [Device linking](#device-linking)
+- [Python launcher (optional alternative to the shell scripts)](#python-launcher-optional-alternative-to-the-shell-scripts)
 - [Usage](#usage)
   - [Controls](#controls)
   - [Composing messages](#composing-messages)
@@ -207,8 +208,8 @@ gracefully skips WhatsApp.
 #### One-command startup (Docker)
 
 ```bash
-docker compose up -d            # start WAHA (WhatsApp HTTP API) on http://127.0.0.1:3005
-./scripts/start_whatsapp.sh     # (optional) start + wait until the API is ready
+docker compose up -d            # start WAHA (WhatsApp HTTP API) on http://127.0.0.1:3005 — no CPU/RAM caps
+./scripts/start_whatsapp.sh     # (optional) start + wait until the API is ready — CPU/RAM caps applied by default
 ```
 
 or use the installer:
@@ -216,6 +217,10 @@ or use the installer:
 ```bash
 ./install.sh --whatsapp
 ```
+
+`./scripts/start_whatsapp.sh` and `./install.sh --whatsapp` both apply the WAHA container's CPU/RAM
+caps (1.5 CPU / 2GB RAM) by default; pass `--no-docker-limits` to either to skip them. A bare
+`docker compose up -d` never applies the caps (see [below](#running-without-cpuram-caps---no-docker-limits)).
 
 The installer creates `.env` with secure WAHA credentials and `0600` permissions,
 preserving any existing WAHA or Telegram values. The API then listens on
@@ -240,6 +245,29 @@ backend at any compatible Baileys API.
 > `WAHA_API_KEY` from `.env` automatically; it can also be set explicitly with
 > `WHATSAPP_API_KEY` (see below). To grab the current values from a running
 > container: `docker exec signal-tui-whatsapp env | grep WAHA_API_KEY`.
+
+#### Running without CPU/RAM caps (`--no-docker-limits`)
+
+`./install.sh --whatsapp`, `./scripts/start_whatsapp.sh`, `./scripts/restart_backend.sh`,
+`./scripts/start_on_server.sh start`, and `./scripts/tui_handover.sh {to-server,to-local}` all layer
+`docker-compose.resources.yml` on top of `docker-compose.yml` **by default**, capping the WAHA
+container at 1.5 CPU / 2GB RAM. Pass `--no-docker-limits` to any of them to skip that:
+
+```bash
+./scripts/start_whatsapp.sh --no-docker-limits
+./install.sh --whatsapp --no-docker-limits
+```
+
+> **Running inside an unprivileged Proxmox/LXC container:** those CPU/RAM caps need the memory
+> cgroup controller delegated to the Docker host. Without it, `docker compose up` fails with
+> `error setting cgroup config for procHooks process: ... memory.max: no such file or directory`.
+> Either fix delegation on the Proxmox **host** with `pct set <vmid> --features nesting=1,keyctl=1`
+> (then reboot the CT), or pass `--no-docker-limits` to skip the caps entirely. A bare
+> `docker compose up -d` (no script/launcher involved) never applies the caps in the first place —
+> to apply them yourself, layer the file manually:
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.resources.yml up -d
+> ```
 
 #### Configuration (env or `config.json`)
 
@@ -321,6 +349,30 @@ Press `Ctrl+L`, select **Telegram**, and scan the QR code with your phone.
 > field after scanning the QR. Enter your 2FA password and press Enter.
 >
 > If you don't have 2FA, the login completes automatically.
+
+## Python launcher (optional alternative to the shell scripts)
+
+`launcher.py` is a stdlib-only Python reimplementation of every operational shell script in this
+repo (`install.sh`, `scripts/*.sh`, `profiling/run_*.sh`, `tests/run_regression_tests.sh`). It's an
+**optional alternative** — the original scripts remain the primary, documented way to do each of
+these things and are not going away; use whichever you're more comfortable with. `launcher.py`
+mainly helps on platforms where bash isn't the default shell (e.g. Windows without WSL), or if you
+just prefer not to shell out.
+
+| Task | Shell script | `launcher.py` equivalent |
+|---|---|---|
+| Full install | `./install.sh [options]` | `python3 launcher.py install [options]` |
+| Shell aliases only | `./install.sh --aliases` | `python3 launcher.py aliases` |
+| Start/stop WAHA | `./scripts/start_whatsapp.sh [--no-wait\|--stop]` | `python3 launcher.py whatsapp start\|stop [--no-wait]` |
+| Restart signal-cli + WAHA | `./scripts/restart_backend.sh [--no-wait]` | `python3 launcher.py backend-restart [--no-wait]` |
+| Run the client on a server | `./scripts/start_on_server.sh {start\|stop\|status}` | `python3 launcher.py server start\|stop\|status` |
+| Local ↔ remote handover | `./scripts/tui_handover.sh {to-server\|to-local\|status}` | `python3 launcher.py handover to-server\|to-local\|status` |
+| CPU/I-O profiling | `./profiling/run_pyspy.sh` / `run_strace.sh` `[duration]` | `python3 launcher.py profile pyspy\|strace [duration]` |
+| Regression tests | `./tests/run_regression_tests.sh` | `python3 launcher.py test` |
+
+Same flags, same behavior (the alias block it writes is byte-for-byte identical to `install.sh`'s),
+same exit codes — pick whichever entry point fits your environment. `python3 launcher.py --help`
+lists every command; each subcommand also takes `--help`.
 
 ## Virtual environment (optional but recommended)
 
@@ -590,7 +642,7 @@ below it, labeled with that protocol's icon and color.
 
 ## Web reader aliases
 
-Three shell aliases (bash/zsh) launch the optional web reader and manage its lifecycle:
+Three shell aliases (bash/zsh/ash) launch the optional web reader and manage its lifecycle:
 
 The automatic installer enables the Web UI in `config.json`, so a normal
 `python3 signal_tui.py` start also serves it locally on `http://127.0.0.1:4242`.
@@ -622,6 +674,21 @@ curl -H "Authorization: Bearer $SIGNAL_TUI_WEB_TOKEN" http://127.0.0.1:4242/api/
 The Bearer token lives in `config.json` under `web.token`; the web server also accepts it via the
 `SIGNAL_TUI_WEB_TOKEN` environment variable. The default port is `4242`.
 
+### Running without a token (`--web-no-auth`)
+
+For a trusted local/LAN setup where you don't want to deal with the Bearer token at all, start the
+web server with `--web-no-auth`:
+
+```bash
+python3 signal_tui.py --web --web-no-auth
+```
+
+This drops authentication entirely on every REST, media, and WebSocket endpoint — **anyone who can
+reach `--web-host`/`--web-port` gets full read/send access with no credential**. The browser also
+skips the login dialog automatically. Only use this on a network you trust (e.g. `127.0.0.1` only,
+or a LAN behind your own firewall); never combine it with `--web-host 0.0.0.0` on a machine exposed
+to the internet.
+
 ### Web UI
 
 The optional web reader gives read-only access to conversations and attachments from a browser:
@@ -635,16 +702,17 @@ default; pass `--apply` to apply the cleanup).
 
 ### Installing the aliases
 
-Automatic install — detects bash/zsh and writes the real project path:
+Automatic install — detects bash/zsh/ash and writes the real project path:
 
 ```bash
 ./install.sh --aliases
 ```
 
-Or manually copy the alias block from [docs/ALIASES.md](docs/ALIASES.md) into `~/.bashrc` (bash) or
-`~/.zshrc` (zsh), then `source ~/.bashrc` (or reopen the shell).
+Or manually copy the alias block from [docs/ALIASES.md](docs/ALIASES.md) into `~/.bashrc` (bash),
+`~/.zshrc` (zsh), or `~/.ashrc` (ash — make sure `$ENV` points there), then reload the file (or
+reopen the shell).
 
-> **Compatibility:** bash and zsh are supported; other shells (fish, dash/sh) are not — see
+> **Compatibility:** bash, zsh, and ash are supported; other shells (fish, dash/sh) are not — see
 > [docs/ALIASES.md](docs/ALIASES.md).
 
 ## Native inline images (kitty graphics protocol)
@@ -848,6 +916,8 @@ signal-tui-client/
 ├── docker-compose.yml         # WAHA (WhatsApp HTTP API) Docker container
 ├── .env.example               # Template for WAHA + Telegram credentials
 ├── install.sh                 # Automatic installation script
+├── launcher.py                # Optional Python alternative to the shell scripts
+├── launcher/                  # launcher.py's command implementations
 ├── Makefile                   # Shared commands: make test / lint / coverage / live-test
 ├── pyproject.toml             # Shared pytest / coverage / ruff config
 ├── .github/workflows/ci.yml   # CI: lint + test (3.12/3.13 matrix) + coverage gate + Codecov

@@ -354,6 +354,20 @@ class ChatBackend(ABC):
         if contact not in self.contacts:
             self.contacts.append(contact)
 
+    # ─── Status ───────────────────────────────────────────────────────
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether the backend has an active session right now.
+
+        Default ``False`` (a freshly constructed, un-connected backend).
+        Subclasses override this with their own readiness flag so callers
+        (e.g. the web UI's backend status badge) reflect the *real* session
+        state instead of inferring it from whether any contacts happen to be
+        loaded — a chat with zero conversations is still connected.
+        """
+        return False
+
     # ─── Pairing ──────────────────────────────────────────────────────
 
     @property
