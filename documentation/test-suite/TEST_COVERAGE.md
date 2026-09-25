@@ -47,6 +47,7 @@ Legenda: **Robusta** = suite dedicata ampia; **Coperta** = test presenti ma su p
 |---|---|---|
 | Lock istanza singola / crash log entry point | Coperta | `test_signal_tui_lock` (crash log non verificato direttamente) |
 | `install.sh` | Coperta | `test_install_script` |
+| `launcher.py` / `launcher/*.py` (alternativa Python opzionale agli script bash) | Coperta | `test_launcher_cli`, `test_launcher_install`, `test_launcher_whatsapp`, `test_launcher_aliases`, `test_launcher_misc` |
 | docker-compose (extra_hosts) | Parziale | `test_docker_compose_extra_hosts` (2 test puntuali) |
 | Script CLI standalone (`link_account.py`, `link_whatsapp.py`, `purge_whatsapp_cache.py`) | Lacuna | la logica QR è coperta (`test_qr_ascii`, device link screen) ma gli script come processi no |
 | Script migrazione one-shot (`migrate_cache_*.py`) | Coperta | `test_migrate_sqlite/protocol/status` |
