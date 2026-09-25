@@ -15,10 +15,12 @@ Textual reactive event loop.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from models import ChatContact, ChatEvent
 
@@ -111,6 +113,71 @@ class ChatBackend(ABC):
         """Blocking image send for callers running in a worker thread."""
         raise NotImplementedError
 
+    def send_attachments_sync(
+        self,
+        contact_id: str,
+        file_paths: list[Path],
+        *,
+        captions: list[str | None],
+        mime_types: list[str],
+        media_kinds: list[str | None],
+        filenames: list[str | None],
+        batch_id: str | None = None,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> list[str]:
+        """Blocking multi-attachment send for callers in a worker thread.
+
+        Default implementation: loop over ``send_attachment_sync`` one file
+        at a time.  Backends with a native batch API (Signal attachment
+        lists, Telegram albums) override this with a single optimized call.
+        ``captions`` carries one caption per file (the web UI only fills the
+        first one); quote/reply metadata applies to the first file only.
+        Optional kwargs are forwarded only when the single-send signature
+        accepts them (``quote_attachments`` exists on Signal only).
+        """
+        parameters = inspect.signature(self.send_attachment_sync).parameters
+        var_keyword = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
+        def accepted(name: str) -> bool:
+            return var_keyword or name in parameters
+
+        message_ids: list[str] = []
+        for index, file_path in enumerate(file_paths):
+            optional: dict[str, Any] = {
+                "media_kind": media_kinds[index],
+                "filename": filenames[index],
+            }
+            if index == 0:
+                optional.update(
+                    quote_timestamp=quote_timestamp,
+                    quote_author=quote_author,
+                    quote_message=quote_message,
+                    reply_to_message_id=reply_to_message_id,
+                    quote_attachments=quote_attachments,
+                )
+            kwargs = {
+                name: value
+                for name, value in optional.items()
+                if value is not None and accepted(name)
+            }
+            message_ids.append(
+                self.send_attachment_sync(
+                    contact_id,
+                    file_path,
+                    caption=captions[index],
+                    mime_type=mime_types[index],
+                    **kwargs,
+                )
+            )
+        return message_ids
+
     def enqueue_sent_message(
         self,
         contact_id: str,
@@ -124,8 +191,24 @@ class ChatBackend(ABC):
         attachment_path: Path | None = None,
         mime_type: str | None = None,
         filename: str | None = None,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
     ) -> None:
         """Publish a successful facade send through the normal receive queue."""
+
+    def enqueue_sent_notification(
+        self,
+        contact_id: str,
+        message_id: str,
+        timestamp: int,
+        batch_id: str | None = None,
+    ) -> None:
+        """Notify the UI that a batch send already mirrored its own rows.
+
+        The Signal backend overrides this to publish the lightweight
+        ``sent-mirror`` event after its send barrier materialized the mirror
+        rows; the default is a no-op.
+        """
 
     @abstractmethod
     async def mark_read(self, contact_id: str) -> None:

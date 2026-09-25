@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from models import ChatContact
+from protocols.base import ChatBackend
 
 TOKEN = "correct-secret"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -31,6 +32,7 @@ class FakeManager:
         self.paths = dict(paths or {})
         self.send_calls = []
         self.attachment_calls = []
+        self.attachments_calls = []
 
     def list_contacts(self):
         return list(self.contacts)
@@ -51,6 +53,50 @@ class FakeManager:
             (protocol, contact_id, path, kwargs, Path(path).exists())
         )
         return "attachment-id"
+
+    def send_attachments_sync(
+        self,
+        protocol,
+        contact_id,
+        file_paths,
+        *,
+        batch_id=None,
+        captions=(),
+        mime_types=(),
+        media_kinds=(),
+        filenames=(),
+        **kwargs,
+    ):
+        self.attachments_calls.append(
+            {
+                "protocol": protocol,
+                "contact_id": contact_id,
+                "paths": [Path(path) for path in file_paths],
+                "batch_id": batch_id,
+                "captions": list(captions),
+                "mime_types": list(mime_types),
+                "media_kinds": list(media_kinds),
+                "filenames": list(filenames),
+                "kwargs": dict(kwargs),
+                "existed_during_send": [Path(path).exists() for path in file_paths],
+            }
+        )
+        message_ids = []
+        for index, file_path in enumerate(file_paths):
+            per_file = dict(kwargs) if index == 0 else {}
+            message_ids.append(
+                self.send_attachment_sync(
+                    protocol,
+                    contact_id,
+                    file_path,
+                    caption=captions[index] if index < len(captions) else None,
+                    mime_type=mime_types[index],
+                    media_kind=media_kinds[index] if index < len(media_kinds) else None,
+                    filename=filenames[index] if index < len(filenames) else None,
+                    **per_file,
+                )
+            )
+        return message_ids
 
 
 def make_app(manager, *, required: bool = True):
@@ -393,12 +439,19 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
-const helper = app.slice(app.indexOf("function mediaKindFromMime("), app.indexOf("\nfunction clearStagedAttachment"));
+const helper = app.slice(app.indexOf("function mediaKindFromMime("), app.indexOf("\nfunction clearStagedAttachments"));
 const submit = helper + "\n" + app.slice(app.indexOf("async function submitMessage("), app.indexOf("\nfunction encodeToken"));
 globalThis.state = {
   sending: false,
   active: { id: "alice", protocol: "signal" },
-  stagedAttachment: { file: new Blob(["image"], { type: "image/png" }), filename: "photo.png", previewUrl: "blob:photo" },
+  stagedAttachments: [{
+    file: new Blob(["image"], { type: "image/png" }),
+    filename: "photo.png",
+    previewUrl: "blob:photo",
+    previewWidth: 640,
+    previewHeight: 480,
+    attachmentId: "photo.png[0]",
+  }],
   replyTo: null,
   messages: [],
   optimistic: [],
@@ -409,7 +462,10 @@ globalThis.window = { SignalTuiReconcile: { messageIdentity: (message) => messag
 globalThis.resizeComposer = () => {};
 globalThis.updateComposer = () => {};
 globalThis.renderMessages = () => {};
-globalThis.clearStagedAttachment = () => { state.stagedAttachment = null; };
+const cached = [];
+globalThis.cacheMedia = (key, url, width, height) => cached.push([key, url, width, height]);
+let clearedWithOptions = null;
+globalThis.clearStagedAttachments = (options) => { clearedWithOptions = options; state.stagedAttachments = []; };
 globalThis.showError = assert.fail;
 let request;
 globalThis.apiFetch = async (url, options) => { request = { url, options }; return { status: 200 }; };
@@ -420,9 +476,17 @@ vm.runInThisContext(submit);
   assert.equal(state.optimistic[0].text, "la caption");
   assert.equal(state.optimistic[0].attachment.type, "image/png");
   assert.equal(state.optimistic[0].attachment.media_kind, "image");
+  assert.equal(state.optimistic[0].attachment.attachment_id, "photo.png[0]");
   assert.equal(state.optimistic[0].localPreviewUrl, "blob:photo");
+  // Single-attachment: percorso legacy, niente batch.
+  assert.equal(state.optimistic[0].batch_id, null);
+  assert.equal(state.optimistic[0].batch_index, null);
+  assert.deepEqual(cached, [["photo.png[0]", "blob:photo", 640, 480]]);
+  assert.deepEqual(clearedWithOptions, { revoke: false });
   assert.equal(request.url, "/api/send");
   assert.equal(request.options.body.get("text"), "la caption");
+  assert.equal(request.options.body.getAll("file").length, 1);
+  assert.equal(request.options.body.get("batch_id"), null);
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
     completed = subprocess.run(
@@ -756,6 +820,286 @@ def test_backend_manager_send_attachment_sync_routes_to_backend(tmp_path):
     )
 
 
+class _SingleSendBackend(ChatBackend):
+    """Minimal backend honouring only the base ``send_attachment_sync`` contract."""
+
+    protocol = "whatsapp"
+
+    def __init__(self):
+        self.contacts: list[ChatContact] = []
+        self.calls = []
+
+    async def connect(self):
+        return None
+
+    async def disconnect(self):
+        return None
+
+    async def list_contacts(self):
+        return []
+
+    async def send_message(self, contact_id, text, **kwargs):
+        return "m"
+
+    async def mark_read(self, contact_id):
+        return None
+
+    async def receive(self):
+        yield  # pragma: no cover - abstract async generator contract
+
+    def send_attachment_sync(
+        self,
+        contact_id,
+        file_path,
+        *,
+        caption=None,
+        mime_type,
+        quote_timestamp=None,
+        quote_author=None,
+        quote_message=None,
+        reply_to_message_id=None,
+        filename=None,
+    ):
+        self.calls.append(
+            {
+                "caption": caption,
+                "mime_type": mime_type,
+                "filename": filename,
+                "quote_timestamp": quote_timestamp,
+                "quote_author": quote_author,
+                "quote_message": quote_message,
+                "reply_to_message_id": reply_to_message_id,
+            }
+        )
+        return f"id-{len(self.calls)}"
+
+
+class _ExtendedSingleSendBackend(_SingleSendBackend):
+    """Signal-like backend whose single send also accepts the extra kwargs."""
+
+    protocol = "signal"
+
+    def send_attachment_sync(
+        self,
+        contact_id,
+        file_path,
+        *,
+        caption=None,
+        mime_type,
+        quote_timestamp=None,
+        quote_author=None,
+        quote_message=None,
+        reply_to_message_id=None,
+        media_kind=None,
+        filename=None,
+        quote_attachments=None,
+    ):
+        message_id = super().send_attachment_sync(
+            contact_id,
+            file_path,
+            caption=caption,
+            mime_type=mime_type,
+            quote_timestamp=quote_timestamp,
+            quote_author=quote_author,
+            quote_message=quote_message,
+            reply_to_message_id=reply_to_message_id,
+            filename=filename,
+        )
+        call = self.calls[-1]
+        call["media_kind"] = media_kind
+        call["quote_attachments"] = quote_attachments
+        return message_id
+
+
+def test_backend_manager_send_attachments_sync_routes_to_backend():
+    from protocols.manager import BackendManager
+
+    backend = MagicMock(protocol="signal")
+    backend.send_attachments_sync.return_value = ["111"]
+    manager = BackendManager()
+    manager.register(backend)
+
+    result = manager.send_attachments_sync(
+        "signal",
+        "alice",
+        [Path("a.png"), Path("b.png")],
+        captions=["Ciao", None],
+        mime_types=["image/png", "image/png"],
+        media_kinds=["image", "image"],
+        filenames=["a.png", "b.png"],
+        batch_id="batch-1",
+        quote_timestamp=123,
+        quote_author="alice",
+        quote_message="Prima",
+        quote_attachments=["image/png"],
+    )
+
+    assert result == ["111"]
+    backend.send_attachments_sync.assert_called_once_with(
+        "alice",
+        [Path("a.png"), Path("b.png")],
+        batch_id="batch-1",
+        captions=["Ciao", None],
+        mime_types=["image/png", "image/png"],
+        media_kinds=["image", "image"],
+        filenames=["a.png", "b.png"],
+        quote_timestamp=123,
+        quote_author="alice",
+        quote_message="Prima",
+        reply_to_message_id=None,
+        quote_attachments=["image/png"],
+    )
+
+
+def test_backend_manager_send_attachments_sync_signal_notifies_once(tmp_path):
+    from protocols.manager import BackendManager
+
+    backend = MagicMock(protocol="signal")
+    backend.send_attachments_sync.return_value = ["1730000000000"]
+    manager = BackendManager()
+    manager.register(backend)
+
+    result = manager.send_attachments_sync(
+        "signal",
+        "alice",
+        [tmp_path / "a.png", tmp_path / "b.png"],
+        captions=["Ciao", None],
+        mime_types=["image/png", "image/png"],
+        media_kinds=["image", "image"],
+        filenames=["a.png", "b.png"],
+        batch_id="batch-1",
+    )
+
+    assert result == ["1730000000000"]
+    backend.enqueue_sent_notification.assert_called_once_with(
+        contact_id="alice",
+        message_id="1730000000000",
+        timestamp=1730000000000,
+        batch_id="batch-1",
+    )
+    backend.enqueue_sent_message.assert_not_called()
+
+
+def test_backend_manager_send_attachments_sync_whatsapp_enqueues_per_message(
+    tmp_path,
+):
+    from protocols.manager import BackendManager
+
+    backend = MagicMock(protocol="whatsapp")
+    backend.send_attachments_sync.return_value = ["wa-1", "wa-2", "wa-3"]
+    manager = BackendManager()
+    manager.register(backend)
+    paths = [tmp_path / "a.png", tmp_path / "b.png", tmp_path / "c.png"]
+
+    result = manager.send_attachments_sync(
+        "whatsapp",
+        "alice",
+        paths,
+        captions=["Ciao", None, None],
+        mime_types=["image/png"] * 3,
+        media_kinds=["image"] * 3,
+        filenames=["a.png", "b.png", "c.png"],
+        batch_id="batch-9",
+        quote_timestamp=123,
+        quote_author="alice",
+        quote_message="Prima",
+        reply_to_message_id="wa-0",
+    )
+
+    assert result == ["wa-1", "wa-2", "wa-3"]
+    assert backend.enqueue_sent_message.call_count == 3
+    first, second, third = backend.enqueue_sent_message.call_args_list
+    assert first.args == ("alice", "wa-1", "Ciao")
+    assert first.kwargs["batch_id"] == "batch-9"
+    assert first.kwargs["batch_index"] == 0
+    assert first.kwargs["quote_timestamp"] == 123
+    assert first.kwargs["reply_to_message_id"] == "wa-0"
+    assert first.kwargs["attachment_path"] == paths[0]
+    assert first.kwargs["filename"] == "a.png"
+    assert second.args == ("alice", "wa-2", "")
+    assert second.kwargs["batch_index"] == 1
+    assert second.kwargs["quote_timestamp"] is None
+    assert second.kwargs["reply_to_message_id"] is None
+    assert second.kwargs["attachment_path"] == paths[1]
+    assert third.args == ("alice", "wa-3", "")
+    assert third.kwargs["batch_index"] == 2
+    backend.enqueue_sent_notification.assert_not_called()
+
+
+def test_base_send_attachments_sync_defaults_to_sequential_single_sends(tmp_path):
+    backend = _SingleSendBackend()
+    paths = [tmp_path / "a.png", tmp_path / "b.png", tmp_path / "c.png"]
+
+    message_ids = backend.send_attachments_sync(
+        "alice",
+        paths,
+        captions=["Ciao", None, None],
+        mime_types=["image/png"] * 3,
+        media_kinds=["image"] * 3,
+        filenames=["a.png", "b.png", "c.png"],
+        quote_timestamp=123,
+        reply_to_message_id="wa-0",
+        quote_attachments=["image/png"],
+    )
+
+    assert message_ids == ["id-1", "id-2", "id-3"]
+    first, second, third = backend.calls
+    assert first["caption"] == "Ciao"
+    assert first["quote_timestamp"] == 123
+    assert first["reply_to_message_id"] == "wa-0"
+    # kwargs outside the base contract (media_kind, quote_attachments) are
+    # dropped for backends whose single send does not accept them.
+    assert "media_kind" not in first
+    assert "quote_attachments" not in first
+    assert second["caption"] is None
+    assert second["quote_timestamp"] is None
+    assert second["reply_to_message_id"] is None
+    assert third["caption"] is None
+
+
+def test_base_send_attachments_sync_forwards_extended_kwargs(tmp_path):
+    backend = _ExtendedSingleSendBackend()
+
+    backend.send_attachments_sync(
+        "alice",
+        [tmp_path / "a.png", tmp_path / "b.png"],
+        captions=["Ciao", None],
+        mime_types=["image/png"] * 2,
+        media_kinds=["image"] * 2,
+        filenames=["a.png", "b.png"],
+        quote_attachments=["image/png"],
+    )
+
+    first, second = backend.calls
+    assert first["media_kind"] == "image"
+    assert first["quote_attachments"] == ["image/png"]
+    assert second["media_kind"] == "image"
+    assert second["quote_attachments"] is None
+
+
+def test_backend_manager_send_attachments_sync_falls_back_to_single_sends(tmp_path):
+    from protocols.manager import BackendManager
+
+    backend = _SingleSendBackend()
+    manager = BackendManager()
+    manager.register(backend)
+    paths = [tmp_path / "a.png", tmp_path / "b.png"]
+
+    result = manager.send_attachments_sync(
+        "whatsapp",
+        "alice",
+        paths,
+        captions=["Ciao", None],
+        mime_types=["image/png"] * 2,
+        media_kinds=["image"] * 2,
+        filenames=["a.png", "b.png"],
+        batch_id="batch-2",
+    )
+
+    assert result == ["id-1", "id-2"]
+    assert [call["caption"] for call in backend.calls] == ["Ciao", None]
+
+
 _PNG_1X1 = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
@@ -1011,6 +1355,360 @@ def test_send_multipart_maps_backend_errors(web_client, exception, status):
     )
 
     assert response.status_code == status
+
+
+def _multipart_body(*fields, boundary="----testboundary"):
+    parts = []
+    for name, value in fields:
+        parts.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n'
+            f"\r\n{value}\r\n"
+        )
+    parts.append(f"--{boundary}--\r\n")
+    return "".join(parts).encode()
+
+
+def _upload_dir(db_file):
+    return db_file.parent / "web-uploads"
+
+
+def test_send_multipart_rejects_non_upload_file_field(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        content=_multipart_body(
+            ("protocol", "signal"),
+            ("contact_id", "alice"),
+            ("text", "Ciao"),
+            ("file", "not-an-upload"),
+        ),
+        headers={
+            **AUTH,
+            "Content-Type": "multipart/form-data; boundary=----testboundary",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid request"
+    assert manager.attachments_calls == []
+    assert manager.send_calls == []
+
+
+def test_starlette_form_repeated_file_field_keeps_order_and_get_returns_last():
+    from starlette.datastructures import FormData
+
+    form = FormData([("file", "one"), ("file", "two"), ("text", "hello")])
+
+    assert form.get("file") == "two"
+    assert form.getlist("file") == ["one", "two"]
+    assert form.get("text") == "hello"
+
+
+def test_send_multipart_single_file_keeps_batch_contract(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": "caption"},
+        files={"file": ("clipboard.png", _PNG_1X1, "image/png")},
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    assert len(manager.attachments_calls) == 1
+    call = manager.attachments_calls[0]
+    assert (call["protocol"], call["contact_id"]) == ("signal", "alice")
+    assert call["batch_id"] is None
+    assert call["captions"] == ["caption"]
+    assert call["mime_types"] == ["image/png"]
+    assert call["media_kinds"] == ["image"]
+    assert call["filenames"] == ["clipboard.png"]
+    assert call["kwargs"] == {
+        "quote_timestamp": None,
+        "quote_author": None,
+        "quote_message": None,
+    }
+    assert call["existed_during_send"] == [True]
+    assert not call["paths"][0].exists()
+
+
+def test_send_multipart_three_files_send_batch_in_order(web_client):
+    client, manager, db_file = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    files = [
+        ("file", ("one.png", _PNG_1X1, "image/png")),
+        ("file", ("two.png", _PNG_1X1, "image/png")),
+        ("file", ("three.pdf", b"%PDF-1.7\n", "application/pdf")),
+    ]
+
+    response = client.post(
+        "/api/send",
+        data={
+            "protocol": "signal",
+            "contact_id": "alice",
+            "text": "caption",
+            "batch_id": "batch-1",
+        },
+        files=files,
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    call = manager.attachments_calls[0]
+    assert call["batch_id"] == "batch-1"
+    assert call["captions"] == ["caption", None, None]
+    assert call["mime_types"] == [
+        "image/png",
+        "image/png",
+        "application/pdf",
+    ]
+    assert call["media_kinds"] == ["image", "image", "document"]
+    assert call["filenames"] == ["one.png", "two.png", "three.pdf"]
+    assert call["existed_during_send"] == [True, True, True]
+    assert [path.suffix for path in call["paths"]] == [".png", ".png", ".pdf"]
+    assert [per_file[3]["filename"] for per_file in manager.attachment_calls] == [
+        "one.png",
+        "two.png",
+        "three.pdf",
+    ]
+    assert not any(path.exists() for path in call["paths"])
+    assert list(_upload_dir(db_file).iterdir()) == []
+
+
+def test_send_multipart_text_only_without_files_still_sends(web_client):
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        content=_multipart_body(
+            ("protocol", "signal"),
+            ("contact_id", "alice"),
+            ("text", "Ciao dal form"),
+        ),
+        headers={
+            **AUTH,
+            "Content-Type": "multipart/form-data; boundary=----testboundary",
+        },
+    )
+
+    assert response.status_code == 200
+    assert manager.send_calls[0][:3] == ("signal", "alice", "Ciao dal form")
+    assert manager.attachments_calls == []
+
+
+def test_send_multipart_rejects_more_than_max_attachments(web_client):
+    from web.api import _MAX_ATTACHMENTS
+
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    files = [
+        ("file", (f"photo-{index}.png", _PNG_1X1, "image/png"))
+        for index in range(_MAX_ATTACHMENTS + 1)
+    ]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": "caption"},
+        files=files,
+        headers=AUTH,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Too many attachments"
+    assert manager.attachments_calls == []
+
+
+def test_send_multipart_normalizes_starlette_too_many_files(web_client):
+    from web.api import _MAX_ATTACHMENTS
+
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    files = [
+        ("file", (f"photo-{index}.png", _PNG_1X1, "image/png"))
+        for index in range(_MAX_ATTACHMENTS + 11)
+    ]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": "caption"},
+        files=files,
+        headers=AUTH,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Too many attachments"
+    assert manager.attachments_calls == []
+
+
+def test_send_multipart_rejects_batch_over_total_byte_cap(web_client):
+    from web import uploads as uploads_module
+    from web.uploads import _MAX_TOTAL_BYTES
+
+    client, manager, db_file = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    files = [
+        ("file", (f"photo-{index}.png", _PNG_1X1, "image/png")) for index in range(3)
+    ]
+
+    assert _MAX_TOTAL_BYTES == 250 * 1024 * 1024
+    with patch.object(
+        uploads_module,
+        "_MAX_TOTAL_BYTES",
+        3 * len(_PNG_1X1) - 10,
+    ):
+        response = client.post(
+            "/api/send",
+            data={"protocol": "signal", "contact_id": "alice", "text": ""},
+            files=files,
+            headers=AUTH,
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Upload too large"
+    assert manager.attachments_calls == []
+    assert list(_upload_dir(db_file).iterdir()) == []
+
+
+def test_send_multipart_chunked_enforces_total_cap_while_storing(web_client):
+    """RISCHIO-5: senza Content-Length (upload chunked) il cap totale va
+    rispettato MENTRE ogni file viene scritto, non dopo averli memorizzati
+    tutti su disco."""
+    from web import uploads as uploads_module
+
+    client, manager, db_file = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    boundary = "----testboundary"
+
+    def _field(name, value):
+        return (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{name}"\r\n'
+            f"\r\n{value}\r\n"
+        ).encode()
+
+    def _file_part(name, filename, content_type, data):
+        return (
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"; '
+                f'filename="{filename}"\r\n'
+                f"Content-Type: {content_type}\r\n"
+                f"\r\n"
+            ).encode()
+            + data
+            + b"\r\n"
+        )
+
+    def _chunked(data, chunk_size=64):
+        def stream():
+            for start in range(0, len(data), chunk_size):
+                yield data[start : start + chunk_size]
+
+        return stream()
+
+    body = (
+        _field("protocol", "signal")
+        + _field("contact_id", "alice")
+        + _field("text", "")
+        + _file_part("file", "one.png", "image/png", _PNG_1X1)
+        + _file_part("file", "two.png", "image/png", b"not an image at all")
+        + f"--{boundary}--\r\n".encode()
+    )
+    # Cap between the first file and the two files together: the second
+    # file must abort mid-read (413) BEFORE its content is sniffed — a
+    # post-storage check would fully store it and answer 400 instead.
+    with patch.object(uploads_module, "_MAX_TOTAL_BYTES", len(_PNG_1X1) + 4):
+        response = client.post(
+            "/api/send",
+            content=_chunked(body),
+            headers={
+                **AUTH,
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Upload too large"
+    assert manager.attachments_calls == []
+    assert list(_upload_dir(db_file).iterdir()) == []
+
+
+def test_send_multipart_cleanup_when_second_file_is_invalid_media(web_client):
+    client, manager, db_file = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": "caption"},
+        files=[
+            ("file", ("one.png", _PNG_1X1, "image/png")),
+            ("file", ("bad.png", b"not an image", "image/png")),
+        ],
+        headers=AUTH,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Unsupported media type"
+    assert manager.attachments_calls == []
+    assert list(_upload_dir(db_file).iterdir()) == []
+
+
+def test_send_multipart_cleanup_when_second_file_is_oversize(web_client):
+    from web import uploads as uploads_module
+
+    client, manager, db_file = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    files = [
+        ("file", ("one.png", _PNG_1X1, "image/png")),
+        ("file", ("big.png", _PNG_1X1 * 4, "image/png")),
+    ]
+
+    with patch.object(
+        uploads_module,
+        "_MAX_BYTES_BY_KIND",
+        {"image": 128, "video": 128, "audio": 128, "document": 128},
+    ):
+        response = client.post(
+            "/api/send",
+            data={"protocol": "signal", "contact_id": "alice", "text": ""},
+            files=files,
+            headers=AUTH,
+        )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Upload too large"
+    assert manager.attachments_calls == []
+    assert list(_upload_dir(db_file).iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "exception,status",
+    [(RuntimeError("down"), 502), (NotImplementedError(), 501)],
+)
+def test_send_multipart_cleanup_when_batch_send_fails(web_client, exception, status):
+    client, manager, db_file = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    manager.send_attachments_sync = MagicMock(side_effect=exception)
+    files = [
+        ("file", ("one.png", _PNG_1X1, "image/png")),
+        ("file", ("two.png", _PNG_1X1, "image/png")),
+    ]
+
+    response = client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": ""},
+        files=files,
+        headers=AUTH,
+    )
+
+    assert response.status_code == status
+    assert manager.send_attachments_sync.call_count == 1
+    assert list(_upload_dir(db_file).iterdir()) == []
 
 
 def test_upload_janitor_removes_only_files_older_than_one_hour(tmp_path):
@@ -1300,6 +1998,8 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
             "read",
             "edited",
             "edit_id",
+            "batch_id",
+            "batch_index",
         }
         for item in body
     )

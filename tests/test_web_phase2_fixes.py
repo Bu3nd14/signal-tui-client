@@ -161,6 +161,114 @@ def test_signal_outgoing_attachment_is_resolvable_or_null(monkeypatch, tmp_path)
         )
 
 
+# ─── Multi-attachment batch persistence (design §6.4) ────────────────────────
+
+
+def _table_columns(db_file: Path) -> set[str]:
+    with sqlite3.connect(db_file) as connection:
+        return {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
+
+
+def test_batch_columns_added_to_modern_versioned_db(monkeypatch, tmp_path):
+    """Un DB preesistente a ``user_version >= _LEGACY_MIGRATION_VERSION`` riceve
+    comunque le colonne batch: la migrazione è incondizionata (stile
+    ``edited``/``content_type``), non gated dall'early-return."""
+    db_file = _db(monkeypatch, tmp_path)
+    with sqlite3.connect(db_file) as connection:
+        connection.execute(
+            """CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                protocol TEXT NOT NULL DEFAULT 'signal',
+                contact_number TEXT NOT NULL,
+                text TEXT,
+                is_mine INTEGER NOT NULL DEFAULT 0,
+                sender TEXT,
+                timestamp INTEGER NOT NULL,
+                msg_type TEXT DEFAULT 'text',
+                attachment_info TEXT,
+                attachment_id TEXT,
+                content_type TEXT,
+                media_kind TEXT,
+                msg_id TEXT,
+                edited INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        connection.execute(f"PRAGMA user_version = {backend_mod._SCHEMA_VERSION}")
+
+    backend_mod._init_db()
+
+    columns = _table_columns(db_file)
+    assert {"batch_id", "batch_index"} <= columns
+    with sqlite3.connect(db_file) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (
+            backend_mod._SCHEMA_VERSION
+        )
+
+
+def test_batch_columns_present_on_fresh_db(monkeypatch, tmp_path):
+    db_file = _db(monkeypatch, tmp_path)
+
+    backend_mod._init_db()
+
+    assert {"batch_id", "batch_index"} <= _table_columns(db_file)
+
+
+def test_messages_exposes_batch_fields(monkeypatch, tmp_path):
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    for index in range(3):
+        _add_message_to_cache(
+            "42",
+            "",
+            is_mine=True,
+            sender="You",
+            timestamp=1_787_250_931_234,
+            msg_type="image",
+            attachment_id=f"file-{index}.png",
+            protocol="signal",
+            msg_id="1787250931234",
+            batch_id="batch-1",
+            batch_index=index,
+        )
+
+    messages = _messages("signal", "42")
+
+    assert [message["batch_index"] for message in messages] == [0, 1, 2]
+    assert {message["batch_id"] for message in messages} == {"batch-1"}
+
+
+def test_load_cache_orders_same_timestamp_rows_deterministically(monkeypatch, tmp_path):
+    """N righe mirror con lo stesso timestamp vengono ricaricate in ordine di
+    inserimento (tie-breaker ``id``): l'eco k-esima continua a matchare la
+    riga mirror k-esima dopo un restart."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache, _load_cache
+
+    for index in range(3):
+        _add_message_to_cache(
+            "42",
+            "",
+            is_mine=True,
+            sender="You",
+            timestamp=1_787_250_931_234,
+            msg_type="image",
+            attachment_id=f"file-{index}.png",
+            protocol="signal",
+            msg_id="1787250931234",
+            batch_id="batch-1",
+            batch_index=index,
+        )
+
+    loaded = _load_cache("signal")
+
+    assert [message["attachment_id"] for message in loaded["42"]] == [
+        "file-0.png",
+        "file-1.png",
+        "file-2.png",
+    ]
+
+
 def test_telegram_persists_content_type_and_api_marks_tgref_as_image(
     monkeypatch, tmp_path
 ):
@@ -450,6 +558,56 @@ result = reconcileOptimisticMessages([echo], [optimistic], "whatsapp", "42");
 assert.equal(result.optimistic[0].confirmed_message_id, "wa-1");
 result = reconcileOptimisticMessages([echo, { ...echo, id: "wa-2" }], [optimistic], "whatsapp", "42");
 assert.equal(result.optimistic[0].confirmed_message_id, undefined);
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_reconcile_multi_falls_back_to_signature_without_batch_match():
+    source = r"""
+const assert = require("node:assert/strict");
+const { reconcileOptimisticMessages } = require("./web/static/reconcile.js");
+const optimistic = (index) => ({
+  optimistic_id: `b1-att${index}`, batch_id: "b1", batch_index: index,
+  protocol: "telegram", contactId: "42", direction: "out", text: "",
+  timestamp: 100 + index, optimisticStatus: "sent", known_message_ids: [],
+  attachment: { type: "image/png", name: `photo-${index}.png`, attachment_id: `local-${index}`, media_kind: "image" },
+});
+const real = (index, id) => ({
+  id, direction: "out", text: "", timestamp: 200 + index,
+  batch_id: null, batch_index: null,
+  attachment: { type: "image/png", name: `photo-${index}.png`, attachment_id: `sent-${index}`, media_kind: "image" },
+});
+
+// Nessun reale con batch: l'optimistic multi cade sul matching generico
+// (signature) invece di restare orfano.
+let result = reconcileOptimisticMessages(
+  [real(0, "r0"), real(1, "r1")], [optimistic(0), optimistic(1)], "telegram", "42",
+);
+const confirmed = result.optimistic
+  .filter((item) => item.confirmed_message_id)
+  .map((item) => item.confirmed_message_id);
+assert.equal(confirmed.length, 2);
+assert.deepEqual(new Set(confirmed), new Set(["r0", "r1"]));
+
+// Con batch_id/batch_index il pairing resta per slot, indipendente dalle
+// signature (entrambe identiche).
+result = reconcileOptimisticMessages(
+  [
+    { ...real(0, "x0"), batch_id: "b1", batch_index: 0 },
+    { ...real(1, "x1"), batch_id: "b1", batch_index: 1 },
+  ],
+  [optimistic(0), optimistic(1)],
+  "telegram",
+  "42",
+);
+const bySlot = Object.fromEntries(
+  result.optimistic.map((item) => [`${item.batch_id}\u0000${item.batch_index}`, item.confirmed_message_id]),
+);
+assert.equal(bySlot["b1\u00000"], "x0");
+assert.equal(bySlot["b1\u00001"], "x1");
 """
     completed = subprocess.run(
         ["node", "-e", source], capture_output=True, text=True, check=False
@@ -759,7 +917,7 @@ const inflight = Promise.resolve();
 globalThis.state = {
   mediaRequests: new Set([controller]), mediaLoads: new Map([["old", inflight]]),
   active: null, messages: [], optimistic: [], optimisticSequence: 0,
-  sending: false, stagedAttachment: null, replyTo: null,
+  sending: false, stagedAttachments: [], replyTo: null,
 };
 function node() { return { children: [], classList: { add() {} }, append(child) { this.children.push(child); }, replaceChildren() { this.children = []; }, focus() {} }; }
 globalThis.elements = {

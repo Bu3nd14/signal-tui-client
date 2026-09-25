@@ -203,10 +203,54 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
   const consumed = new Set(local
     .filter((item) => !item.optimistic_id && item.confirmed_message_id)
     .map((item) => item.confirmed_message_id));
-  const candidates = local
-    .filter((item) => item.optimistic_id && item.optimisticStatus !== "failed")
+  // Multi-allegato (batch_id != null): passata dedicata PRIMA del loop
+  // generico. N allegati omonimi hanno signature identiche, quindi il
+  // pairing usa lo slot batch_id+batch_index persistito nel DB. Signal
+  // materializza le N righe di un batch con lo STESSO msg_id: il claiming
+  // qui e' per slot, non per identity, che sarebbe ambigua.
+  const multiCandidates = local
+    .filter((item) => item.optimistic_id && item.optimisticStatus !== "failed" && item.batch_id != null)
     .sort((a, b) => b.timestamp - a.timestamp);
+  // Il loop generico resta riservato ai single (batch_id == null) E ai multi
+  // che non trovano lo slot: evita che consumi per signature le righe reali
+  // di un batch prima della passata dedicata (che gira prima e le marca come
+  // consumed). I multi senza match batch finiscono in `multiFallbacks` e
+  // vengono ritentati dal loop generico (signature/quote) invece di restare
+  // orfani: copre Telegram/WhatsApp quando il DB non ha ancora i campi batch
+  // (echo-first) o lo slot non e' stato persistito.
+  //
+  // I single hanno PRECEDENZA sui multi fallback: non si usa un sort unico
+  // combinato (col quale un fallback piu' recente ruberebbe il match a un
+  // single con signature identica). Si processano prima tutti i single
+  // (ordinati per timestamp) e poi i multi fallback nell'ordine della passata
+  // batch (gia' ordinato per timestamp), cosi' il pairing per slot resta
+  // intatto quando lo slot esiste.
   const reconciled = new Map();
+  const claimedSlots = new Set();
+  const multiFallbacks = [];
+
+  for (const item of multiCandidates) {
+    const slot = `${item.batch_id}\u0000${item.batch_index}`;
+    const realIndex = messages.findIndex((message) =>
+      message.batch_id === item.batch_id
+      && message.batch_index === item.batch_index
+      && !claimedSlots.has(`${message.batch_id}\u0000${message.batch_index}`));
+    if (realIndex < 0 || claimedSlots.has(slot)) {
+      multiFallbacks.push(item);
+      continue;
+    }
+    claimedSlots.add(slot);
+    const { optimistic_id: ignored, ...confirmed } = item;
+    void ignored;
+    confirmed.confirmed_message_id = messageIdentity(messages[realIndex]);
+    reconciled.set(item.optimistic_id, confirmed);
+    consumed.add(confirmed.confirmed_message_id);
+  }
+
+  const singleCandidates = local
+    .filter((item) => item.optimistic_id && item.optimisticStatus !== "failed" && item.batch_id == null)
+    .sort((a, b) => b.timestamp - a.timestamp);
+  const candidates = [...singleCandidates, ...multiFallbacks];
 
   for (const item of candidates) {
     const known = new Set(item.known_message_ids || []);

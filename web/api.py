@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _PROTOCOLS = {"signal", "whatsapp", "telegram"}
 _MAX_TEXT_LENGTH = 64 * 1024
+_MAX_ATTACHMENTS = 10
 _THUMB_WIDTHS = {96, 240, 480}
 _THUMB_CACHE_LIMIT = 500 * 1024 * 1024
 _THUMB_LOCKS: dict[Path, threading.Lock] = {}
@@ -379,7 +380,7 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                     "protocol, msg_type, "
                     "quote_text, quote_timestamp, quote_author, quote_attachment_id, "
                     "quote_content_type, quote_attachment_path, status, edited, read, "
-                    "reply_to_message_id "
+                    "reply_to_message_id, batch_id, batch_index "
                     "FROM messages WHERE protocol = ? AND contact_number = ? "
                     "ORDER BY timestamp, id",
                     (protocol, contact_id),
@@ -502,6 +503,8 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                 "read": bool(row["read"]),
                 "edited": bool(row["edited"]),
                 "edit_id": _message_edit_id(row),
+                "batch_id": row["batch_id"],
+                "batch_index": row["batch_index"],
             }
         )
 
@@ -1078,6 +1081,7 @@ def create_api_router() -> Any:
     """Build the FastAPI router without making FastAPI a core dependency."""
     from fastapi import APIRouter, HTTPException, Request
     from fastapi.responses import FileResponse, JSONResponse
+    from starlette.exceptions import HTTPException as StarletteHTTPException
 
     router = APIRouter(prefix="/api")
 
@@ -1116,23 +1120,34 @@ def create_api_router() -> Any:
             .lower()
             .startswith("multipart/form-data")
         )
-        upload_file = None
+        upload_files: list[Any] = []
         try:
             if is_multipart:
-                from web.uploads import _MAX_BYTES_BY_KIND
+                from web.uploads import _MAX_TOTAL_BYTES
 
                 content_length = request.headers.get("content-length")
                 if (
                     content_length
-                    and int(content_length)
-                    > max(_MAX_BYTES_BY_KIND.values()) + 1024 * 1024
+                    and int(content_length) > _MAX_TOTAL_BYTES + 1024 * 1024
                 ):
                     raise HTTPException(status_code=413, detail="Upload too large")
-                form = await request.form()
+                try:
+                    form = await request.form(
+                        max_files=_MAX_ATTACHMENTS + 10, max_fields=20
+                    )
+                except StarletteHTTPException as exc:
+                    # Normalize Starlette's early "Too many files" rejection
+                    # without swallowing unrelated HTTP exceptions.  The
+                    # starlette base class also covers fastapi.HTTPException.
+                    if exc.status_code == 400 and str(exc.detail).startswith(
+                        "Too many files"
+                    ):
+                        raise HTTPException(
+                            status_code=400, detail="Too many attachments"
+                        ) from None
+                    raise
                 payload = dict(form)
-                upload_file = form.get("file")
-                if upload_file is None or not hasattr(upload_file, "read"):
-                    raise HTTPException(status_code=400, detail="Invalid request")
+                upload_files = form.getlist("file")
                 payload.pop("file", None)
             else:
                 payload = await request.json()
@@ -1152,7 +1167,11 @@ def create_api_router() -> Any:
             raise HTTPException(status_code=400, detail="Invalid request")
         if not isinstance(text, str) or len(text) > _MAX_TEXT_LENGTH:
             raise HTTPException(status_code=400, detail="Invalid request")
-        if not text.strip() and upload_file is None:
+        if not upload_files and not text.strip():
+            raise HTTPException(status_code=400, detail="Invalid request")
+        if len(upload_files) > _MAX_ATTACHMENTS:
+            raise HTTPException(status_code=400, detail="Too many attachments")
+        if any(not hasattr(upload_file, "read") for upload_file in upload_files):
             raise HTTPException(status_code=400, detail="Invalid request")
 
         quote_timestamp = payload.get("quote_timestamp")
@@ -1269,31 +1288,56 @@ def create_api_router() -> Any:
             kwargs["quote_attachments"] = quote_attachments
         if protocol in {"whatsapp", "telegram"} and reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
-        upload = None
+        uploads: list[Any] = []
         try:
-            if upload_file is not None:
-                from web.uploads import UploadValidationError, store_upload
+            if upload_files:
+                from web.uploads import (
+                    _MAX_TOTAL_BYTES,
+                    UploadValidationError,
+                    store_upload,
+                )
 
-                try:
-                    upload = await store_upload(upload_file)
-                except UploadValidationError as exc:
-                    detail = (
-                        "Upload too large"
-                        if exc.status_code == 413
-                        else "Unsupported media type"
-                    )
-                    raise HTTPException(
-                        status_code=exc.status_code, detail=detail
-                    ) from None
+                # Sequential validation keeps error messages stable (the
+                # first invalid file wins) and lets the finally block clean
+                # up every stored upload when a later one fails.  The
+                # request-wide byte cap is enforced WHILE each file is
+                # stored (each file gets the remaining budget), so a
+                # chunked request cannot write far beyond _MAX_TOTAL_BYTES
+                # before being rejected.
+                total_stored_bytes = 0
+                for upload_file in upload_files:
+                    try:
+                        uploads.append(
+                            await store_upload(
+                                upload_file,
+                                max_bytes=_MAX_TOTAL_BYTES - total_stored_bytes,
+                            )
+                        )
+                    except UploadValidationError as exc:
+                        detail = (
+                            "Upload too large"
+                            if exc.status_code == 413
+                            else "Unsupported media type"
+                        )
+                        raise HTTPException(
+                            status_code=exc.status_code, detail=detail
+                        ) from None
+                    total_stored_bytes += uploads[-1].path.stat().st_size
+                batch_id = payload.get("batch_id")
+                if not isinstance(batch_id, str) or not batch_id.strip():
+                    batch_id = None
                 await asyncio.to_thread(
-                    manager.send_attachment_sync,
+                    manager.send_attachments_sync,
                     protocol,
                     contact_id,
-                    upload.path,
-                    caption=text or None,
-                    mime_type=upload.mime_type,
-                    media_kind=upload.media_kind,
-                    filename=upload.filename,
+                    [upload.path for upload in uploads],
+                    batch_id=batch_id,
+                    # Product default: the single text field captions the
+                    # first attachment only.
+                    captions=[text or None] + [None] * (len(uploads) - 1),
+                    mime_types=[upload.mime_type for upload in uploads],
+                    media_kinds=[upload.media_kind for upload in uploads],
+                    filenames=[upload.filename for upload in uploads],
                     **kwargs,
                 )
             else:
@@ -1307,7 +1351,7 @@ def create_api_router() -> Any:
         except HTTPException:
             raise
         except NotImplementedError:
-            if upload_file is not None:
+            if upload_files:
                 raise HTTPException(
                     status_code=501, detail="Attachment send not supported"
                 ) from None
@@ -1321,7 +1365,7 @@ def create_api_router() -> Any:
             )
             raise HTTPException(status_code=502, detail="Message send failed") from None
         finally:
-            if upload is not None:
+            for upload in uploads:
                 upload.cleanup()
 
         push_event(
