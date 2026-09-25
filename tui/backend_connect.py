@@ -17,6 +17,13 @@ logger = logging.getLogger("signal_tui")
 # of an already-present entry (never downgrade read → sent).
 _STATUS_RANK = {"pending": 0, "failed": 0, "sent": 1, "delivered": 2, "read": 3}
 
+#: How long (seconds) the boot worker waits for WAHA to report WORKING before
+#: giving up, and how often it polls.  Covers a WAHA session that is still
+#: syncing when the app starts (e.g. right after a container restart/device
+#: link) so the UI no longer stays empty until a manual restart.
+WA_BOOT_READY_TIMEOUT_S = 300.0
+WA_BOOT_POLL_INTERVAL_S = 2.5
+
 
 def _status_rank(status: str | None) -> int:
     """Return the numeric rank of a delivery status (default 0)."""
@@ -206,6 +213,38 @@ class BackendConnectMixin:
             logger.exception("LINK-SIG: failed")
             self.call_from_thread(self._status, f"❌ Signal: errore — {e}", 0)
             self.call_from_thread(self._mark_backend_done, self.signal_backend.protocol)
+
+    def _connect_whatsapp_boot(self) -> None:
+        """Worker thread: connect WhatsApp once WAHA reports WORKING.
+
+        WAHA may still be syncing when the app starts (``status != WORKING``,
+        e.g. right after a container restart).  The previous strict
+        ``is_working`` gate skipped the connect *before* scheduling anything,
+        with no retry, so the UI stayed empty until a manual restart.  Poll
+        (bounded) until the session is WORKING, then delegate to the normal
+        ``_connect_whatsapp`` path which waits for readiness and polls contacts.
+        If the session asks for pairing in the meantime, stop: the user links it
+        from Ctrl+L.
+        """
+        backend = self.whatsapp_backend
+        if backend is None:
+            return
+        deadline = time.monotonic() + WA_BOOT_READY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if backend.needs_pairing:
+                logger.info("LINK-WA: pairing richiesto, skip auto-connect")
+                self.call_from_thread(self._mark_backend_done, backend.protocol)
+                return
+            if backend.is_working:
+                logger.info("LINK-WA: WAHA WORKING, avvio connessione")
+                self._connect_whatsapp()
+                return
+            time.sleep(WA_BOOT_POLL_INTERVAL_S)
+        logger.warning(
+            "LINK-WA: WAHA non WORKING dopo %.0fs, auto-connect annullato",
+            WA_BOOT_READY_TIMEOUT_S,
+        )
+        self.call_from_thread(self._mark_backend_done, backend.protocol)
 
     def _connect_whatsapp(self) -> None:
         """Worker thread: avvia WhatsApp, mostra contatti subito, sync cronologia dopo."""

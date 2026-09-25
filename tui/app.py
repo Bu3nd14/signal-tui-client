@@ -32,7 +32,7 @@ from protocols import (
     TelegramBackend,
     WhatsAppBackend,
 )
-from protocols.config import telegram_enabled, whatsapp_enabled
+from protocols.config import signal_enabled, telegram_enabled, whatsapp_enabled
 from tui.backend_connect import BackendConnectMixin
 from tui.chat_view import ChatViewMixin
 from tui.contacts import ContactListMixin
@@ -315,15 +315,17 @@ class SignalTUI(
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
         # Only connect backends that are already linked (skip slow daemon
         # startup for unlinked accounts — they connect after Ctrl+L link).
-        self.run_worker(self._connect_signal, exclusive=False, thread=True)
-        if (
-            self.whatsapp_backend is not None
-            and not self.whatsapp_backend.needs_pairing
-            # Only auto-connect at boot if the session is truly WORKING
-            # (not just "not pairing" — could be failed/stopped).
-            and self.whatsapp_backend.is_working
-        ):
-            self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
+        if signal_enabled():
+            self.run_worker(self._connect_signal, exclusive=False, thread=True)
+        else:
+            logger.info("Signal auto-connect disabled (signal_enabled() is False)")
+            self._mark_backend_done(self.signal_backend.protocol)
+        # WhatsApp: WAHA may still be syncing at boot.  The boot worker waits
+        # (bounded) for the session to become WORKING, then connects; the old
+        # strict ``is_working`` gate skipped the connect with no retry, leaving
+        # the UI empty until a manual restart.
+        if self.whatsapp_backend is not None:
+            self.run_worker(self._connect_whatsapp_boot, exclusive=False, thread=True)
         if (
             self.telegram_backend is not None
             and not self.telegram_backend.needs_pairing

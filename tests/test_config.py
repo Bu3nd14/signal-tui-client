@@ -128,3 +128,55 @@ class TestTelegramApiHash:
             json.dumps({"telegram_api_hash": "abc123"})
         )
         assert config.get_telegram_api_hash() == "abc123"
+
+
+class TestSignalEnabled:
+    """Policy for Signal auto-connect at boot (``signal_enabled``)."""
+
+    def _clean(self, monkeypatch):
+        monkeypatch.delenv("SIGNAL_ENABLED", raising=False)
+        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
+
+    def test_default_with_user_number(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        self._clean(monkeypatch)
+        monkeypatch.setenv("SIGNAL_USER_NUMBER", "+391234567890")
+        assert config.signal_enabled() is True
+
+    def test_default_without_user_number(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        self._clean(monkeypatch)
+        assert config.signal_enabled() is False
+
+    def test_config_user_number_enables(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        self._clean(monkeypatch)
+        (tmp_path / "config.json").write_text(json.dumps({"user_number": "+3911"}))
+        assert config.signal_enabled() is True
+
+    def test_explicit_env_disables(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        self._clean(monkeypatch)
+        monkeypatch.setenv("SIGNAL_USER_NUMBER", "+391234567890")
+        monkeypatch.setenv("SIGNAL_ENABLED", "0")
+        assert config.signal_enabled() is False
+
+    def test_explicit_env_enables_without_number(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        self._clean(monkeypatch)
+        monkeypatch.setenv("SIGNAL_ENABLED", "true")
+        assert config.signal_enabled() is True
+
+    def test_config_flag_disables(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        self._clean(monkeypatch)
+        monkeypatch.setenv("SIGNAL_USER_NUMBER", "+391234567890")
+        (tmp_path / "config.json").write_text(json.dumps({"signal_enabled": False}))
+        assert config.signal_enabled() is False
+
+    def test_dotenv_flag_disables(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        self._clean(monkeypatch)
+        monkeypatch.setenv("SIGNAL_USER_NUMBER", "+391234567890")
+        (tmp_path / ".env").write_text("SIGNAL_ENABLED=no\n")
+        assert config.signal_enabled() is False
