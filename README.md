@@ -32,6 +32,7 @@ A terminal-based (TUI) multi-protocol messaging client built with [Textual](http
 - [Virtual environment](#virtual-environment-optional-but-recommended)
 - [Updating signal-cli](#updating-signal-cli)
 - [Device linking](#device-linking)
+- [Python launcher (optional alternative to the shell scripts)](#python-launcher-optional-alternative-to-the-shell-scripts)
 - [Usage](#usage)
   - [Controls](#controls)
   - [Composing messages](#composing-messages)
@@ -348,6 +349,30 @@ Press `Ctrl+L`, select **Telegram**, and scan the QR code with your phone.
 > field after scanning the QR. Enter your 2FA password and press Enter.
 >
 > If you don't have 2FA, the login completes automatically.
+
+## Python launcher (optional alternative to the shell scripts)
+
+`launcher.py` is a stdlib-only Python reimplementation of every operational shell script in this
+repo (`install.sh`, `scripts/*.sh`, `profiling/run_*.sh`, `tests/run_regression_tests.sh`). It's an
+**optional alternative** — the original scripts remain the primary, documented way to do each of
+these things and are not going away; use whichever you're more comfortable with. `launcher.py`
+mainly helps on platforms where bash isn't the default shell (e.g. Windows without WSL), or if you
+just prefer not to shell out.
+
+| Task | Shell script | `launcher.py` equivalent |
+|---|---|---|
+| Full install | `./install.sh [options]` | `python3 launcher.py install [options]` |
+| Shell aliases only | `./install.sh --aliases` | `python3 launcher.py aliases` |
+| Start/stop WAHA | `./scripts/start_whatsapp.sh [--no-wait\|--stop]` | `python3 launcher.py whatsapp start\|stop [--no-wait]` |
+| Restart signal-cli + WAHA | `./scripts/restart_backend.sh [--no-wait]` | `python3 launcher.py backend-restart [--no-wait]` |
+| Run the client on a server | `./scripts/start_on_server.sh {start\|stop\|status}` | `python3 launcher.py server start\|stop\|status` |
+| Local ↔ remote handover | `./scripts/tui_handover.sh {to-server\|to-local\|status}` | `python3 launcher.py handover to-server\|to-local\|status` |
+| CPU/I-O profiling | `./profiling/run_pyspy.sh` / `run_strace.sh` `[duration]` | `python3 launcher.py profile pyspy\|strace [duration]` |
+| Regression tests | `./tests/run_regression_tests.sh` | `python3 launcher.py test` |
+
+Same flags, same behavior (the alias block it writes is byte-for-byte identical to `install.sh`'s),
+same exit codes — pick whichever entry point fits your environment. `python3 launcher.py --help`
+lists every command; each subcommand also takes `--help`.
 
 ## Virtual environment (optional but recommended)
 
@@ -891,6 +916,8 @@ signal-tui-client/
 ├── docker-compose.yml         # WAHA (WhatsApp HTTP API) Docker container
 ├── .env.example               # Template for WAHA + Telegram credentials
 ├── install.sh                 # Automatic installation script
+├── launcher.py                # Optional Python alternative to the shell scripts
+├── launcher/                  # launcher.py's command implementations
 ├── Makefile                   # Shared commands: make test / lint / coverage / live-test
 ├── pyproject.toml             # Shared pytest / coverage / ruff config
 ├── .github/workflows/ci.yml   # CI: lint + test (3.12/3.13 matrix) + coverage gate + Codecov
