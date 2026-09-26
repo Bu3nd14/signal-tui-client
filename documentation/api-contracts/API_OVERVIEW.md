@@ -41,7 +41,7 @@ Attributo di classe richiesto: `protocol: str` (una delle costanti `PROTOCOL_*` 
 | `edit_message_sync(contact_id, message_id, new_text) -> bool` | `False` | bloccante, solo da worker thread; semantica di `message_id` per protocollo documentata nel docstring (signal = ts ms come stringa; telegram = id server; whatsapp = Baileys id) |
 | `async edit_message(...) -> bool` | delega `edit_message_sync` via `asyncio.to_thread` | |
 | `apply_edit(contact_id, message_id, new_text, *, is_mine=None, edit_timestamp=None) -> dict \| None` | `None` | punto UNICO di mutazione per gli edit; ritorna `{"message_id","timestamp","old_text","text","is_mine"}` solo se ha modificato; idempotente |
-| `list_address_book_sync(force=False) -> list[ChatContact]` | contacts correnti marcati `extras["address_book"]=True` | bloccante, non solleva mai (errore → cache o `[]`) |
+| `list_address_book_sync(force=False, *, start_resolver=True) -> list[ChatContact]` | contacts correnti marcati `extras["address_book"]=True` | bloccante, non solleva mai (errore → cache o `[]`); `start_resolver=False` quando si è già dentro il resolver (evita rientranza) |
 | `async list_address_book()` | delega sync via `asyncio.to_thread` | |
 | `register_contact(contact) -> None` | append se assente | rende il contatto noto per lookup eventi/invio |
 | `needs_pairing` (property) | `False` | richiede pairing QR interattivo |

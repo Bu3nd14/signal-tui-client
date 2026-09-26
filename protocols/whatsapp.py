@@ -878,15 +878,23 @@ class WhatsAppBackend(ChatBackend):
 
     # ─── Address book (rubrica completa) ──────────────────────────────
 
-    def list_address_book_sync(self, force: bool = False) -> list[ChatContact]:
+    def list_address_book_sync(
+        self, force: bool = False, *, start_resolver: bool = True
+    ) -> list[ChatContact]:
         """Rubrica WhatsApp completa = rubrica dedup ∪ chat attive.
 
         Bloccante (chiamare da worker thread); non solleva mai eccezioni: su
         errore remoto serve la copia cached (stale) o ``[]``.  I ``@lid`` non
         in cache NON vengono risolti qui (zero rete): restano standalone con
         ``lid_unresolved=True`` e li risolve in background ``start_lid_resolver``.
+
+        ``start_resolver`` (keyword-only, default ``True``) avvia il resolver
+        background.  Va impostato a ``False`` quando si è già dentro il resolver
+        (``_lid_resolver_run``) per evitare una rientranza/riavvio; il lookup
+        ``_lid_lookup`` usato qui è memory-only, senza rete.
         """
-        self.start_lid_resolver()
+        if start_resolver:
+            self.start_lid_resolver()
         now = time.monotonic()
         if (
             not force
@@ -1195,7 +1203,9 @@ class WhatsAppBackend(ChatBackend):
                 if bulk:
                     self._address_book = None
                     try:
-                        book = self.list_address_book_sync(force=False)
+                        book = self.list_address_book_sync(
+                            force=False, start_resolver=False
+                        )
                         _apply_address_book_names(
                             self.contacts, _build_address_book_name_map(book)
                         )
@@ -1211,7 +1221,7 @@ class WhatsAppBackend(ChatBackend):
             self._lid_cache_save()
             self._address_book = None
             try:
-                book = self.list_address_book_sync(force=False)
+                book = self.list_address_book_sync(force=False, start_resolver=False)
                 _apply_address_book_names(
                     self.contacts, _build_address_book_name_map(book)
                 )

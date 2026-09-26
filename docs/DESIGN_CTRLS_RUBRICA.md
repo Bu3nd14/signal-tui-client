@@ -181,7 +181,7 @@ def start_lid_resolver(self) -> None:   # idempotente, daemon thread interno
 
 *Alternativa scartata:* bulk eager di ~315 GET al caricamento → troppo lento e aggressivo sul server; con la cache persistente il costo si ammortizza su pochi run.
 
-#### e) `WhatsAppBackend.list_address_book_sync(force=False)`
+#### e) `WhatsAppBackend.list_address_book_sync(force=False, *, start_resolver=True)`
 
 Pseudocodice del merge (rubrica ∪ chat attive):
 
