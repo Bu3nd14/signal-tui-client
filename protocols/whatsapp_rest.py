@@ -368,6 +368,34 @@ class WhatsAppRESTClient:
             timeout=5,
         )
 
+    def list_lids(self) -> list[dict] | None:
+        """Return all known ``@lid``→phone mappings via ``/api/{session}/lids``.
+
+        WAHA exposes ``[{"lid": "123@lid", "pn": "456@c.us"}, ...]``; the
+        endpoint is paginated (``limit``/``offset``).  Returns the concatenated
+        list, or ``None`` on transport/HTTP error (best-effort contract).
+        """
+        out: list[dict] = []
+        offset = 0
+        limit = 500
+        while offset <= 100000:
+            result = self._request(
+                "GET",
+                f"/api/{self.session_name}/lids?limit={limit}&offset={offset}",
+                timeout=10,
+            )
+            if result is None:
+                return None if offset == 0 else out
+            if isinstance(result, dict):
+                result = result.get("data") or result.get("lids") or []
+            if not isinstance(result, list) or not result:
+                break
+            out.extend(item for item in result if isinstance(item, dict))
+            if len(result) < limit:
+                break
+            offset += limit
+        return out
+
     def check_number_exists(self, phone_digits: str) -> bool | None:
         """Best-effort check ``GET /api/contacts/check-exists`` (timeout 5).
 

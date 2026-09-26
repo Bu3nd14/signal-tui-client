@@ -878,7 +878,7 @@ class TelegramBackend(ChatBackend):
             return None
         return self._contacts_by_id.get(eid)
 
-    def register_contact(self, contact: ChatContact) -> None:
+    def register_contact(self, contact: ChatContact) -> bool:
         """Registra un contatto (open-or-create) anche nella lookup id→contact.
 
         Oltre all'append in ``self.contacts`` (default di ``ChatBackend``),
@@ -886,11 +886,13 @@ class TelegramBackend(ChatBackend):
         invio (``_resolve_input_entity``) riconoscono il ghost.  Un id non
         intero viene ignorato (guard ``ValueError``/``TypeError``).
         """
-        super().register_contact(contact)
-        try:
-            self._contacts_by_id[int(contact.id)] = contact
-        except (ValueError, TypeError):
-            pass
+        appended = super().register_contact(contact)
+        if appended:
+            try:
+                self._contacts_by_id[int(contact.id)] = contact
+            except (ValueError, TypeError):
+                pass
+        return appended
 
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
@@ -1029,6 +1031,19 @@ class TelegramBackend(ChatBackend):
                 continue
 
         return list(self._address_book)
+
+    def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
+        """Cerca un contatto nella cache rubrica in-memory (zero rete).
+
+        Snapshot locale per evitare TOCTOU su ``_address_book``.
+        """
+        book = self._address_book
+        if book is None:
+            return None
+        for contact in book:
+            if str(contact.id) == contact_id:
+                return contact
+        return None
 
     async def _resolve_input_entity(self, eid: int):
         """Resolve a Telegram user id to an entity usable by ``send_message``.

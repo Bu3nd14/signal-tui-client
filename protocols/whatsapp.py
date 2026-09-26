@@ -99,14 +99,33 @@ def _jid_digits(jid: str) -> str:
 def _dedup_book_contacts(raw: list[dict]) -> list[dict]:
     """Deduplicate the WAHA address book by phone number (pure, unit-testable).
 
-    Key = digits of the number extracted from ``id`` (``_serialized`` handled
-    when ``id`` is a dict), discarding every non-digit and the ``@c.us``/
-    ``@s.whatsapp.net`` domain.  Entries with an empty key or ``@broadcast``/
-    ``@newsletter``/``@g.us`` are dropped.  Among duplicates of the same number
-    the winner is chosen by: (1) a non-empty ``name`` over only-``pushname``,
-    (2) the ``@c.us`` domain, (3) first occurrence (stable).
+    Key = digits of the phone number.  WAHA exposes an explicit ``number``
+    field (``id`` may instead be a ``@lid`` "linked identifier"); when present
+    it takes priority over the digits of ``id`` so a ``@lid`` row is keyed by
+    the real phone and can be looked up by the group-sender resolver.
+    ``_serialized`` dict ids are handled.  Entries with an empty key or
+    ``@broadcast``/``@newsletter``/``@g.us`` are dropped.  Among duplicates of
+    the same number the winner is chosen by: (1) a non-empty ``name`` over
+    only-``pushname``, (2) the ``@c.us`` domain, (3) first occurrence (stable).
+
+    Output rows carry an additive ``lid`` key when the source id (or an
+    explicit ``lid`` field) is a ``@lid`` JID: this is what lets the web group
+    sender resolver map a raw ``@lid`` author to its display name without a
+    network round-trip.
     """
     by_phone: dict[str, dict] = {}
+
+    def _snapshot(
+        jid: str, digits: str, name: str, pushname: str | None, lid: str | None
+    ) -> dict:
+        return {
+            "phone": digits,
+            "name": name,
+            "pushname": pushname,
+            "_jid": jid,
+            "_lid": lid,
+        }
+
     for entry in raw:
         if not isinstance(entry, dict):
             continue
@@ -115,47 +134,40 @@ def _dedup_book_contacts(raw: list[dict]) -> list[dict]:
             continue
         if "@broadcast" in jid or "@newsletter" in jid or jid.endswith("@g.us"):
             continue
-        digits = _jid_digits(jid)
+        # WAHA: a ``@lid`` contact carries the linked identifier in ``id`` and
+        # the real phone in ``number``.  Prefer the explicit number when given.
+        number_field = entry.get("number") or entry.get("phoneNumber")
+        digits = _jid_digits(str(number_field)) if number_field else _jid_digits(jid)
         if not digits:
             continue
+        lid = jid if jid.endswith("@lid") else _jid_string(entry.get("lid"))
         name = entry.get("name") or ""
         pushname = entry.get("pushname") or entry.get("pushName") or None
         current = by_phone.get(digits)
         if current is None:
-            by_phone[digits] = {
-                "phone": digits,
-                "name": name,
-                "pushname": pushname,
-                "_jid": jid,
-            }
+            by_phone[digits] = _snapshot(jid, digits, name, pushname, lid)
             continue
+        candidate = _snapshot(jid, digits, name, pushname, lid or current["_lid"])
         # (1) name non vuoto batte solo-pushname
         candidate_has_name = bool(name)
         current_has_name = bool(current["name"])
         if candidate_has_name != current_has_name:
             if candidate_has_name:
-                by_phone[digits] = {
-                    "phone": digits,
-                    "name": name,
-                    "pushname": pushname,
-                    "_jid": jid,
-                }
+                by_phone[digits] = candidate
             continue
         # (2) a parità, preferisci il dominio @c.us
         candidate_is_c = jid.endswith("@c.us")
         current_is_c = current["_jid"].endswith("@c.us")
         if candidate_is_c and not current_is_c:
-            by_phone[digits] = {
-                "phone": digits,
-                "name": name,
-                "pushname": pushname,
-                "_jid": jid,
-            }
+            by_phone[digits] = candidate
         # (3) a parità, vince la prima occorrenza (keep current)
-    return [
-        {"phone": v["phone"], "name": v["name"], "pushname": v["pushname"]}
-        for v in by_phone.values()
-    ]
+    out: list[dict] = []
+    for v in by_phone.values():
+        item = {"phone": v["phone"], "name": v["name"], "pushname": v["pushname"]}
+        if v.get("_lid"):
+            item["lid"] = v["_lid"]
+        out.append(item)
+    return out
 
 
 class WhatsAppBackend(ChatBackend):
@@ -725,33 +737,64 @@ class WhatsAppBackend(ChatBackend):
         self.contacts = contacts
         self._contacts_by_jid = {cc.id: cc for cc in contacts}
 
+    def _jid_to_phone(self, jid: str) -> str:
+        """Best-effort phone (digits only) for a WhatsApp JID, or ``""``.
+
+        ``@c.us``/``@s.whatsapp.net`` JIDs carry the phone in the local part;
+        ``@lid`` JIDs are resolved through the persistent lid→phone cache
+        (memory only, no network — the background resolver fills it).  This is
+        the hook the web group-sender resolver uses to turn a raw author JID
+        into a phone, which the address book then maps to a display name.
+        Everything else (``@g.us``, broadcasts, ...) has no phone.
+        """
+        if not jid or "@" not in jid:
+            return ""
+        if jid.endswith("@lid"):
+            self._lid_cache_load()
+            return str((self._lid_map or {}).get(jid, {}).get("phone") or "")
+        if jid.endswith(("@c.us", "@s.whatsapp.net")):
+            return _jid_digits(jid.split("@", 1)[0])
+        return ""
+
     def _contact_phone(self, jid: str) -> str:
         """Return the phone for a contact JID, or ``""`` when unknown.
 
-        ``@c.us`` JIDs carry the phone in the local part; ``@lid`` JIDs are
-        resolved through the persistent lid→phone cache (possibly empty on first
-        boot, until the background resolver fills it).  Everything else has no
-        phone number (e.g. ``@g.us``/``@s.whatsapp.net``).
+        Thin alias of :meth:`_jid_to_phone`, kept for the contact loading path.
         """
-        if jid.endswith("@c.us"):
-            return _jid_digits(jid.split("@", 1)[0])
-        if jid.endswith("@lid"):
-            return str((self._lid_map or {}).get(jid, {}).get("phone") or "")
-        return ""
+        return self._jid_to_phone(jid)
 
     def _identify_contact(self, jid: str) -> ChatContact | None:
         """Resolve a JID to a known ``ChatContact`` (or a placeholder)."""
         return self._contacts_by_jid.get(jid)
 
-    def register_contact(self, contact: ChatContact) -> None:
+    def register_contact(self, contact: ChatContact) -> bool:
         """Registra un contatto (open-or-create) anche nella lookup JID→contact.
 
         Oltre all'append in ``self.contacts`` (default di ``ChatBackend``),
         aggiorna ``_contacts_by_jid`` così ``_identify_contact`` e il webhook
-        riconoscono subito il ghost senza creare placeholder duplicati.
+        riconoscono subito il ghost senza creare placeholder duplicati.  Per un
+        ghost ``@c.us`` con un ``@lid`` in cache reverse registra anche l'alias
+        ``_contacts_by_jid[@lid] → stesso oggetto`` (``setdefault``: non
+        sovrascrive un mapping reale preesistente).
         """
-        super().register_contact(contact)
-        self._contacts_by_jid[contact.id] = contact
+        appended = super().register_contact(contact)
+        if appended:
+            self._contacts_by_jid[contact.id] = contact
+        # L'alias è tentato anche quando il contatto è già noto: la cache LID
+        # può essersi popolata dopo la prima registrazione (§3.4).
+        self._register_lid_alias(contact)
+        return appended
+
+    def _register_lid_alias(self, contact: ChatContact) -> None:
+        """Alias ``@lid`` → contatto ``@c.us`` per la continuità eventi."""
+        if not contact.id.endswith("@c.us"):
+            return
+        phone = contact.extras.get("phone")
+        if not phone:
+            return
+        lid = self._phone_to_lid(str(phone))
+        if lid:
+            self._contacts_by_jid.setdefault(lid, contact)
 
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
@@ -781,17 +824,22 @@ class WhatsAppBackend(ChatBackend):
 
             by_phone: dict[str, ChatContact] = {}
             for b in book:
+                extras: dict[str, object] = {
+                    "phone": b["phone"],
+                    "jid": f"{b['phone']}@c.us",
+                    "address_book": True,
+                    "is_chat_active": False,
+                    "source": "wa_book",
+                }
+                # Keep the @lid alias when WAHA gave one: the web group sender
+                # resolver maps a raw @lid author to this name via it.
+                if b.get("lid"):
+                    extras["lid"] = b["lid"]
                 by_phone[b["phone"]] = ChatContact(
                     id=f"{b['phone']}@c.us",
                     display_name=b["name"] or b["pushname"] or f"+{b['phone']}",
                     protocol=PROTOCOL_WHATSAPP,
-                    extras={
-                        "phone": b["phone"],
-                        "jid": f"{b['phone']}@c.us",
-                        "address_book": True,
-                        "is_chat_active": False,
-                        "source": "wa_book",
-                    },
+                    extras=extras,
                 )
 
             out_extra: list[ChatContact] = []
@@ -868,6 +916,44 @@ class WhatsAppBackend(ChatBackend):
                 return list(self._address_book)
             return []
         return list(self._address_book)
+
+    def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
+        """Cerca un contatto nella cache rubrica in-memory (zero rete).
+
+        Ritorna il contatto con l'id del client (es. ``@c.us``), NON riscrive
+        l'id: la risoluzione ``@c.us`` → ``@lid`` avviene tramite alias in
+        ``_contacts_by_jid`` (``register_contact``).  Snapshot locale per
+        evitare TOCTOU: il resolver background può azzerare ``_address_book``.
+        """
+        book = self._address_book
+        if book is None:
+            return None
+        for contact in book:
+            if str(contact.id) == contact_id:
+                return contact
+        return None
+
+    def _phone_to_lid(self, phone: str) -> str | None:
+        """Reverse lookup: phone → ``@lid`` dalla cache LID (zero rete).
+
+        Thread-safe: snapshot di ``_lid_map`` sotto ``_lid_lock``.  Applica lo
+        stesso TTL di ``_lid_lookup`` per scartare mapping scaduti.
+        """
+        self._lid_cache_load()
+        with self._lid_lock:
+            items = list(self._lid_map.items()) if self._lid_map else []
+
+        now = int(time.time())
+        ttl_seconds = get_wa_lid_cache_ttl_days() * 86400
+        for lid_jid, entry in items:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("phone") != phone:
+                continue
+            resolved_at = int(entry.get("resolved_at") or 0)
+            if (now - resolved_at) <= ttl_seconds:
+                return lid_jid
+        return None
 
     # ─── Persistent @lid → phone cache ────────────────────────────────
 
@@ -970,10 +1056,57 @@ class WhatsAppBackend(ChatBackend):
             daemon=True,
         ).start()
 
+    def _lid_bulk_import(self) -> int:
+        """Merge WAHA's known ``@lid``→phone table into the persistent cache.
+
+        ``GET /api/{session}/lids`` lists every link WAHA learned (groups are the
+        main source), so importing it resolves group *participants* too — not
+        just the active chats the per-chat resolver visits.  Best-effort: any
+        transport error is ignored.  Returns how many entries were added or
+        updated.
+        """
+        if not self._rest:
+            return 0
+        try:
+            rows = self._rest.list_lids()
+        except Exception:  # best-effort remote table
+            logger.debug("lid bulk import failed", exc_info=True)
+            return 0
+        if not isinstance(rows, list) or not rows:
+            return 0
+        self._lid_cache_load()
+        now = int(time.time())
+        changed = 0
+        with self._lid_lock:
+            for row in rows:
+                lid = _jid_string(row.get("lid"))
+                pn = _jid_string(row.get("pn"))
+                if not lid or not lid.endswith("@lid"):
+                    continue
+                phone = _jid_digits(pn) if pn and not pn.endswith("@lid") else ""
+                if not phone:
+                    continue
+                entry = self._lid_map.get(lid)
+                if isinstance(entry, dict) and entry.get("phone") == phone:
+                    continue
+                name = entry.get("name") if isinstance(entry, dict) else None
+                self._lid_map[lid] = {
+                    "phone": phone,
+                    "name": name,
+                    "resolved_at": now,
+                }
+                changed += 1
+        if changed:
+            self._lid_cache_save()
+        return changed
+
     def _lid_resolver_run(self) -> None:
-        """Resolve up to 30 uncached ``@lid`` chats, then save and invalidate."""
+        """Resolve uncached ``@lid`` chats, then save and invalidate."""
         try:
             self._lid_cache_load()
+            # Bulk table first: it covers group participants (not just the
+            # active chats visited below) and is a single request.
+            bulk = self._lid_bulk_import()
             candidates = [
                 contact.id
                 for contact in list(self.contacts)
@@ -982,6 +1115,8 @@ class WhatsAppBackend(ChatBackend):
                 and not self._lid_cached(contact.id)
             ]
             if not candidates:
+                if bulk:
+                    self._address_book = None
                 return
             for jid in candidates[:30]:
                 try:
