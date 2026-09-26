@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -49,6 +50,10 @@ class ChatBackend(ABC):
     #: Protocol identifier (one of ``models.PROTOCOL_*``).
     protocol: str = ""
     contacts: list[ChatContact]
+
+    #: Class-level lock guarding ``register_contact`` (dedup check-then-act).
+    #: Class-scoped so backends and test doubles need no ``__init__`` change.
+    _register_lock = threading.Lock()
 
     # ─── Lifecycle ────────────────────────────────────────────────────
 
@@ -349,10 +354,42 @@ class ChatBackend(ABC):
         """
         return await asyncio.to_thread(self.list_address_book_sync)
 
-    def register_contact(self, contact: ChatContact) -> None:
-        """Rende il contatto noto al backend (lookup per eventi/invio)."""
-        if contact not in self.contacts:
+    def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
+        """Cerca un contatto nella cache rubrica in-memory (zero rete).
+
+        Default: ``None`` (backend senza rubrica separata).  Implementato da
+        WhatsApp/Telegram; per Signal la rubrica coincide con ``self.contacts``.
+        Non bloccante: solo lookup in-memory (alcuni backend lazy-caricano la
+        cache LID da disco, mai dalla rete).
+        """
+        return None
+
+    def find_contact(self, contact_id: str) -> ChatContact | None:
+        """Cerca un contatto: prima in ``self.contacts``, poi in rubrica.
+
+        Zero rete.  Ritorna il contatto con l'id del client (nessuna riscrittura
+        di ``@c.us`` in ``@lid``).
+        """
+        for contact in self.contacts:
+            if str(contact.id) == contact_id:
+                return contact
+        return self.find_address_book_contact(contact_id)
+
+    def register_contact(self, contact: ChatContact) -> bool:
+        """Rende il contatto noto al backend (lookup per eventi/invio).
+
+        Idempotente: dedup per ``cache_key`` (non per ``__eq__``, che include
+        ``extras``).  Thread-safe: lock di classe.
+
+        Returns:
+            ``True`` se il contatto è stato aggiunto, ``False`` se già presente.
+        """
+        with ChatBackend._register_lock:
+            for existing in self.contacts:
+                if existing.cache_key == contact.cache_key:
+                    return False
             self.contacts.append(contact)
+            return True
 
     # ─── Status ───────────────────────────────────────────────────────
 

@@ -1252,12 +1252,23 @@ def create_api_router() -> Any:
         backend = manager.get(protocol)
         if backend is None:
             raise HTTPException(status_code=404, detail="Not Found")
-        known_contact = any(
-            str(contact.id) == contact_id and str(contact.protocol) == protocol
-            for contact in manager.list_contacts()
-        )
-        if not known_contact:
+
+        contact = backend.find_contact(contact_id)
+        if contact is None:
             raise HTTPException(status_code=404, detail="Not Found")
+
+        # Contatto book-only (non ancora in self.contacts): registralo prima
+        # del send così gli eventi successivi lo risolvono.  Il backend
+        # WhatsApp crea da sé l'alias @lid → contatto @c.us.
+        is_known = any(str(c.id) == contact.id for c in backend.contacts)
+        if not is_known:
+            contact.extras["ghost"] = True
+            backend.register_contact(contact)
+        elif contact.extras.get("ghost"):
+            # Ghost book-only già registrato: ritenta l'alias @lid.  Il primo
+            # invio può averlo saltato se la cache LID era vuota; la cache può
+            # popolarsi dopo.  Idempotente (setdefault), zero rete.
+            backend.register_contact(contact)
 
         quote_attachments = None
         if protocol == "signal" and quote_attachment_id is not None:

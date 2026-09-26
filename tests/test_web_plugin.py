@@ -26,6 +26,36 @@ TOKEN = "correct-secret"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
+class _FakeBackend:
+    """Backend stub exposing the send-lookup surface used by ``/api/send``.
+
+    Reads the manager's live ``contacts`` list so reassigning
+    ``manager.contacts`` after the fixture is created still resolves.
+    """
+
+    media_dir = None
+
+    def __init__(self, manager, protocol):
+        self._manager = manager
+        self._protocol = protocol
+
+    @property
+    def contacts(self):
+        return self._manager.contacts
+
+    def find_contact(self, contact_id):
+        for contact in self._manager.contacts:
+            if (
+                str(contact.id) == contact_id
+                and str(contact.protocol) == self._protocol
+            ):
+                return contact
+        return None
+
+    def register_contact(self, contact):
+        return False
+
+
 class FakeManager:
     def __init__(self, contacts=(), paths=None):
         self.contacts = list(contacts)
@@ -41,7 +71,7 @@ class FakeManager:
         return self.paths.get((proto, attachment_id))
 
     def get(self, proto):
-        return SimpleNamespace(media_dir=None)
+        return _FakeBackend(self, proto)
 
     def send_message_sync(self, protocol, contact_id, text, **kwargs):
         self.send_calls.append((protocol, contact_id, text, kwargs))
