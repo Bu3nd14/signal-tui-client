@@ -281,6 +281,30 @@ def telegram_enabled() -> bool:
     return get_telegram_api_id() != 0 and bool(get_telegram_api_hash())
 
 
+def signal_enabled() -> bool:
+    """Return whether the Signal backend should auto-connect at boot.
+
+    Explicit ``SIGNAL_ENABLED`` (environment, ``config.json``
+    ``signal_enabled`` or the project ``.env``) wins.  Otherwise Signal is
+    enabled only when a user number is configured (``SIGNAL_USER_NUMBER`` or
+    ``config.json`` ``user_number``): a WhatsApp/Telegram-only deployment then
+    skips the signal-cli daemon startup (and its retry noise) without removing
+    the always-registered Signal backend.  Use ``SIGNAL_ENABLED=0`` to disable
+    auto-connect even when a number is configured.
+    """
+    explicit = os.environ.get("SIGNAL_ENABLED")
+    if explicit is None:
+        cfg = _load_config()
+        if "signal_enabled" in cfg:
+            explicit = cfg.get("signal_enabled")
+    if explicit is None:
+        explicit = _load_dotenv().get("SIGNAL_ENABLED")
+    if explicit is not None and str(explicit).strip() != "":
+        return str(explicit).strip().lower() in ("1", "true", "yes", "on")
+    number = os.environ.get("SIGNAL_USER_NUMBER") or _load_config().get("user_number")
+    return bool(str(number or "").strip())
+
+
 # ─── Address book / picker configuration ────────────────────────────────────
 
 

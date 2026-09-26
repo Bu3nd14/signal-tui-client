@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -324,3 +324,78 @@ class TestBackendReadyMergeDedup:
         entries = app._cache[key]
         assert len(entries) == 1
         assert entries[0]["msg_type"] == "image"
+
+
+class _FakeWhatsAppBackend:
+    """Stand-in with real ``is_working``/``needs_pairing`` properties."""
+
+    protocol = PROTOCOL_WHATSAPP
+
+    def __init__(self, *, needs_pairing: bool = False, is_working=True):
+        self.needs_pairing = needs_pairing
+        self._is_working = is_working
+
+    @property
+    def is_working(self) -> bool:
+        value = self._is_working
+        return bool(value() if callable(value) else value)
+
+
+class TestWhatsappBootConnect:
+    """🚀 ``_connect_whatsapp_boot``: connette appena WAHA è WORKING.
+
+    L'app può partire mentre WAHA sta ancora sincronizzando: il vecchio gate
+    ``is_working`` saltava la connessione senza retry (UI vuota fino al riavvio).
+    """
+
+    def _make(self, *, needs_pairing=False, is_working=True):
+        app = _make_app()
+        app.call_from_thread = MagicMock()
+        app._connect_whatsapp = MagicMock()
+        app.whatsapp_backend = _FakeWhatsAppBackend(
+            needs_pairing=needs_pairing, is_working=is_working
+        )
+        return app, app.whatsapp_backend
+
+    def test_connects_immediately_when_working(self):
+        app, _ = self._make(is_working=True)
+
+        app._connect_whatsapp_boot()
+
+        app._connect_whatsapp.assert_called_once_with()
+
+    def test_skips_pairing_sessions(self):
+        app, _ = self._make(needs_pairing=True, is_working=False)
+
+        app._connect_whatsapp_boot()
+
+        app._connect_whatsapp.assert_not_called()
+        app.call_from_thread.assert_called_once()
+
+    def test_waits_until_working_then_connects(self):
+        app, backend = self._make(is_working=False)
+        calls = {"n": 0}
+
+        def _is_working():
+            calls["n"] += 1
+            return calls["n"] >= 3
+
+        backend._is_working = _is_working
+        with patch("tui.backend_connect.time.sleep"):
+            app._connect_whatsapp_boot()
+
+        app._connect_whatsapp.assert_called_once_with()
+        assert calls["n"] == 3
+
+    def test_timeout_marks_backend_done(self):
+        app, _ = self._make(is_working=False)
+        with patch("tui.backend_connect.time.monotonic", side_effect=[0.0, 1e9]):
+            app._connect_whatsapp_boot()
+
+        app._connect_whatsapp.assert_not_called()
+        app.call_from_thread.assert_called_once()
+
+    def test_no_backend_is_noop(self):
+        app = _make_app()
+        app.whatsapp_backend = None
+        app._connect_whatsapp_boot()  # non deve sollevare
