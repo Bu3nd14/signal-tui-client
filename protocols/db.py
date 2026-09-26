@@ -186,6 +186,18 @@ def _migrate_protocol_schema(conn: sqlite3.Connection) -> None:
     if "quote_attachment_path" not in columns:
         conn.execute("ALTER TABLE messages ADD COLUMN quote_attachment_path TEXT")
 
+    # Multi-attachment batch identity (DESIGN_WEB_MULTI_ATTACHMENT §6.4): one
+    # outgoing Signal message with N attachments is persisted as N rows sharing
+    # ``msg_id``; ``batch_id``/``batch_index`` carry the batch slot so the web
+    # optimistic↔real pairing survives a reload.  Ensured unconditionally
+    # (before the user_version early return below) like ``edited`` and
+    # ``content_type`` above: a DB can already carry a modern schema version
+    # while still lacking these columns.
+    if "batch_id" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN batch_id TEXT")
+    if "batch_index" not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN batch_index INTEGER")
+
     if _current_schema_version(conn) >= _LEGACY_MIGRATION_VERSION:
         return
 
@@ -328,7 +340,9 @@ def _init_db():
                     quote_timestamp INTEGER,
                     quote_author TEXT,
                     reply_to_message_id TEXT,
-                    edited INTEGER NOT NULL DEFAULT 0
+                    edited INTEGER NOT NULL DEFAULT 0,
+                    batch_id TEXT,
+                    batch_index INTEGER
                 )
             """)
             conn.execute("""
@@ -404,13 +418,17 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
         conn = sqlite3.connect(DB_FILE)
         try:
             conn.row_factory = sqlite3.Row
+            # Deterministic tie-breaker: rows sharing a timestamp (the N mirror
+            # rows of one multi-attachment message) load in insertion order
+            # (``id`` is the autoincrement rowid), so the k-th echo keeps
+            # matching the k-th mirror after a restart.
             if protocol is None:
                 rows = conn.execute(
-                    "SELECT * FROM messages ORDER BY timestamp"
+                    "SELECT * FROM messages ORDER BY timestamp, id"
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM messages WHERE protocol = ? ORDER BY timestamp",
+                    "SELECT * FROM messages WHERE protocol = ? ORDER BY timestamp, id",
                     (protocol,),
                 ).fetchall()
         finally:
@@ -442,6 +460,8 @@ def _load_cache(protocol: str | None = None) -> dict[str, list[dict]]:
                 "read": bool(row["read"]),
                 "status": row["status"],
                 "protocol": row["protocol"],
+                "batch_id": row["batch_id"],
+                "batch_index": row["batch_index"],
             }
         )
     return cache
@@ -468,6 +488,8 @@ def _add_message_to_cache(
     quote_attachment_path: str | None = None,
     quote_content_type: str | None = None,
     media_kind: str | None = None,
+    batch_id: str | None = None,
+    batch_index: int | None = None,
 ):
     """Add a message to the SQLite cache (incremental INSERT).
     msg_type: "text", "image", "sticker", "attachment"
@@ -480,6 +502,10 @@ def _add_message_to_cache(
         for backward compatibility.
     msg_id: stable per-message id (e.g. the Baileys WhatsApp message id).
         Persisting it lets the id-based dedup work across sessions.
+    batch_id/batch_index: multi-attachment batch slot (one outgoing message
+        with N attachments = N rows sharing ``msg_id`` and ``batch_id``).
+        Deliberately NOT part of the ``existing`` dedup query below: the
+        batch slot is immutable for a given row.
     """
     _init_db()
     if quote_attachment_path is not None:
@@ -514,8 +540,9 @@ def _add_message_to_cache(
                      quote_text, msg_type, attachment_info, attachment_id, content_type,
                      media_kind,
                      quote_attachment_id, quote_attachment_path, quote_content_type,
-                       read, status, msg_id, quote_timestamp, quote_author, reply_to_message_id)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       read, status, msg_id, quote_timestamp, quote_author, reply_to_message_id,
+                       batch_id, batch_index)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     protocol,
                     contact_number,
@@ -538,6 +565,8 @@ def _add_message_to_cache(
                     quote_timestamp,
                     quote_author,
                     reply_to_message_id,
+                    batch_id,
+                    batch_index,
                 ),
             )
             conn.commit()
@@ -604,18 +633,34 @@ def _update_message_attachment_id(
     msg_id: str | None,
     timestamp: int,
     attachment_id: str,
+    expected_attachment_id: str | None = None,
 ) -> bool:
+    """Attach a real attachment id to the row currently carrying a known one.
+
+    Without ``expected_attachment_id`` the closest row matching
+    ``(msg_id, timestamp)`` is updated (historical behaviour).  The N mirror
+    rows of a multi-attachment batch share both ``msg_id`` and ``timestamp``,
+    so callers upgrading one slot pass the id being replaced
+    (``expected_attachment_id``) to target exactly that row instead of
+    overwriting the first one N times.
+    """
     if not msg_id:
         return False
     _init_db()
     with _DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         try:
-            row = conn.execute(
+            query = (
                 "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
-                "AND msg_id = ? ORDER BY ABS(timestamp - ?) ASC, rowid ASC LIMIT 1",
-                (protocol, contact_number, str(msg_id), timestamp),
-            ).fetchone()
+                "AND msg_id = ?"
+            )
+            params: list = [protocol, contact_number, str(msg_id)]
+            if expected_attachment_id is not None:
+                query += " AND attachment_id = ?"
+                params.append(expected_attachment_id)
+            query += " ORDER BY ABS(timestamp - ?) ASC, rowid ASC LIMIT 1"
+            params.append(timestamp)
+            row = conn.execute(query, params).fetchone()
             if row is None:
                 return False
             cursor = conn.execute(

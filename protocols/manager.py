@@ -10,6 +10,7 @@ send/mark-read calls to the correct backend.
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -219,14 +220,123 @@ class BackendManager:
         )
         return message_id
 
+    def send_attachments_sync(
+        self,
+        protocol: str,
+        contact_id: str,
+        file_paths: list[Path],
+        *,
+        captions: list[str | None],
+        mime_types: list[str],
+        media_kinds: list[str | None],
+        filenames: list[str | None],
+        batch_id: str | None = None,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> list[str]:
+        """Send N attachments through *protocol* from a worker thread.
+
+        Returns the message ids created by the backend: Signal batches the
+        attachments into a single message, WhatsApp/Telegram may create one
+        message per attachment.  ``captions`` carries one caption per file
+        (the web UI only fills the first one).  Atomic semantics: any send
+        failure raises so the caller can abort the whole batch.
+        """
+        backend = self._get_or_raise(protocol)
+        message_ids = backend.send_attachments_sync(
+            contact_id,
+            file_paths,
+            batch_id=batch_id,
+            captions=captions,
+            mime_types=mime_types,
+            media_kinds=media_kinds,
+            filenames=filenames,
+            quote_timestamp=quote_timestamp,
+            quote_author=quote_author,
+            quote_message=quote_message,
+            reply_to_message_id=reply_to_message_id,
+            quote_attachments=quote_attachments,
+        )
+        if not message_ids:
+            # Degenerate batch (empty file list): nothing to mirror.
+            return message_ids
+        if protocol == "signal":
+            # The Signal backend mirrors its own rows inside the atomic send
+            # barrier: enqueue only the lightweight "sent-mirror" notification
+            # (no second DB write).  The timestamp is the Signal message id.
+            try:
+                timestamp = (
+                    int(message_ids[0]) if message_ids else int(time.time() * 1000)
+                )
+            except (TypeError, ValueError):
+                timestamp = int(time.time() * 1000)
+            try:
+                backend.enqueue_sent_notification(
+                    contact_id=contact_id,
+                    message_id=message_ids[0],
+                    timestamp=timestamp,
+                    batch_id=batch_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to enqueue sent-mirror notification: "
+                    "protocol=%s contact=%s message_id=%s",
+                    protocol,
+                    contact_id,
+                    message_ids[0] if message_ids else None,
+                )
+            return message_ids
+        # WhatsApp/Telegram: N messages → N mirror events, batch-indexed.
+        for index, message_id in enumerate(message_ids):
+            try:
+                self._enqueue_sent_message(
+                    backend,
+                    contact_id,
+                    message_id,
+                    captions[index] or "",
+                    batch_id=batch_id,
+                    batch_index=index,
+                    quote_timestamp=quote_timestamp if index == 0 else None,
+                    quote_author=quote_author if index == 0 else None,
+                    quote_message=quote_message if index == 0 else None,
+                    reply_to_message_id=reply_to_message_id if index == 0 else None,
+                    attachment_path=file_paths[index],
+                    mime_type=mime_types[index],
+                    media_kind=media_kinds[index],
+                    filename=filenames[index],
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to enqueue sent message: protocol=%s contact=%s "
+                    "message_id=%s",
+                    protocol,
+                    contact_id,
+                    message_id,
+                )
+        return message_ids
+
     @staticmethod
     def _enqueue_sent_message(
         backend: ChatBackend,
         contact_id: str,
         message_id: str,
         text: str,
+        *,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
         **kwargs,
     ) -> None:
+        # Forward the batch metadata only when the whole batch is identified
+        # by a batch_id: ``batch_index`` alone is always set (0 for a single
+        # attachment routed through the batch API) and backends that have not
+        # been extended yet would reject the extra kwarg and lose the whole
+        # mirror (the TypeError is absorbed below).
+        if batch_id is not None:
+            kwargs["batch_id"] = batch_id
+            kwargs["batch_index"] = batch_index
         try:
             backend.enqueue_sent_message(contact_id, message_id, text, **kwargs)
         except OSError:

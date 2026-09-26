@@ -165,7 +165,7 @@ class TestRegisterContact:
         backend = _MinimalBackend()
         contact = _contact()
 
-        backend.register_contact(contact)
+        assert backend.register_contact(contact) is True
 
         assert backend.contacts == [contact]
 
@@ -173,9 +173,21 @@ class TestRegisterContact:
         contact = _contact()
         backend = _MinimalBackend([contact])
 
-        backend.register_contact(contact)
+        assert backend.register_contact(contact) is False
 
         assert len(backend.contacts) == 1
+
+    def test_dedup_uses_cache_key_not_dataclass_eq(self):
+        first = _contact()
+        first.extras["copy"] = 1
+        second = _contact()
+        second.extras["copy"] = 2
+        backend = _MinimalBackend([first])
+
+        assert second != first  # __eq__ includes extras
+        assert backend.register_contact(second) is False
+
+        assert backend.contacts == [first]
 
 
 # ─── Config getters ──────────────────────────────────────────────────────────

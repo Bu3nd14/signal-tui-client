@@ -767,15 +767,34 @@ class WhatsAppBackend(ChatBackend):
         """Resolve a JID to a known ``ChatContact`` (or a placeholder)."""
         return self._contacts_by_jid.get(jid)
 
-    def register_contact(self, contact: ChatContact) -> None:
+    def register_contact(self, contact: ChatContact) -> bool:
         """Registra un contatto (open-or-create) anche nella lookup JID→contact.
 
         Oltre all'append in ``self.contacts`` (default di ``ChatBackend``),
         aggiorna ``_contacts_by_jid`` così ``_identify_contact`` e il webhook
-        riconoscono subito il ghost senza creare placeholder duplicati.
+        riconoscono subito il ghost senza creare placeholder duplicati.  Per un
+        ghost ``@c.us`` con un ``@lid`` in cache reverse registra anche l'alias
+        ``_contacts_by_jid[@lid] → stesso oggetto`` (``setdefault``: non
+        sovrascrive un mapping reale preesistente).
         """
-        super().register_contact(contact)
-        self._contacts_by_jid[contact.id] = contact
+        appended = super().register_contact(contact)
+        if appended:
+            self._contacts_by_jid[contact.id] = contact
+        # L'alias è tentato anche quando il contatto è già noto: la cache LID
+        # può essersi popolata dopo la prima registrazione (§3.4).
+        self._register_lid_alias(contact)
+        return appended
+
+    def _register_lid_alias(self, contact: ChatContact) -> None:
+        """Alias ``@lid`` → contatto ``@c.us`` per la continuità eventi."""
+        if not contact.id.endswith("@c.us"):
+            return
+        phone = contact.extras.get("phone")
+        if not phone:
+            return
+        lid = self._phone_to_lid(str(phone))
+        if lid:
+            self._contacts_by_jid.setdefault(lid, contact)
 
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
@@ -897,6 +916,44 @@ class WhatsAppBackend(ChatBackend):
                 return list(self._address_book)
             return []
         return list(self._address_book)
+
+    def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
+        """Cerca un contatto nella cache rubrica in-memory (zero rete).
+
+        Ritorna il contatto con l'id del client (es. ``@c.us``), NON riscrive
+        l'id: la risoluzione ``@c.us`` → ``@lid`` avviene tramite alias in
+        ``_contacts_by_jid`` (``register_contact``).  Snapshot locale per
+        evitare TOCTOU: il resolver background può azzerare ``_address_book``.
+        """
+        book = self._address_book
+        if book is None:
+            return None
+        for contact in book:
+            if str(contact.id) == contact_id:
+                return contact
+        return None
+
+    def _phone_to_lid(self, phone: str) -> str | None:
+        """Reverse lookup: phone → ``@lid`` dalla cache LID (zero rete).
+
+        Thread-safe: snapshot di ``_lid_map`` sotto ``_lid_lock``.  Applica lo
+        stesso TTL di ``_lid_lookup`` per scartare mapping scaduti.
+        """
+        self._lid_cache_load()
+        with self._lid_lock:
+            items = list(self._lid_map.items()) if self._lid_map else []
+
+        now = int(time.time())
+        ttl_seconds = get_wa_lid_cache_ttl_days() * 86400
+        for lid_jid, entry in items:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("phone") != phone:
+                continue
+            resolved_at = int(entry.get("resolved_at") or 0)
+            if (now - resolved_at) <= ttl_seconds:
+                return lid_jid
+        return None
 
     # ─── Persistent @lid → phone cache ────────────────────────────────
 
@@ -1448,37 +1505,33 @@ class WhatsAppBackend(ChatBackend):
             )
         return self._extract_message_id(result)
 
-    def send_attachment_sync(
+    def _send_media_sync(
         self,
-        contact_id: str,
+        send_chat_id: str,
         file_path: Path,
         *,
-        caption: str | None = None,
+        caption: str | None,
         mime_type: str,
-        quote_timestamp: int | None = None,
-        quote_author: str | None = None,
-        quote_message: str | None = None,
-        reply_to_message_id: str | None = None,
-        media_kind: str | None = None,
-        filename: str | None = None,
+        media_kind: str | None,
+        filename: str | None,
+        reply_to_message_id: str | None,
     ) -> str | None:
+        """Send one media file via the WAHA endpoint matching its kind.
+
+        Shared by the single- and the multi-attachment send paths: routes
+        to ``sendImage``/``sendVideo``/``sendFile`` and falls back to
+        ``sendFile`` when the media endpoint is missing (older WAHA builds
+        answer 404/501).  Returns the extracted Baileys message id.
+        """
         if not self._rest:
             raise RuntimeError("WhatsApp API is not configured")
-        send_chat_id = self._resolve_send_chat_id(contact_id)
         kind = media_kind or media_kind_from_mime(mime_type) or "document"
-        send_method = (
-            self._rest.send_image
+        endpoint, send_method = (
+            ("sendImage", self._rest.send_image)
             if kind in {"image", "gif"}
-            else self._rest.send_video
+            else ("sendVideo", self._rest.send_video)
             if kind == "video"
-            else self._rest.send_file
-        )
-        endpoint = (
-            "sendImage"
-            if kind in {"image", "gif"}
-            else "sendVideo"
-            if kind == "video"
-            else "sendFile"
+            else ("sendFile", self._rest.send_file)
         )
         kwargs = {
             "caption": caption,
@@ -1498,14 +1551,7 @@ class WhatsAppBackend(ChatBackend):
             }
         ):
             endpoint = "sendFile"
-            result = self._rest.send_file(
-                send_chat_id,
-                file_path,
-                caption=caption,
-                reply_to_message_id=reply_to_message_id,
-                mime_type=mime_type,
-                **({"filename": filename} if filename is not None else {}),
-            )
+            result = self._rest.send_file(send_chat_id, file_path, **kwargs)
         if result is None:
             status = self._rest.last_status
             detail = self._rest.last_error or "unreachable"
@@ -1514,12 +1560,100 @@ class WhatsAppBackend(ChatBackend):
             )
         return self._extract_message_id(result)
 
+    def send_attachment_sync(
+        self,
+        contact_id: str,
+        file_path: Path,
+        *,
+        caption: str | None = None,
+        mime_type: str,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        media_kind: str | None = None,
+        filename: str | None = None,
+    ) -> str | None:
+        if not self._rest:
+            raise RuntimeError("WhatsApp API is not configured")
+        send_chat_id = self._resolve_send_chat_id(contact_id)
+        return self._send_media_sync(
+            send_chat_id,
+            file_path,
+            caption=caption,
+            mime_type=mime_type,
+            media_kind=media_kind,
+            filename=filename,
+            reply_to_message_id=reply_to_message_id,
+        )
+
+    def send_attachments_sync(
+        self,
+        contact_id: str,
+        file_paths: list[Path],
+        *,
+        captions: list[str | None],
+        mime_types: list[str],
+        media_kinds: list[str | None],
+        filenames: list[str | None],
+        batch_id: str | None = None,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> list[str | None]:
+        """Send N attachments as N separate WhatsApp messages.
+
+        WAHA has no batch API, so every attachment becomes its own message
+        (one ``sendImage``/``sendVideo``/``sendFile`` call per file).  The
+        caption (from ``captions``) and the quote/reply metadata apply to
+        the FIRST message only.  Atomic stop-early semantics (design §4.8):
+        the first failure aborts the remaining sends and raises — WhatsApp
+        has no reliable delete API, so messages already delivered stay.
+        """
+        if not self._rest:
+            raise RuntimeError("WhatsApp API is not configured")
+        send_chat_id = self._resolve_send_chat_id(contact_id)
+        message_ids: list[str | None] = []
+        for index, file_path in enumerate(file_paths):
+            try:
+                message_ids.append(
+                    self._send_media_sync(
+                        send_chat_id,
+                        file_path,
+                        caption=captions[index] if index == 0 else None,
+                        mime_type=mime_types[index],
+                        media_kind=media_kinds[index],
+                        filename=filenames[index],
+                        reply_to_message_id=(
+                            reply_to_message_id if index == 0 else None
+                        ),
+                    )
+                )
+            except Exception as exc:
+                # Rollback is impossible (no reliable WhatsApp delete API):
+                # log how far the batch got and re-raise so the caller can
+                # answer with a single failure for the whole batch.
+                logger.error(
+                    "WhatsApp multi-attach failed at index %d/%d: "
+                    "%d messages already sent (%s)",
+                    index,
+                    len(file_paths),
+                    len(message_ids),
+                    exc,
+                )
+                raise
+        return message_ids
+
     def enqueue_sent_message(
         self,
         contact_id: str,
         message_id: str,
         text: str,
         *,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
@@ -1568,6 +1702,8 @@ class WhatsAppBackend(ChatBackend):
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
                     "media_kind": media_kind,
+                    "batch_id": batch_id,
+                    "batch_index": batch_index,
                 },
             )
         )
@@ -2073,7 +2209,77 @@ class WhatsAppBackend(ChatBackend):
             quote_attachment_id=data.get("quote_attachment_id"),
             quote_attachment_path=data.get("quote_attachment_path"),
             quote_content_type=data.get("quote_content_type"),
+            batch_id=data.get("batch_id"),
+            batch_index=data.get("batch_index"),
         )
+
+    def _merge_batch_slot(self, contact_id: str, entry: dict, data: dict) -> bool:
+        """Fuse the batch slot of a mirror event onto an existing row.
+
+        A WhatsApp multi-attachment send materializes one row per file (WAHA
+        has no batch API), each mirrored with ``batch_id``/``batch_index``.
+        When the real echo wins the race and creates the row first, the batch
+        mirror dedups onto it; without this merge the row keeps a NULL slot and
+        the web reconciliation leaves the optimistic bubbles orphaned.  An
+        existing batch is never overwritten (a row belongs to exactly one
+        batch).
+
+        The fusion is only declared when the DB actually owns the row: if the
+        slot UPDATE touches no row (cache-only row from ``persist=False`` or a
+        DB row that no longer exists) we log and return False, so callers do not
+        push a ``"changed"`` the next fetch cannot reproduce.
+        """
+        batch_id = data.get("batch_id")
+        if batch_id is None or entry.get("batch_id") is not None:
+            return False
+        msg_id = entry.get("id") or data.get("id")
+        if not msg_id:
+            logger.warning(
+                "WhatsApp: batch slot merge skipped, no msg_id contact=%s batch_id=%s",
+                contact_id,
+                batch_id,
+            )
+            return False
+        from protocols.db import _DB_LOCK, DB_FILE
+
+        updated = 0
+        try:
+            with _DB_LOCK:
+                connection = sqlite3.connect(DB_FILE)
+                try:
+                    cursor = connection.execute(
+                        "UPDATE messages SET batch_id = ?, batch_index = ? "
+                        "WHERE protocol = ? AND contact_number = ? "
+                        "AND msg_id = ? AND batch_id IS NULL",
+                        (
+                            batch_id,
+                            data.get("batch_index"),
+                            PROTOCOL_WHATSAPP,
+                            contact_id,
+                            str(msg_id),
+                        ),
+                    )
+                    updated = cursor.rowcount
+                    connection.commit()
+                finally:
+                    connection.close()
+        except Exception:
+            logger.exception("WhatsApp: batch slot merge failed")
+            return False
+        # Cache-only rows (persist=False) or rows missing from the DB cannot
+        # confirm the slot: do not push "changed" for something the DB cannot
+        # show, or the next fetch would resurrect the orphaned bubble.
+        if updated <= 0:
+            logger.warning(
+                "WhatsApp: batch slot merge touched no row contact=%s msg_id=%s batch_id=%s",
+                contact_id,
+                msg_id,
+                batch_id,
+            )
+            return False
+        entry["batch_id"] = batch_id
+        entry["batch_index"] = data.get("batch_index")
+        return True
 
     def _upgrade_outgoing_attachment(
         self, contact_id: str, message: dict, data: dict, ts: int
@@ -2333,7 +2539,10 @@ class WhatsAppBackend(ChatBackend):
                     int(existing.get("timestamp", ts)),
                     incoming_info,
                 )
-            return "changed" if attachment_changed or caption_changed else False
+            batch_changed = self._merge_batch_slot(contact_id, existing, data)
+            if attachment_changed or caption_changed or batch_changed:
+                return "changed"
+            return False
 
         if (
             reconcile
@@ -2397,6 +2606,8 @@ class WhatsAppBackend(ChatBackend):
                 "quote_attachment_id": data.get("quote_attachment_id"),
                 "quote_attachment_path": data.get("quote_attachment_path"),
                 "quote_content_type": data.get("quote_content_type"),
+                "batch_id": data.get("batch_id"),
+                "batch_index": data.get("batch_index"),
             },
         )
         return True

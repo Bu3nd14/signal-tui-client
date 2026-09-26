@@ -286,7 +286,7 @@ const submit = app.slice(app.indexOf("async function submitMessage("), app.index
 globalThis.state = {
   sending: false,
   active: { id: "alice", protocol: "signal" },
-  stagedAttachment: null,
+  stagedAttachments: [],
   replyTo: { timestamp: 10, quoteAuthor: "alice", quoteMessage: "Foto", isImage: true, isMedia: true, contentType: "image/jpeg", attachmentId: "folder/photo id:1", id: "10" },
   messages: [],
   optimistic: [],

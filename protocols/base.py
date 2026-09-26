@@ -15,10 +15,13 @@ Textual reactive event loop.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from models import ChatContact, ChatEvent
 
@@ -47,6 +50,10 @@ class ChatBackend(ABC):
     #: Protocol identifier (one of ``models.PROTOCOL_*``).
     protocol: str = ""
     contacts: list[ChatContact]
+
+    #: Class-level lock guarding ``register_contact`` (dedup check-then-act).
+    #: Class-scoped so backends and test doubles need no ``__init__`` change.
+    _register_lock = threading.Lock()
 
     # ─── Lifecycle ────────────────────────────────────────────────────
 
@@ -111,6 +118,71 @@ class ChatBackend(ABC):
         """Blocking image send for callers running in a worker thread."""
         raise NotImplementedError
 
+    def send_attachments_sync(
+        self,
+        contact_id: str,
+        file_paths: list[Path],
+        *,
+        captions: list[str | None],
+        mime_types: list[str],
+        media_kinds: list[str | None],
+        filenames: list[str | None],
+        batch_id: str | None = None,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> list[str]:
+        """Blocking multi-attachment send for callers in a worker thread.
+
+        Default implementation: loop over ``send_attachment_sync`` one file
+        at a time.  Backends with a native batch API (Signal attachment
+        lists, Telegram albums) override this with a single optimized call.
+        ``captions`` carries one caption per file (the web UI only fills the
+        first one); quote/reply metadata applies to the first file only.
+        Optional kwargs are forwarded only when the single-send signature
+        accepts them (``quote_attachments`` exists on Signal only).
+        """
+        parameters = inspect.signature(self.send_attachment_sync).parameters
+        var_keyword = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+
+        def accepted(name: str) -> bool:
+            return var_keyword or name in parameters
+
+        message_ids: list[str] = []
+        for index, file_path in enumerate(file_paths):
+            optional: dict[str, Any] = {
+                "media_kind": media_kinds[index],
+                "filename": filenames[index],
+            }
+            if index == 0:
+                optional.update(
+                    quote_timestamp=quote_timestamp,
+                    quote_author=quote_author,
+                    quote_message=quote_message,
+                    reply_to_message_id=reply_to_message_id,
+                    quote_attachments=quote_attachments,
+                )
+            kwargs = {
+                name: value
+                for name, value in optional.items()
+                if value is not None and accepted(name)
+            }
+            message_ids.append(
+                self.send_attachment_sync(
+                    contact_id,
+                    file_path,
+                    caption=captions[index],
+                    mime_type=mime_types[index],
+                    **kwargs,
+                )
+            )
+        return message_ids
+
     def enqueue_sent_message(
         self,
         contact_id: str,
@@ -124,8 +196,24 @@ class ChatBackend(ABC):
         attachment_path: Path | None = None,
         mime_type: str | None = None,
         filename: str | None = None,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
     ) -> None:
         """Publish a successful facade send through the normal receive queue."""
+
+    def enqueue_sent_notification(
+        self,
+        contact_id: str,
+        message_id: str,
+        timestamp: int,
+        batch_id: str | None = None,
+    ) -> None:
+        """Notify the UI that a batch send already mirrored its own rows.
+
+        The Signal backend overrides this to publish the lightweight
+        ``sent-mirror`` event after its send barrier materialized the mirror
+        rows; the default is a no-op.
+        """
 
     @abstractmethod
     async def mark_read(self, contact_id: str) -> None:
@@ -266,10 +354,42 @@ class ChatBackend(ABC):
         """
         return await asyncio.to_thread(self.list_address_book_sync)
 
-    def register_contact(self, contact: ChatContact) -> None:
-        """Rende il contatto noto al backend (lookup per eventi/invio)."""
-        if contact not in self.contacts:
+    def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
+        """Cerca un contatto nella cache rubrica in-memory (zero rete).
+
+        Default: ``None`` (backend senza rubrica separata).  Implementato da
+        WhatsApp/Telegram; per Signal la rubrica coincide con ``self.contacts``.
+        Non bloccante: solo lookup in-memory (alcuni backend lazy-caricano la
+        cache LID da disco, mai dalla rete).
+        """
+        return None
+
+    def find_contact(self, contact_id: str) -> ChatContact | None:
+        """Cerca un contatto: prima in ``self.contacts``, poi in rubrica.
+
+        Zero rete.  Ritorna il contatto con l'id del client (nessuna riscrittura
+        di ``@c.us`` in ``@lid``).
+        """
+        for contact in self.contacts:
+            if str(contact.id) == contact_id:
+                return contact
+        return self.find_address_book_contact(contact_id)
+
+    def register_contact(self, contact: ChatContact) -> bool:
+        """Rende il contatto noto al backend (lookup per eventi/invio).
+
+        Idempotente: dedup per ``cache_key`` (non per ``__eq__``, che include
+        ``extras``).  Thread-safe: lock di classe.
+
+        Returns:
+            ``True`` se il contatto è stato aggiunto, ``False`` se già presente.
+        """
+        with ChatBackend._register_lock:
+            for existing in self.contacts:
+                if existing.cache_key == contact.cache_key:
+                    return False
             self.contacts.append(contact)
+            return True
 
     # ─── Status ───────────────────────────────────────────────────────
 

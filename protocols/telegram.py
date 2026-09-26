@@ -878,7 +878,7 @@ class TelegramBackend(ChatBackend):
             return None
         return self._contacts_by_id.get(eid)
 
-    def register_contact(self, contact: ChatContact) -> None:
+    def register_contact(self, contact: ChatContact) -> bool:
         """Registra un contatto (open-or-create) anche nella lookup id→contact.
 
         Oltre all'append in ``self.contacts`` (default di ``ChatBackend``),
@@ -886,11 +886,13 @@ class TelegramBackend(ChatBackend):
         invio (``_resolve_input_entity``) riconoscono il ghost.  Un id non
         intero viene ignorato (guard ``ValueError``/``TypeError``).
         """
-        super().register_contact(contact)
-        try:
-            self._contacts_by_id[int(contact.id)] = contact
-        except (ValueError, TypeError):
-            pass
+        appended = super().register_contact(contact)
+        if appended:
+            try:
+                self._contacts_by_id[int(contact.id)] = contact
+            except (ValueError, TypeError):
+                pass
+        return appended
 
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
@@ -1030,6 +1032,19 @@ class TelegramBackend(ChatBackend):
 
         return list(self._address_book)
 
+    def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
+        """Cerca un contatto nella cache rubrica in-memory (zero rete).
+
+        Snapshot locale per evitare TOCTOU su ``_address_book``.
+        """
+        book = self._address_book
+        if book is None:
+            return None
+        for contact in book:
+            if str(contact.id) == contact_id:
+                return contact
+        return None
+
     async def _resolve_input_entity(self, eid: int):
         """Resolve a Telegram user id to an entity usable by ``send_message``.
 
@@ -1162,12 +1177,81 @@ class TelegramBackend(ChatBackend):
         future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
         return future.result(timeout=self.attachment_send_timeout)
 
+    def send_attachments_sync(
+        self,
+        contact_id: str,
+        file_paths: list[Path],
+        *,
+        captions: list[str | None],
+        mime_types: list[str],
+        media_kinds: list[str | None],
+        filenames: list[str | None],
+        batch_id: str | None = None,
+        quote_timestamp: int | None = None,
+        quote_author: str | None = None,
+        quote_message: str | None = None,
+        reply_to_message_id: str | None = None,
+        quote_attachments: list[str] | None = None,
+    ) -> list[str]:
+        """Send N attachments as a single Telegram album.
+
+        Telethon ``send_file`` with a media list issues one album request
+        and automatically chunks lists longer than 10 media into
+        consecutive albums.  Known Telegram limitations (documented, not
+        worked around — design §4.3.3): documents inside an album are
+        delivered as separate messages outside the album, and audio/voice
+        cannot join an album at all.  The caption (from ``captions``)
+        applies to the first media of the album only; ``media_kinds`` /
+        ``mime_types`` are consumed by the mirror events, not by the album
+        request.  Atomic semantics: any failure aborts the whole batch and
+        the exception propagates.
+        """
+        if not file_paths:
+            return []
+        if self._loop is None or self._client is None:
+            raise RuntimeError("Telegram backend not connected")
+
+        async def _send() -> list[str]:
+            try:
+                eid = int(contact_id)
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid Telegram contact id: {contact_id}")
+            reply_to = self._validated_reply_to_message_id(reply_to_message_id)
+            entity = await self._resolve_input_entity(eid)
+            uploads = []
+            for index, file_path in enumerate(file_paths):
+                upload = str(file_path)
+                if filenames[index] is not None:
+                    upload = await self._client.upload_file(
+                        upload, file_name=filenames[index]
+                    )
+                uploads.append(upload)
+            caption = captions[0] if captions else None
+            msgs = await self._client.send_file(
+                entity,
+                uploads,
+                caption=caption or None,
+                reply_to=reply_to,
+                force_document=False,
+            )
+            # An album returns a list of messages; a single media (or a
+            # document-only batch delivered outside the album) may come
+            # back as a bare message.
+            if not isinstance(msgs, list):
+                msgs = [msgs]
+            return [str(msg.id) for msg in msgs]
+
+        future = asyncio.run_coroutine_threadsafe(_send(), self._loop)
+        return future.result(timeout=self.attachment_send_timeout * len(file_paths))
+
     def enqueue_sent_message(
         self,
         contact_id: str,
         message_id: str,
         text: str,
         *,
+        batch_id: str | None = None,
+        batch_index: int | None = None,
         quote_timestamp: int | None = None,
         quote_author: str | None = None,
         quote_message: str | None = None,
@@ -1219,6 +1303,8 @@ class TelegramBackend(ChatBackend):
                     "attachment_id": attachment_id,
                     "content_type": mime_type,
                     "media_kind": media_kind,
+                    "batch_id": batch_id,
+                    "batch_index": batch_index,
                 },
             )
         )
@@ -1884,7 +1970,76 @@ class TelegramBackend(ChatBackend):
             quote_attachment_id=data.get("quote_attachment_id"),
             quote_attachment_path=data.get("quote_attachment_path"),
             quote_content_type=data.get("quote_content_type"),
+            batch_id=data.get("batch_id"),
+            batch_index=data.get("batch_index"),
         )
+
+    def _merge_batch_slot(self, contact_id: str, entry: dict, data: dict) -> bool:
+        """Fuse the batch slot of a mirror event onto an existing row.
+
+        A Telegram album materializes one row per attachment with its own
+        ``msg_id``, mirrored (locally) with ``batch_id``/``batch_index``.  When
+        the real echo wins the race and creates the row first, the batch mirror
+        dedups onto it; without this merge the row keeps a NULL slot and the
+        web reconciliation leaves the optimistic bubbles orphaned.  An existing
+        batch is never overwritten (a row belongs to exactly one batch).
+
+        The fusion is only declared when the DB actually owns the row: if the
+        slot UPDATE touches no row (cache-only row from ``persist=False`` or a
+        DB row that no longer exists) we log and return False, so callers do not
+        push a ``"changed"`` the next fetch cannot reproduce.
+        """
+        batch_id = data.get("batch_id")
+        if batch_id is None or entry.get("batch_id") is not None:
+            return False
+        msg_id = entry.get("id") or data.get("id")
+        if not msg_id:
+            logger.warning(
+                "Telegram: batch slot merge skipped, no msg_id contact=%s batch_id=%s",
+                contact_id,
+                batch_id,
+            )
+            return False
+        from protocols.db import _DB_LOCK, DB_FILE
+
+        updated = 0
+        try:
+            with _DB_LOCK:
+                connection = sqlite3.connect(DB_FILE)
+                try:
+                    cursor = connection.execute(
+                        "UPDATE messages SET batch_id = ?, batch_index = ? "
+                        "WHERE protocol = ? AND contact_number = ? "
+                        "AND msg_id = ? AND batch_id IS NULL",
+                        (
+                            batch_id,
+                            data.get("batch_index"),
+                            PROTOCOL_TELEGRAM,
+                            contact_id,
+                            str(msg_id),
+                        ),
+                    )
+                    updated = cursor.rowcount
+                    connection.commit()
+                finally:
+                    connection.close()
+        except Exception:
+            logger.exception("Telegram: batch slot merge failed")
+            return False
+        # Cache-only rows (persist=False) or rows missing from the DB cannot
+        # confirm the slot: do not push "changed" for something the DB cannot
+        # show, or the next fetch would resurrect the orphaned bubble.
+        if updated <= 0:
+            logger.warning(
+                "Telegram: batch slot merge touched no row contact=%s msg_id=%s batch_id=%s",
+                contact_id,
+                msg_id,
+                batch_id,
+            )
+            return False
+        entry["batch_id"] = batch_id
+        entry["batch_index"] = data.get("batch_index")
+        return True
 
     def ingest_message(
         self, contact_id: str, data: dict, ts: int, persist: bool = True
@@ -1974,7 +2129,10 @@ class TelegramBackend(ChatBackend):
                         int(entry.get("timestamp", ts)),
                         incoming_info,
                     )
-                if attachment_changed or caption_changed:
+                batch_changed = entry is not None and self._merge_batch_slot(
+                    contact_id, entry, data
+                )
+                if attachment_changed or caption_changed or batch_changed:
                     return "changed"
                 if (
                     entry is not None
@@ -2018,6 +2176,7 @@ class TelegramBackend(ChatBackend):
                         )
                     except Exception:
                         logger.exception("Telegram: _update_message_id failed")
+                    batch_changed = self._merge_batch_slot(contact_id, m, data)
                     incoming_info = data.get("attachment_info")
                     if (
                         data.get("msg_type") == "image"
@@ -2032,6 +2191,8 @@ class TelegramBackend(ChatBackend):
                             int(m.get("timestamp", ts)),
                             incoming_info,
                         )
+                        return "changed"
+                    if batch_changed:
                         return "changed"
                     return False
             self._seen_msg_ids.add(mid)
@@ -2075,6 +2236,8 @@ class TelegramBackend(ChatBackend):
                 "quote_attachment_id": data.get("quote_attachment_id"),
                 "quote_attachment_path": data.get("quote_attachment_path"),
                 "quote_content_type": data.get("quote_content_type"),
+                "batch_id": data.get("batch_id"),
+                "batch_index": data.get("batch_index"),
             }
         )
 

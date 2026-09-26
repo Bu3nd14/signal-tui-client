@@ -38,7 +38,70 @@ class EventHandlingMixin:
             return self._handle_reaction_event(event)
         if event.type == "message":
             return self._handle_message_event(event)
+        if event.type == "sent-mirror":
+            return self._handle_sent_mirror_event(event)
         return False
+
+    def _handle_sent_mirror_event(self, event: ChatEvent) -> bool:
+        """Handle the lightweight ``sent-mirror`` notification (batch sends).
+
+        The backend send barrier has already materialized the mirror rows
+        in cache/DB and ``web/api.py`` already pushed the generic web
+        refresh, so this handler only promotes the contact in the TUI
+        list: it never calls ``ingest_message`` (no double DB write) and
+        never emits a second ``push_event``.
+        """
+        backend = self.manager.get(event.protocol)
+        if backend is None:
+            return False
+
+        # Resolve the REAL contact object: prefer the copy already in
+        # ``self.contacts`` (it may differ from the payload/backend copy
+        # after a contact-list rebuild), then the payload copy, then the
+        # backend lookup.  A placeholder is created only for unknown ids
+        # so an existing contact is never duplicated.
+        target_key = contact_cache_key(event.protocol, event.contact_id)
+        contact = next(
+            (
+                candidate
+                for candidate in self.contacts
+                if candidate.cache_key == target_key
+            ),
+            None,
+        )
+        if contact is None:
+            contact = event.payload.get("contact")
+        if contact is None:
+            identify = getattr(backend, "_identify_contact", None)
+            if identify is not None:
+                contact = identify(event.contact_id)
+        if contact is None:
+            contact = ChatContact(
+                id=event.contact_id,
+                display_name=event.contact_id,
+                protocol=event.protocol,
+            )
+            # New contact discovered live — add to lists and trigger re-render
+            existing = {c.cache_key for c in self.contacts}
+            if contact.cache_key not in existing:
+                self.contacts.append(contact)
+                if hasattr(backend, "contacts"):
+                    backend.contacts.append(contact)
+                self._contact_list_dirty = True
+                self._dirty_contact_keys.add(contact.cache_key)
+
+        # Promote the contact in the "most recent first" ordering; the
+        # re-sort/render is deferred to the end of the poll batch by the
+        # poll worker (same pattern as _handle_message_event).
+        ts = event.payload.get("timestamp", 0)
+        if isinstance(ts, int) and ts > (contact.last_message_ts or 0):
+            contact.last_message_ts = ts
+            if contact.cache_key != (
+                self.selected_contact.cache_key if self.selected_contact else None
+            ):
+                self._contact_list_dirty = True
+                self._dirty_contact_keys.add(contact.cache_key)
+        return True
 
     def _handle_message_event(self, event: ChatEvent) -> bool:
         """Ingest and display a normalized incoming/outgoing message."""
