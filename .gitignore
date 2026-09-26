@@ -7,6 +7,8 @@ bin
 bin/
 __pycache__/
 *.pyc
+# Backup del DB locale creati da purge_test_rows.py (non committare)
+messages.db.bak-*
 # Coverage artifacts
 .coverage
 coverage.xml

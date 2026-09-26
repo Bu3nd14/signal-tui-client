@@ -17,17 +17,44 @@ import pytest
 def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate every test from the user's persistent cache and database."""
     import protocols.db as backend
+    import protocols.download as download_mod
+    import protocols.signal as signal_mod
+    import protocols.whatsapp as whatsapp_mod
+    from protocols import config, rpc
 
     cache_dir = tmp_path / "backend-cache"
     cache_dir.mkdir()
     monkeypatch.setattr(backend, "CACHE_DIR", cache_dir)
     monkeypatch.setattr(backend, "DB_FILE", cache_dir / "messages.db")
     monkeypatch.setattr(backend, "CACHE_FILE", cache_dir / "messages.json")
-    from protocols import config, rpc
-
     monkeypatch.setattr(rpc, "SIGNAL_CLI_ATTACHMENTS_DIR", cache_dir / "signal-media")
     monkeypatch.setattr(config, "get_whatsapp_media_dir", lambda: "")
+
+    # Modules that bind these names by value at import time (no local import).
+    monkeypatch.setattr(signal_mod, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(
+        signal_mod, "SIGNAL_CLI_ATTACHMENTS_DIR", cache_dir / "signal-media"
+    )
+    monkeypatch.setattr(download_mod, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(whatsapp_mod, "get_whatsapp_media_dir", lambda: "")
+
+    # Process-wide download globals: reset so the first test to use them
+    # resolves under tmp_path. Resetting _DOWNLOAD_SERVER does not close a real
+    # server; tests either mock it or stop it explicitly.
+    monkeypatch.setattr(download_mod, "_TEMP_DOWNLOAD_DIR", None)
+    monkeypatch.setattr(download_mod, "_DOWNLOAD_SERVER", None)
+    monkeypatch.setattr(download_mod, "_DOWNLOAD_URL_BASE", None)
     return cache_dir
+
+
+@pytest.fixture(autouse=True)
+def isolate_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear SIGNAL_TUI_WEB_TOKEN so web-server tests are deterministic.
+
+    Only this variable is cleared: SIGNAL_USER_NUMBER, WHATSAPP_API_URL and the
+    LIVE_* flags must stay visible so the opt-in live tests remain runnable.
+    """
+    monkeypatch.delenv("SIGNAL_TUI_WEB_TOKEN", raising=False)
 
 
 @pytest.fixture

@@ -2524,8 +2524,10 @@ def test_clean_start_and_stop_web_server():
     assert not handle.thread.is_alive()
 
 
-def test_start_web_server_requires_token_by_default():
+def test_start_web_server_requires_token_by_default(monkeypatch: pytest.MonkeyPatch):
     from web.server import start_web_server
+
+    monkeypatch.delenv("SIGNAL_TUI_WEB_TOKEN", raising=False)
 
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
