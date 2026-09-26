@@ -259,6 +259,7 @@ h2 { font-size: 1.05rem; }
 .message-text a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .message-time { display: block; margin-top: 5px; color: #c3cedaaa; font-size: .66rem; text-align: right; }
 .message-status.failed { color: var(--danger); }
+.message-status.retrying { color: #f5a623; }
 .message-tick { margin-left: 4px; color: #9aa7b8; font-size: .66rem; white-space: nowrap; }
 .tick-sent { color: #f0b90b; }
 .tick-delivered { color: #f0b90b; }

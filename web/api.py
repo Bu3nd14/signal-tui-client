@@ -6,11 +6,13 @@ import json
 import logging
 import mimetypes
 import os
+import random
 import re
 import sqlite3
 import tempfile
 import threading
 import time
+import uuid
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -19,6 +21,12 @@ from urllib.parse import urlsplit
 
 from models import is_caption_like, is_media_quote_placeholder_composite
 from web.bridge import push_event
+from web.retry import (
+    SEND_RETRY_MAX_ATTEMPTS,
+    classify_send_error,
+    compute_delay,
+    safe_error_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1202,6 +1210,17 @@ def create_api_router() -> Any:
         if any(not hasattr(upload_file, "read") for upload_file in upload_files):
             raise HTTPException(status_code=400, detail="Invalid request")
 
+        # client_msg_id: opzionale con fallback server (client vecchi/tooling).
+        client_msg_id_raw = payload.get("client_msg_id")
+        if (
+            isinstance(client_msg_id_raw, str)
+            and client_msg_id_raw.strip()
+            and len(client_msg_id_raw) <= 128
+        ):
+            client_msg_id = client_msg_id_raw.strip()
+        else:
+            client_msg_id = str(uuid.uuid4())
+
         quote_timestamp = payload.get("quote_timestamp")
         quote_author = payload.get("quote_author")
         quote_message = payload.get("quote_message")
@@ -1328,6 +1347,7 @@ def create_api_router() -> Any:
         if protocol in {"whatsapp", "telegram"} and reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
         uploads: list[Any] = []
+        succeeded = False
         try:
             if upload_files:
                 from web.uploads import (
@@ -1379,14 +1399,63 @@ def create_api_router() -> Any:
                     filenames=[upload.filename for upload in uploads],
                     **kwargs,
                 )
+                succeeded = True
             else:
-                await asyncio.to_thread(
-                    manager.send_message_sync,
-                    protocol,
-                    contact_id,
-                    text,
-                    **kwargs,
-                )
+                # Ramo TESTO: retry con backoff esponenziale + jitter.
+                # Nessun timeout aggiuntivo: i backend hanno timeout interni propri.
+                rng = random.Random()
+                for attempt in range(1, SEND_RETRY_MAX_ATTEMPTS + 1):
+                    try:
+                        await asyncio.to_thread(
+                            manager.send_message_sync,
+                            protocol,
+                            contact_id,
+                            text,
+                            **kwargs,
+                        )
+                        succeeded = True
+                        break
+                    except Exception as exc:
+                        classification = classify_send_error(protocol, exc)
+                        if classification == "terminal":
+                            logger.exception(
+                                "Terminal send error, no retry: protocol=%s contact=%s",
+                                protocol,
+                                contact_id,
+                            )
+                            break
+                        if attempt == SEND_RETRY_MAX_ATTEMPTS:
+                            logger.exception(
+                                "Send failed after %d attempts: protocol=%s contact=%s",
+                                SEND_RETRY_MAX_ATTEMPTS,
+                                protocol,
+                                contact_id,
+                            )
+                            break
+                        delay = compute_delay(attempt, rng)
+                        logger.info(
+                            "Send retry %d/%d in %.1fs: protocol=%s contact=%s error=%s",
+                            attempt + 1,
+                            SEND_RETRY_MAX_ATTEMPTS,
+                            delay,
+                            protocol,
+                            contact_id,
+                            exc,
+                        )
+                        push_event(
+                            {
+                                "type": "send_retry",
+                                "payload": {
+                                    "client_msg_id": client_msg_id,
+                                    "protocol": protocol,
+                                    "contact_id": contact_id,
+                                    "attempt": attempt + 1,
+                                    "max_attempts": SEND_RETRY_MAX_ATTEMPTS,
+                                    "error": safe_error_text(exc),
+                                },
+                            }
+                        )
+                        await asyncio.sleep(delay)
         except HTTPException:
             raise
         except NotImplementedError:
@@ -1406,6 +1475,9 @@ def create_api_router() -> Any:
         finally:
             for upload in uploads:
                 upload.cleanup()
+
+        if not succeeded:
+            raise HTTPException(status_code=502, detail="Message send failed")
 
         push_event(
             {
