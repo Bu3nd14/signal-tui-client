@@ -856,6 +856,36 @@ make live-test-manual PYTHON=.venv-test/bin/python
 with clear messages when a backend is unconfigured, the contact cannot be resolved, or no suitable
 media exists — they never fail the suite.
 
+### Database cleanup runbook (known test rows)
+
+`purge_test_rows.py` removes the known regression-test rows from the local message cache
+(`~/.local/share/signal-tui-client/messages.db`). It is **dry-run by default** and, with `--apply`,
+creates a WAL-safe timestamped backup (`messages.db.bak-<timestamp>`) and runs an integrity check
+before deleting. Run it only in a maintenance window, with the app stopped:
+
+```bash
+# 1. Stop the TUI (it embeds the web server — no separate process)
+tmux kill-session -t tui
+# or: pkill -f "python -m signal_tui"
+
+# 2. Gate: no process must hold the DB (the output must be empty)
+lsof ~/.local/share/signal-tui-client/messages.db
+
+# 3. Dry-run — inspect the rows that would be removed
+.venv/bin/python purge_test_rows.py --db ~/.local/share/signal-tui-client/messages.db
+
+# 4. Apply (backup first, then delete)
+.venv/bin/python purge_test_rows.py --db ~/.local/share/signal-tui-client/messages.db --apply
+
+# 5. Restart from the project root with the usual web options
+cd /home/rob/signal-tui-client
+tmux new-session -d -s tui ".venv/bin/python -m signal_tui --web --web-host 0.0.0.0 --web-port 4242"
+```
+
+The script aborts (`-1`) if more rows than expected match, and is idempotent (a second run finds
+zero rows). Never instantiate a backend outside `pytest`/the conftest: the autouse fixtures in
+`tests/conftest.py` redirect the DB, cache and media paths to `tmp_path`.
+
 ## Project structure
 
 ```
