@@ -1282,7 +1282,11 @@ function buildMessageNode(item, protocol, stickToBottom) {
   if (item.optimisticStatus) {
     const status = document.createElement("span");
     status.className = `message-status ${item.optimisticStatus}`;
-    status.textContent = item.optimisticStatus === "failed" ? " · fallito" : item.optimisticStatus === "sent" ? " · inviato" : " · invio…";
+    let statusText = " · invio…";
+    if (item.optimisticStatus === "failed") statusText = " · fallito";
+    else if (item.optimisticStatus === "sent") statusText = " · inviato";
+    else if (item.optimisticStatus === "retrying") statusText = ` · riprova ${item.retryAttempt}/${item.retryMax}…`;
+    status.textContent = statusText;
     time.append(status);
   } else {
     if (item.edited) {
@@ -2246,6 +2250,7 @@ async function submitMessage() {
   if (reply) cancelReply();
   const active = { ...state.active };
   const timestamp = Date.now();
+  const clientMsgId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
   const knownMessageIds = state.messages.map(window.SignalTuiReconcile.messageIdentity);
   const quoteFields = {};
   if (reply) {
@@ -2281,6 +2286,7 @@ async function submitMessage() {
         optimistic_id: batchId ? `${batchId}-att${index}` : `${timestamp}-${++state.optimisticSequence}`,
         batch_id: batchId,
         batch_index: batchId ? index : null,
+        client_msg_id: clientMsgId,
         protocol: active.protocol,
         contactId: active.id,
         // La caption accompagna solo il primo allegato, come le righe reali
@@ -2311,6 +2317,7 @@ async function submitMessage() {
   } else {
     optimisticItems.push({
       optimistic_id: `${timestamp}-${++state.optimisticSequence}`,
+      client_msg_id: clientMsgId,
       protocol: active.protocol,
       contactId: active.id,
       text,
@@ -2346,6 +2353,7 @@ async function submitMessage() {
       body.set("protocol", active.protocol);
       body.set("contact_id", active.id);
       body.set("text", text);
+      body.set("client_msg_id", clientMsgId);
       if (batchId) body.set("batch_id", batchId);
       for (const [key, value] of Object.entries(quotePayload)) body.set(key, String(value));
       // append (non set): il campo "file" e' ripetuto per ciascun allegato.
@@ -2355,7 +2363,7 @@ async function submitMessage() {
       await apiFetch("/api/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text, ...quotePayload }),
+        body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text, client_msg_id: clientMsgId, ...quotePayload }),
       });
     }
     for (const optimistic of optimisticItems) optimistic.optimisticStatus = "sent";
@@ -2522,6 +2530,23 @@ function connectSocket() {
         case "typing":
           handleTyping(update.payload);
           break;
+        case "send_retry": {
+          const { client_msg_id, attempt, max_attempts } = update.payload;
+          let updated = false;
+          for (const item of state.optimistic) {
+            if (item.client_msg_id === client_msg_id &&
+                (item.optimisticStatus === "sending" || item.optimisticStatus === "retrying")) {
+              item.optimisticStatus = "retrying";
+              item.retryAttempt = attempt;
+              item.retryMax = max_attempts;
+              updated = true;
+            }
+          }
+          if (updated && state.active) {
+            renderMessages(state.messages, state.active.protocol);
+          }
+          break;
+        }
       }
     } catch {
       showError("Aggiornamento live non valido ricevuto dal server.");
