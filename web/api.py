@@ -1029,11 +1029,14 @@ def _quoted_sender(proto: str, contact_id: str, quote_ts: Any) -> str | None:
 def _group_sender_resolver(manager: Any, proto: str):
     """Risolvi il sender (JID/numero) al nome della rubrica, come la TUI.
 
-    Mappa una volta la rubrica aggregata (id/phone → display_name), poi per
-    ogni sender: nome diretto, @lid→phone (WA), @c.us→numero, numero nudo.
+    Mappa una volta la rubrica aggregata (id/phone/lid → display_name), poi per
+    ogni sender: nome diretto, @lid→nome (alias rubrica), @lid→phone cache del
+    backend → nome, @lid/numero locale → nome, @c.us → numero → nome.  Il
+    fallback resta un numero leggibile (mai il JID grezzo con ``@lid``/``@c.us``).
     """
     phone_to_name: dict[str, str] = {}
     id_to_name: dict[str, str] = {}
+    lid_to_name: dict[str, str] = {}
     try:
         book = manager.list_address_book_sync(protocols={proto}, force=False)
     except Exception:  # noqa: BLE001 — rubrica best-effort
@@ -1044,32 +1047,57 @@ def _group_sender_resolver(manager: Any, proto: str):
             continue
         cid = str(contact.id or "")
         phone = str(contact.phone or "")
+        extras = contact.extras if isinstance(contact.extras, dict) else {}
         if cid:
             id_to_name[cid] = name
+            # A merged active chat keeps its ``@lid`` as id: that IS the alias a
+            # group participant shows up with.
+            if cid.endswith("@lid"):
+                lid_to_name[cid] = name
         if phone:
             phone_to_name[phone] = name
+        lid = str(extras.get("lid") or "")
+        if lid:
+            lid_to_name[lid] = name
+
+    backend = None
+    try:
+        backend = manager.get(proto)
+    except Exception:  # noqa: BLE001 — backend opzionale
+        backend = None
 
     def resolve(sender: str) -> str:
         if not sender:
             return sender
         if sender in id_to_name:
             return id_to_name[sender]
-        is_jid = sender.endswith(("@lid", "@c.us"))
+        if sender in lid_to_name:
+            return lid_to_name[sender]
         local = sender.split("@", 1)[0]
+
         if sender.endswith("@lid"):
+            # 1) @lid → phone via cache backend (solo memoria), poi phone → nome.
+            phone = ""
             try:
-                phone = str(manager.get(proto)._jid_to_phone(sender) or "")
-            except Exception:  # noqa: BLE001
+                phone = str(backend._jid_to_phone(sender) or "")
+            except Exception:  # noqa: BLE001 — backend vecchi/mock senza il metodo
                 phone = ""
-            if phone in phone_to_name:
+            if phone and phone in phone_to_name:
                 return phone_to_name[phone]
+            # 2) Rubrica WAHA che espone la riga @lid: numero = cifre del lid.
+            if local in phone_to_name:
+                return phone_to_name[local]
+            # 3) Rubrica dove l'id è il numero reale: ``<lid>@c.us``.
+            if f"{local}@c.us" in id_to_name:
+                return id_to_name[f"{local}@c.us"]
+            # 4) Ultima spiaggia: il numero risolto (meglio del lid grezzo).
             if phone:
                 return phone
         if sender.endswith("@c.us") and local in phone_to_name:
             return phone_to_name[local]
         if sender in phone_to_name:
             return phone_to_name[sender]
-        if is_jid:
+        if sender.endswith(("@lid", "@c.us")):
             # Fallback leggibile: numero senza @lid/@c.us (mai il JID grezzo).
             return local
         return sender
