@@ -3819,9 +3819,7 @@ class TestSeedCacheFromDB:
                 extras={"source": "wa_book", "phone": "393331234567"},
             )
         ]
-        assert (
-            _resolve_placeholder_name(backend, "393331234567@c.us") == "Mario Rossi"
-        )
+        assert _resolve_placeholder_name(backend, "393331234567@c.us") == "Mario Rossi"
         assert _resolve_placeholder_name(backend, "393337777777@c.us") == (
             "393337777777@c.us"
         )

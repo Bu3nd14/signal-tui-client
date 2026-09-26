@@ -199,7 +199,9 @@ def _build_address_book_name_map(book: list[ChatContact]) -> dict[str, str]:
     return name_map
 
 
-def _apply_address_book_names(contacts: list[ChatContact], name_map: dict[str, str]) -> int:
+def _apply_address_book_names(
+    contacts: list[ChatContact], name_map: dict[str, str]
+) -> int:
     """Aggiorna SOLO display_name dai nomi rubrica. Priorità phone > lid. Ritorna il conteggio."""
     updated = 0
     for contact in contacts:
@@ -216,7 +218,9 @@ def _apply_address_book_names(contacts: list[ChatContact], name_map: dict[str, s
     return updated
 
 
-def _cached_address_book_name(backend, phone: str | None, lid: str | None) -> str | None:
+def _cached_address_book_name(
+    backend, phone: str | None, lid: str | None
+) -> str | None:
     """Lookup nome dallo snapshot in-memory `backend._address_book` (ZERO rete)."""
     book = getattr(backend, "_address_book", None)
     if not book:
@@ -806,9 +810,7 @@ class WhatsAppBackend(ChatBackend):
         self._contacts_by_jid = {cc.id: cc for cc in contacts}
         try:
             book = self.list_address_book_sync(force=False)
-            _apply_address_book_names(
-                self.contacts, _build_address_book_name_map(book)
-            )
+            _apply_address_book_names(self.contacts, _build_address_book_name_map(book))
         except Exception:
             logger.warning("Address book merge failed", exc_info=True)
 
