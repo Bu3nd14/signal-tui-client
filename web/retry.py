@@ -23,7 +23,9 @@ _SIGNAL_RETRYABLE_PATTERNS = re.compile(
 )
 
 
-def classify_send_error(protocol: str, exc: BaseException) -> Literal["retryable", "terminal"]:
+def classify_send_error(
+    protocol: str, exc: BaseException
+) -> Literal["retryable", "terminal"]:
     """Classifica un errore di send. Non solleva MAI: degrada a "terminal"."""
     try:
         if protocol == "signal":
@@ -55,7 +57,10 @@ def _classify_signal(exc: BaseException) -> str:
     if isinstance(exc, OSError):
         if exc.errno in {errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH}:
             return "retryable"
-        if isinstance(exc, socket.gaierror) and exc.errno in {socket.EAI_AGAIN, socket.EAI_NONAME}:
+        if isinstance(exc, socket.gaierror) and exc.errno in {
+            socket.EAI_AGAIN,
+            socket.EAI_NONAME,
+        }:
             return "retryable"
         return "terminal"
     if isinstance(exc, RuntimeError):
@@ -70,6 +75,7 @@ def _classify_signal(exc: BaseException) -> str:
 
 def _classify_whatsapp(exc: BaseException) -> str:
     import urllib.error
+
     if isinstance(exc, (TimeoutError, socket.timeout)):
         return "terminal"
     if isinstance(exc, (FileNotFoundError, PermissionError, IsADirectoryError)):
@@ -104,6 +110,7 @@ def _classify_whatsapp(exc: BaseException) -> str:
 
 def _classify_telegram(exc: BaseException) -> str:
     import concurrent.futures
+
     if isinstance(exc, concurrent.futures.TimeoutError):
         return "terminal"
     if isinstance(exc, (FileNotFoundError, PermissionError, IsADirectoryError)):
@@ -111,7 +118,10 @@ def _classify_telegram(exc: BaseException) -> str:
     if isinstance(exc, OSError):
         if exc.errno in {errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH}:
             return "retryable"
-        if isinstance(exc, socket.gaierror) and exc.errno in {socket.EAI_AGAIN, socket.EAI_NONAME}:
+        if isinstance(exc, socket.gaierror) and exc.errno in {
+            socket.EAI_AGAIN,
+            socket.EAI_NONAME,
+        }:
             return "retryable"
         return "terminal"
     if isinstance(exc, RuntimeError):
@@ -124,7 +134,15 @@ def _classify_telegram(exc: BaseException) -> str:
         if seconds is not None and seconds < 5:
             return "retryable"
         return "terminal"
-    if any(p in exc_name for p in ("PeerFlood", "UserIsBlocked", "ChatWriteForbidden", "UserIsDeactivated")):
+    if any(
+        p in exc_name
+        for p in (
+            "PeerFlood",
+            "UserIsBlocked",
+            "ChatWriteForbidden",
+            "UserIsDeactivated",
+        )
+    ):
         return "terminal"
     if "ServerError" in exc_name or "RPCError" in exc_name:
         code = getattr(exc, "code", None)
