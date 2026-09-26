@@ -743,15 +743,34 @@ class WhatsAppBackend(ChatBackend):
         """Resolve a JID to a known ``ChatContact`` (or a placeholder)."""
         return self._contacts_by_jid.get(jid)
 
-    def register_contact(self, contact: ChatContact) -> None:
+    def register_contact(self, contact: ChatContact) -> bool:
         """Registra un contatto (open-or-create) anche nella lookup JID→contact.
 
         Oltre all'append in ``self.contacts`` (default di ``ChatBackend``),
         aggiorna ``_contacts_by_jid`` così ``_identify_contact`` e il webhook
-        riconoscono subito il ghost senza creare placeholder duplicati.
+        riconoscono subito il ghost senza creare placeholder duplicati.  Per un
+        ghost ``@c.us`` con un ``@lid`` in cache reverse registra anche l'alias
+        ``_contacts_by_jid[@lid] → stesso oggetto`` (``setdefault``: non
+        sovrascrive un mapping reale preesistente).
         """
-        super().register_contact(contact)
-        self._contacts_by_jid[contact.id] = contact
+        appended = super().register_contact(contact)
+        if appended:
+            self._contacts_by_jid[contact.id] = contact
+        # L'alias è tentato anche quando il contatto è già noto: la cache LID
+        # può essersi popolata dopo la prima registrazione (§3.4).
+        self._register_lid_alias(contact)
+        return appended
+
+    def _register_lid_alias(self, contact: ChatContact) -> None:
+        """Alias ``@lid`` → contatto ``@c.us`` per la continuità eventi."""
+        if not contact.id.endswith("@c.us"):
+            return
+        phone = contact.extras.get("phone")
+        if not phone:
+            return
+        lid = self._phone_to_lid(str(phone))
+        if lid:
+            self._contacts_by_jid.setdefault(lid, contact)
 
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
@@ -868,6 +887,44 @@ class WhatsAppBackend(ChatBackend):
                 return list(self._address_book)
             return []
         return list(self._address_book)
+
+    def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
+        """Cerca un contatto nella cache rubrica in-memory (zero rete).
+
+        Ritorna il contatto con l'id del client (es. ``@c.us``), NON riscrive
+        l'id: la risoluzione ``@c.us`` → ``@lid`` avviene tramite alias in
+        ``_contacts_by_jid`` (``register_contact``).  Snapshot locale per
+        evitare TOCTOU: il resolver background può azzerare ``_address_book``.
+        """
+        book = self._address_book
+        if book is None:
+            return None
+        for contact in book:
+            if str(contact.id) == contact_id:
+                return contact
+        return None
+
+    def _phone_to_lid(self, phone: str) -> str | None:
+        """Reverse lookup: phone → ``@lid`` dalla cache LID (zero rete).
+
+        Thread-safe: snapshot di ``_lid_map`` sotto ``_lid_lock``.  Applica lo
+        stesso TTL di ``_lid_lookup`` per scartare mapping scaduti.
+        """
+        self._lid_cache_load()
+        with self._lid_lock:
+            items = list(self._lid_map.items()) if self._lid_map else []
+
+        now = int(time.time())
+        ttl_seconds = get_wa_lid_cache_ttl_days() * 86400
+        for lid_jid, entry in items:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("phone") != phone:
+                continue
+            resolved_at = int(entry.get("resolved_at") or 0)
+            if (now - resolved_at) <= ttl_seconds:
+                return lid_jid
+        return None
 
     # ─── Persistent @lid → phone cache ────────────────────────────────
 

@@ -488,15 +488,17 @@ class SignalBackend(ChatBackend):
     async def list_contacts(self) -> list[ChatContact]:
         return list(self.contacts)
 
-    def register_contact(self, contact: ChatContact) -> None:
+    def register_contact(self, contact: ChatContact) -> bool:
         """Registra un contatto (open-or-create) anche nella lookup cache_key→contact.
 
         Oltre all'append in ``self.contacts`` (default di ``ChatBackend``),
         aggiorna ``_contacts_by_key`` (popolato in ``_set_contacts``) così il
         ghost è risolvibile per cache key come gli altri contatti.
         """
-        super().register_contact(contact)
-        self._contacts_by_key[contact.cache_key] = contact
+        appended = super().register_contact(contact)
+        if appended:
+            self._contacts_by_key[contact.cache_key] = contact
+        return appended
 
     # ─── Address book (rubrica completa) ──────────────────────────────
 
@@ -533,6 +535,17 @@ class SignalBackend(ChatBackend):
         self._address_book = result
         self._address_book_ts = now
         return list(self._address_book)
+
+    def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
+        """Signal: la rubrica completa coincide con ``self.contacts``.
+
+        Ridondante rispetto a ``find_contact`` (che cerca già qui), implementato
+        per simmetria con WhatsApp/Telegram.
+        """
+        for contact in self.contacts:
+            if str(contact.id) == contact_id:
+                return contact
+        return None
 
     # ─── Cache ────────────────────────────────────────────────────────
     # NOTE: ``self.cache`` is keyed by the *raw* contact id (e.g. the phone
