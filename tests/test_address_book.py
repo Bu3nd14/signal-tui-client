@@ -852,7 +852,52 @@ class TestWALidResolver:
 
         assert backend._rest.resolve_contact.call_count == 30
         mock_save.assert_called_once()
-        assert backend._address_book is None
+        assert backend._address_book is not None
+        assert "stale" not in backend._address_book
+
+    def test_lid_resolver_run_does_not_restart_resolver(self, monkeypatch, tmp_path):
+        import protocols.db as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        backend = _wa_backend()
+        backend.contacts = [_chat(f"{i}@lid", ts=i) for i in range(35)]
+        backend._rest.resolve_contact.return_value = {
+            "id": "391234567890@c.us",
+            "name": "X",
+        }
+        backend._rest.list_all_contacts.return_value = []
+
+        with (
+            patch("time.sleep"),
+            patch.object(backend, "start_lid_resolver") as mock_start,
+        ):
+            backend._lid_resolver_run()
+
+        assert backend._rest.resolve_contact.call_count == 30
+        mock_start.assert_not_called()
+        assert backend._lid_resolver_started is False
+
+    def test_lid_resolver_run_bulk_only_does_not_restart_resolver(
+        self, monkeypatch, tmp_path
+    ):
+        import protocols.db as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        backend = _wa_backend()
+        backend._rest.list_lids.return_value = [{"lid": "111@lid", "pn": "39333@c.us"}]
+        backend._rest.list_all_contacts.return_value = [
+            {"id": "39333@c.us", "name": "Mario", "pushname": None}
+        ]
+        chat = _chat("39333@c.us")
+        chat.extras["phone"] = "39333"
+        backend.contacts = [chat]
+
+        with patch.object(backend, "start_lid_resolver") as mock_start:
+            backend._lid_resolver_run()
+
+        mock_start.assert_not_called()
+        assert backend._lid_resolver_started is False
+        assert backend.contacts[0].display_name == "Mario"
 
 
 # ─── Telegram rubrica (milestone 3) ───────────────────────────────────────────

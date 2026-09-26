@@ -23,15 +23,17 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import PROTOCOL_WHATSAPP, contact_cache_key
+from models import PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
 from protocols.whatsapp import (
     WhatsAppBackend,
     WhatsAppRESTClient,
+    _build_address_book_name_map,
     _event_from_ack,
     _event_from_message,
     _event_from_raw,
     _event_from_receipt,
     _event_from_typing,
+    _looks_like_phone,
     _resolve_wa_media_chat_id,
 )
 
@@ -1106,12 +1108,16 @@ class TestWhatsAppBackend:
 
     def test_list_contacts_from_rest(self):
         backend = _make_backend()
-        with patch.object(
-            backend._rest,
-            "list_contacts",
-            return_value=[
-                {"id": "wa:39123@s.whatsapp.net", "name": "Mario"},
-            ],
+        with (
+            patch.object(
+                backend._rest,
+                "list_contacts",
+                return_value=[
+                    {"id": "wa:39123@s.whatsapp.net", "name": "Mario"},
+                ],
+            ),
+            patch.object(backend, "list_address_book_sync", return_value=[]),
+            patch.object(backend, "start_lid_resolver", return_value=None),
         ):
             backend._load_contacts()
         assert len(backend.contacts) == 1
@@ -1123,10 +1129,14 @@ class TestWhatsAppBackend:
     def test_load_contacts_sets_phone_for_c_us(self):
         """I contatti @c.us derivano extras["phone"] dalla parte locale del JID."""
         backend = _make_backend()
-        with patch.object(
-            backend._rest,
-            "list_contacts",
-            return_value=[{"id": "393331234567@c.us", "name": "Mario"}],
+        with (
+            patch.object(
+                backend._rest,
+                "list_contacts",
+                return_value=[{"id": "393331234567@c.us", "name": "Mario"}],
+            ),
+            patch.object(backend, "list_address_book_sync", return_value=[]),
+            patch.object(backend, "start_lid_resolver", return_value=None),
         ):
             backend._load_contacts()
         assert backend.contacts[0].extras["phone"] == "393331234567"
@@ -1137,10 +1147,14 @@ class TestWhatsAppBackend:
         """Un @lid risolto in cache eredita il telefono dalla lid map."""
         backend = _make_backend()
         backend._lid_map = {"139153@lid": {"phone": "393331234567"}}
-        with patch.object(
-            backend._rest,
-            "list_contacts",
-            return_value=[{"id": "139153@lid", "name": "Bob"}],
+        with (
+            patch.object(
+                backend._rest,
+                "list_contacts",
+                return_value=[{"id": "139153@lid", "name": "Bob"}],
+            ),
+            patch.object(backend, "list_address_book_sync", return_value=[]),
+            patch.object(backend, "start_lid_resolver", return_value=None),
         ):
             backend._load_contacts()
         assert backend.contacts[0].extras["phone"] == "393331234567"
@@ -1150,10 +1164,14 @@ class TestWhatsAppBackend:
         """Un @lid non risolto NON ha extras["phone"] (resta single-member)."""
         backend = _make_backend()
         backend._lid_map = {}
-        with patch.object(
-            backend._rest,
-            "list_contacts",
-            return_value=[{"id": "139153@lid", "name": "Bob"}],
+        with (
+            patch.object(
+                backend._rest,
+                "list_contacts",
+                return_value=[{"id": "139153@lid", "name": "Bob"}],
+            ),
+            patch.object(backend, "list_address_book_sync", return_value=[]),
+            patch.object(backend, "start_lid_resolver", return_value=None),
         ):
             backend._load_contacts()
         assert "phone" not in backend.contacts[0].extras
@@ -1164,12 +1182,20 @@ class TestWhatsAppBackend:
         """L'aggiunta di extras["phone"] non rimuove jid/last_message_ts."""
         backend = _make_backend()
         backend._lid_map = {}
-        with patch.object(
-            backend._rest,
-            "list_contacts",
-            return_value=[
-                {"id": "393331234567@c.us", "name": "Mario", "last_ts": 1700000000000}
-            ],
+        with (
+            patch.object(
+                backend._rest,
+                "list_contacts",
+                return_value=[
+                    {
+                        "id": "393331234567@c.us",
+                        "name": "Mario",
+                        "last_ts": 1700000000000,
+                    }
+                ],
+            ),
+            patch.object(backend, "list_address_book_sync", return_value=[]),
+            patch.object(backend, "start_lid_resolver", return_value=None),
         ):
             backend._load_contacts()
         extras = backend.contacts[0].extras
@@ -3624,7 +3650,11 @@ class TestSeedCacheFromDB:
         """_load_contacts fa una singola chiamata a list_contacts() (refactoring opt/wa-link-profile)."""
         backend = _make_backend()
         mock = MagicMock(return_value=[{"id": "wa:1@s.whatsapp.net", "name": "Mario"}])
-        with patch.object(backend._rest, "list_contacts", new=mock):
+        with (
+            patch.object(backend._rest, "list_contacts", new=mock),
+            patch.object(backend, "list_address_book_sync", return_value=[]),
+            patch.object(backend, "start_lid_resolver", return_value=None),
+        ):
             backend._load_contacts()
         assert len(backend.contacts) == 1
         assert backend.contacts[0].id == "wa:1@s.whatsapp.net"
@@ -3634,9 +3664,165 @@ class TestSeedCacheFromDB:
         """Se list_contacts restituisce vuoto, 0 contatti (best-effort, nessuna eccezione)."""
         backend = _make_backend()
         mock = MagicMock(return_value=[])
-        with patch.object(backend._rest, "list_contacts", new=mock):
+        with (
+            patch.object(backend._rest, "list_contacts", new=mock),
+            patch.object(backend, "list_address_book_sync", return_value=[]),
+            patch.object(backend, "start_lid_resolver", return_value=None),
+        ):
             backend._load_contacts()
         assert backend.contacts == []
+
+    def test_load_contacts_merges_address_book(self):
+        """_load_contacts sostituisce il fallback-numero col nome salvato in rubrica."""
+        backend = _make_backend()
+        book = [
+            ChatContact(
+                id="393331234567@c.us",
+                display_name="Mario Rossi",
+                protocol=PROTOCOL_WHATSAPP,
+                extras={"source": "wa_book", "phone": "393331234567"},
+            )
+        ]
+        with (
+            patch.object(
+                backend._rest,
+                "list_contacts",
+                return_value=[{"id": "393331234567@c.us", "name": "393331234567"}],
+            ),
+            patch.object(backend, "list_address_book_sync", return_value=book),
+            patch.object(backend, "start_lid_resolver", return_value=None),
+        ):
+            backend._load_contacts()
+        assert backend.contacts[0].display_name == "Mario Rossi"
+        assert backend.contacts[0].extras["phone"] == "393331234567"
+
+    def test_load_contacts_skips_groups(self):
+        """Un @g.us senza phone non fa crashare il merge rubrica."""
+        backend = _make_backend()
+        with (
+            patch.object(
+                backend._rest,
+                "list_contacts",
+                return_value=[{"id": "12345@g.us", "name": "Gruppo"}],
+            ),
+            patch.object(backend, "list_address_book_sync", return_value=[]),
+            patch.object(backend, "start_lid_resolver", return_value=None),
+        ):
+            backend._load_contacts()
+        assert backend.contacts[0].id == "12345@g.us"
+        assert "phone" not in backend.contacts[0].extras
+
+    def test_load_contacts_skips_lid_unresolved(self):
+        """Un @lid non risolto (senza phone) non fa crashare il merge rubrica."""
+        backend = _make_backend()
+        backend._lid_map = {}
+        with (
+            patch.object(
+                backend._rest,
+                "list_contacts",
+                return_value=[{"id": "139153@lid", "name": "Bob"}],
+            ),
+            patch.object(backend, "list_address_book_sync", return_value=[]),
+            patch.object(backend, "start_lid_resolver", return_value=None),
+        ):
+            backend._load_contacts()
+        assert backend.contacts[0].extras["lid"] == "139153@lid"
+        assert "phone" not in backend.contacts[0].extras
+
+    def test_lid_resolver_reapplies_names(self):
+        """Ramo bulk-only (bulk truthy, candidates vuoto): i nomi vengono riapplicati."""
+        backend = _make_backend()
+        backend.contacts = [
+            ChatContact(
+                id="393331234567@c.us",
+                display_name="393331234567",
+                protocol=PROTOCOL_WHATSAPP,
+                extras={"phone": "393331234567"},
+            )
+        ]
+        backend._address_book = None
+        book = [
+            ChatContact(
+                id="393331234567@c.us",
+                display_name="Mario Rossi",
+                protocol=PROTOCOL_WHATSAPP,
+                extras={"source": "wa_book", "phone": "393331234567"},
+            )
+        ]
+        with (
+            patch.object(backend, "_lid_bulk_import", return_value=1),
+            patch.object(backend, "list_address_book_sync", return_value=book),
+        ):
+            backend._lid_resolver_run()
+        assert backend.contacts[0].display_name == "Mario Rossi"
+
+    def test_address_book_lid_without_number(self):
+        """_build_address_book_name_map mappa un'entry rubrica per solo lid."""
+        book = [
+            ChatContact(
+                id="139153@lid",
+                display_name="Mario Rossi",
+                protocol=PROTOCOL_WHATSAPP,
+                extras={"source": "wa_book", "lid": "139153@lid"},
+            )
+        ]
+        assert _build_address_book_name_map(book) == {"139153@lid": "Mario Rossi"}
+
+    def test_looks_like_phone(self):
+        assert _looks_like_phone("393331234567", "393331234567") is True
+        assert _looks_like_phone("+39 333 123 4567", "393331234567") is True
+        assert _looks_like_phone("Mario", "393331234567") is False
+        assert _looks_like_phone("", "393331234567") is False
+        assert _looks_like_phone("Mario", None) is False
+
+    def test_build_address_book_name_map(self):
+        book = [
+            ChatContact(
+                id="393331234567@c.us",
+                display_name="Mario Rossi",
+                protocol=PROTOCOL_WHATSAPP,
+                extras={
+                    "source": "wa_book",
+                    "phone": "393331234567",
+                    "lid": "139153@lid",
+                },
+            ),
+            ChatContact(
+                id="393339999999@c.us",
+                display_name="Luigi",
+                protocol=PROTOCOL_WHATSAPP,
+                extras={"source": "wa_chats", "phone": "393339999999"},
+            ),
+            ChatContact(
+                id="393338888888@c.us",
+                display_name="393338888888",
+                protocol=PROTOCOL_WHATSAPP,
+                extras={"source": "wa_book", "phone": "393338888888"},
+            ),
+        ]
+        name_map = _build_address_book_name_map(book)
+        assert name_map == {
+            "393331234567": "Mario Rossi",
+            "139153@lid": "Mario Rossi",
+        }
+
+    def test_placeholder_uses_address_book_name(self):
+        """Il placeholder live usa il nome rubrica dallo snapshot in-memory."""
+        from tui.events import _resolve_placeholder_name
+
+        backend = _make_backend()
+        backend._address_book = [
+            ChatContact(
+                id="393331234567@c.us",
+                display_name="Mario Rossi",
+                protocol=PROTOCOL_WHATSAPP,
+                extras={"source": "wa_book", "phone": "393331234567"},
+            )
+        ]
+        assert _resolve_placeholder_name(backend, "393331234567@c.us") == "Mario Rossi"
+        assert _resolve_placeholder_name(backend, "393337777777@c.us") == (
+            "393337777777@c.us"
+        )
 
 
 # ─── Webhook self-registration (PUT session config) ───────────────────────────
