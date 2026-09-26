@@ -852,7 +852,8 @@ class TestWALidResolver:
 
         assert backend._rest.resolve_contact.call_count == 30
         mock_save.assert_called_once()
-        assert backend._address_book is None
+        assert backend._address_book is not None
+        assert "stale" not in backend._address_book
 
 
 # ─── Telegram rubrica (milestone 3) ───────────────────────────────────────────

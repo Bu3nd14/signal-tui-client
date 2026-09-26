@@ -5,17 +5,40 @@ import time
 
 from models import (
     PROTOCOL_SIGNAL,
+    PROTOCOL_WHATSAPP,
     ChatContact,
     ChatEvent,
     contact_cache_key,
     protocol_emoji,
     protocol_name,
 )
+from protocols.whatsapp import _jid_digits
 from ui_components import (
     MessageWidget,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_placeholder_name(backend, contact_id: str) -> str:
+    """Nome placeholder dallo snapshot in-memory della rubrica (zero rete)."""
+    if getattr(backend, "protocol", None) != PROTOCOL_WHATSAPP:
+        return contact_id
+    phone = ""
+    lid = ""
+    if contact_id.endswith("@lid"):
+        lid = contact_id
+        lid_map = getattr(backend, "_lid_map", None)
+        if lid_map and contact_id in lid_map:
+            entry = lid_map[contact_id]
+            if isinstance(entry, dict):
+                phone = str(entry.get("phone") or "")
+    elif "@" in contact_id:
+        phone = _jid_digits(contact_id.split("@", 1)[0])
+    from protocols.whatsapp import _cached_address_book_name
+
+    name = _cached_address_book_name(backend, phone or None, lid or None)
+    return name or contact_id
 
 
 class EventHandlingMixin:
@@ -78,7 +101,7 @@ class EventHandlingMixin:
         if contact is None:
             contact = ChatContact(
                 id=event.contact_id,
-                display_name=event.contact_id,
+                display_name=_resolve_placeholder_name(backend, event.contact_id),
                 protocol=event.protocol,
             )
             # New contact discovered live — add to lists and trigger re-render
@@ -120,7 +143,7 @@ class EventHandlingMixin:
             if contact is None:
                 contact = ChatContact(
                     id=event.contact_id,
-                    display_name=event.contact_id,
+                    display_name=_resolve_placeholder_name(backend, event.contact_id),
                     protocol=event.protocol,
                 )
                 # New contact discovered live — add to lists and trigger re-render
@@ -288,7 +311,7 @@ class EventHandlingMixin:
         if contact is None:
             contact = ChatContact(
                 id=event.contact_id,
-                display_name=event.contact_id,
+                display_name=_resolve_placeholder_name(backend, event.contact_id),
                 protocol=event.protocol,
             )
 

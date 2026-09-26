@@ -170,6 +170,72 @@ def _dedup_book_contacts(raw: list[dict]) -> list[dict]:
     return out
 
 
+def _looks_like_phone(name: str, phone: str | None) -> bool:
+    """True se `name` è il fallback-numero di `phone` (confronto sui soli digit)."""
+    if not name or not phone:
+        return False
+    name_digits = _jid_digits(name)
+    phone_digits = _jid_digits(phone)
+    if not name_digits or not phone_digits:
+        return False
+    return name_digits == phone_digits
+
+
+def _build_address_book_name_map(book: list[ChatContact]) -> dict[str, str]:
+    """Mappa telefono->nome e lid->nome, SOLO da entry rubrica (source == 'wa_book')."""
+    name_map: dict[str, str] = {}
+    for contact in book:
+        if contact.extras.get("source") != "wa_book":
+            continue
+        name = contact.display_name
+        phone = contact.extras.get("phone")
+        if _looks_like_phone(name, phone):
+            continue
+        if phone:
+            name_map[str(phone)] = name
+        lid = contact.extras.get("lid")
+        if lid:
+            name_map[str(lid)] = name
+    return name_map
+
+
+def _apply_address_book_names(contacts: list[ChatContact], name_map: dict[str, str]) -> int:
+    """Aggiorna SOLO display_name dai nomi rubrica. Priorità phone > lid. Ritorna il conteggio."""
+    updated = 0
+    for contact in contacts:
+        phone = contact.extras.get("phone")
+        lid = contact.extras.get("lid")
+        new_name = None
+        if phone:
+            new_name = name_map.get(str(phone))
+        if not new_name and lid:
+            new_name = name_map.get(str(lid))
+        if new_name and contact.display_name != new_name:
+            contact.display_name = new_name
+            updated += 1
+    return updated
+
+
+def _cached_address_book_name(backend, phone: str | None, lid: str | None) -> str | None:
+    """Lookup nome dallo snapshot in-memory `backend._address_book` (ZERO rete)."""
+    book = getattr(backend, "_address_book", None)
+    if not book:
+        return None
+    try:
+        name_map = _build_address_book_name_map(book)
+        if phone:
+            hit = name_map.get(str(phone))
+            if hit:
+                return hit
+        if lid:
+            hit = name_map.get(str(lid))
+            if hit:
+                return hit
+    except Exception:
+        logger.debug("Address book snapshot lookup failed", exc_info=True)
+    return None
+
+
 class WhatsAppBackend(ChatBackend):
     """WhatsApp backend adapted to the ``ChatBackend`` interface.
 
@@ -726,6 +792,8 @@ class WhatsAppBackend(ChatBackend):
             phone = self._contact_phone(jid)
             if phone:
                 extras["phone"] = phone
+            if jid.endswith("@lid"):
+                extras["lid"] = jid
             contacts.append(
                 ChatContact(
                     id=jid,
@@ -736,6 +804,13 @@ class WhatsAppBackend(ChatBackend):
             )
         self.contacts = contacts
         self._contacts_by_jid = {cc.id: cc for cc in contacts}
+        try:
+            book = self.list_address_book_sync(force=False)
+            _apply_address_book_names(
+                self.contacts, _build_address_book_name_map(book)
+            )
+        except Exception:
+            logger.warning("Address book merge failed", exc_info=True)
 
     def _jid_to_phone(self, jid: str) -> str:
         """Best-effort phone (digits only) for a WhatsApp JID, or ``""``.
@@ -1117,6 +1192,13 @@ class WhatsAppBackend(ChatBackend):
             if not candidates:
                 if bulk:
                     self._address_book = None
+                    try:
+                        book = self.list_address_book_sync(force=False)
+                        _apply_address_book_names(
+                            self.contacts, _build_address_book_name_map(book)
+                        )
+                    except Exception:
+                        logger.debug("Address book re-apply failed", exc_info=True)
                 return
             for jid in candidates[:30]:
                 try:
@@ -1126,6 +1208,13 @@ class WhatsAppBackend(ChatBackend):
                 time.sleep(0.3)
             self._lid_cache_save()
             self._address_book = None
+            try:
+                book = self.list_address_book_sync(force=False)
+                _apply_address_book_names(
+                    self.contacts, _build_address_book_name_map(book)
+                )
+            except Exception:
+                logger.debug("Address book re-apply failed", exc_info=True)
         except Exception:
             logger.warning("WhatsApp lid resolver run failed", exc_info=True)
 
