@@ -899,6 +899,77 @@ class TestWALidResolver:
         assert backend._lid_resolver_started is False
         assert backend.contacts[0].display_name == "Mario"
 
+    def test_lid_resolver_run_emits_warmup_done_once_bulk_only(
+        self, monkeypatch, tmp_path
+    ):
+        """Il resolver notifica una sola volta, anche sul ramo ``not candidates``."""
+        import protocols.db as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        backend = _wa_backend()
+        backend._rest.list_lids.return_value = []
+        backend.contacts = []
+
+        with patch("web.bridge.push_event") as mock_push:
+            backend._lid_resolver_run()
+
+        mock_push.assert_called_once()
+        event = mock_push.call_args.args[0]
+        assert event["type"] == "lid_warmup_done"
+        assert event["payload"]["protocol"] == "whatsapp"
+
+    def test_lid_resolver_run_emits_warmup_done_on_error(self, monkeypatch, tmp_path):
+        """Il ``finally`` notifica anche quando il corpo del resolver solleva."""
+        import protocols.db as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        backend = _wa_backend()
+        backend._lid_cache_load = MagicMock(side_effect=RuntimeError("boom"))
+
+        with patch("web.bridge.push_event") as mock_push:
+            backend._lid_resolver_run()
+
+        mock_push.assert_called_once()
+        event = mock_push.call_args.args[0]
+        assert event["type"] == "lid_warmup_done"
+        assert event["payload"]["protocol"] == "whatsapp"
+
+    def test_lid_resolver_run_emits_warmup_done_once_with_candidates(
+        self, monkeypatch, tmp_path
+    ):
+        """Anche il ramo con ``candidates`` emette una sola volta, payload esatto."""
+        import protocols.db as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        backend = _wa_backend()
+        backend._lid_map = {}
+        backend.contacts = [_chat("111@lid")]
+        backend._rest.resolve_contact.return_value = {
+            "id": "391234567890@c.us",
+            "name": "X",
+        }
+        backend._rest.list_lids.return_value = []
+        backend.list_address_book_sync = MagicMock(return_value=[])
+
+        with patch("time.sleep"), patch("web.bridge.push_event") as mock_push:
+            backend._lid_resolver_run()
+
+        mock_push.assert_called_once_with(
+            {"type": "lid_warmup_done", "payload": {"protocol": "whatsapp"}}
+        )
+
+    def test_lid_resolver_run_swallows_push_event_failure(self, monkeypatch, tmp_path):
+        """Un errore del bridge non deve propagare fuori dal resolver."""
+        import protocols.db as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        backend = _wa_backend()
+        backend._rest.list_lids.return_value = []
+        backend.contacts = []
+
+        with patch("web.bridge.push_event", side_effect=RuntimeError("boom")):
+            backend._lid_resolver_run()  # non deve sollevare
+
 
 # ─── Telegram rubrica (milestone 3) ───────────────────────────────────────────
 

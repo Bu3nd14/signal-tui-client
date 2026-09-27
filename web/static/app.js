@@ -2518,6 +2518,11 @@ function connectSocket() {
           }
           break;
         }
+        case "lid_warmup_done":
+          if (state.active?.protocol === "whatsapp" && state.active?.id?.endsWith("@g.us")) {
+            loadMessages();
+          }
+          break;
         case "receipt":
           applyReceiptUpdates(update.payload);
           break;
