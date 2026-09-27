@@ -1229,6 +1229,18 @@ class WhatsAppBackend(ChatBackend):
                 logger.debug("Address book re-apply failed", exc_info=True)
         except Exception:
             logger.warning("WhatsApp lid resolver run failed", exc_info=True)
+        finally:
+            try:
+                from web.bridge import push_event
+
+                push_event(
+                    {
+                        "type": "lid_warmup_done",
+                        "payload": {"protocol": "whatsapp"},
+                    }
+                )
+            except Exception:
+                logger.debug("lid warmup notify failed", exc_info=True)
 
     # ─── Presence (typing) subscription ────────────────────────────────
     # WAHA only distributes ``presence.update`` for chats we subscribed to via
