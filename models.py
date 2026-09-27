@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 # ─── Protocol identifiers ────────────────────────────────────────────────────
@@ -239,6 +240,42 @@ def is_caption_like(value: str | None) -> bool:
     return not (
         lowered.startswith("media:") and re.fullmatch(r"\S+", stripped[6:].strip())
     )
+
+
+# ─── WhatsApp synthetic media identity ───────────────────────────────────────
+
+#: Forme di identità media sintetica generate dal backend WhatsApp nel campo
+#: ``text`` (``"Media: <id>"``): URL WAHA, id ``false_...@...``/``true_...@...``,
+#: coppia ``chat:message`` o filename/id ``sent-*``.  L'identità deve essere un
+#: singolo token senza spazi: l'ultima alternativa ``\S+`` rende le precedenti
+#: ridondanti ma esplicita i formati riconosciuti (predicato canonico condiviso
+#: tra ingest backend, dedup SQLite e serializzazione web).
+_WHATSAPP_MEDIA_IDENTITY = (
+    r"https?://\S+"
+    r"|(?:false|true)_[^\s@]*@[^\s@]+"
+    r"|\d+:\d+"
+    r"|\S+"
+)
+
+
+def is_whatsapp_synthetic_media_text(text: str | None) -> bool:
+    """True se *text* è un'identità media WhatsApp sintetica (``Media: <id>``),
+    non una caption utente. L'identità deve essere un singolo token senza spazi:
+    ``"Media: bella foto"`` (caption multi-parola) NON è sintetica."""
+    stripped = (text or "").strip()
+    if not stripped.lower().startswith("media:"):
+        return False
+    media_identity = stripped[len("media:") :].strip()
+    if not media_identity:
+        return False
+    return bool(re.fullmatch(_WHATSAPP_MEDIA_IDENTITY, media_identity, re.IGNORECASE))
+
+
+def is_sent_mirror_attachment_id(value: str | None) -> bool:
+    """True se *value* è un attachment_id mirror client-side ``sent-*`` (basename)."""
+    if not value:
+        return False
+    return Path(str(value)).name.lower().startswith("sent-")
 
 
 # ─── Data models ─────────────────────────────────────────────────────────────

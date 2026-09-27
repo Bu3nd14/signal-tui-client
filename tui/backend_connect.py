@@ -30,6 +30,21 @@ def _status_rank(status: str | None) -> int:
     return _STATUS_RANK.get(status, 0)
 
 
+def _run_startup_maintenance() -> None:
+    """Run the idempotent DB maintenance before backend caches load.
+
+    Each connect worker calls this; ``run_startup_maintenance`` is guarded per
+    DB path (R3), so the heavy dedup runs at most once per process.  Never
+    raises: a maintenance failure must not abort a backend connection.
+    """
+    try:
+        from protocols.db import run_startup_maintenance
+
+        run_startup_maintenance()
+    except Exception:
+        logger.debug("Startup DB maintenance failed", exc_info=True)
+
+
 def _dedup_key(m: dict) -> tuple | None:
     """Composite dedup key for the id-based merge: ``(id, attachment_id)``.
 
@@ -192,6 +207,7 @@ class BackendConnectMixin:
 
     def _connect_signal(self) -> None:
         """Worker thread: avvia Signal, poi merge nel UI thread."""
+        _run_startup_maintenance()
         self.call_from_thread(
             self._mark_backend_connecting, self.signal_backend.protocol
         )
@@ -229,6 +245,7 @@ class BackendConnectMixin:
         backend = self.whatsapp_backend
         if backend is None:
             return
+        _run_startup_maintenance()
         deadline = time.monotonic() + WA_BOOT_READY_TIMEOUT_S
         while time.monotonic() < deadline:
             if backend.needs_pairing:
@@ -336,6 +353,7 @@ class BackendConnectMixin:
             logger.info("LINK-TG: already connecting, skipping duplicate worker")
             return
         self._tg_connecting = True
+        _run_startup_maintenance()
         try:
             self.call_from_thread(
                 self._mark_backend_connecting, self.telegram_backend.protocol

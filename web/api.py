@@ -19,7 +19,11 @@ from typing import Any, Literal
 from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
-from models import is_caption_like, is_media_quote_placeholder_composite
+from models import (
+    is_caption_like,
+    is_media_quote_placeholder_composite,
+    is_whatsapp_synthetic_media_text,
+)
 from web.bridge import push_event
 from web.retry import (
     SEND_RETRY_MAX_ATTEMPTS,
@@ -136,21 +140,12 @@ def _infer_attachment_type(attachment_id: str, content_type: str | None) -> str 
 
 
 def _is_whatsapp_synthetic_text(text: str | None) -> bool:
-    stripped = (text or "").strip()
-    if not stripped.lower().startswith("media:"):
-        return False
+    """Alias locale del predicato canonico ``models.is_whatsapp_synthetic_media_text``.
 
-    media_identity = stripped[len("media:") :].strip()
-    if not media_identity:
-        return False
-    return bool(
-        re.fullmatch(r"https?://\S+", media_identity, re.IGNORECASE)
-        or re.fullmatch(
-            r"(?:false|true)_[^\s@]*@[^\s@]+", media_identity, re.IGNORECASE
-        )
-        or re.fullmatch(r"\d+:\d+", media_identity)
-        or re.fullmatch(r"\S+", media_identity)
-    )
+    Il predicato vive in ``models`` così ingest backend, dedup SQLite e web
+    condividono una sola definizione.
+    """
+    return is_whatsapp_synthetic_media_text(text)
 
 
 def _unread_counts() -> dict[tuple[str, str], int]:

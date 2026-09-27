@@ -31,9 +31,11 @@ from models import (
     ChatContact,
     ChatEvent,
     is_caption_like,
+    is_sent_mirror_attachment_id,
     media_kind_from_mime,
     msg_type_for_media_kind,
 )
+from protocols.db import _ECHO_MATCH_WINDOW_MS
 
 from .base import ChatBackend, should_upgrade_outgoing_attachment
 from .config import (
@@ -2227,16 +2229,23 @@ class WhatsAppBackend(ChatBackend):
             # diverso).  Il match per id DEVE precedere quello sul testo, altrimenti
             # l'evento ack sintetico viene ingerito come nuovo messaggio di testo.
             cached_attachment_id = msg.get("attachment_id")
-            outgoing_mirror = bool(
-                is_mine
-                and cached_attachment_id
-                and Path(str(cached_attachment_id)).name.startswith("sent-")
+            # XOR mirror: la riga URL WAHA (non ``sent-*``) e quella mirror
+            # client-side ``sent-*`` sono lo STESSO allegato anche con id
+            # diversi, ma due mirror distinti (stesso msg_id, due ``sent-*``)
+            # sono allegati diversi e non vanno fusi.  Il confronto è sul
+            # basename, non sull'id intero: un URL WAHA e un ``sent-*`` hanno
+            # necessariamente id diversi.
+            cached_mirror = bool(
+                is_mine and is_sent_mirror_attachment_id(cached_attachment_id)
+            )
+            incoming_mirror = bool(
+                is_mine and is_sent_mirror_attachment_id(attachment_id)
             )
             same_attachment = (
                 not attachment_id
                 or not cached_attachment_id
                 or cached_attachment_id == attachment_id
-                or outgoing_mirror
+                or (cached_mirror != incoming_mirror)
             )
             if (
                 is_mine
@@ -2471,7 +2480,7 @@ class WhatsAppBackend(ChatBackend):
 
         Returns ``True`` when a row was reused, ``False`` otherwise.
         """
-        from protocols.db import _DB_LOCK, _ECHO_MATCH_WINDOW_MS, DB_FILE, _init_db
+        from protocols.db import _DB_LOCK, DB_FILE, _init_db
 
         _init_db()
         status = data.get("status", "sent" if data.get("is_mine") else "read")
@@ -3122,10 +3131,11 @@ class WhatsAppBackend(ChatBackend):
 
 _SEND_DEDUP_WINDOW_MS = 5000
 
-# Window (ms) entro cui un'entry SENT senza id (invio ottimistico della TUI)
-# può essere considerata l'echo di un messaggio con id reale, abbinandola per
-# testo.  Copre il normale ritardo dell'echo di WAHA (che usa il proprio
-# timestamp server, distante dal ts client) senza però far "inghiottire" a
-# un'entry legacy (pre-fix, id=None) molto vecchia un messaggio mio
-# genuinamente nuovo (es. inviato da un altro client) con lo stesso testo.
-_ECHO_MATCH_WINDOW_MS = 600000  # 10 minuti
+# Nota: ``_ECHO_MATCH_WINDOW_MS`` (10 min) è la finestra entro cui un'entry
+# SENT senza id (invio ottimistico della TUI) può essere considerata l'echo di
+# un messaggio con id reale, abbinandola per testo.  Copre il normale ritardo
+# dell'echo di WAHA (che usa il proprio timestamp server, distante dal ts
+# client) senza però far "inghiottire" a un'entry legacy (pre-fix, id=None)
+# molto vecchia un messaggio mio genuinamente nuovo (es. inviato da un altro
+# client) con lo stesso testo.  Definita una sola volta in ``protocols.db`` e
+# importata qui (N5).
