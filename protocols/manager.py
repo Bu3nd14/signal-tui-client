@@ -53,6 +53,12 @@ class BackendManager:
 
     async def connect_all(self) -> None:
         """Connect every registered backend."""
+        from .db import run_startup_maintenance
+
+        try:
+            run_startup_maintenance()
+        except Exception:
+            logger.debug("Startup DB maintenance failed", exc_info=True)
         for backend in self._backends.values():
             await backend.connect()
 

@@ -132,7 +132,12 @@ def _is_technical_media_label(label: str) -> bool:
 def _is_synthetic_media_text(
     text: str, attachment_info: str | None, attachment_id: str | None
 ) -> bool:
-    """True se `text` è un'identità sintetica generata dal backend, non una caption."""
+    """True se `text` è un'identità sintetica generata dal backend, non una caption.
+
+    Follow-up: questa è la variante DISPLAY, più ampia del predicato canonico
+    ``models.is_whatsapp_synthetic_media_text`` (che richiede il prefisso
+    ``Media:`` e un id a token singolo). Non usarla per il dedup/ingest.
+    """
     t = (text or "").strip()
     if not t:
         return True

@@ -12,6 +12,12 @@ import threading
 import time
 from pathlib import Path
 
+from models import (
+    is_caption_like,
+    is_sent_mirror_attachment_id,
+    is_whatsapp_synthetic_media_text,
+)
+
 logger = logging.getLogger(__name__)
 
 CACHE_DIR = Path.home() / ".local" / "share" / "signal-tui-client"
@@ -26,9 +32,22 @@ _MIN_PRUNE_LIMIT = 100
 
 # Window (ms) entro cui un'entry id-less può essere considerata l'echo di un
 # messaggio con id reale.  Condivisa tra ``_update_message_id`` (match mirato a
-# UNA riga entro la finestra) e ``_dedup_messages_by_id`` (guardia difensiva che
-# non cancella partizioni con timestamp divergenti oltre la finestra).
+# UNA riga entro la finestra), ``_dedup_messages_by_id`` (guardia difensiva che
+# non cancella partizioni con timestamp divergenti oltre la finestra) e
+# ``_dedup_outgoing_attachment_mirrors`` (coppie URL-WAHA + mirror ``sent-*``).
 _ECHO_MATCH_WINDOW_MS = 600_000  # 10 minuti
+
+# Rank di delivery status condiviso.  Debito noto: le query SQL di
+# ``_update_message_status*`` e ``_dedup_messages_by_id`` replicano lo stesso
+# mapping in un CASE, per non alterarne il testo (R4).  Questa costante è la
+# fonte per il codice Python (es. la fusione delle coppie mirror outgoing).
+_STATUS_RANK = {"pending": 0, "failed": 0, "sent": 1, "delivered": 2, "read": 3}
+
+
+def _status_rank(status: str | None) -> int:
+    """Rank numerico di uno status (NULL/sconosciuto → 0)."""
+    return _STATUS_RANK.get((status or "").lower(), 0)
+
 
 # Current schema version, persisted via ``PRAGMA user_version`` so the legacy
 # migration below is skipped once the schema is known to be up to date.
@@ -1369,6 +1388,206 @@ def _dedup_messages_by_id() -> int:
             conn.close()
 
 
+def _dedup_outgoing_attachment_mirrors() -> int:
+    """Fondi le coppie WhatsApp outgoing URL-WAHA + mirror client ``sent-*``.
+
+    Bug: un allegato PDF outgoing WhatsApp compare doppio — una riga con
+    ``attachment_id`` = URL WAHA (``text = "Media: <url>"``) e, con timestamp
+    maggiore, la riga ``sent-<uuid>.pdf`` (``text = ""``), stesso ``msg_id``.
+    ``_dedup_messages_by_id`` non le fonde perché partiziona anche per ``text``
+    e ``attachment_id``.  Questa routine riconosce la coppia (esattamente una
+    riga ``sent-*`` e una non-``sent-*``, con id distinti) e la fonde nella
+    riga ``sent-*``, che è durevole: il riferimento al file locale sopravvive
+    alla scadenza dell'URL WAHA.
+
+    Idempotente.  Limite documentato: coppie con timestamp distanti più di
+    ``_ECHO_MATCH_WINDOW_MS`` (10 min) NON vengono fuse (guardia anti-collisione
+    di ``msg_id``).  Lo scope è ristretto a ``protocol='whatsapp' AND
+    is_mine=1``: non tocca i multi-allegato Signal (righe con ``attachment_id``
+    distinti) né i multi-media incoming (``is_mine=0``).
+
+    Ritorna il numero di righe rimosse.
+    """
+    _init_db()
+    removed = 0
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.row_factory = sqlite3.Row
+            # Filtro SQL (R2): il predicato Python ``is_sent_mirror_attachment_id``
+            # lavora sul basename, quindi riconosce anche un path ``/x/sent-a``;
+            # qui lo si replica con ``LIKE '%/sent-%'`` per coerenza, tenendo poi
+            # la classificazione autorevole in Python.
+            groups = conn.execute(
+                "SELECT contact_number, msg_id FROM messages "
+                "WHERE protocol = 'whatsapp' AND is_mine = 1 "
+                "AND msg_id IS NOT NULL AND msg_id != '' "
+                "AND attachment_id IS NOT NULL AND attachment_id != '' "
+                "GROUP BY contact_number, msg_id "
+                "HAVING COUNT(*) = 2 "
+                "AND COUNT(DISTINCT CASE "
+                "WHEN attachment_id LIKE 'sent-%' "
+                "OR attachment_id LIKE '%/sent-%' THEN 'm' ELSE 'r' END) = 2 "
+                "AND COUNT(DISTINCT attachment_id) = 2 "
+                "AND MAX(timestamp) - MIN(timestamp) <= ?",
+                (_ECHO_MATCH_WINDOW_MS,),
+            ).fetchall()
+            for group in groups:
+                rows = conn.execute(
+                    "SELECT id, attachment_id, text, attachment_info, status, "
+                    "msg_type, content_type, media_kind, quote_text, "
+                    "quote_timestamp, quote_author, reply_to_message_id, "
+                    "quote_attachment_id, quote_attachment_path, "
+                    "quote_content_type, batch_id, batch_index, edited "
+                    "FROM messages WHERE protocol = 'whatsapp' "
+                    "AND is_mine = 1 AND contact_number = ? AND msg_id = ? "
+                    "AND attachment_id IS NOT NULL AND attachment_id != '' "
+                    "ORDER BY CASE status "
+                    "WHEN 'pending' THEN 0 WHEN 'failed' THEN 0 "
+                    "WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 "
+                    "WHEN 'read' THEN 3 ELSE 0 END DESC, rowid ASC",
+                    (group["contact_number"], group["msg_id"]),
+                ).fetchall()
+
+                mirrors = [
+                    row
+                    for row in rows
+                    if is_sent_mirror_attachment_id(row["attachment_id"])
+                ]
+                others = [
+                    row
+                    for row in rows
+                    if not is_sent_mirror_attachment_id(row["attachment_id"])
+                ]
+                if (
+                    len(mirrors) != 1
+                    or len(others) != 1
+                    or mirrors[0]["attachment_id"] == others[0]["attachment_id"]
+                ):
+                    logger.warning(
+                        "outgoing attachment mirror dedup skipped ambiguous group "
+                        "(contact_number=%r, msg_id=%r, rows=%d, attachment_ids=%r)",
+                        group["contact_number"],
+                        group["msg_id"],
+                        len(rows),
+                        [row["attachment_id"] for row in rows],
+                    )
+                    continue
+
+                survivor = mirrors[0]
+                other = others[0]
+
+                # N6: mai downgrade — vince lo status di rank più alto (NULL→0).
+                final_status = (
+                    survivor["status"]
+                    if _status_rank(survivor["status"]) >= _status_rank(other["status"])
+                    else other["status"]
+                )
+
+                # B2 + R1: azzera il testo solo se è l'identità sintetica del
+                # backend; una caption reale sul survivor resta.  Se però il
+                # survivor è vuoto/sintetico e l'altra riga porta una caption
+                # reale (non vuota e non sintetica), il testo va trasferito:
+                # altrimenti la fusione la perderebbe insieme alla riga
+                # eliminata.  Mai il contrario: un testo sintetico di ``other``
+                # non sovrascrive una caption reale del survivor.
+                survivor_text = survivor["text"] or ""
+                other_text = other["text"] or ""
+                if (
+                    is_whatsapp_synthetic_media_text(survivor_text)
+                    or not survivor_text.strip()
+                ) and (
+                    other_text.strip()
+                    and not is_whatsapp_synthetic_media_text(other_text)
+                ):
+                    final_text = other_text
+                elif is_whatsapp_synthetic_media_text(survivor_text):
+                    final_text = ""
+                else:
+                    final_text = survivor["text"]
+
+                def _missing(value) -> bool:
+                    return value is None or value == ""
+
+                # B3: i campi di ``other`` completano il survivor solo se
+                # assenti/vuoti lì (mai sovrascrivere un dato reale).
+                merged = {
+                    field: survivor[field]
+                    for field in (
+                        "content_type",
+                        "media_kind",
+                        "quote_text",
+                        "quote_timestamp",
+                        "quote_author",
+                        "reply_to_message_id",
+                        "quote_attachment_id",
+                        "quote_attachment_path",
+                        "quote_content_type",
+                    )
+                }
+                for field, value in merged.items():
+                    if _missing(value) and not _missing(other[field]):
+                        merged[field] = other[field]
+
+                # attachment_info: precedenza al survivor (contiene il filename
+                # tecnico durevole del mirror), MA una caption reale portata
+                # dall'altra riga non deve mai sparire; se il survivor è vuoto
+                # si prende comunque il valore di ``other``.
+                survivor_info = survivor["attachment_info"]
+                other_info = other["attachment_info"]
+                take_other_info = _missing(survivor_info) or (
+                    is_caption_like(other_info) and not is_caption_like(survivor_info)
+                )
+                merged_info = other_info if take_other_info else survivor_info
+
+                # R5: ``edited`` è il massimo; batch/timestamp restano del
+                # survivor (slot immutabile, mai sovrascritto da NULL).
+                merged_edited = max(
+                    int(survivor["edited"] or 0), int(other["edited"] or 0)
+                )
+
+                conn.execute(
+                    "UPDATE messages SET text = ?, attachment_info = ?, "
+                    "status = ?, content_type = ?, media_kind = ?, "
+                    "quote_text = ?, quote_timestamp = ?, quote_author = ?, "
+                    "reply_to_message_id = ?, quote_attachment_id = ?, "
+                    "quote_attachment_path = ?, quote_content_type = ?, "
+                    "edited = ? WHERE id = ?",
+                    (
+                        final_text,
+                        merged_info,
+                        final_status,
+                        merged["content_type"],
+                        merged["media_kind"],
+                        merged["quote_text"],
+                        merged["quote_timestamp"],
+                        merged["quote_author"],
+                        merged["reply_to_message_id"],
+                        merged["quote_attachment_id"],
+                        merged["quote_attachment_path"],
+                        merged["quote_content_type"],
+                        merged_edited,
+                        survivor["id"],
+                    ),
+                )
+                logger.info(
+                    "outgoing attachment mirror dedup contact=%r msg_id=%r "
+                    "survivor_id=%s removed_id=%s mirror=%r other=%r",
+                    group["contact_number"],
+                    group["msg_id"],
+                    survivor["id"],
+                    other["id"],
+                    survivor["attachment_id"],
+                    other["attachment_id"],
+                )
+                conn.execute("DELETE FROM messages WHERE id = ?", (other["id"],))
+                removed += 1
+            conn.commit()
+            return removed
+        finally:
+            conn.close()
+
+
 def _detect_ghost_outgoing_text(db_file=None) -> list[dict]:
     """Detect suspicious WhatsApp outgoing text pairs without changing them.
 
@@ -1465,3 +1684,59 @@ def _count_unread() -> dict[str, int]:
         finally:
             conn.close()
     return {row[0]: row[1] for row in rows}
+
+
+# ─── Startup maintenance ─────────────────────────────────────────────────────
+
+_STARTUP_DEDUP_LOCK = threading.Lock()
+_startup_dedup_done_for: set[str] = set()
+
+
+def reset_startup_maintenance() -> None:
+    """Forget the per-path "maintenance done" markers (test helper).
+
+    Needed when tests point several assertions at the same ``DB_FILE``: without
+    a reset the second ``run_startup_maintenance()`` would be a no-op.
+    """
+    with _STARTUP_DEDUP_LOCK:
+        _startup_dedup_done_for.clear()
+
+
+def run_startup_maintenance(force: bool = False) -> None:
+    """Manutenzione DB idempotente, una volta per path del database.
+
+    Ordine: dedup exact-dup (``_dedup_messages_by_id``) → fusione delle coppie
+    mirror outgoing WhatsApp (``_dedup_outgoing_attachment_mirrors``) →
+    rilevazione ghost text (``_detect_ghost_outgoing_text``).
+
+    La TUI la invoca prima del primo connect dei worker
+    (``tui/backend_connect.py``); ``BackendManager.connect_all`` la invoca per
+    gli altri entry point (es. CLI).  Il web gira nello stesso processo TUI,
+    quindi non serve un hook separato.
+
+    R2 (race): ``_STARTUP_DEDUP_LOCK`` è tenuto per l'INTERA durata del lavoro.
+    Un chiamante concorrente (i worker connect partono in thread separati)
+    resta bloccato finché la manutenzione non è completata; solo allora vede il
+    path marcato e ritorna.  In questo modo nessuno può seminare la cache
+    in-memory dalle righe non ancora deduplicate.  ``force=True`` (solo test)
+    riesegue sempre, anch'esso serializzato dal lock.  Se il lavoro solleva, il
+    marcatore viene rimosso prima di rilanciare: i chiamanti successivi non
+    restano bloccati e ritentano.
+    """
+    _init_db()
+    key = str(DB_FILE)
+    with _STARTUP_DEDUP_LOCK:
+        if force:
+            _startup_dedup_done_for.discard(key)
+        if not force and key in _startup_dedup_done_for:
+            return
+        _startup_dedup_done_for.add(key)
+        try:
+            _dedup_messages_by_id()
+            _dedup_outgoing_attachment_mirrors()
+            _detect_ghost_outgoing_text()
+        except Exception:
+            # Never wedge later callers: drop the marker so the next attempt
+            # retries instead of seeing a spurious "done".
+            _startup_dedup_done_for.discard(key)
+            raise
