@@ -77,6 +77,50 @@ def test_facade_reply_mirrors_complete_quote_into_tui_ingest(protocol):
     assert cached["reply_to_message_id"] == "11"
 
 
+def test_facade_signal_media_reply_derives_quote_text_from_descriptor():
+    """Bug: reply media Signal senza caption → il mirror non perde la quote.
+
+    Il ``quote_text`` display è derivato da ``quote_attachments`` (mime +
+    filename); i kwargs di servizio NON viaggiano sul filo.
+    """
+    backend = _backend("signal")
+    manager = BackendManager()
+    manager.register(backend)
+    descriptor = ["audio/ogg:voice.ogg:/tmp/voice.ogg"]
+
+    manager.send_message_sync(
+        "signal",
+        "42",
+        "answer",
+        quote_timestamp=123000,
+        quote_author="42",
+        quote_message="",
+        quote_attachments=descriptor,
+    )
+    event = backend.poll_once()[0]
+
+    assert event.payload["quote_text"] == "voice.ogg — 🎵 Audio"
+    sent_kwargs = backend.send_message_sync.call_args.kwargs
+    assert sent_kwargs["quote_attachments"] == descriptor
+    assert "quote_content_type" not in sent_kwargs
+    assert "quote_filename" not in sent_kwargs
+
+
+def test_signal_enqueue_sent_message_prefers_real_quote_message():
+    """Un ``quote_message`` reale vince sul fallback del descriptor."""
+    backend = SignalBackend()
+    backend.enqueue_sent_message(
+        "42",
+        "1730000000000",
+        "answer",
+        quote_message="Che bella!",
+        quote_content_type="audio/ogg",
+        quote_filename="voice.ogg",
+    )
+    event = backend.poll_once()[0]
+    assert event.payload["quote_text"] == "Che bella!"
+
+
 @pytest.mark.parametrize("protocol", ["signal", "telegram", "whatsapp"])
 def test_facade_send_attachment_enqueues_event_with_media_data(
     protocol, tmp_path, monkeypatch

@@ -9,12 +9,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import (
+    _KIND_TO_PLACEHOLDER,
+    MEDIA_KIND_VALUES,
     MEDIA_QUOTE_PLACEHOLDERS,
     ChatMessage,
     is_caption_like,
     is_media_quote_placeholder,
     is_media_quote_placeholder_composite,
+    media_quote_display,
     media_quote_placeholder,
+    parse_quote_attachment_descriptor,
 )
 
 
@@ -123,3 +127,57 @@ def test_is_caption_like_accepts_user_text():
     assert is_caption_like("La foto delle vacanze") is True
     assert is_caption_like("tramonto sul mare") is True
     assert is_caption_like("quando hai le idee chiare...") is True
+
+
+class TestMediaQuoteDisplay:
+    """Helper canonico ``media_quote_display`` (mime → segnaposto)."""
+
+    def test_kind_mapping_is_total_over_media_kinds(self):
+        assert set(_KIND_TO_PLACEHOLDER) == set(MEDIA_KIND_VALUES)
+        for placeholder_key in _KIND_TO_PLACEHOLDER.values():
+            assert placeholder_key in MEDIA_QUOTE_PLACEHOLDERS
+
+    def test_representative_mime_types(self):
+        assert media_quote_display("image/png") == "🖼️ Immagine"
+        assert media_quote_display("image/gif") == "🖼️ Immagine"
+        assert media_quote_display("video/mp4") == "🎬 Video"
+        assert media_quote_display("audio/ogg") == "🎵 Audio"
+        assert media_quote_display("application/pdf") == "📎 File"
+
+    def test_filename_is_prepended_with_em_dash(self):
+        assert (
+            media_quote_display("image/jpeg", filename="photo.jpg")
+            == "photo.jpg — 🖼️ Immagine"
+        )
+
+    def test_no_content_type_has_no_placeholder(self):
+        assert media_quote_display(None) is None
+        assert media_quote_display("") is None
+
+
+class TestParseQuoteAttachmentDescriptor:
+    """Helper canonico ``parse_quote_attachment_descriptor`` (due partition)."""
+
+    def test_empty_descriptor(self):
+        assert parse_quote_attachment_descriptor(None) == (None, None)
+        assert parse_quote_attachment_descriptor("") == (None, None)
+
+    def test_content_type_only(self):
+        assert parse_quote_attachment_descriptor("image/png") == ("image/png", None)
+
+    def test_content_type_and_filename(self):
+        assert parse_quote_attachment_descriptor("image/png:photo.png") == (
+            "image/png",
+            "photo.png",
+        )
+
+    def test_path_with_colon_is_ignored(self):
+        assert parse_quote_attachment_descriptor(
+            "image/png:photo.png:/tmp/ph:oto.png"
+        ) == ("image/png", "photo.png")
+
+    def test_fields_are_stripped(self):
+        assert parse_quote_attachment_descriptor(" image/png : photo.png : /tmp/x") == (
+            "image/png",
+            "photo.png",
+        )

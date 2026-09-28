@@ -400,6 +400,53 @@ class TestDedupById:
         assert backend_mod._dedup_messages_by_id() == 1
         assert backend_mod._dedup_messages_by_id() == 0
 
+    def test_dedup_merges_missing_quote_fields_into_survivor(self, tmp_db):
+        """La fusione preserva quote/campi media ed ``edited = max``."""
+        import sqlite3
+
+        backend_mod._add_message_to_cache(
+            "42",
+            "answer",
+            True,
+            "You",
+            1000,
+            protocol=PROTOCOL_TELEGRAM,
+            msg_id="7",
+            status="sent",
+            quote_text="voice.ogg — 🎵 Audio",
+            quote_timestamp=900,
+            quote_author="Mario",
+            quote_attachment_id="voice.ogg",
+            quote_attachment_path="/tmp/voice.ogg",
+            quote_content_type="audio/ogg",
+        )
+        backend_mod._add_message_to_cache(
+            "42",
+            "answer",
+            True,
+            "You",
+            1001,
+            protocol=PROTOCOL_TELEGRAM,
+            msg_id="7",
+            status="read",
+        )
+        with sqlite3.connect(tmp_db) as conn:
+            conn.execute(
+                "UPDATE messages SET edited = 1 WHERE timestamp = 1000 AND msg_id = '7'"
+            )
+
+        assert backend_mod._dedup_messages_by_id() == 1
+
+        rows = backend_mod._load_cache(protocol=PROTOCOL_TELEGRAM)["42"]
+        assert len(rows) == 1
+        assert rows[0]["status"] == "read"
+        assert rows[0]["quote_text"] == "voice.ogg — 🎵 Audio"
+        assert rows[0]["quote_author"] == "Mario"
+        assert rows[0]["quote_attachment_id"] == "voice.ogg"
+        assert rows[0]["quote_attachment_path"] == "/tmp/voice.ogg"
+        assert rows[0]["quote_content_type"] == "audio/ogg"
+        assert rows[0]["edited"] == 1
+
     def test_dedup_keeps_distinct_text_for_same_msg_id(self, tmp_db):
         # WhatsApp splits one message into several rows sharing msg_id.
         backend_mod._add_message_to_cache(

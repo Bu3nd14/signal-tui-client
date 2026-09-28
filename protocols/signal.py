@@ -36,8 +36,9 @@ from models import (
     ChatEvent,
     is_caption_like,
     media_kind_from_mime,
-    media_quote_placeholder,
+    media_quote_display,
     msg_type_for_media_kind,
+    parse_quote_attachment_descriptor,
 )
 
 from .base import ChatBackend
@@ -54,6 +55,7 @@ from protocols.db import (
     _ECHO_MATCH_WINDOW_MS,
     CACHE_DIR,
     _add_message_to_cache,
+    _fill_message_quote_fields,
     _load_cache,
     _mark_as_read,
     _update_message_attachment_id,
@@ -121,20 +123,9 @@ def _signal_quote_text(quote: dict | None) -> str | None:
     if not attachments:
         return None
     first = attachments[0] or {}
-    content_type = first.get("contentType", "") or ""
-    filename = (first.get("filename") or "").strip()
-    if content_type.startswith("image/"):
-        msg_type = "image"
-    elif content_type.startswith("video/"):
-        msg_type = "video"
-    elif content_type.startswith("audio/"):
-        msg_type = "audio"
-    else:
-        msg_type = "attachment"
-    placeholder = media_quote_placeholder(msg_type)
-    if filename:
-        return f"{filename} — {placeholder}"
-    return placeholder
+    content_type = (first.get("contentType") or "").strip() or None
+    filename = (first.get("filename") or "").strip() or None
+    return media_quote_display(content_type, filename=filename)
 
 
 def _signal_quote_content_type(quote: dict | None) -> str | None:
@@ -774,6 +765,10 @@ class SignalBackend(ChatBackend):
         # which is acceptable: the row id is a string, the ts an int).
         ts = int(message_id) if str(message_id).isdigit() else int(time.time() * 1000)
 
+        quote_content_type, quote_filename = parse_quote_attachment_descriptor(
+            (quote_attachments or [None])[0]
+        )
+
         inserted_mirror_ids: list[str] = []
         with self._ingest_lock:
             try:
@@ -805,7 +800,13 @@ class SignalBackend(ChatBackend):
                         "is_mine": True,
                         "sender": "You",
                         "timestamp": ts,
-                        "quote_text": quote_message,
+                        "quote_text": (
+                            quote_message
+                            if (quote_message or "").strip()
+                            else media_quote_display(
+                                quote_content_type, filename=quote_filename
+                            )
+                        ),
                         "quote_timestamp": quote_timestamp,
                         "quote_author": quote_author,
                         "reply_to_message_id": reply_to_message_id,
@@ -1040,6 +1041,8 @@ class SignalBackend(ChatBackend):
         mime_type: str | None = None,
         media_kind: str | None = None,
         filename: str | None = None,
+        quote_content_type: str | None = None,
+        quote_filename: str | None = None,
     ) -> None:
         try:
             ts = int(message_id)
@@ -1085,7 +1088,13 @@ class SignalBackend(ChatBackend):
                     "is_mine": True,
                     "sender": "You",
                     "timestamp": ts,
-                    "quote_text": quote_message,
+                    "quote_text": (
+                        quote_message
+                        if (quote_message or "").strip()
+                        else media_quote_display(
+                            quote_content_type, filename=quote_filename
+                        )
+                    ),
                     "quote_timestamp": quote_timestamp,
                     "quote_author": quote_author,
                     "reply_to_message_id": reply_to_message_id,
@@ -1914,6 +1923,45 @@ class SignalBackend(ChatBackend):
         )
         return True
 
+    def _merge_quote_fields(
+        self, contact_id: str, entry: dict, data: dict, ts: int
+    ) -> bool:
+        """Fonde i campi quote mancanti in *entry* (fill "solo-se-vuoto").
+
+        Non sovrascrive mai un valore già presente e persiste in SQLite solo se
+        qualcosa è cambiato (nessun churn).  Non tocca status/id/timestamp.
+        """
+        fields = (
+            "quote_text",
+            "quote_timestamp",
+            "quote_author",
+            "reply_to_message_id",
+            "quote_attachment_id",
+            "quote_attachment_path",
+            "quote_content_type",
+        )
+        changed = False
+        for field in fields:
+            value = data.get(field)
+            if entry.get(field) in (None, "") and value not in (None, ""):
+                entry[field] = value
+                changed = True
+        if changed:
+            _fill_message_quote_fields(
+                PROTOCOL_SIGNAL,
+                contact_id,
+                entry.get("id") or data.get("id"),
+                int(entry.get("timestamp", ts)),
+                quote_text=data.get("quote_text"),
+                quote_timestamp=data.get("quote_timestamp"),
+                quote_author=data.get("quote_author"),
+                reply_to_message_id=data.get("reply_to_message_id"),
+                quote_attachment_id=data.get("quote_attachment_id"),
+                quote_attachment_path=data.get("quote_attachment_path"),
+                quote_content_type=data.get("quote_content_type"),
+            )
+        return changed
+
     def _persist_message(self, contact_id: str, data: dict, ts: int) -> int | None:
         """Persist a message to the SQLite cache (Signal protocol).
 
@@ -1958,8 +2006,10 @@ class SignalBackend(ChatBackend):
         keeps working on the UI thread) but the SQLite write is skipped;
         the caller is responsible for calling ``_persist_message`` later.
 
-        Returns ``True`` when added, ``"changed"`` for an attachment upgrade,
-        and ``False`` for an unchanged duplicate.
+        Returns ``True`` when added, ``"changed"`` when an existing duplicate was
+        healed in place — an attachment upgrade, an image-caption heal, or a fill
+        of the missing quote fields (incoming or outgoing) — and ``False`` for an
+        unchanged duplicate.
         """
         if not hasattr(self, "_ingest_lock"):
             self._ingest_lock = threading.RLock()
@@ -2056,6 +2106,7 @@ class SignalBackend(ChatBackend):
                     changed = (
                         self._heal_image_caption(contact_id, m, data, ts) or changed
                     )
+                    quote_changed = self._merge_quote_fields(contact_id, m, data, ts)
                     if not changed:
                         logger.info(
                             "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
@@ -2065,7 +2116,7 @@ class SignalBackend(ChatBackend):
                             m.get("attachment_id"),
                             data.get("attachment_id"),
                         )
-                    return "changed" if changed else False
+                    return "changed" if (changed or quote_changed) else False
 
             existing = self._message_already_cached(
                 contact_id,
@@ -2077,6 +2128,7 @@ class SignalBackend(ChatBackend):
                 batch_index=data.get("batch_index"),
             )
             if existing is not None:
+                changed = False
                 if is_mine:
                     # Same two protections as the optimistic branch above: no
                     # upgrade when the incoming attachment already lives in
@@ -2105,17 +2157,17 @@ class SignalBackend(ChatBackend):
                         self._heal_image_caption(contact_id, existing, data, ts)
                         or changed
                     )
-                    if changed:
-                        return "changed"
-                    logger.info(
-                        "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
-                        data.get("id"),
-                        ts,
-                        text,
-                        existing.get("attachment_id"),
-                        data.get("attachment_id"),
-                    )
-                return False
+                    if not changed:
+                        logger.info(
+                            "signal ingest: dup is_mine id=%s ts=%s text=%r att_existing=%s att_incoming=%s",
+                            data.get("id"),
+                            ts,
+                            text,
+                            existing.get("attachment_id"),
+                            data.get("attachment_id"),
+                        )
+                quote_changed = self._merge_quote_fields(contact_id, existing, data, ts)
+                return "changed" if (changed or quote_changed) else False
 
             persisted_id = (
                 self._persist_message(contact_id, data, ts) if persist else None

@@ -773,6 +773,9 @@ def _fill_message_quote_fields(
     quote_timestamp: int | None = None,
     quote_author: str | None = None,
     reply_to_message_id: str | None = None,
+    quote_attachment_id: str | None = None,
+    quote_attachment_path: str | None = None,
+    quote_content_type: str | None = None,
 ) -> bool:
     if not msg_id:
         return False
@@ -797,12 +800,24 @@ def _fill_message_quote_fields(
                 "THEN ? ELSE quote_author END, "
                 "reply_to_message_id = CASE "
                 "WHEN reply_to_message_id IS NULL OR reply_to_message_id = '' "
-                "THEN ? ELSE reply_to_message_id END WHERE id = ?",
+                "THEN ? ELSE reply_to_message_id END, "
+                "quote_attachment_id = CASE "
+                "WHEN quote_attachment_id IS NULL OR quote_attachment_id = '' "
+                "THEN ? ELSE quote_attachment_id END, "
+                "quote_attachment_path = CASE "
+                "WHEN quote_attachment_path IS NULL OR quote_attachment_path = '' "
+                "THEN ? ELSE quote_attachment_path END, "
+                "quote_content_type = CASE "
+                "WHEN quote_content_type IS NULL OR quote_content_type = '' "
+                "THEN ? ELSE quote_content_type END WHERE id = ?",
                 (
                     quote_text,
                     quote_timestamp,
                     quote_author,
                     reply_to_message_id,
+                    quote_attachment_id,
+                    quote_attachment_path,
+                    quote_content_type,
                     row[0],
                 ),
             )
@@ -1291,7 +1306,12 @@ def _dedup_messages_by_id() -> int:
     server-echo row fetched at startup), keep the one with the highest status
     rank so a ``read`` receipt is never lost in favour of a ``sent`` duplicate.
     ``attachment_id`` is part of the key because some protocols split one
-    incoming message into multiple rows. Idempotent across repeated runs.
+    incoming message into multiple rows. Before deleting the extra rows, their
+    missing quote/media fields (``quote_text``, ``quote_timestamp``,
+    ``quote_author``, ``reply_to_message_id``, ``quote_attachment_*``,
+    ``content_type``, ``media_kind``) are merged into the survivor and
+    ``edited`` becomes the maximum: the dedup never loses a field. Idempotent
+    across repeated runs.
 
     Defensive guard: a partition whose timestamps span more than
     ``_ECHO_MATCH_WINDOW_MS`` is a signal that one id was (erroneously) attached
@@ -1304,8 +1324,8 @@ def _dedup_messages_by_id() -> int:
     _init_db()
     with _DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
         try:
-            before = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
             # Defensive: log partitions whose timestamps diverge beyond the echo
             # window — an id assigned to two distinct messages.  These must never
             # be merged, otherwise a legitimate row would be deleted at boot.
@@ -1342,48 +1362,98 @@ def _dedup_messages_by_id() -> int:
                     min_ts,
                     max_ts,
                 )
-            # CTE: for every (protocol, contact_number, msg_id, text) group,
-            # order by status rank descending and rowid ascending, then delete
-            # every row past the first one — but ONLY when the partition's
-            # timestamp range fits within the echo window (see guard above).
-            conn.execute(
-                """
-                WITH ranked AS (
-                    SELECT
-                        rowid,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY protocol, contact_number, msg_id, text,
-                                attachment_id
-                            ORDER BY
-                                CASE status
-                                WHEN 'pending' THEN 0 WHEN 'failed' THEN 0
-                                WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2
-                                WHEN 'read' THEN 3 ELSE 0
-                                END DESC,
-                                rowid ASC
-                        ) AS rn,
-                        MIN(timestamp) OVER (
-                            PARTITION BY protocol, contact_number, msg_id, text,
-                                attachment_id
-                        ) AS min_ts,
-                        MAX(timestamp) OVER (
-                            PARTITION BY protocol, contact_number, msg_id, text,
-                                attachment_id
-                        ) AS max_ts
-                    FROM messages
-                    WHERE msg_id IS NOT NULL AND msg_id != ''
-                )
-                DELETE FROM messages
-                WHERE rowid IN (
-                    SELECT rowid FROM ranked
-                    WHERE rn > 1 AND (max_ts - min_ts) <= ?
-                )
-                """,
+            # Partizioni candidate: stessa identità (protocol, contact_number,
+            # msg_id, text, attachment_id), più di una riga e span dei timestamp
+            # entro la finestra di echo.  Le partizioni divergenti (guardia
+            # sopra) NON vengono fuse.
+            partitions = conn.execute(
+                "SELECT protocol, contact_number, msg_id, text, attachment_id "
+                "FROM messages WHERE msg_id IS NOT NULL AND msg_id != '' "
+                "GROUP BY protocol, contact_number, msg_id, text, attachment_id "
+                "HAVING COUNT(*) > 1 "
+                "AND MAX(timestamp) - MIN(timestamp) <= ?",
                 (_ECHO_MATCH_WINDOW_MS,),
-            )
+            ).fetchall()
+            removed = 0
+            for (
+                protocol,
+                contact_number,
+                msg_id,
+                text,
+                attachment_id,
+            ) in partitions:
+                # ``IS`` distingue NULL da '' (a differenza di ``IFNULL``): ogni
+                # riga è selezionata solo dalla propria partizione esatta.
+                rows = conn.execute(
+                    "SELECT id, status, edited, content_type, media_kind, "
+                    "quote_text, quote_timestamp, quote_author, "
+                    "reply_to_message_id, quote_attachment_id, "
+                    "quote_attachment_path, quote_content_type "
+                    "FROM messages WHERE protocol = ? AND contact_number = ? "
+                    "AND msg_id = ? AND text IS ? AND attachment_id IS ? "
+                    "ORDER BY CASE status "
+                    "WHEN 'pending' THEN 0 WHEN 'failed' THEN 0 "
+                    "WHEN 'sent' THEN 1 WHEN 'delivered' THEN 2 "
+                    "WHEN 'read' THEN 3 ELSE 0 END DESC, rowid ASC",
+                    (protocol, contact_number, msg_id, text, attachment_id),
+                ).fetchall()
+                if len(rows) < 2:
+                    continue
+                # Survivor = status rank più alto, poi rowid più basso (nessun
+                # downgrade).  Prima del DELETE i campi mancanti delle altre
+                # righe completano il survivor (mai sovrascrivere un valore).
+                survivor = rows[0]
+                merged = {
+                    field: survivor[field]
+                    for field in (
+                        "content_type",
+                        "media_kind",
+                        "quote_text",
+                        "quote_timestamp",
+                        "quote_author",
+                        "reply_to_message_id",
+                        "quote_attachment_id",
+                        "quote_attachment_path",
+                        "quote_content_type",
+                    )
+                }
+                for other in rows[1:]:
+                    for field, value in merged.items():
+                        if (value is None or value == "") and other[field] not in (
+                            None,
+                            "",
+                        ):
+                            merged[field] = other[field]
+                merged_edited = max(int(row["edited"] or 0) for row in rows)
+                conn.execute(
+                    "UPDATE messages SET content_type = ?, media_kind = ?, "
+                    "quote_text = ?, quote_timestamp = ?, quote_author = ?, "
+                    "reply_to_message_id = ?, quote_attachment_id = ?, "
+                    "quote_attachment_path = ?, quote_content_type = ?, "
+                    "edited = ? WHERE id = ?",
+                    (
+                        merged["content_type"],
+                        merged["media_kind"],
+                        merged["quote_text"],
+                        merged["quote_timestamp"],
+                        merged["quote_author"],
+                        merged["reply_to_message_id"],
+                        merged["quote_attachment_id"],
+                        merged["quote_attachment_path"],
+                        merged["quote_content_type"],
+                        merged_edited,
+                        survivor["id"],
+                    ),
+                )
+                conn.execute(
+                    "DELETE FROM messages WHERE id IN ({})".format(
+                        ",".join("?" for _ in rows[1:])
+                    ),
+                    tuple(row["id"] for row in rows[1:]),
+                )
+                removed += len(rows) - 1
             conn.commit()
-            after = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-            return before - after
+            return removed
         finally:
             conn.close()
 
