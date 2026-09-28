@@ -260,6 +260,21 @@ h2 { font-size: 1.05rem; }
 .message-time { display: block; margin-top: 5px; color: #c3cedaaa; font-size: .66rem; text-align: right; }
 .message-status.failed { color: var(--danger); }
 .message-status.retrying { color: #f5a623; }
+.message-status.queued { color: #9aa7b8; }
+.message-status.confirm { color: #f5a623; }
+.message-retry, .message-discard {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  font-size: .68rem;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.message-retry { color: #f5a623; }
+.message-discard { color: var(--danger); }
 .message-tick { margin-left: 4px; color: #9aa7b8; font-size: .66rem; white-space: nowrap; }
 .tick-sent { color: #f0b90b; }
 .tick-delivered { color: #f0b90b; }

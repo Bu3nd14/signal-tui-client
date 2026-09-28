@@ -156,6 +156,24 @@ function replyQuoteMessage(message) {
     || "Allegato";
 }
 
+// N5/§9.1: un item optimistic ripristinato dall'outbox (known_message_ids = [])
+// non può accoppiarsi con una riga REALE più vecchia della bolla.  Normalizza
+// secondi/ms come ``timestampMilliseconds`` (app.js) per confrontare unità
+// eterogenee.
+function timestampMilliseconds(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return null;
+  return numeric < 100000000000 ? numeric * 1000 : numeric;
+}
+
+function isRestoredOptimistic(item) {
+  // Solo il marker esplicito prodotto da ``recordToOptimistic`` (app.js): gli
+  // invii freschi, anche in chat vuota/storia non caricata, non sono mai
+  // vincolati temporalmente (un eco con clock skew non deve far sparire la
+  // bolla).
+  return item.restored === true;
+}
+
 function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) {
   const realBySignature = new Map();
   const realByLooseSignature = new Map();
@@ -163,8 +181,10 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
   const realByTextQuoteSignature = new Map();
   const realByQuoteAgnosticSignature = new Map();
   const quoteLessWhatsAppEchoes = new Map();
+  const timestampByIdentity = new Map();
   messages.forEach((message, index) => {
     const identity = messageIdentity(message, index);
+    timestampByIdentity.set(identity, timestampMilliseconds(message.timestamp));
     const signature = messageSignature(message);
     const matches = realBySignature.get(signature) || [];
     matches.push(identity);
@@ -267,7 +287,15 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
     const quoteLessMatches = protocol === "whatsapp" && quoteSignatureValue(item) != null
       ? quoteLessWhatsAppEchoes.get(messageQuoteAgnosticSignature(item)) || []
       : [];
-    const available = (id) => !known.has(id) && !consumed.has(id);
+    const guardTimestamp = isRestoredOptimistic(item);
+    const itemTimestamp = timestampMilliseconds(item.timestamp);
+    const timestampAllows = (id) => {
+      if (!guardTimestamp || itemTimestamp == null) return true;
+      const realTimestamp = timestampByIdentity.get(id);
+      if (realTimestamp == null) return true;
+      return realTimestamp >= itemTimestamp;
+    };
+    const available = (id) => !known.has(id) && !consumed.has(id) && timestampAllows(id);
     const uniqueAvailable = (matches) => {
       const availableMatches = matches.filter(available);
       return availableMatches.length === 1 ? availableMatches[0] : undefined;

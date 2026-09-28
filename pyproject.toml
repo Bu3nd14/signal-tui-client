@@ -42,6 +42,11 @@ show_missing = true
 target-version = "py312"
 line-length = 88
 exclude = ["profiling", ".opencode"]
+# Ruff 0.16 formatta anche i blocchi Python dentro il markdown: i documenti di
+# design contengono snippet illustrativi (non codice eseguibile) e non devono
+# essere riscritti dal formatter. Il codice di produzione resta coperto da
+# ``ruff format``/``ruff check``.
+extend-exclude = ["*.md"]
 
 [tool.basedpyright]
 typeCheckingMode = "off"
