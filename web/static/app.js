@@ -1984,7 +1984,14 @@ function insertEmoji(char) {
   const end = input.selectionEnd ?? start;
   input.setRangeText(char, start, end, "end");
   input.dispatchEvent(new Event("input", { bubbles: true }));
-  input.focus();
+  if (isMobile()) {
+    // Su mobile la tastiera si apre solo con un tap esplicito nel campo:
+    // manteniamo il cursore dopo l'emoji così se ne possono inserire più di
+    // seguito senza che compaia la tastiera.
+    input.selectionStart = input.selectionEnd = start + char.length;
+  } else {
+    input.focus();
+  }
 }
 
 function renderEmojiGrid() {
@@ -2052,7 +2059,8 @@ function closeEmojiPicker({ focus = true } = {}) {
   elements.emojiPicker.hidden = true;
   elements.emojiToggle.setAttribute("aria-expanded", "false");
   elements.emojiToggle.setAttribute("aria-label", "Apri selettore emoji");
-  if (focus) elements.messageInput.focus();
+  // Su mobile il focus del campo avviene solo con un tap esplicito.
+  if (focus && !isMobile()) elements.messageInput.focus();
 }
 
 async function toggleEmojiPicker() {
@@ -2073,7 +2081,15 @@ async function toggleEmojiPicker() {
   elements.emojiPicker.hidden = false;
   elements.emojiToggle.setAttribute("aria-expanded", "true");
   elements.emojiToggle.setAttribute("aria-label", "Chiudi selettore emoji");
-  elements.emojiSearch.focus();
+  if (isMobile()) {
+    // Su mobile l'apertura delle emoji deve chiudere la tastiera, non aprire
+    // quella del campo di ricerca: togliamo il focus dagli input.
+    elements.emojiSearch.blur();
+    elements.messageInput.blur();
+    if (document.activeElement instanceof HTMLElement) document.activeElement?.blur?.();
+  } else {
+    elements.emojiSearch.focus();
+  }
 }
 
 function resizeComposer() {
