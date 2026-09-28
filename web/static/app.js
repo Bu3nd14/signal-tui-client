@@ -68,6 +68,10 @@ const state = {
   editing: null,
   editSending: false,
   stagedAttachments: [],
+  attachmentSending: false,
+  voiceRecorder: null,
+  voiceStarting: false,
+  voiceGeneration: 0,
   replyTo: null,
   emojiData: null,
   emojiRequest: null,
@@ -121,6 +125,7 @@ const elements = {
   emojiGrid: document.querySelector("#emoji-grid"),
   attachButton: document.querySelector("#attach-button"),
   fileInput: document.querySelector("#file-input"),
+  voiceRecord: document.querySelector("#voice-record"),
 };
 
 function showError(message) {
@@ -1676,6 +1681,7 @@ function cancelEdit() {
 function startEdit(item) {
   if (!state.active || !item.edit_id || item.optimistic_id) return;
   cancelReply();
+  if (typeof cancelVoiceRecording === "function") cancelVoiceRecording();
   state.editing = {
     edit_id: String(item.edit_id),
     id: item.id,
@@ -1909,6 +1915,7 @@ function openThread(contact) {
   closeEmojiPicker({ focus: false });
   closeReactionPicker();
   cancelReply();
+  if (typeof cancelVoiceRecording === "function") cancelVoiceRecording();
   if (state.editing) cancelEdit();
   state.active = contact;
   state.userScrolledUp = false;
@@ -2086,7 +2093,7 @@ function updateComposer() {
   // (state.sending > 0) NON blocca piu' nulla: l'utente deve poter scrivere
   // e inviare il messaggio successivo senza aspettare che il precedente
   // arrivi a destinazione (ogni invio ha un optimistic_id indipendente).
-  const busy = state.editSending;
+  const busy = state.editSending || state.voiceStarting || Boolean(state.voiceRecorder) || state.attachmentSending;
   const spinning = busy || state.sending > 0;
   elements.sendMessage.disabled = busy || (!elements.messageInput.value.trim() && !state.stagedAttachments.length);
   elements.messageInput.disabled = busy;
@@ -2271,6 +2278,223 @@ async function stageOneAttachment(file) {
   // e il branch localPreviewUrl di renderMessages la cerca in mediaCache.
   // Stessa URL → cacheMedia preserva le dims al re-cache del render.
   if (previewUrl) cacheMedia(attachmentId, previewUrl, previewWidth, previewHeight);
+}
+
+// ── Registrazione vocale (mobile) ───────────────────────────────────────────
+// Tap-per-registrare/tap-per-fermare: il file viene accodato come allegato
+// audio generico (non PTT). Cap 5 minuti, niente waveform/trascrizione.
+
+const VOICE_MAX_DURATION_MS = 5 * 60 * 1000;
+
+function isMobile() {
+  return window.matchMedia("(max-width: 700px)").matches;
+}
+
+function _selectVoiceMime() {
+  if (typeof MediaRecorder !== "function" || typeof MediaRecorder.isTypeSupported !== "function") return "";
+  for (const type of ["audio/mp4", "audio/webm"]) {
+    if (MediaRecorder.isTypeSupported(type)) return type;
+  }
+  return "";
+}
+
+function mimeTypeToExtension(mime) {
+  return String(mime || "").toLowerCase().split(";", 1)[0].trim() === "audio/mp4" ? "m4a" : "webm";
+}
+
+function formatVoiceDuration(ms) {
+  const t = Math.floor(ms / 1000);
+  return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+}
+
+function safeStopMediaRecorder(mr) {
+  if (!mr || mr.state === "inactive") return;
+  try {
+    mr.stop();
+  } catch {
+    /* già fermo */
+  }
+}
+
+function renderVoiceRecorder(recorderState) {
+  let panel = document.querySelector("#voice-recorder");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "voice-recorder";
+    panel.className = "voice-recorder";
+    elements.attachmentsPreview.before(panel);
+  }
+  if (!recorderState) {
+    panel.replaceChildren();
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  panel.innerHTML = `
+    <div id="voice-recorder-timer" class="voice-recorder-timer">${formatVoiceDuration(Date.now() - recorderState.startTime)}</div>
+    <div class="voice-recorder-actions">
+      <button type="button" class="voice-recorder-btn stop" aria-label="Ferma registrazione">⏹️</button>
+      <button type="button" class="voice-recorder-btn cancel" aria-label="Annulla registrazione">🗑️</button>
+    </div>`;
+  panel.querySelector(".voice-recorder-btn.stop").addEventListener("click", (event) => {
+    event.preventDefault();
+    stopVoiceRecording();
+  });
+  panel.querySelector(".voice-recorder-btn.cancel").addEventListener("click", (event) => {
+    event.preventDefault();
+    cancelVoiceRecording();
+  });
+}
+
+function stopVoiceRecording() {
+  const rec = state.voiceRecorder;
+  if (rec) safeStopMediaRecorder(rec.mediaRecorder);
+}
+
+function cancelVoiceRecording() {
+  const rec = state.voiceRecorder;
+  if (!rec) {
+    // getUserMedia ancora in volo: invalida la generazione così il post-await
+    // non avvia la registrazione dopo che l'utente ha annullato/cambiato chat.
+    if (state.voiceStarting) {
+      state.voiceGeneration += 1;
+      state.voiceStarting = false;
+      updateComposer();
+    }
+    return;
+  }
+  rec.discarded = true;
+  clearInterval(rec.timerInterval);
+  rec.stream.getTracks().forEach((track) => track.stop());
+  rec.mediaRecorder.ondataavailable = null;
+  rec.mediaRecorder.onstop = null;
+  rec.mediaRecorder.onerror = null;
+  safeStopMediaRecorder(rec.mediaRecorder);
+  state.voiceRecorder = null;
+  state.voiceStarting = false;
+  renderVoiceRecorder(null);
+  updateComposer();
+}
+
+async function startVoiceRecording() {
+  if (!isMobile()) return;
+  if (state.voiceStarting || state.voiceRecorder) return;
+  if (state.editing || state.editSending || state.sending > 0) return;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    showError("Registrazione vocale non disponibile: serve una connessione sicura (HTTPS).");
+    return;
+  }
+  const generation = ++state.voiceGeneration;
+  state.voiceStarting = true;
+  updateComposer();
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    state.voiceStarting = false;
+    if (generation !== state.voiceGeneration) return;
+    showError("Impossibile accedere al microfono.");
+    updateComposer();
+    return;
+  }
+  if (generation !== state.voiceGeneration) {
+    stream.getTracks().forEach((track) => track.stop());
+    state.voiceStarting = false;
+    return;
+  }
+  const mimeType = _selectVoiceMime();
+  let mediaRecorder;
+  try {
+    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+  } catch {
+    stream.getTracks().forEach((track) => track.stop());
+    state.voiceStarting = false;
+    showError("Impossibile avviare la registrazione.");
+    updateComposer();
+    return;
+  }
+  const chunks = [];
+  const startTime = Date.now();
+  const rec = {
+    stream,
+    mediaRecorder,
+    chunks,
+    startTime,
+    timerInterval: null,
+    generation,
+    discarded: false,
+  };
+  // SOLO property handler: addEventListener duplicherebbe i callback a ogni
+  // registrazione concorrente sullo stesso oggetto.
+  mediaRecorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) chunks.push(event.data);
+  };
+  mediaRecorder.onerror = () => {
+    clearInterval(rec.timerInterval);
+    stream.getTracks().forEach((track) => track.stop());
+    if (generation !== state.voiceGeneration) return;
+    state.voiceRecorder = null;
+    state.voiceStarting = false;
+    renderVoiceRecorder(null);
+    updateComposer();
+    showError("Errore durante la registrazione.");
+  };
+  mediaRecorder.onstop = () => {
+    clearInterval(rec.timerInterval);
+    stream.getTracks().forEach((track) => track.stop());
+    // R5: la generazione invalidata (chat cambiata/annullo) scarta il blob
+    // prima di qualunque accesso a `rec`.
+    if (generation !== state.voiceGeneration) return;
+    const captured = state.voiceRecorder;
+    if (!captured || captured.discarded) {
+      state.voiceRecorder = null;
+      state.voiceStarting = false;
+      renderVoiceRecorder(null);
+      updateComposer();
+      return;
+    }
+    const actualMime = mediaRecorder.mimeType
+      || (chunks.length ? new Blob(chunks).type : "")
+      || "audio/webm";
+    const extension = mimeTypeToExtension(actualMime);
+    const filename = `voice-${startTime}.${extension}`;
+    const chunkCount = chunks.length;
+    state.voiceRecorder = null;
+    state.voiceStarting = false;
+    renderVoiceRecorder(null);
+    updateComposer();
+    if (!chunkCount) {
+      showError("Registrazione vuota.");
+      return;
+    }
+    const file = new File(
+      [new Blob(chunks, { type: actualMime })],
+      filename,
+      { type: actualMime, lastModified: startTime },
+    );
+    void stageAttachments([file]);
+  };
+  rec.timerInterval = setInterval(() => {
+    const elapsed = Date.now() - startTime;
+    const timerEl = document.querySelector("#voice-recorder-timer");
+    if (timerEl) timerEl.textContent = formatVoiceDuration(elapsed);
+    if (elapsed >= VOICE_MAX_DURATION_MS && mediaRecorder.state === "recording") {
+      showError("Registrazione fermata automaticamente dopo 5 minuti.");
+      safeStopMediaRecorder(mediaRecorder);
+    }
+  }, 250);
+  state.voiceRecorder = rec;
+  state.voiceStarting = false;
+  try {
+    mediaRecorder.start(1000);
+  } catch {
+    cancelVoiceRecording();
+    showError("Impossibile avviare la registrazione.");
+    return;
+  }
+  renderVoiceRecorder(rec);
+  updateComposer();
+  closeComposerMenu();
 }
 
 // ── Outbox: retry testo che sopravvive alla disconnessione ──────────────────
@@ -2461,6 +2685,10 @@ if (typeof window !== "undefined") {
 
 async function submitMessage() {
   if (!state.active) return;
+  // R2: l'invio allegati trattiene lo staging fino all'esito della fetch: il
+  // flag blocca un secondo submit e il composer, così nessun doppio invio.
+  if (state.voiceRecorder || state.voiceStarting) return;
+  if (state.attachmentSending) return;
   const text = elements.messageInput.value;
   const attachments = [...state.stagedAttachments];
   const reply = state.replyTo ? { ...state.replyTo } : null;
@@ -2595,8 +2823,8 @@ async function submitMessage() {
     return;
   }
   state.sending += 1;
+  if (attachments.length) state.attachmentSending = true;
   elements.messageInput.value = "";
-  if (attachments.length) clearStagedAttachments({ revoke: false });
   resizeComposer();
   updateComposer();
   if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
@@ -2631,10 +2859,14 @@ async function submitMessage() {
       });
     }
     for (const optimistic of optimisticItems) optimistic.optimisticStatus = "sent";
+    // R2: lo staging viene svuotato solo a invio riuscito; su errore gli
+    // allegati restano disponibili per il retry manuale.
+    if (attachments.length) clearStagedAttachments({ revoke: false });
   } catch (error) {
     for (const optimistic of optimisticItems) optimistic.optimisticStatus = "failed";
     if (error.message !== "unauthorized") showError("Impossibile inviare il messaggio.");
   } finally {
+    state.attachmentSending = false;
     state.sending -= 1;
     updateComposer();
     // Non spostare il focus se nel frattempo l'utente ha cambiato chat:
@@ -2847,8 +3079,16 @@ document.addEventListener("visibilitychange", () => {
     loadContacts({ quiet: true });
   }
   if (document.visibilityState === "visible") flushOutbox();
+  if (document.visibilityState === "hidden") cancelVoiceRecording();
 });
+window.addEventListener("pagehide", () => cancelVoiceRecording());
 window.addEventListener("online", () => flushOutbox());
+// Gating mobile unico: `.is-mobile` guida la UI vocale con la STESSA media
+// query usata da JS e CSS (nessuna divergenza a 700px).
+const mobileMq = window.matchMedia("(max-width: 700px)");
+const syncMobileClass = () => document.documentElement.classList.toggle("is-mobile", mobileMq.matches);
+if (mobileMq.addEventListener) mobileMq.addEventListener("change", syncMobileClass);
+syncMobileClass();
 const vv = window.visualViewport;
 if (vv) {
   let vvFrame = 0;
@@ -2893,7 +3133,12 @@ document.querySelector("#back-button").addEventListener("click", () => {
   clearTelegramRefreshTimer();
   elements.app.classList.remove("thread-open");
 });
-document.querySelector("#dismiss-error").addEventListener("click", () => { elements.errorBanner.hidden = true; });
+document.querySelector("#dismiss-error").addEventListener("click", () => {
+  elements.errorBanner.hidden = true;
+  // Un fallimento emoji transitorio non deve restare permanente fino al
+  // reload: chiudendo il banner si abilita il retry al prossimo tap.
+  state.emojiFailed = false;
+});
 elements.messages.addEventListener("scroll", () => {
   state.userScrolledUp = (
     elements.messages.scrollHeight
@@ -3048,10 +3293,17 @@ elements.composer.addEventListener("paste", (event) => {
   void stageAttachments([item.getAsFile()]);
 });
 elements.attachButton.addEventListener("click", () => {
+  cancelVoiceRecording();
   closeComposerMenu();
   elements.fileInput.value = "";
   elements.fileInput.click();
 });
+if (elements.voiceRecord) {
+  elements.voiceRecord.addEventListener("click", () => {
+    closeComposerMenu();
+    void startVoiceRecording();
+  });
+}
 elements.fileInput.addEventListener("change", () => {
   const files = [...(elements.fileInput.files || [])];
   elements.fileInput.value = "";

@@ -489,6 +489,24 @@ h2 { font-size: 1.05rem; }
 .composer-more { display: none; }
 .composer-menu { display: contents; }
 .composer-menu-item span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* #voice-record esiste nel DOM anche su desktop: la nascondiamo esplicitamente
+   perché .composer-menu{display:contents} e .composer-icon-button{display:grid}
+   vincerebbero sul [hidden] dell'UA stylesheet. */
+#voice-record { display: none; }
+.voice-recorder { display: none; }
+
+/* Registrazione vocale: solo mobile (classe `.is-mobile` impostata su <html>
+   da app.js con la STESSA media query `max-width:700px`). */
+.is-mobile #voice-record { display: grid; color: #ef4444; border-color: #ef444466; }
+.is-mobile #voice-record:active, .is-mobile #voice-record.recording { border-color: #ef4444; background: #ef444426; }
+.is-mobile .voice-recorder { display: flex; width: 100%; flex-direction: column; gap: 10px; padding: 14px; margin-bottom: 8px; border: 1px solid #ef444466; border-radius: 12px; background: var(--panel-raised); }
+.is-mobile .voice-recorder[hidden] { display: none; }
+.is-mobile .voice-recorder-timer { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; text-align: center; }
+.is-mobile .voice-recorder-actions { display: flex; gap: 10px; justify-content: center; }
+.is-mobile .voice-recorder-btn { display: grid; width: 44px; height: 44px; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: var(--panel-raised); font-size: 1.2rem; cursor: pointer; }
+.is-mobile .voice-recorder-btn.stop { border-color: var(--accent); color: var(--accent); }
+.is-mobile .voice-recorder-btn.cancel { border-color: var(--danger); color: var(--danger); }
 .send-button { display: grid; width: 42px; height: 42px; flex: none; place-items: center; border: 0; border-radius: 50%; background: var(--accent); color: white; cursor: pointer; }
 .send-button:disabled { opacity: .45; cursor: default; }
 .send-button .spinner { width: 19px; height: 19px; }

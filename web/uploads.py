@@ -23,6 +23,9 @@ _MAX_BYTES_BY_KIND = {
 }
 UPLOAD_MAX_AGE_SECONDS = 60 * 60
 _CHUNK_SIZE = 256 * 1024
+#: Byte di header accumulati per il riconoscimento del container (e per
+#: l'eventuale box-walk MP4/WebM): sufficiente per `ftyp`/`moov`/`Tracks`.
+_SNIFF_BYTES = 4096
 
 _EXTENSIONS_BY_MIME = {
     "image/png": {".png"},
@@ -35,10 +38,22 @@ _EXTENSIONS_BY_MIME = {
     "audio/mpeg": {".mp3"},
     "audio/ogg": {".ogg", ".opus"},
     "audio/mp4": {".m4a"},
+    "audio/webm": {".webm"},
     "audio/wav": {".wav"},
     "application/pdf": {".pdf"},
     "application/zip": {".zip", ".docx", ".xlsx", ".pptx"},
 }
+
+#: Varianti CodecID usate dagli elementi Tracks di Matroska/WebM.
+_WEBM_VIDEO_CODECS = (b"V_VP8", b"V_VP9", b"V_AV1", b"V_MPEG4/ISO/AVC")
+_WEBM_AUDIO_CODECS = (
+    b"A_OPUS",
+    b"A_VORBIS",
+    b"A_AAC",
+    b"A_MPEG/L3",
+    b"A_FLAC",
+    b"A_PCM",
+)
 
 
 class UploadValidationError(ValueError):
@@ -95,14 +110,21 @@ def _sniff_media(header: bytes) -> tuple[str, str] | None:
         return "image/gif", "gif"
     if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP":
         return "image/webp", "image"
-    if len(header) >= 12 and header[4:8] == b"ftyp":
-        brand = header[8:12]
+    if len(header) >= 12 and header[4:8] in {b"ftyp", b"styp"}:
+        brand = header[8:12].lower()
         if brand == b"qt  ":
             return "video/quicktime", "video"
-        if brand == b"M4A ":
+        if brand == b"m4a ":
             return "audio/mp4", "audio"
-        if brand.startswith(b"mp4") or brand in {b"isom", b"iso2", b"avc1"}:
+        # R3: i container frammentati iOS usano brand `iso*`/`mp4*`/`m4a*`
+        # (es. `iso5`, `iso6`, `mp42`): accettali come MP4, il raffinamento
+        # `_mp4_has_video_track`/hint dichiarato decide audio vs video.
+        if brand.startswith((b"iso", b"mp4", b"m4a")) or brand in {b"avc1", b"avc3"}:
             return "video/mp4", "video"
+        # Brand ignoto: il container MP4 non è più affidabile → 400.
+        return None
+    if len(header) >= 8 and header[4:8] == b"moof":
+        return "video/mp4", "video"
     if header.startswith(b"\x1aE\xdf\xa3"):
         return "video/webm", "video"
     if header.startswith(b"OggS"):
@@ -123,11 +145,139 @@ def _max_bytes_for_kind(media_kind: str) -> int:
     return _MAX_BYTES_BY_KIND[limit_kind]
 
 
+def _sniff_webm_kind(header: bytes) -> str | None:
+    """Return the WebM kind from the CodecID strings in the Tracks element.
+
+    Any video codec wins over audio (a container with both is served as
+    video); ``None`` means no codec was found in the sniffed header.
+    """
+    if any(codec in header for codec in _WEBM_VIDEO_CODECS):
+        return "video"
+    if any(codec in header for codec in _WEBM_AUDIO_CODECS):
+        return "audio"
+    return None
+
+
+def _iter_boxes(data: bytes, start: int, end: int):
+    """Yield ``(box_type, box_start, box_end)`` for the boxes in ``data``.
+
+    Handles 32-bit sizes, ``size == 1`` (64-bit extended) and ``size == 0``
+    (box extends to ``end``).
+    """
+    offset = start
+    while offset + 8 <= end:
+        size = int.from_bytes(data[offset : offset + 4], "big")
+        box_type = data[offset + 4 : offset + 8]
+        header_size = 8
+        if size == 1:
+            if offset + 16 > end:
+                return
+            size = int.from_bytes(data[offset + 8 : offset + 16], "big")
+            header_size = 16
+        elif size == 0:
+            size = end - offset
+        if size < header_size:
+            return
+        box_end = min(offset + size, end)
+        yield box_type, offset, box_end
+        if box_end <= offset:
+            return
+        offset = box_end
+
+
+def _mp4_has_video_track(data: bytes) -> str | None:
+    """Classify an MP4 container by walking ``moov`` → ``trak`` → ``mdia``.
+
+    R1: any video track wins. Returns ``"video"`` if at least one ``hdlr`` is
+    ``vide``, ``"audio"`` only if no video and at least one ``soun``, else
+    ``None`` (nessuna prova).
+    """
+    found_video = False
+    found_audio = False
+    for box_type, box_start, box_end in _iter_boxes(data, 0, len(data)):
+        if box_type != b"moov":
+            continue
+        for trak_type, trak_start, trak_end in _iter_boxes(
+            data, box_start + 8, box_end
+        ):
+            if trak_type != b"trak":
+                continue
+            for mdia_type, mdia_start, mdia_end in _iter_boxes(
+                data, trak_start + 8, trak_end
+            ):
+                if mdia_type != b"mdia":
+                    continue
+                for hdlr_type, hdlr_start, hdlr_end in _iter_boxes(
+                    data, mdia_start + 8, mdia_end
+                ):
+                    if hdlr_type != b"hdlr" or hdlr_start + 20 > hdlr_end:
+                        continue
+                    handler = data[hdlr_start + 16 : hdlr_start + 20]
+                    if handler == b"vide":
+                        found_video = True
+                    elif handler == b"soun":
+                        found_audio = True
+    if found_video:
+        return "video"
+    if found_audio:
+        return "audio"
+    return None
+
+
+def _classify_upload(
+    header: bytes,
+    *,
+    declared_content_type: str | None,
+    filename: str | None,
+) -> tuple[str, str]:
+    """Return ``(mime_type, media_kind)`` for an upload header.
+
+    Il mime dichiarato dal client è usato SOLO come hint (per i container
+    audio ambigui) e mai come fonte di verità: magic bytes, box-walk e
+    estensione coerente restano i criteri decisivi.
+    """
+    detected = _sniff_media(header)
+    if detected is None:
+        raise UploadValidationError(400)
+    mime_type, media_kind = detected
+
+    if mime_type == "video/webm":
+        refined = _sniff_webm_kind(header)
+        if refined == "video":
+            return "video/webm", "video"
+        if refined == "audio":
+            return "audio/webm", "audio"
+    elif mime_type == "video/mp4":
+        refined = _mp4_has_video_track(header)
+        if refined == "video":
+            return "video/mp4", "video"
+        if refined == "audio":
+            return "audio/mp4", "audio"
+
+    # Hint per-file: accettato solo per un container ambiguo SENZA prova di
+    # traccia video e con estensione coerente (`.mp4` escluso di proposito).
+    declared = (declared_content_type or "").lower().split(";", 1)[0].strip()
+    if (
+        declared in {"audio/webm", "audio/mp4"}
+        and media_kind != "audio"
+        and mime_type in {"video/webm", "video/mp4", "video/quicktime"}
+    ):
+        suffix = Path(filename or "").suffix.lower()
+        coherent = (declared == "audio/webm" and suffix == ".webm") or (
+            declared == "audio/mp4" and suffix == ".m4a"
+        )
+        if coherent:
+            return declared, "audio"
+    return mime_type, media_kind
+
+
 def _store_upload_sync(upload: Any, *, max_bytes: int | None = None) -> StoredUpload:
     directory = ensure_upload_directory()
     temporary_path: Path | None = None
     total = 0
     header = bytearray()
+    raw_filename = getattr(upload, "filename", None)
+    declared_content_type = getattr(upload, "content_type", None)
     try:
         with tempfile.NamedTemporaryFile(
             dir=directory, prefix="upload-", delete=False
@@ -143,17 +293,27 @@ def _store_upload_sync(upload: Any, *, max_bytes: int | None = None) -> StoredUp
                     raise UploadValidationError(413)
                 if total > max(_MAX_BYTES_BY_KIND.values()):
                     raise UploadValidationError(413)
-                if len(header) < 32:
-                    header.extend(chunk[: 32 - len(header)])
-                detected = _sniff_media(bytes(header))
-                if detected and total > _max_bytes_for_kind(detected[1]):
+                if len(header) < _SNIFF_BYTES:
+                    header.extend(chunk[: _SNIFF_BYTES - len(header)])
+                # Cap per-kind mentre si legge: l'header incompleto non è
+                # classificabile, quindi il 400 viene rimandato a fine upload.
+                try:
+                    _, detected_kind = _classify_upload(
+                        bytes(header),
+                        declared_content_type=declared_content_type,
+                        filename=raw_filename,
+                    )
+                except UploadValidationError:
+                    detected_kind = None
+                if detected_kind and total > _max_bytes_for_kind(detected_kind):
                     raise UploadValidationError(413)
                 temporary.write(chunk)
 
-        detected = _sniff_media(bytes(header))
-        if detected is None:
-            raise UploadValidationError(400)
-        mime_type, media_kind = detected
+        mime_type, media_kind = _classify_upload(
+            bytes(header),
+            declared_content_type=declared_content_type,
+            filename=raw_filename,
+        )
         if total > _max_bytes_for_kind(media_kind):
             raise UploadValidationError(413)
         filename = sanitize_filename(upload.filename)
