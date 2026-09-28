@@ -481,6 +481,72 @@ class TestFetchHistoryEdit:
 
         apply_edit.assert_called_once_with(_CID, "m1", "nuovo", is_mine=False)
 
+    def test_forwarded_messages_in_same_history_batch_are_not_merged_as_edit(self):
+        """Bug reale: la chat viene aperta per la prima volta (cache vuota,
+        backend appena avviato) MOLTO dopo che più messaggi sono stati
+        INOLTRATI insieme nella chat (ts ravvicinati, stesso ``fetch_history``
+        batch). Prima della fix, il secondo/terzo messaggio del batch
+        trovava il primo — appena ingerito da QUESTA STESSA chiamata — come
+        candidato unico entro ±2s e veniva scambiato per un suo edit: la
+        riga cache restava una sola e il testo del messaggio "vincente" (per
+        via del bug sull'id passato ad ``apply_edit``) andava perso del
+        tutto. Tutti i messaggi devono restare bolle distinte."""
+        backend = _webhook_backend()
+        backend._rest.list_messages.return_value = [
+            {
+                "id": "fwd-1",
+                "from": _CID,
+                "fromMe": False,
+                "body": "Prima cosa inoltrata",
+                "timestamp": _TS_SEC,
+            },
+            {
+                "id": "fwd-2",
+                "from": _CID,
+                "fromMe": False,
+                "body": "Seconda cosa inoltrata",
+                "timestamp": _TS_SEC + 1,
+            },
+            {
+                "id": "fwd-3",
+                "from": _CID,
+                "fromMe": False,
+                "body": "Terza cosa inoltrata",
+                "timestamp": _TS_SEC + 1,
+            },
+        ]
+
+        backend.fetch_history(_CID, limit=20)
+
+        assert [(m["id"], m["text"]) for m in backend.cache[_CID]] == [
+            ("fwd-1", "Prima cosa inoltrata"),
+            ("fwd-2", "Seconda cosa inoltrata"),
+            ("fwd-3", "Terza cosa inoltrata"),
+        ]
+
+    def test_fetch_history_still_reconciles_edit_against_prior_session_entry(self):
+        """La reconciliation di un edit REALE (testo già editato riportato
+        dallo storico per una riga presente PRIMA di questa chiamata, es. da
+        una sessione precedente) deve continuare a funzionare: lo snapshot
+        pre-batch include ancora la cache preesistente."""
+        backend = _webhook_backend()
+        backend.cache[_CID] = [_cached_message()]  # id "m1", text "vecchio"
+        backend._rest.list_messages.return_value = [
+            {
+                "id": "m1-from-rest",  # id instabile REST↔webhook (§9)
+                "from": _CID,
+                "fromMe": False,
+                "body": "nuovo",
+                "timestamp": _TS_SEC,
+            }
+        ]
+
+        backend.fetch_history(_CID, limit=20)
+
+        assert len(backend.cache[_CID]) == 1
+        assert backend.cache[_CID][0]["id"] == "m1"  # id originale preservato
+        assert backend.cache[_CID][0]["text"] == "nuovo"
+
 
 # ─── edit_message_sync ────────────────────────────────────────────────────────
 
