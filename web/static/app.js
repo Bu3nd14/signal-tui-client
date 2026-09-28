@@ -2053,6 +2053,7 @@ async function toggleEmojiPicker() {
     closeEmojiPicker();
     return;
   }
+  closeComposerMenu();
   try {
     await loadEmojiData();
   } catch (error) {
@@ -2464,6 +2465,9 @@ async function submitMessage() {
   const attachments = [...state.stagedAttachments];
   const reply = state.replyTo ? { ...state.replyTo } : null;
   if (!text.trim() && !attachments.length) return;
+  // Mantiene la tastiera aperta sui dispositivi touch anche quando il percorso
+  // outbox ritorna presto (senza attendere la fetch) o il send e' asincrono.
+  elements.messageInput.focus({ preventScroll: true });
   // Il banner "Rispondendo a..." si chiude subito, non ad invio riuscito:
   // con piu' invii in volo insieme un secondo messaggio composto mentre il
   // primo (con citazione) e' ancora in corso non deve erediare la stessa
@@ -2845,6 +2849,44 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") flushOutbox();
 });
 window.addEventListener("online", () => flushOutbox());
+const vv = window.visualViewport;
+if (vv) {
+  let vvFrame = 0;
+  const applyViewport = () => {
+    if (vvFrame) return;
+    vvFrame = requestAnimationFrame(() => {
+      vvFrame = 0;
+      if (window.matchMedia("(max-width: 700px)").matches) {
+        document.documentElement.style.setProperty("--vvh", `${vv.height}px`);
+        document.documentElement.style.setProperty("--vv-top", `${vv.offsetTop}px`);
+        // In PWA standalone iOS l'inset di safe-area inferiore (home indicator)
+        // resta applicato anche con la tastiera aperta: aggiunge una fascia
+        // vuota sotto il composer. Con la tastiera aperta la azzeriamo.
+        const keyboardOpen = vv.offsetTop > 0 || vv.height < window.screen.height - 150;
+        document.documentElement.classList.toggle("kb-open", keyboardOpen);
+        // Il guscio si accorcia quando appare la tastiera: senza ri-ancorare,
+        // l'ultimo messaggio finisce sotto la tastiera. Ripinna al fondo, a
+        // layout aggiornato, solo se l'utente non stava leggendo la cronologia.
+        requestAnimationFrame(() => {
+          if (!state.userScrolledUp) scrollThreadToBottom();
+        });
+      } else {
+        document.documentElement.style.removeProperty("--vvh");
+        document.documentElement.style.removeProperty("--vv-top");
+        document.documentElement.classList.remove("kb-open");
+      }
+    });
+  };
+  // iOS anima la tastiera: il valore finale del visual viewport puo' arrivare
+  // dopo l'ultimo evento resize. Rimisura anche a tastiera assestata.
+  const applyViewportSettled = () => {
+    applyViewport();
+    for (const delay of [50, 150, 300, 500]) window.setTimeout(applyViewport, delay);
+  };
+  vv.addEventListener("resize", applyViewportSettled);
+  vv.addEventListener("scroll", applyViewport);
+  applyViewportSettled();
+}
 elements.saveOpenaiKey.addEventListener("click", saveOpenaiKey);
 elements.changeOpenaiKey.addEventListener("click", enableOpenaiKeyEdit);
 document.querySelector("#back-button").addEventListener("click", () => {
@@ -2859,9 +2901,56 @@ elements.messages.addEventListener("scroll", () => {
     - elements.messages.clientHeight
   ) > 80;
 });
+// Chiude la tastiera solo su un VERO tap nella lista messaggi, non all'inizio
+// di un gesto di scroll: altrimenti ogni scroll-up farebbe blur + reflow.
+let messageTapStart = null;
+elements.messages.addEventListener("pointerdown", (event) => {
+  if (!window.matchMedia("(max-width: 700px)").matches) return;
+  messageTapStart = { x: event.clientX, y: event.clientY, t: Date.now() };
+});
+elements.messages.addEventListener("pointerup", (event) => {
+  if (!window.matchMedia("(max-width: 700px)").matches) return;
+  const start = messageTapStart;
+  messageTapStart = null;
+  if (!start) return;
+  const moved = Math.hypot(event.clientX - start.x, event.clientY - start.y);
+  if (moved > 10 || Date.now() - start.t > 600) return; // era uno scroll, non un tap
+  const interactive = event.target.closest(
+    "button, a, input, textarea, [contenteditable], .attachment, .transcript-box"
+  );
+  if (!interactive) elements.messageInput.blur();
+});
 elements.composer.addEventListener("submit", (event) => {
   event.preventDefault();
   state.editing ? submitEdit() : submitMessage();
+});
+if (window.matchMedia("(pointer: coarse)").matches) {
+  for (const btn of document.querySelectorAll(".composer-controls button")) {
+    btn.addEventListener("pointerdown", (event) => event.preventDefault());
+  }
+}
+const composerMore = document.querySelector("#composer-more");
+const composerMenu = document.querySelector("#composer-menu");
+function closeComposerMenu() {
+  if (!composerMenu || composerMenu.hidden) return;
+  composerMenu.hidden = true;
+  composerMore.setAttribute("aria-expanded", "false");
+}
+function toggleComposerMenu() {
+  if (!composerMenu) return;
+  const willOpen = composerMenu.hidden;
+  composerMenu.hidden = !willOpen;
+  composerMore.setAttribute("aria-expanded", willOpen ? "true" : "false");
+}
+if (composerMore) composerMore.addEventListener("click", toggleComposerMenu);
+// Chiudi dopo le azioni e su click fuori / Escape.
+document.addEventListener("click", (event) => {
+  if (!composerMenu || composerMenu.hidden) return;
+  if (event.target.closest("#composer-menu, #composer-more")) return;
+  closeComposerMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeComposerMenu();
 });
 elements.messageInput.addEventListener("input", () => {
   resizeComposer();
@@ -2959,6 +3048,7 @@ elements.composer.addEventListener("paste", (event) => {
   void stageAttachments([item.getAsFile()]);
 });
 elements.attachButton.addEventListener("click", () => {
+  closeComposerMenu();
   elements.fileInput.value = "";
   elements.fileInput.click();
 });
