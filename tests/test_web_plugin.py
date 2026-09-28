@@ -2584,3 +2584,39 @@ def test_default_tui_import_does_not_import_optional_web_package():
         [sys.executable, "-c", code], capture_output=True, text=True, check=False
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_web_send_text_dedup_but_attachments_stay_legacy(web_client):
+    """Il registry idempotenza copre solo il testo (N7)."""
+    client, manager, _ = web_client
+    manager.contacts = [ChatContact("alice", "Alice", "signal")]
+    payload = {
+        "protocol": "signal",
+        "contact_id": "alice",
+        "text": "Ciao",
+        "client_msg_id": "cid-plugin-dup",
+    }
+
+    first = client.post("/api/send", json=payload, headers=AUTH)
+    second = client.post("/api/send", json=payload, headers=AUTH)
+
+    assert first.status_code == 200
+    assert first.json() == {"ok": True}
+    assert second.status_code == 200
+    assert second.json() == {"ok": True, "duplicate": True}
+    assert len(manager.send_calls) == 1
+
+    for _ in range(2):
+        response = client.post(
+            "/api/send",
+            data={
+                "protocol": "signal",
+                "contact_id": "alice",
+                "text": "",
+                "client_msg_id": "cid-plugin-att",
+            },
+            files={"file": ("clipboard.png", _PNG_1X1, "image/png")},
+            headers=AUTH,
+        )
+        assert response.status_code == 200
+    assert len(manager.attachments_calls) == 2

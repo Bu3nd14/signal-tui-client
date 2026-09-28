@@ -31,6 +31,7 @@ from web.retry import (
     compute_delay,
     safe_error_text,
 )
+from web.send_registry import SendRegistry, build_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -1115,6 +1116,9 @@ def create_api_router() -> Any:
     from starlette.exceptions import HTTPException as StarletteHTTPException
 
     router = APIRouter(prefix="/api")
+    # Registry di idempotenza in-memory, scoped al processo (§8). Applicato
+    # SOLO al ramo testo: gli allegati restano legacy e non deduplicati.
+    registry = SendRegistry()
 
     @router.get("/emoji")
     def emojis() -> JSONResponse:
@@ -1341,8 +1345,40 @@ def create_api_router() -> Any:
             kwargs["quote_attachments"] = quote_attachments
         if protocol in {"whatsapp", "telegram"} and reply_to_message_id is not None:
             kwargs["reply_to_message_id"] = reply_to_message_id
+
+        # Idempotenza (solo ramo testo, N7): claim atomico scoped al contatto.
+        request.app.state.send_registry = registry
+        registry_key: tuple[str, str, str] | None = None
+        registry_token: str | None = None
+        if not upload_files:
+            registry_key = (protocol, contact_id, client_msg_id)
+            fingerprint = build_fingerprint(
+                protocol=protocol,
+                contact_id=contact_id,
+                text=text,
+                quote_timestamp=quote_timestamp,
+                quote_author=quote_author,
+                quote_message=quote_message,
+                reply_to_message_id=reply_to_message_id,
+                quote_content_type=quote_content_type,
+                quote_attachment_id=quote_attachment_id,
+            )
+            outcome, value = registry.claim_or_lookup(registry_key, fingerprint)
+            if outcome == "sent":
+                if value.get("fingerprint") != fingerprint:
+                    raise HTTPException(
+                        status_code=422, detail="Client message id conflict"
+                    )
+                return {"ok": True, "duplicate": True}
+            if outcome == "inflight":
+                # Un altro handler sta inviando: retryable lato client.  Nessuna
+                # mutazione del registry (N2).
+                raise HTTPException(status_code=409, detail="Send in progress")
+            registry_token = value
+
         uploads: list[Any] = []
         succeeded = False
+        message_id: str | None = None
         try:
             if upload_files:
                 from web.uploads import (
@@ -1401,13 +1437,15 @@ def create_api_router() -> Any:
                 rng = random.Random()
                 for attempt in range(1, SEND_RETRY_MAX_ATTEMPTS + 1):
                     try:
-                        await asyncio.to_thread(
+                        result = await asyncio.to_thread(
                             manager.send_message_sync,
                             protocol,
                             contact_id,
                             text,
                             **kwargs,
                         )
+                        if result is not None:
+                            message_id = str(result)
                         succeeded = True
                         break
                     except Exception as exc:
@@ -1470,6 +1508,15 @@ def create_api_router() -> Any:
         finally:
             for upload in uploads:
                 upload.cleanup()
+            # B3/N2: mark_sent solo su successo, release in tutti gli altri casi
+            # (incluso il 502 dopo i 3 tentativi), sempre vincolato al token.
+            if registry_token is not None and registry_key is not None:
+                if succeeded:
+                    registry.mark_sent(
+                        registry_key, registry_token, message_id, int(time.time())
+                    )
+                else:
+                    registry.release(registry_key, registry_token)
 
         if not succeeded:
             raise HTTPException(status_code=502, detail="Message send failed")

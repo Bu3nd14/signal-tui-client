@@ -61,6 +61,10 @@ const state = {
   optimisticSequence: 0,
   readTimers: new Map(),
   sending: 0, // conteggio invii /api/send in corso: piu' invii possono essere in volo insieme
+  outbox: null, // store outbox (web/static/outbox.js); null = percorso legacy
+  outboxFlushing: false,
+  outboxFlushPending: false,
+  outboxFlushTimer: null,
   editing: null,
   editSending: false,
   stagedAttachments: [],
@@ -1286,6 +1290,8 @@ function buildMessageNode(item, protocol, stickToBottom) {
     if (item.optimisticStatus === "failed") statusText = " · fallito";
     else if (item.optimisticStatus === "sent") statusText = " · inviato";
     else if (item.optimisticStatus === "retrying") statusText = ` · riprova ${item.retryAttempt}/${item.retryMax}…`;
+    else if (item.optimisticStatus === "queued") statusText = " · in attesa";
+    else if (item.optimisticStatus === "confirm") statusText = " · da confermare";
     status.textContent = statusText;
     time.append(status);
   } else {
@@ -1335,6 +1341,35 @@ function buildMessageNode(item, protocol, stickToBottom) {
     edit.title = "Modifica";
     edit.addEventListener("click", () => startEdit(item));
     actions.append(edit);
+  }
+  if (
+    item.optimistic_id
+    && (item.optimisticStatus === "failed" || item.optimisticStatus === "confirm")
+  ) {
+    const outboxId = item.outbox_id || `out-${item.client_msg_id}`;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "message-retry";
+    retry.textContent = item.optimisticStatus === "confirm" ? "Rispedisci" : "Riprova";
+    retry.setAttribute("aria-label", retry.textContent);
+    retry.title = retry.textContent;
+    retry.addEventListener("click", () => {
+      if (
+        item.optimisticStatus === "confirm"
+        && !window.confirm("Il messaggio potrebbe essere già stato inviato. Rispedire?")
+      ) return;
+      window.retryOutboxItem?.(outboxId);
+    });
+    actions.append(retry);
+
+    const discard = document.createElement("button");
+    discard.type = "button";
+    discard.className = "message-discard";
+    discard.textContent = "Scarta";
+    discard.setAttribute("aria-label", "Scarta messaggio");
+    discard.title = "Scarta";
+    discard.addEventListener("click", () => window.discardOutboxItem?.(outboxId));
+    actions.append(discard);
   }
   if (actions.childElementCount) message.append(actions);
   return { el: message, textEl, timeEl: time, tickEl, reactionsEl };
@@ -2237,6 +2272,192 @@ async function stageOneAttachment(file) {
   if (previewUrl) cacheMedia(attachmentId, previewUrl, previewWidth, previewHeight);
 }
 
+// ── Outbox: retry testo che sopravvive alla disconnessione ──────────────────
+// Vedi docs/DESIGN_WEB_SEND_RETRY_DISCONNECTION.md §7.  `state.outbox` è null
+// quando outbox.js non è caricato (fallback legacy sincrono) oppure quando lo
+// store non è disponibile: in quel caso submitMessage non passa dall'outbox.
+
+function outboxModule() {
+  return (typeof window !== "undefined" && window.SignalTuiOutbox) || null;
+}
+
+// Ricostruisce i campi display della quote per la bolla ripristinata al boot.
+function recordQuoteFields(record) {
+  const fields = {};
+  const quote = record.quote;
+  if (!quote) return fields;
+  fields.quote_timestamp = quote.quote_timestamp;
+  fields.quote_author = quote.quote_author;
+  fields.quote_message = quote.quote_message;
+  fields.quote_text = quote.quote_message;
+  if (quote.quote_content_type) fields.quote_content_type = quote.quote_content_type;
+  const mediaType = String(quote.quote_content_type || "").startsWith("video/")
+    ? "video"
+    : String(quote.quote_content_type || "").startsWith("image/")
+      ? "image"
+      : null;
+  if (mediaType && record.protocol !== "signal") fields.quote_media_type = mediaType;
+  if (quote.quote_attachment_id) {
+    const attachmentId = String(quote.quote_attachment_id).split("/").map(encodeURIComponent).join("/");
+    fields.quote_thumb_url = `/api/media/${record.protocol}/${attachmentId}?w=96`;
+    fields.quote_media_placeholder = !quote.quote_message;
+  }
+  return fields;
+}
+
+function recordToOptimistic(record) {
+  return {
+    optimistic_id: record.optimistic_id || `out-${record.client_msg_id}`,
+    outbox_id: record.id,
+    client_msg_id: record.client_msg_id,
+    protocol: record.protocol,
+    contactId: record.contact_id,
+    text: record.text,
+    direction: "out",
+    timestamp: record.timestamp,
+    // N5: niente ricalcolo di known_message_ids (l'eco del già inviato
+    // produrrebbe una doppia bolla).  `restored` abilita il vincolo temporale
+    // di pairing (riga.timestamp >= item.timestamp) in reconcile.js.
+    known_message_ids: [],
+    restored: true,
+    optimisticStatus: record.status === "sending" ? "queued" : record.status,
+    ...recordQuoteFields(record),
+  };
+}
+
+function sendOutboxRecord(record) {
+  const module = outboxModule();
+  const active = { protocol: record.protocol, id: record.contact_id };
+  const payload = module.buildSendPayload(active, record.text, record.quote);
+  payload.client_msg_id = record.client_msg_id;
+  return apiFetch("/api/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+function onOutboxUpdate(record) {
+  if (!record || !state.outbox) return;
+  const status = record.status === "sent" ? "sent" : record.status;
+  let changed = false;
+  for (const item of state.optimistic) {
+    if (item.client_msg_id !== record.client_msg_id) continue;
+    if (record.optimistic_id && item.optimistic_id !== record.optimistic_id) continue;
+    item.outbox_id = record.id;
+    if (status === "sending") item.optimisticStatus = "sending";
+    else item.optimisticStatus = status;
+    changed = true;
+  }
+  if (changed && state.active) {
+    renderMessages(state.messages, state.active.protocol);
+  }
+}
+
+function scheduleOutboxFlush(delayMs) {
+  window.clearTimeout(state.outboxFlushTimer);
+  state.outboxFlushTimer = window.setTimeout(() => {
+    state.outboxFlushTimer = null;
+    flushOutbox();
+  }, Math.max(0, delayMs));
+}
+
+function flushOutbox() {
+  const store = state.outbox;
+  if (!store || !state.token) return;
+  // Un flush già in corso non vede i record reincodati dopo la sua lettura:
+  // memorizza la richiesta e rilancia un flush al termine (Riprova manuale).
+  if (state.outboxFlushing) {
+    state.outboxFlushPending = true;
+    return;
+  }
+  state.outboxFlushing = true;
+  state.outboxFlushPending = false;
+  store
+    .flush({ send: sendOutboxRecord, onUpdate: onOutboxUpdate })
+    .then((result) => {
+      if (result && result.nextAttemptAt) {
+        scheduleOutboxFlush(result.nextAttemptAt - Date.now());
+      }
+    })
+    .catch((error) => console.debug("[web] outbox flush failed", error))
+    .finally(() => {
+      state.outboxFlushing = false;
+      if (state.outboxFlushPending) {
+        state.outboxFlushPending = false;
+        flushOutbox();
+      }
+    });
+}
+
+async function retryOutboxRecord(id) {
+  const store = state.outbox;
+  if (!store || !id) return;
+  const record = await store.retry(id);
+  if (record) onOutboxUpdate(record);
+  flushOutbox();
+}
+
+async function discardOutboxRecord(id) {
+  const store = state.outbox;
+  if (!store || !id) return;
+  await store.remove(id);
+  state.optimistic = state.optimistic.filter((item) => item.outbox_id !== id);
+  if (state.active) renderMessages(state.messages, state.active.protocol);
+}
+
+async function initOutbox() {
+  const module = outboxModule();
+  if (!module) return;
+  let store = null;
+  try {
+    store = module.openOutbox();
+  } catch (error) {
+    console.debug("[web] outbox open failed, using in-memory", error);
+  }
+  let records = [];
+  if (store) {
+    try {
+      await store.recover();
+      records = await store.list();
+    } catch (error) {
+      console.debug("[web] outbox IDB unusable, using in-memory", error);
+      store = null;
+    }
+  }
+  // R-C/§11: se IDB non è utilizzabile non lasciare uno store morto: degrada
+  // all'outbox in-memory asincrono con lo stesso contratto.
+  if (!store) {
+    store = module.openOutbox({ backend: module.createMemoryBackend() });
+  }
+  state.outbox = store;
+  for (const record of records) state.optimistic.push(recordToOptimistic(record));
+  if (records.length && state.active) {
+    renderMessages(state.messages, state.active.protocol);
+  }
+  store.subscribe?.((message) => {
+    if (message && (message.type === "enqueue" || message.type === "retry")) flushOutbox();
+  });
+  flushOutbox();
+}
+
+async function clearOutbox() {
+  const store = state.outbox;
+  state.optimistic = state.optimistic.filter((item) => item.outbox_id === undefined);
+  if (state.active) renderMessages(state.messages, state.active.protocol);
+  if (!store) return;
+  try {
+    await store.clear();
+  } catch (error) {
+    console.debug("[web] outbox clear failed", error);
+  }
+}
+
+if (typeof window !== "undefined") {
+  window.retryOutboxItem = (id) => { void retryOutboxRecord(id); };
+  window.discardOutboxItem = (id) => { void discardOutboxRecord(id); };
+}
+
 async function submitMessage() {
   if (!state.active) return;
   const text = elements.messageInput.value;
@@ -2275,6 +2496,8 @@ async function submitMessage() {
       }
     }
   }
+  const outboxStore = state.outbox || null;
+  const useOutbox = Boolean(outboxStore) && attachments.length === 0;
   // batch_id solo per il multi-allegato (design §6.3): il singolo resta il
   // percorso legacy, senza batch_id, cosi' signature e reconciliation del
   // single-attachment non cambiano.
@@ -2323,13 +2546,50 @@ async function submitMessage() {
       text,
       direction: "out",
       timestamp,
-      optimisticStatus: "sending",
+      optimisticStatus: useOutbox ? "queued" : "sending",
       known_message_ids: knownMessageIds,
       ...quoteFields,
     });
   }
   console.debug("[web] optimistic", { protocol: active.protocol, optimistic_ids: optimisticItems.map((item) => item.optimistic_id), attachments: attachments.length, hasPreview: optimisticItems.some((item) => item.localPreviewUrl) });
   state.optimistic.push(...optimisticItems);
+  if (useOutbox) {
+    const record = {
+      id: `out-${clientMsgId}`,
+      client_msg_id: clientMsgId,
+      optimistic_id: optimisticItems[0].optimistic_id,
+      protocol: active.protocol,
+      contact_id: active.id,
+      text,
+      timestamp,
+      quote: window.SignalTuiOutbox.replyToQuoteRecord(reply, active.protocol),
+      batch_id: null,
+      attachments: [],
+      status: "queued",
+      attempts: 0,
+      dispatched: false,
+      last_attempt_at: 0,
+      next_attempt_at: 0,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    };
+    for (const item of optimisticItems) item.outbox_id = record.id;
+    try {
+      // Composer svuotato solo DOPO l'accodamento persistente (§7.3).
+      await outboxStore.enqueue(record);
+      elements.messageInput.value = "";
+      resizeComposer();
+      updateComposer();
+      if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
+        renderMessages(state.messages, active.protocol);
+      }
+      flushOutbox();
+    } catch (error) {
+      for (const item of optimisticItems) item.optimisticStatus = "failed";
+      showError("Impossibile accodare il messaggio.");
+    }
+    return;
+  }
   state.sending += 1;
   elements.messageInput.value = "";
   if (attachments.length) clearStagedAttachments({ revoke: false });
@@ -2493,6 +2753,7 @@ function connectSocket() {
     setDotColor(COLOR_GREEN);
     elements.connection.textContent = "live";
     if (state.active) loadMessages();
+    flushOutbox();
   };
   socket.onmessage = (event) => {
     state.lastWsActivity = Date.now();
@@ -2540,7 +2801,7 @@ function connectSocket() {
           let updated = false;
           for (const item of state.optimistic) {
             if (item.client_msg_id === client_msg_id &&
-                (item.optimisticStatus === "sending" || item.optimisticStatus === "retrying")) {
+                (item.optimisticStatus === "sending" || item.optimisticStatus === "retrying" || item.optimisticStatus === "queued")) {
               item.optimisticStatus = "retrying";
               item.retryAttempt = attempt;
               item.retryMax = max_attempts;
@@ -2581,7 +2842,9 @@ document.addEventListener("visibilitychange", () => {
     markRead(state.active.protocol, state.active.id);
     loadContacts({ quiet: true });
   }
+  if (document.visibilityState === "visible") flushOutbox();
 });
+window.addEventListener("online", () => flushOutbox());
 elements.saveOpenaiKey.addEventListener("click", saveOpenaiKey);
 elements.changeOpenaiKey.addEventListener("click", enableOpenaiKeyEdit);
 document.querySelector("#back-button").addEventListener("click", () => {
@@ -2785,11 +3048,15 @@ elements.saveToken.addEventListener("click", () => {
     elements.tokenError.hidden = false;
     return;
   }
+  const previousToken = state.token;
   state.token = token;
   localStorage.setItem(TOKEN_KEY, token);
   elements.tokenError.hidden = true;
   elements.linkDialog.close();
   updateTelegramRefreshTimer();
+  // Rotazione token deliberata → clear dell'outbox (D6). Il login iniziale
+  // (nessun token precedente) non cancella nulla perché la coda è vuota.
+  if (previousToken && previousToken !== token) void clearOutbox();
   loadContacts();
   connectSocket();
 });
@@ -2825,5 +3092,6 @@ async function boot() {
   } else {
     requestToken();
   }
+  void initOutbox();
 }
 boot();

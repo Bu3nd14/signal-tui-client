@@ -12,6 +12,7 @@ import errno
 import random
 import socket
 import subprocess
+import threading
 import urllib.error
 import uuid
 from base64 import b64decode
@@ -30,6 +31,7 @@ from web.retry import (
     classify_send_error,
     compute_delay,
 )
+from web.send_registry import SendRegistry, build_fingerprint
 
 _PNG_1X1 = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
@@ -390,9 +392,24 @@ def test_web_send_retry_frontend_contract():
         'item.optimisticStatus === "sending" || item.optimisticStatus === "retrying"'
         in source
     )
+    assert 'item.optimisticStatus === "queued"' in source
+    assert "flushOutbox" in source
+    assert "retryOutboxItem" in source
 
     css = Path("web/static/style.css").read_text()
     assert ".message-status.retrying" in css
+    assert ".message-status.queued" in css
+    assert ".message-status.confirm" in css
+    assert ".message-retry" in css
+
+    outbox = Path("web/static/outbox.js").read_text()
+    assert "function classifyHttpFailure(" in outbox
+    assert "function computeClientDelay(" in outbox
+    assert "function buildSendPayload(" in outbox
+
+    html = Path("web/static/index.html").read_text()
+    assert "/outbox.js?v=" in html
+    assert html.index("/outbox.js?v=") < html.index("/app.js?v=")
 
 
 # ── Edge cases aggiunti in fase di verifica (bug hunting) ────────────────────
@@ -505,3 +522,580 @@ def test_index_html_bumps_static_asset_versions():
     html = Path("web/static/index.html").read_text()
     assert "/app.js?v=" in html
     assert "/style.css?v=" in html
+
+
+# ── Registry idempotenza server-side (§8) ────────────────────────────────────
+
+
+class _Clock:
+    def __init__(self, value: float = 1000.0) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, delta: float) -> None:
+        self.value += delta
+
+
+def _fingerprint(**overrides) -> str:
+    params = {
+        "protocol": "signal",
+        "contact_id": "alice",
+        "text": "Ciao",
+        "quote_timestamp": None,
+        "quote_author": None,
+        "quote_message": None,
+        "reply_to_message_id": None,
+        "quote_content_type": None,
+        "quote_attachment_id": None,
+    }
+    params.update(overrides)
+    return build_fingerprint(**params)
+
+
+def test_send_registry_claim_release_and_mark_sent_require_token():
+    registry = SendRegistry()
+    key = ("signal", "alice", "cid")
+    outcome, token = registry.claim_or_lookup(key, "fp")
+    assert outcome == "claimed"
+    assert isinstance(token, str)
+
+    registry.release(key, "not-the-token")
+    registry.mark_sent(key, "not-the-token", "m", 1)
+    assert registry.snapshot(key)["status"] == "inflight"
+
+    registry.mark_sent(key, token, "m-1", 123)
+    entry = registry.snapshot(key)
+    assert entry["status"] == "sent"
+    assert entry["message_id"] == "m-1"
+    assert entry["timestamp"] == 123
+
+
+def test_send_registry_inflight_branch_does_not_mutate():
+    clock = _Clock()
+    registry = SendRegistry(clock=clock)
+    key = ("signal", "alice", "cid")
+    assert registry.claim_or_lookup(key, "fp")[0] == "claimed"
+    before = registry.snapshot(key)
+
+    outcome, value = registry.claim_or_lookup(key, "fp")
+    assert outcome == "inflight"
+    assert value is None
+    assert registry.snapshot(key) == before
+
+
+def test_send_registry_sent_ttl_prune_only_after_expiry():
+    clock = _Clock()
+    registry = SendRegistry(
+        ttl_sent=600, max_entries=100, prune_interval=1e9, clock=clock
+    )
+    key = ("signal", "alice", "cid")
+    _, token = registry.claim_or_lookup(key, "fp")
+    registry.mark_sent(key, token, "m", 0)
+
+    clock.advance(599)
+    registry.prune()
+    assert registry.snapshot(key) is not None
+
+    clock.advance(2)
+    registry.prune()
+    assert registry.snapshot(key) is None
+
+
+def test_send_registry_capacity_pressure_keeps_young_sent():
+    clock = _Clock()
+    registry = SendRegistry(max_entries=3, prune_interval=1e9, clock=clock)
+    keys = [("signal", "alice", f"c{i}") for i in range(3)]
+    for key in keys:
+        outcome, token = registry.claim_or_lookup(key, "fp")
+        assert outcome == "claimed"
+        registry.mark_sent(key, token, key[2], 0)
+
+    newest = ("signal", "alice", "new")
+    outcome, token = registry.claim_or_lookup(newest, "fp")
+    assert outcome == "claimed"
+
+    # Nessuna `sent` giovane è stata evinta: la struttura si è espansa.
+    for key in keys:
+        assert registry.snapshot(key)["status"] == "sent"
+    assert registry.snapshot(newest)["status"] == "inflight"
+    assert len(registry) == 4
+    assert token is not None
+
+
+def test_send_registry_stale_inflight_is_reclaimable():
+    clock = _Clock()
+    registry = SendRegistry(ttl_inflight=120, clock=clock)
+    key = ("signal", "alice", "cid")
+    _, token = registry.claim_or_lookup(key, "fp")
+
+    clock.advance(121)
+    outcome, new_token = registry.claim_or_lookup(key, "fp")
+    assert outcome == "claimed"
+    assert new_token != token
+
+    # Il vecchio handler non può più chiudere il claim.
+    registry.mark_sent(key, token, "m", 0)
+    assert registry.snapshot(key)["status"] == "inflight"
+
+
+def test_send_registry_concurrent_claim_has_single_winner():
+    registry = SendRegistry()
+    key = ("signal", "alice", "race")
+    barrier = threading.Barrier(8)
+    results: list[tuple[str, object]] = []
+    guard = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait()
+        outcome, value = registry.claim_or_lookup(key, "fp")
+        with guard:
+            results.append((outcome, value))
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    claimed = [item for item in results if item[0] == "claimed"]
+    assert len(claimed) == 1
+    assert all(item[0] == "inflight" for item in results if item[0] != "claimed")
+
+
+def test_build_fingerprint_stable_and_payload_sensitive():
+    assert _fingerprint() == _fingerprint()
+    assert _fingerprint(text="Ciao") != _fingerprint(text="Altro")
+    assert _fingerprint(contact_id="alice") != _fingerprint(contact_id="bob")
+
+
+# ── Integrazione API: duplicate / conflict / inflight / release ──────────────
+
+
+def test_send_duplicate_client_msg_id_is_idempotent():
+    manager = _manager()
+    calls = _script_sends(manager, [])
+    with (
+        patch("web.api.push_event"),
+        TestClient(make_app(manager)) as client,
+    ):
+        first = _send_text(client, client_msg_id="cid-dup")
+        second = _send_text(client, client_msg_id="cid-dup")
+    assert first.status_code == 200
+    assert first.json() == {"ok": True}
+    assert second.status_code == 200
+    assert second.json() == {"ok": True, "duplicate": True}
+    assert len(calls) == 1
+
+
+def test_send_same_client_msg_id_different_payload_conflicts_422():
+    manager = _manager()
+    calls = _script_sends(manager, [])
+    with (
+        patch("web.api.push_event"),
+        TestClient(make_app(manager)) as client,
+    ):
+        first = _send_text(client, text="uno", client_msg_id="cid-conflict")
+        second = _send_text(client, text="due", client_msg_id="cid-conflict")
+    assert first.status_code == 200
+    assert second.status_code == 422
+    assert second.json() == {"detail": "Client message id conflict"}
+    assert len(calls) == 1
+
+
+def test_send_registry_is_scoped_per_contact():
+    manager = FakeManager(
+        [
+            ChatContact("alice", "Alice", "signal"),
+            ChatContact("bob", "Bob", "signal"),
+        ]
+    )
+    calls = _script_sends(manager, [])
+    with (
+        patch("web.api.push_event"),
+        TestClient(make_app(manager)) as client,
+    ):
+        first = _send_text(client, contact_id="alice", client_msg_id="cid-shared")
+        second = _send_text(client, contact_id="bob", client_msg_id="cid-shared")
+    assert first.json() == {"ok": True}
+    assert second.json() == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_send_502_releases_inflight_claim():
+    manager = _manager()
+    refused = OSError(errno.ECONNREFUSED, "refused")
+    _script_sends(manager, [refused] * 5)
+    app = make_app(manager)
+    with (
+        patch("web.api.push_event"),
+        patch("web.api.compute_delay", return_value=0.0),
+        patch("web.api.asyncio.sleep", new_callable=AsyncMock),
+        TestClient(app) as client,
+    ):
+        response = _send_text(client, client_msg_id="cid-release")
+    assert response.status_code == 502
+    registry = app.state.send_registry
+    assert registry.snapshot(("signal", "alice", "cid-release")) is None
+
+
+def test_send_inflight_returns_409_without_registry_mutation():
+    manager = _manager()
+    calls = _script_sends(manager, [])
+    app = make_app(manager)
+    with (
+        patch("web.api.push_event"),
+        TestClient(app) as client,
+    ):
+        _send_text(client, client_msg_id="cid-seed")
+        registry = app.state.send_registry
+        key = ("signal", "alice", "cid-inflight")
+        fingerprint = _fingerprint()
+        outcome, _ = registry.claim_or_lookup(key, fingerprint)
+        assert outcome == "claimed"
+        before = registry.snapshot(key)
+
+        response = _send_text(client, client_msg_id="cid-inflight")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Send in progress"}
+    assert registry.snapshot(key) == before
+    # Solo il send di seed è arrivato al manager.
+    assert len(calls) == 1
+
+
+def test_send_attachments_are_not_deduplicated():
+    manager = _manager()
+    with (
+        patch("web.api.push_event"),
+        TestClient(make_app(manager)) as client,
+    ):
+        first = client.post(
+            "/api/send",
+            data={
+                "protocol": "signal",
+                "contact_id": "alice",
+                "text": "",
+                "client_msg_id": "att-dup",
+            },
+            files={"file": ("clipboard.png", _PNG_1X1, "image/png")},
+            headers=AUTH,
+        )
+        second = client.post(
+            "/api/send",
+            data={
+                "protocol": "signal",
+                "contact_id": "alice",
+                "text": "",
+                "client_msg_id": "att-dup",
+            },
+            files={"file": ("clipboard.png", _PNG_1X1, "image/png")},
+            headers=AUTH,
+        )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(manager.attachments_calls) == 2
+
+
+# ── Unit outbox.js (Node, logica pura + store in-memory) ─────────────────────
+
+
+def _run_node(source: str) -> None:
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False, timeout=30
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_outbox_classify_and_delay_contract():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const outbox = require("./web/static/outbox.js");
+
+assert.equal(outbox.classifyHttpFailure(null), "terminal");
+assert.equal(outbox.classifyHttpFailure({ name: "AbortError" }), "retryable");
+assert.equal(outbox.classifyHttpFailure({ status: 401 }), "suspend");
+assert.equal(outbox.classifyHttpFailure(new TypeError("Failed to fetch")), "retryable");
+assert.equal(outbox.classifyHttpFailure({ status: 408 }), "retryable");
+assert.equal(outbox.classifyHttpFailure({ status: 429 }), "retryable");
+assert.equal(outbox.classifyHttpFailure({ status: 409 }), "retryable");
+assert.equal(outbox.classifyHttpFailure({ status: 422 }), "terminal");
+assert.equal(outbox.classifyHttpFailure({ status: 501 }), "terminal");
+assert.equal(outbox.classifyHttpFailure({ status: 502 }), "retryable");
+assert.equal(outbox.classifyHttpFailure({ status: 400 }), "terminal");
+
+assert.equal(outbox.computeClientDelay(1, () => 0), 1000);
+assert.equal(outbox.computeClientDelay(1, () => 1), 2000);
+assert.equal(outbox.computeClientDelay(3, () => 0), 4000);
+assert.equal(outbox.computeClientDelay(9, () => 1), 30000);
+""")
+
+
+def test_outbox_build_send_payload_matches_wire_rules():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const outbox = require("./web/static/outbox.js");
+
+const signalActive = { protocol: "signal", id: "alice" };
+const signalQuote = {
+  quote_timestamp: 5,
+  quote_author: "bob",
+  quote_message: "foto",
+  reply_to_message_id: null,
+  quote_content_type: "image/jpeg",
+  quote_attachment_id: "folder/a b",
+  isMedia: true,
+};
+const payload = outbox.buildSendPayload(signalActive, "ciao", signalQuote);
+assert.equal(payload.quote_timestamp, 5);
+assert.equal(payload.quote_author, "bob");
+assert.equal(payload.quote_message, "");
+assert.equal(payload.quote_content_type, "image/jpeg");
+assert.equal(payload.quote_attachment_id, "folder/a b");
+assert.equal("reply_to_message_id" in payload, false);
+
+const waPayload = outbox.buildSendPayload(
+  { protocol: "whatsapp", id: "bob" },
+  "hey",
+  { ...signalQuote, isMedia: false, quote_message: "testo", reply_to_message_id: "w1" },
+);
+assert.equal(waPayload.quote_message, "testo");
+assert.equal(waPayload.reply_to_message_id, "w1");
+assert.equal("quote_content_type" in waPayload, false);
+
+const raw = outbox.replyToQuoteRecord(
+  { timestamp: 9, quoteAuthor: "a", quoteMessage: "m", id: "x", contentType: "text/plain", attachmentId: "att", isMedia: false },
+  "signal",
+);
+assert.equal(raw.quote_timestamp, 9);
+assert.equal(raw.quote_author, "a");
+assert.equal(raw.quote_message, "m");
+assert.equal(raw.reply_to_message_id, null);
+""")
+
+
+def test_outbox_dispatched_persisted_before_fetch_and_auto_resend_window():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const outbox = require("./web/static/outbox.js");
+
+function record(overrides) {
+  const now = 1000000;
+  return {
+    id: "out-cid",
+    client_msg_id: "cid",
+    protocol: "signal",
+    contact_id: "alice",
+    text: "ciao",
+    timestamp: now,
+    quote: null,
+    status: "queued",
+    attempts: 0,
+    dispatched: false,
+    last_attempt_at: 0,
+    next_attempt_at: 0,
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+(async () => {
+  // R-B: il claim PRE-fetch persiste dispatched/last_attempt_at.
+  const backend = outbox.createMemoryBackend();
+  const store = outbox.openOutbox({ backend, now: () => 1000 });
+  await store.enqueue(record({}));
+  let claimed = null;
+  void store.flush({
+    send: () => new Promise(() => {}),
+    onUpdate: (item) => { claimed = item; },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const saved = (await backend.all())[0];
+  assert.equal(saved.dispatched, true);
+  assert.equal(saved.status, "sending");
+  assert.ok(saved.last_attempt_at > 0);
+  assert.equal(claimed.status, "sending");
+
+  // dispatched oltre la finestra -> confirm, nessun auto-flush.
+  const oldBackend = outbox.createMemoryBackend();
+  const now = 1000000;
+  const old = outbox.openOutbox({ backend: oldBackend, now: () => now });
+  await old.enqueue(record({ created_at: now, dispatched: true, last_attempt_at: now - outbox.OUTBOX_AUTO_RESEND_MAX_AGE_MS - 1 }));
+  let sent = false;
+  await old.flush({ send: async () => { sent = true; return "id"; } });
+  assert.equal(sent, false);
+  assert.equal((await oldBackend.all())[0].status, "confirm");
+
+  // dispatched=false -> auto-flush sempre, record rimosso al successo.
+  const freshBackend = outbox.createMemoryBackend();
+  const fresh = outbox.openOutbox({ backend: freshBackend, now: () => now });
+  await fresh.enqueue(record({ created_at: now, dispatched: false }));
+  let sentFresh = false;
+  await fresh.flush({ send: async () => { sentFresh = true; return "id"; } });
+  assert.equal(sentFresh, true);
+  assert.equal((await freshBackend.all()).length, 0);
+
+  // Terminal -> failed conservato (record non perso).
+  const failBackend = outbox.createMemoryBackend();
+  const failing = outbox.openOutbox({ backend: failBackend, now: () => now });
+  await failing.enqueue(record({ created_at: now }));
+  const error = new Error("bad"); error.status = 400;
+  await failing.flush({ send: async () => { throw error; } });
+  const failed = (await failBackend.all())[0];
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.attempts, 1);
+
+  // Retry manuale: azzera attempts/dispatched/next_attempt_at e riaccoda.
+  const retried = await failing.retry("out-cid");
+  assert.equal(retried.status, "queued");
+  assert.equal(retried.attempts, 0);
+  assert.equal(retried.dispatched, false);
+  assert.equal(retried.next_attempt_at, 0);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+""")
+
+
+def test_outbox_recover_orphan_sending_records():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const outbox = require("./web/static/outbox.js");
+
+function record(overrides) {
+  const now = 1000000;
+  return {
+    id: "out-" + (overrides.client_msg_id || "cid"),
+    client_msg_id: "cid",
+    protocol: "signal",
+    contact_id: "alice",
+    text: "ciao",
+    timestamp: now,
+    quote: null,
+    status: "sending",
+    attempts: 0,
+    dispatched: true,
+    last_attempt_at: now,
+    next_attempt_at: 0,
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+(async () => {
+  const now = 1000000;
+  const backend = outbox.createMemoryBackend();
+  const store = outbox.openOutbox({ backend, now: () => now });
+  await store.enqueue(record({ client_msg_id: "young", last_attempt_at: now - 1000 }));
+  await store.enqueue(record({
+    client_msg_id: "old",
+    last_attempt_at: now - outbox.OUTBOX_AUTO_RESEND_MAX_AGE_MS - 1,
+  }));
+  await store.recover(now);
+  const byId = Object.fromEntries((await backend.all()).map((item) => [item.client_msg_id, item]));
+  assert.equal(byId.young.status, "queued");
+  assert.equal(byId.old.status, "confirm");
+
+  // 401 -> suspend: resta in coda senza backoff attivo.
+  const suspendBackend = outbox.createMemoryBackend();
+  const suspending = outbox.openOutbox({ backend: suspendBackend, now: () => now });
+  await suspending.enqueue(record({ client_msg_id: "auth", status: "queued", dispatched: false, last_attempt_at: 0 }));
+  const unauthorized = new Error("unauthorized"); unauthorized.status = 401;
+  await suspending.flush({ send: async () => { throw unauthorized; } });
+  const queued = (await suspendBackend.all())[0];
+  assert.equal(queued.status, "queued");
+  assert.equal(queued.next_attempt_at, 0);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+""")
+
+
+def test_app_submit_text_uses_outbox_when_available():
+    """R-C: con outbox.js caricato il submit testo accoda e flusha."""
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const submit = app.slice(app.indexOf("async function submitMessage("), app.indexOf("\nfunction encodeToken"));
+let enqueued = null;
+let flushed = false;
+globalThis.state = {
+  active: { id: "alice", protocol: "signal" },
+  stagedAttachments: [],
+  replyTo: null,
+  messages: [],
+  optimistic: [],
+  optimisticSequence: 0,
+  sending: 0,
+  outbox: { enqueue: async (record) => { enqueued = record; } },
+};
+globalThis.elements = { messageInput: { value: "ciao", focus() {} } };
+globalThis.window = {
+  SignalTuiReconcile: { messageIdentity: (message) => message.id },
+  SignalTuiOutbox: { replyToQuoteRecord: () => null },
+};
+globalThis.resizeComposer = () => {};
+globalThis.updateComposer = () => {};
+globalThis.renderMessages = () => {};
+globalThis.flushOutbox = () => { flushed = true; };
+globalThis.showError = assert.fail;
+vm.runInThisContext(submit);
+(async () => {
+  await submitMessage();
+  assert.ok(enqueued, "il record deve essere accodato");
+  assert.equal(enqueued.status, "queued");
+  assert.equal(enqueued.dispatched, false);
+  assert.equal(state.optimistic[0].optimisticStatus, "queued");
+  assert.equal(state.optimistic[0].outbox_id, "out-" + enqueued.client_msg_id);
+  assert.equal(elements.messageInput.value, "");
+  assert.equal(flushed, true);
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+""")
+
+
+def test_outbox_retryable_backoff_and_max_attempts():
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const outbox = require("./web/static/outbox.js");
+
+function record(overrides) {
+  const now = 1000000;
+  return {
+    id: "out-cid",
+    client_msg_id: "cid",
+    protocol: "signal",
+    contact_id: "alice",
+    text: "ciao",
+    timestamp: now,
+    quote: null,
+    status: "queued",
+    attempts: 0,
+    dispatched: false,
+    last_attempt_at: 0,
+    next_attempt_at: 0,
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+(async () => {
+  const backend = outbox.createMemoryBackend();
+  const store = outbox.openOutbox({ backend, now: () => 1000, random: () => 0 });
+  await store.enqueue(record({}));
+  const error = new Error("down"); error.status = 503;
+  const outcome = await store.flush({ send: async () => { throw error; } });
+  const retry = (await backend.all())[0];
+  assert.equal(retry.status, "queued");
+  assert.equal(retry.attempts, 1);
+  assert.equal(retry.next_attempt_at, 2000);
+  assert.equal(outcome.nextAttemptAt, 2000);
+
+  await store.enqueue(record({ id: "out-cap", client_msg_id: "cap", attempts: 9 }));
+  await store.flush({ send: async () => { throw error; } });
+  const capped = (await backend.all()).find((item) => item.client_msg_id === "cap");
+  assert.equal(capped.attempts, 10);
+  assert.equal(capped.status, "failed");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+""")
