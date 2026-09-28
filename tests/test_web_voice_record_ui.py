@@ -28,7 +28,14 @@ _LOAD_VOICE = r"""
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-globalThis.File = globalThis.File || require("node:buffer").File;
+function setGlobal(name, value) {
+  try {
+    Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+  } catch {
+    globalThis[name] = value;
+  }
+}
+setGlobal("File", globalThis.File || require("node:buffer").File);
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const voice = app.slice(
   app.indexOf("const VOICE_MAX_DURATION_MS"),
@@ -41,7 +48,14 @@ LOAD_SUBMIT = r"""
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-globalThis.File = globalThis.File || require("node:buffer").File;
+function setGlobal(name, value) {
+  try {
+    Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+  } catch {
+    globalThis[name] = value;
+  }
+}
+setGlobal("File", globalThis.File || require("node:buffer").File);
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const helper = app.slice(
   app.indexOf("function mediaKindFromMime("),
@@ -85,15 +99,22 @@ function __makeNode(tag) {
     addEventListener() {}, querySelector() { return { addEventListener() {} }; },
   };
 }
+function setGlobal(name, value) {
+  try {
+    Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
+  } catch {
+    globalThis[name] = value;
+  }
+}
 function installCommon() {
-  globalThis.MediaRecorder = __FakeMediaRecorder;
-  globalThis.document = {
+  setGlobal("MediaRecorder", __FakeMediaRecorder);
+  setGlobal("document", {
     querySelector: () => null,
     createElement: (tag) => __makeNode(tag),
     documentElement: { classList: { toggle() {} } },
-  };
+  });
   globalThis.elements = { attachmentsPreview: { before() {} } };
-  globalThis.URL = { createObjectURL: () => "blob:stub", revokeObjectURL() {} };
+  setGlobal("URL", { createObjectURL: () => "blob:stub", revokeObjectURL() {} });
   globalThis.updateComposer = () => {};
   globalThis.closeComposerMenu = () => {};
   globalThis.stageAttachments = async (files) => { __staged.push(...files); };
@@ -140,9 +161,9 @@ globalThis.__supported = ["audio/webm"];
 assert.equal(_selectVoiceMime(), "audio/webm");
 globalThis.__supported = [];
 assert.equal(_selectVoiceMime(), "");
-globalThis.MediaRecorder = undefined;
+setGlobal("MediaRecorder", undefined);
 assert.equal(_selectVoiceMime(), "");
-globalThis.MediaRecorder = {};
+setGlobal("MediaRecorder", {});
 assert.equal(_selectVoiceMime(), "");
 """
         )
@@ -176,8 +197,8 @@ def test_start_stop_stages_m4a_file():
             + r"""
 installCommon();
 globalThis.__supported = ["audio/mp4"];
-globalThis.window = { matchMedia: () => ({ matches: true, addEventListener() {} }) };
-globalThis.navigator = { mediaDevices: { getUserMedia: async () => __stream } };
+setGlobal("window", { matchMedia: () => ({ matches: true, addEventListener() {} }) });
+setGlobal("navigator", { mediaDevices: { getUserMedia: async () => __stream } });
 """
             + _async(
                 r"""
@@ -210,8 +231,8 @@ def test_start_stop_stages_webm_file_when_mp4_unsupported():
             + r"""
 installCommon();
 globalThis.__supported = ["audio/webm"];
-globalThis.window = { matchMedia: () => ({ matches: true }) };
-globalThis.navigator = { mediaDevices: { getUserMedia: async () => __stream } };
+setGlobal("window", { matchMedia: () => ({ matches: true }) });
+setGlobal("navigator", { mediaDevices: { getUserMedia: async () => __stream } });
 """
             + _async(
                 r"""
@@ -242,8 +263,8 @@ def test_cancel_releases_mic_and_discards_without_staging():
             + r"""
 installCommon();
 globalThis.__supported = ["audio/mp4"];
-globalThis.window = { matchMedia: () => ({ matches: true }) };
-globalThis.navigator = { mediaDevices: { getUserMedia: async () => __stream } };
+setGlobal("window", { matchMedia: () => ({ matches: true }) });
+setGlobal("navigator", { mediaDevices: { getUserMedia: async () => __stream } });
 """
             + _async(
                 r"""
@@ -274,11 +295,11 @@ def test_cancel_while_get_user_media_in_flight_stops_late_stream():
             + r"""
 installCommon();
 globalThis.__supported = ["audio/mp4"];
-globalThis.window = { matchMedia: () => ({ matches: true }) };
+setGlobal("window", { matchMedia: () => ({ matches: true }) });
 let resolveGum;
-globalThis.navigator = {
+setGlobal("navigator", {
   mediaDevices: { getUserMedia: () => new Promise((resolve) => { resolveGum = resolve; }) },
-};
+});
 """
             + _async(
                 r"""
@@ -308,11 +329,11 @@ def test_desktop_does_not_start_recording():
             + r"""
 installCommon();
 globalThis.__supported = ["audio/mp4"];
-globalThis.window = { matchMedia: () => ({ matches: false }) };
+setGlobal("window", { matchMedia: () => ({ matches: false }) });
 let gumCalled = false;
-globalThis.navigator = {
+setGlobal("navigator", {
   mediaDevices: { getUserMedia: async () => { gumCalled = true; return __stream; } },
-};
+});
 """
             + _async(
                 r"""
@@ -334,10 +355,10 @@ def test_permission_denied_shows_clear_error_without_crash():
             + r"""
 installCommon();
 globalThis.__supported = ["audio/mp4"];
-globalThis.window = { matchMedia: () => ({ matches: true }) };
-globalThis.navigator = {
+setGlobal("window", { matchMedia: () => ({ matches: true }) });
+setGlobal("navigator", {
   mediaDevices: { getUserMedia: async () => { throw new Error("NotAllowedError"); } },
-};
+});
 const errors = [];
 globalThis.showError = (message) => errors.push(message);
 """
@@ -361,8 +382,8 @@ def test_missing_media_devices_shows_https_error():
             + r"""
 installCommon();
 globalThis.__supported = ["audio/mp4"];
-globalThis.window = { matchMedia: () => ({ matches: true }) };
-globalThis.navigator = {};
+setGlobal("window", { matchMedia: () => ({ matches: true }) });
+setGlobal("navigator", {});
 const errors = [];
 globalThis.showError = (message) => errors.push(message);
 """
@@ -385,12 +406,12 @@ def test_media_recorder_constructor_failure_releases_stream():
             _recording_state()
             + r"""
 installCommon();
-globalThis.MediaRecorder = class {
+setGlobal("MediaRecorder", class {
   static isTypeSupported() { return true; }
   constructor() { throw new Error("boom"); }
-};
-globalThis.window = { matchMedia: () => ({ matches: true }) };
-globalThis.navigator = { mediaDevices: { getUserMedia: async () => __stream } };
+});
+setGlobal("window", { matchMedia: () => ({ matches: true }) });
+setGlobal("navigator", { mediaDevices: { getUserMedia: async () => __stream } });
 const errors = [];
 globalThis.showError = (message) => errors.push(message);
 """
@@ -417,8 +438,8 @@ def test_auto_stop_after_five_minutes():
             + r"""
 installCommon();
 globalThis.__supported = ["audio/mp4"];
-globalThis.window = { matchMedia: () => ({ matches: true }) };
-globalThis.navigator = { mediaDevices: { getUserMedia: async () => __stream } };
+setGlobal("window", { matchMedia: () => ({ matches: true }) });
+setGlobal("navigator", { mediaDevices: { getUserMedia: async () => __stream } });
 let intervalCb = null;
 globalThis.setInterval = (callback) => { intervalCb = callback; return 99; };
 globalThis.clearInterval = () => { intervalCb = null; };
@@ -514,7 +535,7 @@ globalThis.state = {
   optimisticSequence: 0, replyTo: null, editing: null, editSending: false,
 };
 globalThis.elements = { messageInput: { value: "nota", focus() {} } };
-globalThis.window = { SignalTuiReconcile: { messageIdentity: (m) => m.id } };
+setGlobal("window", { SignalTuiReconcile: { messageIdentity: (m) => m.id } });
 globalThis.resizeComposer = () => {};
 globalThis.updateComposer = () => {};
 globalThis.renderMessages = () => {};
@@ -560,7 +581,7 @@ globalThis.state = {
   optimisticSequence: 0, replyTo: null, editing: null, editSending: false,
 };
 globalThis.elements = { messageInput: { value: "nota", focus() {} } };
-globalThis.window = { SignalTuiReconcile: { messageIdentity: (m) => m.id } };
+setGlobal("window", { SignalTuiReconcile: { messageIdentity: (m) => m.id } });
 globalThis.resizeComposer = () => {};
 globalThis.updateComposer = () => {};
 globalThis.renderMessages = () => {};
