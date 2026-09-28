@@ -230,6 +230,42 @@ class TestDetectEdit:
             backend._detect_edit(_CID, "unknown", "nuovo", True, _TS_MS + 500) is None
         )
 
+    def test_require_history_source_rejects_live_only_candidate(self):
+        """Bug: due messaggi INOLTRATI (nuovi, distinti) ravvicinati (±2s) non
+        devono essere scambiati per un edit quando il candidato viene da un
+        webhook live (``_from_history`` assente/False) — solo un candidato
+        originato da ``fetch_history`` (REST) giustifica il fallback ts."""
+        backend = self._backend(
+            [_cached_message(id="other-id", text="Prima cosa inoltrata")]
+        )
+        assert (
+            backend._detect_edit(
+                _CID,
+                "unknown-id",
+                "Seconda cosa inoltrata",
+                False,
+                _TS_MS + 1000,
+                require_history_source=True,
+            )
+            is None
+        )
+
+    def test_require_history_source_accepts_history_sourced_candidate(self):
+        """Un candidato marcato ``_from_history`` (ingerito da
+        ``fetch_history`` con ``reconcile=True``) resta rilevabile come
+        target di un edit live con id diverso (id instabile REST↔webhook)."""
+        backend = self._backend([_cached_message(id="rest-id", _from_history=True)])
+        hit = backend._detect_edit(
+            _CID,
+            "webhook-id",
+            "nuovo",
+            False,
+            _TS_MS + 1000,
+            require_history_source=True,
+        )
+        assert hit is not None
+        assert hit["text"] == "vecchio"
+
 
 # ─── handle_webhook ───────────────────────────────────────────────────────────
 
@@ -312,6 +348,51 @@ class TestHandleWebhookEdit:
         )
         assert added is False
         assert len(backend.cache[_CID]) == 1
+
+    def test_forwarded_messages_in_quick_succession_are_not_merged_as_edit(self):
+        """Bug: due messaggi INOLTRATI insieme (nuovi, testo diverso, ids
+        distinti) arrivano via webhook ravvicinati (qui 1s) nella stessa
+        chat. Prima della fix, il fallback ts di ``_detect_edit`` li
+        scambiava per un edit: il secondo sovrascriveva il testo del primo
+        invece di comparire come bolla propria (i messaggi inoltrati
+        "sparivano" dalla UI). Entrambi devono restare bolle distinte."""
+        backend = _webhook_backend()
+        first = {
+            "event": "message",
+            "payload": {
+                "id": "fwd-1",
+                "from": _CID,
+                "fromMe": False,
+                "body": "Prima cosa inoltrata",
+                "timestamp": _TS_SEC,
+            },
+        }
+        second = {
+            "event": "message",
+            "payload": {
+                "id": "fwd-2",
+                "from": _CID,
+                "fromMe": False,
+                "body": "Seconda cosa inoltrata",
+                "timestamp": _TS_SEC + 1,
+            },
+        }
+
+        assert backend.handle_webhook(first) is True
+        events = backend.poll_once()
+        assert [e.type for e in events] == ["message"]
+        backend.ingest_message(_CID, events[0].payload, events[0].payload["timestamp"])
+
+        assert backend.handle_webhook(second) is True
+        events = backend.poll_once()
+        assert [e.type for e in events] == ["message"], (
+            "il secondo messaggio inoltrato è stato scambiato per un edit "
+            "del primo invece di comparire come bolla propria"
+        )
+        backend.ingest_message(_CID, events[0].payload, events[0].payload["timestamp"])
+
+        cache_texts = [m["text"] for m in backend.cache[_CID]]
+        assert cache_texts == ["Prima cosa inoltrata", "Seconda cosa inoltrata"]
 
     def test_synthetic_ack_edit_enqueues_message_edit_not_message(self):
         """``message.ack`` con body nuovo (cache vecchio) → ``message_edit``,

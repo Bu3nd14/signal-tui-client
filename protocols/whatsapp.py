@@ -529,6 +529,7 @@ class WhatsAppBackend(ChatBackend):
                     event.payload.get("text") or "",
                     bool(event.payload.get("is_mine")),
                     int(event.payload.get("timestamp") or 0),
+                    require_history_source=True,
                 )
                 if hit is not None:
                     event = ChatEvent(
@@ -2730,6 +2731,7 @@ class WhatsAppBackend(ChatBackend):
                 "quote_content_type": data.get("quote_content_type"),
                 "batch_id": data.get("batch_id"),
                 "batch_index": data.get("batch_index"),
+                "_from_history": reconcile,
             },
         )
         return True
@@ -2741,6 +2743,8 @@ class WhatsAppBackend(ChatBackend):
         text: str,
         is_mine: bool,
         ts_ms: int,
+        *,
+        require_history_source: bool = False,
     ) -> dict | None:
         """Ritorna l'entry cached target di un edit, o None.
 
@@ -2750,6 +2754,17 @@ class WhatsAppBackend(ChatBackend):
            possono differire tra webhook e REST (/api/messages), quindi un edit
            di un messaggio caricato via fetch_history potrebbe non matchare
            per id.  Il timestamp WhatsApp dell'edit è quello ORIGINALE.
+
+           ``require_history_source=True`` limita i candidati del fallback
+           (2) a righe originariamente ingerite da ``fetch_history``
+           (``reconcile=True``, marcate ``_from_history``): sulla live
+           webhook path (1) copre già l'edit reale (id stabile
+           webhook-webhook), quindi il fallback lì serve SOLO al caso
+           "id instabile REST↔webhook".  Senza questo filtro, due messaggi
+           NUOVI e distinti (es. più messaggi inoltrati insieme, che
+           arrivano ravvicinati nello stesso ±2s) vengono scambiati per un
+           edit: il secondo sovrascrive il testo del primo invece di
+           comparire come bolla propria.
         """
         if not text:
             return None
@@ -2771,6 +2786,7 @@ class WhatsAppBackend(ChatBackend):
                 for m in entries
                 if not m.get("is_mine")
                 and m.get("msg_type", "text") == "text"
+                and (not require_history_source or m.get("_from_history"))
                 and abs(int(m.get("timestamp") or 0) - ts_ms) <= 2000
                 and _norm(m.get("text", "")) != normalized_text
             ]
