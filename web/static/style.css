@@ -121,7 +121,7 @@ h2 { font-size: 1.05rem; }
   border-radius: 9px;
   background: var(--panel);
   color: var(--text);
-  font-size: .82rem;
+  font-size: 16px;
   outline: none;
 }
 .sidebar-search input:focus { border-color: var(--accent); background: var(--panel-raised); }
@@ -486,6 +486,9 @@ h2 { font-size: 1.05rem; }
 .composer textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px #4f8cff25; }
 .composer-icon-button { display: grid; width: 42px; height: 42px; flex: none; place-items: center; border: 1px solid var(--line); border-radius: 50%; background: var(--panel-raised); cursor: pointer; }
 .composer-icon-button:hover, .composer-icon-button:focus-visible, .composer-icon-button[aria-expanded="true"] { border-color: var(--accent); background: #4f8cff25; }
+.composer-more { display: none; }
+.composer-menu { display: contents; }
+.composer-menu-item span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .send-button { display: grid; width: 42px; height: 42px; flex: none; place-items: center; border: 0; border-radius: 50%; background: var(--accent); color: white; cursor: pointer; }
 .send-button:disabled { opacity: .45; cursor: default; }
 .send-button .spinner { width: 19px; height: 19px; }
@@ -577,15 +580,44 @@ h2 { font-size: 1.05rem; }
 }
 
 @media (max-width: 700px) {
-  .app-shell { display: block; height: 100dvh; overflow: hidden; border: 0; }
+  html, body { height: var(--vvh, 100dvh); overflow: hidden; }
+  .app-shell { display: block; position: fixed; top: var(--vv-top, 0); left: 0; right: 0; height: calc(var(--vvh, 100dvh) + 2px); overflow: hidden; border: 0; }
   .sidebar, .thread-panel { height: 100%; min-height: 0; overflow: hidden; }
   .thread-panel { display: none; }
   .app-shell.thread-open .sidebar { display: none; }
   .app-shell.thread-open .thread-panel { display: flex; }
+  .thread-header { padding-top: env(safe-area-inset-top, 0px); }
   .back-button { display: inline-grid; }
   .message { max-width: 88%; }
   .message-quote-thumb { width: 40px; height: 40px; }
   .message-quote-thumb-video { width: 40px; height: 40px; }
+  .composer { padding: 12px clamp(10px, 3vw, 16px); padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+  html.kb-open .composer { padding-bottom: 12px; }
+  .composer-shell { background: var(--panel); }
+  .composer-controls { position: relative; gap: 6px; }
+  .composer textarea { min-height: 44px; }
+  .composer-icon-button, .send-button { width: 44px; height: 44px; }
+  .composer-more {
+    display: grid;
+    color: #daa520; border-color: #daa52066;
+  }
+  .composer-more[aria-expanded="true"] { border-color: #daa520; background: #daa52026; }
+  .composer-menu {
+    display: none;
+    position: absolute; right: 50px; bottom: calc(100% + 8px); z-index: 60;
+    min-width: 190px; padding: 6px;
+    flex-direction: column; gap: 4px;
+    border: 1px solid var(--line); border-radius: 12px;
+    background: var(--panel); box-shadow: 0 -10px 30px #0008;
+  }
+  .composer-menu:not([hidden]) { display: flex; }
+  .composer-menu #emoji-toggle { order: -1; }
+  .composer-menu-item {
+    width: 100%; height: 44px; border-radius: 9px;
+    grid-auto-flow: column; justify-content: start; gap: 10px;
+    padding: 0 10px; font-size: .92rem;
+  }
+  .composer-menu-item span { position: static; width: auto; height: auto; overflow: visible; clip-path: none; white-space: normal; }
 }
 
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
