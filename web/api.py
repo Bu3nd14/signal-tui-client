@@ -80,11 +80,17 @@ _AUDIO_MIME_BY_EXT: dict[str, str] = {
 }
 
 
-def _media_content_type(path: Path) -> str | None:
-    """Return deterministic audio MIME types and guess all other types."""
+def _media_content_type(path: Path, *, prefer_audio: bool = False) -> str | None:
+    """Return deterministic audio MIME types and guess all other types.
+
+    ``.webm`` è ambiguo (video o audio): ``prefer_audio`` lo serve come
+    ``audio/webm`` quando il messaggio lo classifica come audio.
+    """
     ext = path.suffix.lower()
     if ext in _AUDIO_MIME_BY_EXT:
         return _AUDIO_MIME_BY_EXT[ext]
+    if prefer_audio and ext == ".webm":
+        return "audio/webm"
     return mimetypes.guess_type(path.name)[0]
 
 
@@ -922,6 +928,29 @@ def _attachment_content_type(proto: str, attachment_id: str) -> str | None:
     return row[0] or ("image/*" if row[1] == "image" else None)
 
 
+def _attachment_media_kind(proto: str, attachment_id: str) -> str | None:
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
+
+    with _DB_LOCK:
+        try:
+            connection = sqlite3.connect(backend.DB_FILE)
+            try:
+                row = connection.execute(
+                    "SELECT media_kind FROM messages "
+                    "WHERE protocol = ? AND attachment_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (proto, attachment_id),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            return None
+    if not row:
+        return None
+    return row[0]
+
+
 def _is_thumbnail_candidate(path: Path, proto: str, attachment_id: str) -> bool:
     content_type = (_attachment_content_type(proto, attachment_id) or "").lower()
     suffix = path.suffix.lower()
@@ -940,6 +969,12 @@ def _is_thumbnail_candidate(path: Path, proto: str, attachment_id: str) -> bool:
 
 def _is_video_candidate(path: Path, proto: str, attachment_id: str) -> bool:
     content_type = (_attachment_content_type(proto, attachment_id) or "").lower()
+    # Un audio (es. voice webm/m4a) non deve mai passare per la pipeline
+    # thumbnail video, anche quando l'estensione `.webm` è nella lista video.
+    if content_type.startswith("audio/"):
+        return False
+    if not content_type and _attachment_media_kind(proto, attachment_id) == "audio":
+        return False
     return content_type.startswith("video/") or path.suffix.lower() in _VIDEO_EXTENSIONS
 
 
@@ -2015,7 +2050,12 @@ def create_api_router() -> Any:
                     media_type="image/jpeg",
                     headers={"Cache-Control": "private, max-age=31536000, immutable"},
                 )
-        media_type = _media_content_type(path)
+        # R7: `.webm` è ambiguo; il media_kind persistito decide audio vs video.
+        prefer_audio = (
+            path.suffix.lower() == ".webm"
+            and _attachment_media_kind(proto, attachment_id) == "audio"
+        )
+        media_type = _media_content_type(path, prefer_audio=prefer_audio)
         return FileResponse(
             path,
             media_type=media_type,
