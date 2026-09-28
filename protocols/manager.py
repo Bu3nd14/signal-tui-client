@@ -14,7 +14,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from models import ChatContact
+from models import (
+    PROTOCOL_SIGNAL,
+    ChatContact,
+    parse_quote_attachment_descriptor,
+)
 
 from .base import ChatBackend
 
@@ -164,6 +168,9 @@ class BackendManager:
         if quote_attachments is not None:
             kwargs["quote_attachments"] = quote_attachments
         message_id = backend.send_message_sync(contact_id, text, **kwargs)
+        quote_content_type, quote_filename = parse_quote_attachment_descriptor(
+            quote_attachments[0] if quote_attachments else None
+        )
         self._enqueue_sent_message(
             backend,
             contact_id,
@@ -173,6 +180,8 @@ class BackendManager:
             quote_author=quote_author,
             quote_message=quote_message,
             reply_to_message_id=reply_to_message_id,
+            quote_content_type=quote_content_type,
+            quote_filename=quote_filename,
         )
         return message_id
 
@@ -210,6 +219,9 @@ class BackendManager:
         if filename is not None:
             kwargs["filename"] = filename
         message_id = backend.send_attachment_sync(contact_id, file_path, **kwargs)
+        quote_content_type, quote_filename = parse_quote_attachment_descriptor(
+            quote_attachments[0] if quote_attachments else None
+        )
         self._enqueue_sent_message(
             backend,
             contact_id,
@@ -223,6 +235,8 @@ class BackendManager:
             mime_type=mime_type,
             media_kind=media_kind,
             filename=filename,
+            quote_content_type=quote_content_type,
+            quote_filename=quote_filename,
         )
         return message_id
 
@@ -296,6 +310,9 @@ class BackendManager:
                 )
             return message_ids
         # WhatsApp/Telegram: N messages → N mirror events, batch-indexed.
+        quote_content_type, quote_filename = parse_quote_attachment_descriptor(
+            quote_attachments[0] if quote_attachments else None
+        )
         for index, message_id in enumerate(message_ids):
             try:
                 self._enqueue_sent_message(
@@ -313,6 +330,8 @@ class BackendManager:
                     mime_type=mime_types[index],
                     media_kind=media_kinds[index],
                     filename=filenames[index],
+                    quote_content_type=quote_content_type if index == 0 else None,
+                    quote_filename=quote_filename if index == 0 else None,
                 )
             except Exception:
                 logger.exception(
@@ -333,6 +352,8 @@ class BackendManager:
         *,
         batch_id: str | None = None,
         batch_index: int | None = None,
+        quote_content_type: str | None = None,
+        quote_filename: str | None = None,
         **kwargs,
     ) -> None:
         # Forward the batch metadata only when the whole batch is identified
@@ -343,6 +364,11 @@ class BackendManager:
         if batch_id is not None:
             kwargs["batch_id"] = batch_id
             kwargs["batch_index"] = batch_index
+        # Il fallback display della quote media è un dettaglio Signal: gli altri
+        # backend non devono ricevere i kwargs (doppio gating col chiamante).
+        if backend.protocol == PROTOCOL_SIGNAL:
+            kwargs["quote_content_type"] = quote_content_type
+            kwargs["quote_filename"] = quote_filename
         try:
             backend.enqueue_sent_message(contact_id, message_id, text, **kwargs)
         except OSError:

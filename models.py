@@ -106,6 +106,18 @@ MEDIA_QUOTE_PLACEHOLDERS: dict[str, str] = {
     "video": "🎬 Video",
 }
 
+#: Media kind → ``media_quote_placeholder`` key.  Totale su
+#: ``MEDIA_KIND_VALUES``: ogni kind ha un segnaposto canonico.
+_KIND_TO_PLACEHOLDER: dict[str, str] = {
+    "image": "image",
+    "gif": "image",
+    "video": "video",
+    "voice": "audio",
+    "audio": "audio",
+    "document": "attachment",
+    "sticker": "sticker",
+}
+
 _IMAGE_BASE64_PREFIXES = ("/9j/", "iVBORw0KGgo", "R0lGOD", "UklGR")
 
 
@@ -143,6 +155,41 @@ def media_quote_placeholder(msg_type: str, detail: str | None = None) -> str:
     return MEDIA_QUOTE_PLACEHOLDERS.get(
         msg_type, MEDIA_QUOTE_PLACEHOLDERS["attachment"]
     )
+
+
+def media_quote_display(
+    content_type: str | None, *, filename: str | None = None
+) -> str | None:
+    """Costruisce il ``quote_text`` display di un media quotato.
+
+    Il mime seleziona il segnaposto tipizzato via ``media_kind_from_mime``;
+    senza mime (o con kind non mappato) non c'è placeholder.  Il filename, se
+    presente, è anteposto come ``"<filename> — <placeholder>"`` (em dash).
+    """
+    kind = media_kind_from_mime(content_type)
+    if not kind or kind not in _KIND_TO_PLACEHOLDER:
+        return None
+    placeholder = media_quote_placeholder(_KIND_TO_PLACEHOLDER[kind])
+    return f"{filename} — {placeholder}" if filename else placeholder
+
+
+def parse_quote_attachment_descriptor(
+    descriptor: str | None,
+) -> tuple[str | None, str | None]:
+    """Estrae ``(content_type, filename)`` da un descriptor Signal.
+
+    Formato ``"content_type[:filename[:path]]"``.  Il path può contenere ``:``,
+    quindi si usano DUE ``partition`` (ct | filename | path): tutto ciò che
+    segue il secondo ``:`` resta nel path e viene ignorato.  Un descriptor
+    vuoto (o ``None``) ritorna ``(None, None)``.
+    """
+    if not descriptor:
+        return (None, None)
+    content_type, sep, rest = (descriptor or "").partition(":")
+    if not sep:
+        return (content_type.strip() or None, None)
+    filename, _sep2, _path = rest.partition(":")
+    return (content_type.strip() or None, filename.strip() or None)
 
 
 def is_media_quote_placeholder(text: str | None) -> bool:

@@ -194,3 +194,62 @@ def test_last_ditch_idless_requires_same_attachment(
         "photo-A",
         "photo-B",
     ]
+
+
+def test_existing_row_gets_missing_quote_fields(signal_backend: SignalBackend):
+    """Bug: l'echo arricchito riempie la quote mancante della riga esistente."""
+    base = {**_outgoing("confirmed-A", text="answer"), "timestamp": T0}
+    assert signal_backend.ingest_message(CONTACT, base, T0) is True
+
+    enriched = {
+        **base,
+        "quote_text": "voice.ogg — 🎵 Audio",
+        "quote_timestamp": T0 - 1_000,
+        "quote_author": CONTACT,
+        "quote_attachment_id": "voice.ogg",
+        "quote_attachment_path": "/tmp/voice.ogg",
+        "quote_content_type": "audio/ogg",
+    }
+    assert signal_backend.ingest_message(CONTACT, enriched, T0) == "changed"
+
+    cached = signal_backend.cache[CONTACT][0]
+    assert cached["quote_text"] == "voice.ogg — 🎵 Audio"
+    assert cached["quote_attachment_id"] == "voice.ogg"
+    assert cached["quote_content_type"] == "audio/ogg"
+
+    # Idempotente: un secondo echo non cambia più nulla.
+    assert signal_backend.ingest_message(CONTACT, enriched, T0) is False
+
+
+def test_incoming_enriched_echo_fills_quote_fields_idempotently(
+    signal_backend: SignalBackend,
+):
+    """FIX B vale anche per i messaggi in ingresso (is_mine=False)."""
+    incoming = {
+        "id": "in-1",
+        "text": "answer",
+        "is_mine": False,
+        "sender": "Mario",
+        "quote_text": None,
+        "msg_type": "text",
+        "attachment_info": None,
+        "attachment_id": None,
+        "content_type": None,
+        "timestamp": T0,
+    }
+    assert signal_backend.ingest_message(CONTACT, incoming, T0) is True
+
+    enriched = {
+        **incoming,
+        "quote_text": "voice.ogg — 🎵 Audio",
+        "quote_timestamp": T0 - 1_000,
+        "quote_author": CONTACT,
+        "quote_content_type": "audio/ogg",
+    }
+    assert signal_backend.ingest_message(CONTACT, enriched, T0) == "changed"
+    assert signal_backend.cache[CONTACT][0]["quote_text"] == "voice.ogg — 🎵 Audio"
+    assert signal_backend.cache[CONTACT][0]["quote_content_type"] == "audio/ogg"
+
+    # Mai sovrascrivere e secondo echo no-op.
+    assert signal_backend.ingest_message(CONTACT, enriched, T0) is False
+    assert signal_backend.cache[CONTACT][0]["quote_text"] == "voice.ogg — 🎵 Audio"
