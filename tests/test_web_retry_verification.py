@@ -15,7 +15,10 @@ from base64 import b64decode
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-import httpx
+try:  # CI installa httpx2 (requirements-web); il modulo httpx può mancare
+    import httpx2 as httpx
+except ModuleNotFoundError:  # pragma: no cover - ambiente locale con httpx
+    import httpx
 import pytest
 from fastapi.testclient import TestClient
 
