@@ -38,9 +38,9 @@ from protocols.whatsapp import (
 )
 
 
-def _msg(raw, contacts=None, lid_lookup=None):
+def _msg(raw, contacts=None, lid_lookup=None, schedule_lid_resolve=None):
     """Wrapper: returns first event from _event_from_message (now returns list)."""
-    events = _event_from_message(raw, contacts, lid_lookup)
+    events = _event_from_message(raw, contacts, lid_lookup, schedule_lid_resolve)
     return events[0] if events else None
 
 
@@ -903,6 +903,56 @@ class TestWhatsAppEvents:
         )
         assert ev is not None
         assert ev.payload["text"] == "ciao @999999999999999 come va"
+
+    def test_mention_unresolved_schedules_background_lid_resolve(self):
+        """Bug: un @mention che non è né un contatto noto né in cache
+        lid→phone deve comunque restare invariato in QUESTO messaggio, ma
+        deve far scattare la risoluzione in background (schedule_lid_resolve)
+        così i mention FUTURI della stessa persona si risolvono. Vale anche
+        per un messaggio che è SOLO il mention, senza altro testo attorno."""
+        scheduled = []
+        ev = _msg(
+            {
+                "id": "m8",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "body": "@191882160263217",
+            },
+            {},
+            lambda _jid: None,
+            scheduled.append,
+        )
+        assert ev is not None
+        assert ev.payload["text"] == "@191882160263217"
+        assert scheduled == ["191882160263217@lid"]
+
+    def test_mention_resolved_by_name_does_not_schedule(self):
+        """Se il mention si risolve già a un nome noto, non deve scattare
+        nessuna risoluzione in background (niente da risolvere)."""
+        from models import ChatContact
+
+        contacts = {
+            "111111111@lid": ChatContact(
+                id="111111111@lid", display_name="Alice", protocol=PROTOCOL_WHATSAPP
+            ),
+        }
+        scheduled = []
+        ev = _msg(
+            {
+                "id": "m9",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "body": "ciao @111111111",
+            },
+            contacts,
+            lambda _jid: None,
+            scheduled.append,
+        )
+        assert ev is not None
+        assert ev.payload["text"] == "ciao @Alice"
+        assert scheduled == []
 
     def test_direct_message_not_group(self):
         """Un messaggio diretto (@c.us) non è un gruppo."""
@@ -2392,6 +2442,306 @@ class TestWhatsAppMediaResolver:
                 assert key not in backend._media_pending
             assert backend._rest.get_message_media.call_count == 3
             assert backend.poll_once() == []
+        finally:
+            backend.disconnect_sync()
+
+
+class TestWhatsAppMentionLidResolver:
+    """🔄 Bug: un @mention di qualcuno che non ha mai mandato un messaggio
+    (mai risolto dal warm-up dei contatti) resta un lid grezzo per sempre,
+    anche se WAHA lo risolverebbe al volo. ``_schedule_mention_lid_resolve``
+    lo risolve in background (mai bloccando l'ingest live) così i mention
+    FUTURI della stessa persona mostrano nome/numero."""
+
+    def test_schedule_deduplicates_and_resolver_populates_lid_cache(self):
+        import time
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.resolve_contact.return_value = {
+            "id": "391234567890@c.us",
+            "name": "Marco",
+        }
+
+        try:
+            backend._schedule_mention_lid_resolve("999999999@lid")
+            backend._schedule_mention_lid_resolve("999999999@lid")
+            with backend._mention_lid_lock:
+                assert len(backend._mention_lid_pending) == 1
+                backend._mention_lid_pending["999999999@lid"]["next"] = 0
+
+            deadline = time.monotonic() + 2
+            while (
+                time.monotonic() < deadline
+                and "999999999@lid" in backend._mention_lid_pending
+            ):
+                time.sleep(0.02)
+
+            with backend._mention_lid_lock:
+                assert backend._mention_lid_pending == {}
+            assert backend._lid_lookup("999999999@lid") == "391234567890"
+            backend._rest.resolve_contact.assert_called_once_with("999999999@lid")
+        finally:
+            backend.disconnect_sync()
+
+    def test_resolver_gives_up_after_three_attempts(self):
+        import time
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.resolve_contact.return_value = None
+
+        try:
+            backend._schedule_mention_lid_resolve("888888888@lid")
+            jid = "888888888@lid"
+            observed_attempts = -1
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                with backend._mention_lid_lock:
+                    pending = backend._mention_lid_pending.get(jid)
+                    if pending is None:
+                        break
+                    if pending["attempts"] != observed_attempts:
+                        observed_attempts = pending["attempts"]
+                        pending["next"] = 0
+                time.sleep(0.02)
+
+            with backend._mention_lid_lock:
+                assert jid not in backend._mention_lid_pending
+            assert backend._rest.resolve_contact.call_count == 3
+        finally:
+            backend.disconnect_sync()
+
+    def test_empty_jid_and_stopped_resolver_are_noops(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+
+        backend._schedule_mention_lid_resolve("")
+        assert backend._mention_lid_pending == {}
+
+        backend._mention_lid_resolver_stop = True
+        backend._schedule_mention_lid_resolve("777777777@lid")
+        assert backend._mention_lid_pending == {}
+
+    def test_second_distinct_jid_reuses_already_running_thread(self):
+        """Un secondo jid diverso schedulato mentre il thread è già vivo
+        non ne avvia un secondo (``_start_mention_lid_resolver``'s
+        thread.is_alive() short-circuit)."""
+        import time
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.resolve_contact.return_value = None
+
+        try:
+            backend._schedule_mention_lid_resolve("111@lid")
+            deadline = time.monotonic() + 2
+            while (
+                time.monotonic() < deadline
+                and backend._mention_lid_resolver_thread is None
+            ):
+                time.sleep(0.02)
+            first_thread = backend._mention_lid_resolver_thread
+            assert first_thread is not None and first_thread.is_alive()
+
+            backend._schedule_mention_lid_resolve("222@lid")
+            assert backend._mention_lid_resolver_thread is first_thread
+            with backend._mention_lid_lock:
+                assert set(backend._mention_lid_pending) == {"111@lid", "222@lid"}
+        finally:
+            backend.disconnect_sync()
+
+    def test_start_resolver_is_a_noop_once_stopped(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._mention_lid_resolver_stop = True
+
+        backend._start_mention_lid_resolver()
+
+        assert backend._mention_lid_resolver_thread is None
+
+    def test_resolve_exception_is_swallowed_and_retried(self):
+        """``_lid_resolve_remote`` che solleva (es. errore di rete) non deve
+        far morire il thread: viene loggato e ritentato come un fallimento
+        normale."""
+        import time
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.resolve_contact.side_effect = RuntimeError("boom")
+
+        try:
+            backend._schedule_mention_lid_resolve("333@lid")
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with backend._mention_lid_lock:
+                    pending = backend._mention_lid_pending.get("333@lid")
+                    if pending is None:
+                        break
+                    pending["next"] = 0
+                time.sleep(0.02)
+
+            with backend._mention_lid_lock:
+                assert "333@lid" not in backend._mention_lid_pending
+            assert backend._rest.resolve_contact.call_count == 3
+        finally:
+            backend.disconnect_sync()
+
+    def test_stop_flag_mid_batch_breaks_out_without_processing_rest(self):
+        """Se ``_mention_lid_resolver_stop`` diventa True mentre il thread
+        sta processando un batch di jid dovuti, il ciclo interno si
+        interrompe subito (nessun altro jid del batch viene toccato)."""
+        import time
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+
+        def resolve_and_stop(jid):
+            backend._mention_lid_resolver_stop = True
+
+        backend._rest.resolve_contact.side_effect = resolve_and_stop
+
+        backend._schedule_mention_lid_resolve("first@lid")
+        with backend._mention_lid_lock:
+            backend._mention_lid_pending["second@lid"] = {
+                "attempts": 0,
+                "next": 0,
+            }
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not backend._mention_lid_resolver_stop:
+            time.sleep(0.02)
+        time.sleep(0.1)  # let the loop actually reach the break
+
+        assert backend._rest.resolve_contact.call_count == 1
+        with backend._mention_lid_lock:
+            # "second@lid" was never attempted: stop was hit first.
+            assert (
+                backend._mention_lid_pending.get("second@lid", {}).get("attempts") == 0
+            )
+
+    def test_unexpected_error_in_loop_body_is_swallowed(self):
+        """Un errore inatteso nel corpo del loop (non nella sola chiamata
+        REST) non deve uccidere il thread: viene loggato e il loop continua
+        al giro successivo."""
+        import time
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.resolve_contact.return_value = {
+            "id": "391234567890@c.us",
+            "name": None,
+        }
+
+        class _BoomOnce(dict):
+            def items(self):
+                if not self.pop("_boomed", False):
+                    self["_boomed"] = True
+                    raise RuntimeError("boom")
+                return super().items()
+
+        backend._mention_lid_pending = _BoomOnce()
+        try:
+            backend._schedule_mention_lid_resolve("444@lid")
+            deadline = time.monotonic() + 2
+            while (
+                time.monotonic() < deadline
+                and "444@lid" in backend._mention_lid_pending
+            ):
+                time.sleep(0.02)
+
+            assert "444@lid" not in backend._mention_lid_pending
+            assert backend._lid_lookup("444@lid") == "391234567890"
+        finally:
+            backend.disconnect_sync()
+
+    def test_entry_vanished_before_first_recheck_is_skipped(self):
+        """Race: il jid è nel batch ``due``, ma è già sparito (rimosso da
+        un'altra chiamata) quando il loop lo riprende sotto lock subito
+        dopo — deve solo passare oltre (``continue``), mai sollevare."""
+        import time
+
+        class _VanishOnNthGet(dict):
+            def __init__(self, *a, target, vanish_at, **kw):
+                super().__init__(*a, **kw)
+                self._target = target
+                self._vanish_at = vanish_at
+                self._calls = 0
+
+            def get(self, key, default=None):
+                if key == self._target:
+                    self._calls += 1
+                    if self._calls == self._vanish_at:
+                        return None
+                return super().get(key, default)
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.resolve_contact.return_value = {
+            "id": "391234567890@c.us",
+            "name": None,
+        }
+        backend._mention_lid_pending = _VanishOnNthGet(target="555@lid", vanish_at=1)
+
+        try:
+            backend._schedule_mention_lid_resolve("555@lid")
+            with backend._mention_lid_lock:
+                backend._mention_lid_pending["555@lid"]["next"] = 0
+
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if backend._lid_lookup("555@lid"):
+                    break
+                time.sleep(0.02)
+
+            # The vanished check was skipped once; a later pass (now a
+            # normal dict lookup) still resolves it.
+            assert backend._lid_lookup("555@lid") == "391234567890"
+            backend._rest.resolve_contact.assert_called_once_with("555@lid")
+        finally:
+            backend.disconnect_sync()
+
+    def test_entry_vanished_before_second_recheck_is_skipped(self):
+        """Race: il jid sparisce tra la chiamata REST (fallita) e il
+        secondo lookup che decide retry/give-up — deve solo passare oltre,
+        senza sollevare né pianificare un retry su un'entry già rimossa."""
+        import time
+
+        class _VanishOnNthGet(dict):
+            def __init__(self, *a, target, vanish_at, **kw):
+                super().__init__(*a, **kw)
+                self._target = target
+                self._vanish_at = vanish_at
+                self._calls = 0
+
+            def get(self, key, default=None):
+                if key == self._target:
+                    self._calls += 1
+                    if self._calls == self._vanish_at:
+                        return None
+                return super().get(key, default)
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.resolve_contact.return_value = None
+        # 1st get() = the due-batch recheck (must see the real entry so the
+        # REST call actually happens); 2nd get() = the post-REST-failure
+        # recheck this test targets.
+        backend._mention_lid_pending = _VanishOnNthGet(target="666@lid", vanish_at=2)
+
+        try:
+            backend._schedule_mention_lid_resolve("666@lid")
+            with backend._mention_lid_lock:
+                backend._mention_lid_pending["666@lid"]["next"] = 0
+
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if backend._rest.resolve_contact.call_count >= 1:
+                    break
+                time.sleep(0.02)
+            time.sleep(0.1)  # let the post-failure recheck run
+
+            assert backend._rest.resolve_contact.call_count == 1
         finally:
             backend.disconnect_sync()
 

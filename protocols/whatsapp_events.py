@@ -335,6 +335,7 @@ def _resolve_text_mentions(
     text: str | None,
     contacts_by_jid: dict | None,
     lid_lookup: Callable[[str], str | None] | None = None,
+    schedule_lid_resolve: Callable[[str], None] | None = None,
 ) -> str | None:
     """Replace raw WhatsApp ``@<number>`` mentions with a name or phone.
 
@@ -343,8 +344,13 @@ def _resolve_text_mentions(
     ``lid_lookup`` (the backend's persistent lid→phone cache) resolves it to
     a phone number, falls back to that (formatted like elsewhere in this
     codebase: ``+<digits>``) rather than leaving the raw internal id visible.
-    A digit run that resolves through neither is left untouched — never a
-    guess — e.g. "vediamoci @2024" with no such contact/lid renders unchanged.
+
+    A digit run that resolves through neither is left untouched in THIS
+    message — never a guess — but ``schedule_lid_resolve`` (when given) is
+    called so the backend resolves it in the background: a group member who
+    has never sent a message we've processed has no reason to be in either
+    lookup yet, and without this, EVERY future mention of the same person
+    would keep showing the raw id too, not just this one message.
     """
     if not text or "@" not in text or (not contacts_by_jid and lid_lookup is None):
         return text
@@ -359,6 +365,8 @@ def _resolve_text_mentions(
             phone = lid_lookup(jid)
             if phone:
                 return f"@+{phone}"
+        if schedule_lid_resolve is not None:
+            schedule_lid_resolve(jid)
         return match.group(0)
 
     return _MENTION_RE.sub(_replace, text)
@@ -368,6 +376,7 @@ def _event_from_message(
     raw: dict,
     contacts_by_jid: dict | None = None,
     lid_lookup: Callable[[str], str | None] | None = None,
+    schedule_lid_resolve: Callable[[str], None] | None = None,
 ) -> list[ChatEvent]:
     """Normalize a raw incoming message dict into zero or more ``ChatEvent`` objects.
 
@@ -436,7 +445,9 @@ def _event_from_message(
         or (raw.get("message") or {}).get("conversation")
         or ""
     )
-    text = _resolve_text_mentions(text, contacts_by_jid, lid_lookup)
+    text = _resolve_text_mentions(
+        text, contacts_by_jid, lid_lookup, schedule_lid_resolve
+    )
     ts = raw.get("timestamp")
     ts_ms = 0
     if isinstance(ts, (int, float)):
@@ -447,7 +458,7 @@ def _event_from_message(
     msg_id = raw.get("id") or (raw.get("key") or {}).get("id") or str(ts_ms)
     msg_type = _msg_type(raw)
     caption = _resolve_text_mentions(
-        raw.get("caption") or "", contacts_by_jid, lid_lookup
+        raw.get("caption") or "", contacts_by_jid, lid_lookup, schedule_lid_resolve
     ) or (text.strip() or "")
     if _looks_like_embedded_media(caption):
         caption = ""
@@ -588,7 +599,7 @@ def _event_from_message(
 
     quote = raw.get("replyTo") or raw.get("quote") or raw.get("quotedMessage")
     quote_text = _resolve_text_mentions(
-        _wa_quote_text(quote), contacts_by_jid, lid_lookup
+        _wa_quote_text(quote), contacts_by_jid, lid_lookup, schedule_lid_resolve
     )
     quote_timestamp = None
     quote_author = None
@@ -927,6 +938,7 @@ def _event_from_raw(
     raw: dict,
     contacts_by_jid: dict | None = None,
     lid_lookup: Callable[[str], str | None] | None = None,
+    schedule_lid_resolve: Callable[[str], None] | None = None,
 ) -> list[ChatEvent]:
     """Dispatch a raw WebSocket message to the right normalization function.
 
@@ -947,7 +959,9 @@ def _event_from_raw(
         "messages.upsert",
         "messages/upsert",
     ):
-        return _event_from_message(content, contacts_by_jid, lid_lookup)
+        return _event_from_message(
+            content, contacts_by_jid, lid_lookup, schedule_lid_resolve
+        )
     if evt == "message.reaction":
         event = _event_from_reaction(content, contacts_by_jid)
         return [event] if event is not None else []
@@ -975,5 +989,7 @@ def _event_from_raw(
         or content.get("hasMedia")
         or content.get("media")
     ):
-        return _event_from_message(content, contacts_by_jid, lid_lookup)
+        return _event_from_message(
+            content, contacts_by_jid, lid_lookup, schedule_lid_resolve
+        )
     return []
