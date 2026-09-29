@@ -1584,8 +1584,19 @@ def create_api_router() -> Any:
 
     @router.get("/contacts")
     def contacts(request: Request, q: str | None = None) -> list[dict[str, Any]]:
-        unread = _unread_counts()
         manager = request.app.state.manager
+        # Riallinea il badge "non letti" WhatsApp allo stato reale (telefono
+        # incluso) prima di calcolare i conteggi: leggere sul telefono non
+        # tocca il DB locale finché non lo facciamo qui. Best-effort/throttled
+        # (vedi WhatsAppBackend.reconcile_unread), nessun impatto per gli
+        # altri protocolli o se il metodo non esiste.
+        reconcile = getattr(manager.get("whatsapp"), "reconcile_unread", None)
+        if reconcile is not None:
+            try:
+                reconcile()
+            except Exception:
+                logger.debug("WhatsApp unread reconcile failed", exc_info=True)
+        unread = _unread_counts()
         contacts = manager.list_contacts()
         query = (q or "").strip()
         if query:

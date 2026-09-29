@@ -282,6 +282,9 @@ class WhatsAppBackend(ChatBackend):
         #: doppio un messaggio (il dedup definitivo avviene in ``ingest_message``).
         self._seen_message_keys: set[tuple[str, ...]] = set()
         self._history_unfetchable: set[str] = set()
+        #: Ultimo reconcile_unread() riuscito (monotonic): throttle per non
+        #: martellare WAHA con un GET /chats ad ogni singolo /api/contacts.
+        self._last_unread_reconcile: float = 0.0
         self._media_pending: dict[tuple[str, str], dict] = {}
         self._media_lock = threading.Lock()
         self._media_resolver_thread: threading.Thread | None = None
@@ -777,6 +780,38 @@ class WhatsAppBackend(ChatBackend):
             ts = int(c.get("timestamp") or 0)
             out.append((cid, unread, ts))
         return out
+
+    def reconcile_unread(self, *, min_interval: float = 20.0) -> None:
+        """Riallinea il flag ``read`` locale all'``unreadCount`` di WAHA.
+
+        Bug: leggere i messaggi dal TELEFONO (o da un altro client
+        multi-device) non tocca il nostro DB locale — il badge "non letti"
+        della web UI/TUI riflette solo le chat aperte in QUESTA app, mai lo
+        stato reale di WhatsApp.  ``unreadCount`` da ``GET /chats`` è invece
+        la verità server-side (sincronizzata anche col telefono): quando è
+        0 per una chat ma abbiamo ancora righe locali ``is_mine=0,read=0``,
+        il telefono le ha già lette e le allineiamo.
+
+        Chiamato on-demand quando il client (ri)apre la web UI/TUI (``GET
+        /api/contacts``), MAI in un loop di polling: throttle a un GET
+        ``/chats`` al massimo ogni ``min_interval`` secondi.
+        """
+        if not self._rest or not self._connected:
+            return
+        now = time.monotonic()
+        if now - self._last_unread_reconcile < min_interval:
+            return
+        self._last_unread_reconcile = now
+        try:
+            chats = self._discover_active_chats()
+        except Exception:
+            logger.debug("WhatsApp unread reconcile: /chats failed", exc_info=True)
+            return
+        from protocols.db import _mark_as_read
+
+        for jid, unread, _ts in chats:
+            if unread == 0:
+                _mark_as_read(jid, protocol=PROTOCOL_WHATSAPP)
 
     # ─── Contact loading ──────────────────────────────────────────────
 
