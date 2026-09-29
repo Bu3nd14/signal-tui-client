@@ -38,9 +38,9 @@ from protocols.whatsapp import (
 )
 
 
-def _msg(raw, contacts=None):
+def _msg(raw, contacts=None, lid_lookup=None):
     """Wrapper: returns first event from _event_from_message (now returns list)."""
-    events = _event_from_message(raw, contacts)
+    events = _event_from_message(raw, contacts, lid_lookup)
     return events[0] if events else None
 
 
@@ -776,8 +776,8 @@ class TestWhatsAppEvents:
         assert ev.payload["text"] == "ciao @999999999999999 come va"
 
     def test_mention_no_matching_contact_among_known_contacts_left_unchanged(self):
-        """Con una rubrica NON vuota ma senza alcun contatto per quel
-        numero, la sostituzione (regex + lookup) deve comunque lasciare il
+        """Con una rubrica NON vuota (e senza lid_lookup) ma senza alcun
+        contatto per quel numero, la sostituzione deve comunque lasciare il
         testo invariato invece di indovinare."""
         from models import ChatContact
 
@@ -841,6 +841,68 @@ class TestWhatsAppEvents:
         )
         assert ev is not None
         assert ev.payload["text"] == "@Alice e @Bob potete venire?"
+
+    def test_mention_falls_back_to_phone_via_lid_lookup(self):
+        """Bug: un @lid menzionato che non è (ancora) un contatto noto in
+        rubrica, ma che il resolver di background ha già risolto a un
+        numero nella cache persistente lid→phone, deve mostrare il numero
+        (``+<cifre>``, come altrove nel codebase) invece del lid grezzo."""
+        phones = {"111111111@lid": "391234567890"}
+        ev = _msg(
+            {
+                "id": "m5",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "body": "trovato per le 12:30 @111111111",
+            },
+            {},
+            phones.get,
+        )
+        assert ev is not None
+        assert ev.payload["text"] == "trovato per le 12:30 @+391234567890"
+
+    def test_mention_contact_name_preferred_over_lid_phone_fallback(self):
+        """Se il contatto ha già un nome in rubrica, quello vince sul
+        fallback al numero anche quando lid_lookup lo risolverebbe pure."""
+        from models import ChatContact
+
+        contacts = {
+            "111111111@lid": ChatContact(
+                id="111111111@lid", display_name="Alice", protocol=PROTOCOL_WHATSAPP
+            ),
+        }
+        phones = {"111111111@lid": "391234567890"}
+        ev = _msg(
+            {
+                "id": "m6",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "body": "ciao @111111111",
+            },
+            contacts,
+            phones.get,
+        )
+        assert ev is not None
+        assert ev.payload["text"] == "ciao @Alice"
+
+    def test_mention_unresolved_by_name_or_lid_lookup_left_unchanged(self):
+        """Né rubrica né cache lid→phone conoscono questo id: resta
+        invariato (mai una sostituzione indovinata)."""
+        ev = _msg(
+            {
+                "id": "m7",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "body": "ciao @999999999999999 come va",
+            },
+            {},
+            lambda _jid: None,
+        )
+        assert ev is not None
+        assert ev.payload["text"] == "ciao @999999999999999 come va"
 
     def test_direct_message_not_group(self):
         """Un messaggio diretto (@c.us) non è un gruppo."""

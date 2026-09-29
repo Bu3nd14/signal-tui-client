@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 import re
+from collections.abc import Callable
 
 from models import (
     PROTOCOL_WHATSAPP,
@@ -331,29 +332,42 @@ _MENTION_RE = re.compile(r"@(\d{5,20})(?!\d)")
 
 
 def _resolve_text_mentions(
-    text: str | None, contacts_by_jid: dict | None
+    text: str | None,
+    contacts_by_jid: dict | None,
+    lid_lookup: Callable[[str], str | None] | None = None,
 ) -> str | None:
-    """Replace raw WhatsApp ``@<number>`` mentions with the contact's name.
+    """Replace raw WhatsApp ``@<number>`` mentions with a name or phone.
 
-    Reuses ``_resolve_sender_name``'s exact-JID / number-part matching, so a
-    digit run that isn't an actual known contact is left untouched (never a
-    guess) — e.g. "vediamoci @2024" with no such contact renders unchanged.
+    Reuses ``_resolve_sender_name``'s exact-JID / number-part matching for a
+    display name.  When the mentioned ``@lid`` has no known contact but
+    ``lid_lookup`` (the backend's persistent lid→phone cache) resolves it to
+    a phone number, falls back to that (formatted like elsewhere in this
+    codebase: ``+<digits>``) rather than leaving the raw internal id visible.
+    A digit run that resolves through neither is left untouched — never a
+    guess — e.g. "vediamoci @2024" with no such contact/lid renders unchanged.
     """
-    if not text or "@" not in text or not contacts_by_jid:
+    if not text or "@" not in text or (not contacts_by_jid and lid_lookup is None):
         return text
 
     def _replace(match: re.Match[str]) -> str:
         digits = match.group(1)
-        resolved = _resolve_sender_name(f"{digits}@lid", contacts_by_jid)
-        if resolved == f"{digits}@lid":
-            return match.group(0)
-        return f"@{resolved}"
+        jid = f"{digits}@lid"
+        resolved = _resolve_sender_name(jid, contacts_by_jid)
+        if resolved != jid:
+            return f"@{resolved}"
+        if lid_lookup is not None:
+            phone = lid_lookup(jid)
+            if phone:
+                return f"@+{phone}"
+        return match.group(0)
 
     return _MENTION_RE.sub(_replace, text)
 
 
 def _event_from_message(
-    raw: dict, contacts_by_jid: dict | None = None
+    raw: dict,
+    contacts_by_jid: dict | None = None,
+    lid_lookup: Callable[[str], str | None] | None = None,
 ) -> list[ChatEvent]:
     """Normalize a raw incoming message dict into zero or more ``ChatEvent`` objects.
 
@@ -422,7 +436,7 @@ def _event_from_message(
         or (raw.get("message") or {}).get("conversation")
         or ""
     )
-    text = _resolve_text_mentions(text, contacts_by_jid)
+    text = _resolve_text_mentions(text, contacts_by_jid, lid_lookup)
     ts = raw.get("timestamp")
     ts_ms = 0
     if isinstance(ts, (int, float)):
@@ -432,9 +446,9 @@ def _event_from_message(
         ts_ms = t * 1000 if t < 10**12 else t
     msg_id = raw.get("id") or (raw.get("key") or {}).get("id") or str(ts_ms)
     msg_type = _msg_type(raw)
-    caption = _resolve_text_mentions(raw.get("caption") or "", contacts_by_jid) or (
-        text.strip() or ""
-    )
+    caption = _resolve_text_mentions(
+        raw.get("caption") or "", contacts_by_jid, lid_lookup
+    ) or (text.strip() or "")
     if _looks_like_embedded_media(caption):
         caption = ""
 
@@ -573,7 +587,9 @@ def _event_from_message(
     sender = _resolve_sender_name(sender, contacts_by_jid)
 
     quote = raw.get("replyTo") or raw.get("quote") or raw.get("quotedMessage")
-    quote_text = _resolve_text_mentions(_wa_quote_text(quote), contacts_by_jid)
+    quote_text = _resolve_text_mentions(
+        _wa_quote_text(quote), contacts_by_jid, lid_lookup
+    )
     quote_timestamp = None
     quote_author = None
     reply_to_message_id = None
@@ -907,7 +923,11 @@ def _event_from_typing(raw: dict) -> ChatEvent | None:
     )
 
 
-def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> list[ChatEvent]:
+def _event_from_raw(
+    raw: dict,
+    contacts_by_jid: dict | None = None,
+    lid_lookup: Callable[[str], str | None] | None = None,
+) -> list[ChatEvent]:
     """Dispatch a raw WebSocket message to the right normalization function.
 
     WAHA frames look like ``{"event": "...", "session": "...", "payload": {...}}``;
@@ -927,7 +947,7 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> list[Chat
         "messages.upsert",
         "messages/upsert",
     ):
-        return _event_from_message(content, contacts_by_jid)
+        return _event_from_message(content, contacts_by_jid, lid_lookup)
     if evt == "message.reaction":
         event = _event_from_reaction(content, contacts_by_jid)
         return [event] if event is not None else []
@@ -955,5 +975,5 @@ def _event_from_raw(raw: dict, contacts_by_jid: dict | None = None) -> list[Chat
         or content.get("hasMedia")
         or content.get("media")
     ):
-        return _event_from_message(content, contacts_by_jid)
+        return _event_from_message(content, contacts_by_jid, lid_lookup)
     return []

@@ -500,7 +500,7 @@ class WhatsAppBackend(ChatBackend):
                 if chat and msg_id:
                     self._schedule_media_resolve(chat, str(msg_id))
 
-        events = _event_from_raw(raw, self._contacts_by_jid)
+        events = _event_from_raw(raw, self._contacts_by_jid, self._lid_lookup)
         if not events:
             # Even when the raw event is not recognised as a receipt/typing
             # (e.g. message.ack with status < 2), enqueue the synthetic message
@@ -1422,7 +1422,7 @@ class WhatsAppBackend(ChatBackend):
                 msg_id = m.get("id") or (m.get("key") or {}).get("id")
                 if msg_id:
                     self._schedule_media_resolve(contact_id, str(msg_id))
-            events = _event_from_message(m, self._contacts_by_jid)
+            events = _event_from_message(m, self._contacts_by_jid, self._lid_lookup)
             for event in events:
                 payload = event.payload
 
@@ -2126,7 +2126,7 @@ class WhatsAppBackend(ChatBackend):
                             normalized.setdefault("id", msg_id)
                             normalized.setdefault("timestamp", fallback_ts)
                             events = _event_from_message(
-                                normalized, self._contacts_by_jid
+                                normalized, self._contacts_by_jid, self._lid_lookup
                             )
                     except Exception:
                         logger.debug(
