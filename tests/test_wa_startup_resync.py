@@ -11,13 +11,14 @@ from __future__ import annotations
 import sqlite3
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import protocols.db as backend_mod
 from protocols.whatsapp import WhatsAppBackend
 from signal_tui import SignalTUI
 
@@ -147,6 +148,102 @@ class TestResyncHistory:
         n = backend.resync_history()
         assert n == 0
         backend._rest.list_messages.assert_not_called()
+
+
+# ─── reconcile_unread ──────────────────────────────────────────────────────────
+
+
+class TestReconcileUnread:
+    """🔄 Bug: leggere su WhatsApp dal TELEFONO non aggiorna il badge "non
+    letti" della web UI/TUI finché quella chat non viene aperta in QUESTA
+    app. ``reconcile_unread`` riallinea il flag ``read`` locale
+    all'``unreadCount`` (verità server-side, sincronizzata col telefono)
+    riportato da ``GET /chats``."""
+
+    @pytest.fixture
+    def tmp_db(self, tmp_path: Path):
+        db_file = tmp_path / "messages.db"
+        with (
+            patch.object(backend_mod, "DB_FILE", db_file),
+            patch.object(backend_mod, "CACHE_DIR", tmp_path),
+        ):
+            yield db_file
+
+    def _seed_unread(self, contact_id: str) -> None:
+        backend_mod._add_message_to_cache(
+            contact_id,
+            "ciao",
+            False,
+            "Mario",
+            1_700_000_000_000,
+            protocol="whatsapp",
+            msg_id=f"m-{contact_id}",
+        )
+
+    def test_marks_locally_unread_as_read_when_waha_reports_zero(self, tmp_db):
+        """Chat letta sul telefono (unreadCount=0 lato WAHA) ma con righe
+        locali is_mine=0/read=0 (mai aperta in questa app) → allineata."""
+        backend = _make_backend()
+        backend._last_unread_reconcile = 0.0
+        self._seed_unread("39@c.us")
+        self._seed_unread("40@c.us")
+        backend._rest._request.return_value = [
+            {"id": "39@c.us", "isGroup": False, "unreadCount": 0, "timestamp": 1},
+            {"id": "40@c.us", "isGroup": False, "unreadCount": 3, "timestamp": 1},
+        ]
+
+        backend.reconcile_unread()
+
+        conn = sqlite3.connect(tmp_db)
+        try:
+            rows = dict(
+                conn.execute("SELECT contact_number, read FROM messages").fetchall()
+            )
+        finally:
+            conn.close()
+        assert rows["39@c.us"] == 1, "read on phone must sync locally"
+        assert rows["40@c.us"] == 0, "still-unread chat must stay untouched"
+
+    def test_throttled_no_repeat_rest_call_within_min_interval(self, tmp_db):
+        backend = _make_backend()
+        backend._last_unread_reconcile = 0.0
+        self._seed_unread("39@c.us")
+        backend._rest._request.return_value = [
+            {"id": "39@c.us", "isGroup": False, "unreadCount": 0, "timestamp": 1},
+        ]
+
+        backend.reconcile_unread()
+        backend._rest._request.reset_mock()
+        backend.reconcile_unread()
+
+        backend._rest._request.assert_not_called()
+
+    def test_disconnected_is_a_noop(self, tmp_db):
+        backend = _make_backend()
+        backend._connected = False
+        backend._last_unread_reconcile = 0.0
+        self._seed_unread("39@c.us")
+
+        backend.reconcile_unread()
+
+        backend._rest._request.assert_not_called()
+
+    def test_rest_error_is_swallowed(self, tmp_db):
+        backend = _make_backend()
+        backend._last_unread_reconcile = 0.0
+        self._seed_unread("39@c.us")
+        backend._rest._request.side_effect = RuntimeError("waha down")
+
+        backend.reconcile_unread()  # must not raise
+
+        conn = sqlite3.connect(tmp_db)
+        try:
+            read = conn.execute(
+                "SELECT read FROM messages WHERE contact_number = '39@c.us'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert read == 0  # unreconciled, but no crash
 
 
 # ─── purge_whatsapp_cache.py ─────────────────────────────────────────────────
