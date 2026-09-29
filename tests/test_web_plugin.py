@@ -1977,6 +1977,43 @@ def test_contacts_schema_order_and_unread_count(web_client):
     assert body[1]["unread"] == 1
 
 
+def test_contacts_calls_whatsapp_reconcile_unread(web_client):
+    """GET /api/contacts riallinea il badge "non letti" WhatsApp: se il
+    backend esposto da manager.get("whatsapp") ha reconcile_unread, viene
+    chiamato prima di calcolare i conteggi."""
+    client, manager, _ = web_client
+    calls = []
+    reconcile_backend = SimpleNamespace(reconcile_unread=lambda: calls.append(1))
+    original_get = manager.get
+    manager.get = lambda proto: (
+        reconcile_backend if proto == "whatsapp" else original_get(proto)
+    )
+
+    response = client.get("/api/contacts", headers=AUTH)
+
+    assert response.status_code == 200
+    assert calls == [1]
+
+
+def test_contacts_swallows_reconcile_unread_error(web_client):
+    """Un errore in reconcile_unread() (es. WAHA irraggiungibile) non deve
+    far fallire /api/contacts: best-effort, mai un 500."""
+    client, manager, _ = web_client
+
+    def boom():
+        raise RuntimeError("waha unreachable")
+
+    reconcile_backend = SimpleNamespace(reconcile_unread=boom)
+    original_get = manager.get
+    manager.get = lambda proto: (
+        reconcile_backend if proto == "whatsapp" else original_get(proto)
+    )
+
+    response = client.get("/api/contacts", headers=AUTH)
+
+    assert response.status_code == 200
+
+
 def test_messages_schema_filters_and_stable_chronological_order(web_client):
     client, _, db_file = web_client
     import sqlite3
