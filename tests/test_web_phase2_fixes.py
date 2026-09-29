@@ -919,6 +919,7 @@ globalThis.state = {
   active: null, messages: [], optimistic: [], optimisticSequence: 0,
   sending: false, stagedAttachments: [], replyTo: null,
 };
+globalThis.history = { pushState() {} };
 function node() { return { children: [], classList: { add() {} }, append(child) { this.children.push(child); }, replaceChildren() { this.children = []; }, focus() {} }; }
 globalThis.elements = {
   threadName: {}, threadMeta: {}, app: node(), composerShell: {}, messages: node(),

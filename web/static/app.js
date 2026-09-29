@@ -38,6 +38,10 @@ const state = {
     return PROTOCOLS.includes(saved) ? saved : "signal";
   })(),
   active: null,
+  // True quando è stata pushata una history entry per il thread aperto
+  // (mobile back/swipe-back): evita di accumulare una entry per ogni
+  // cambio di contatto mentre il thread resta aperto.
+  threadHistoryPushed: false,
   socket: null,
   reconnectTimer: null,
   reconnectAttempt: 0,
@@ -1987,6 +1991,14 @@ function openThread(contact) {
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
   elements.app.classList.add("thread-open");
+  // Push una history entry SOLO al primo ingresso nel thread (lista →
+  // thread): così il back/swipe-back del browser (mobile) la consuma
+  // tornando alla lista invece di uscire dall'app, e cambiare contatto
+  // mentre il thread resta aperto non accumula entry extra.
+  if (!state.threadHistoryPushed) {
+    history.pushState({ threadOpen: true }, "");
+    state.threadHistoryPushed = true;
+  }
   elements.composerShell.hidden = false;
   state.messages = [];
   // Reset esplicito: il diff di renderMessages riusa i nodi DOM per `id` di
@@ -3215,9 +3227,26 @@ if (vv) {
 }
 elements.saveOpenaiKey.addEventListener("click", saveOpenaiKey);
 elements.changeOpenaiKey.addEventListener("click", enableOpenaiKeyEdit);
-document.querySelector("#back-button").addEventListener("click", () => {
+
+function closeThreadView() {
   clearTelegramRefreshTimer();
   elements.app.classList.remove("thread-open");
+  state.threadHistoryPushed = false;
+}
+
+document.querySelector("#back-button").addEventListener("click", () => {
+  // Se abbiamo pushato una history entry per questo thread, torniamo
+  // indietro nella history invece di chiudere direttamente: il popstate
+  // handler sotto fa la chiusura, così history e UI restano sincronizzate
+  // (un eventuale swipe-back successivo non trova una entry "fantasma").
+  if (state.threadHistoryPushed) history.back();
+  else closeThreadView();
+});
+// Back/swipe-back del browser (mobile) mentre un thread è aperto: chiude
+// il thread e torna alla lista contatti invece di uscire dall'app (o
+// navigare alla pagina precedente nella cronologia del browser).
+window.addEventListener("popstate", () => {
+  if (elements.app.classList.contains("thread-open")) closeThreadView();
 });
 document.querySelector("#dismiss-error").addEventListener("click", () => {
   elements.errorBanner.hidden = true;

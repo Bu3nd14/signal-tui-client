@@ -206,6 +206,7 @@ globalThis.window = {
   clearInterval(id) { cleared.push(id); },
 };
 globalThis.state = { active: null, editing: null, messages: [], telegramRefreshTimer: null };
+globalThis.history = { pushState() {} };
 globalThis.loadMessages = () => {};
 globalThis.closeEmojiPicker = () => {};
 globalThis.closeReactionPicker = () => {};
@@ -233,6 +234,91 @@ openThread({ id: "alice", protocol: "signal", display_name: "Signal" });
 assert.deepEqual(cleared, [1]);
 assert.equal(intervals.length, 1);
 assert.equal(state.telegramRefreshTimer, null);
+""")
+
+
+def test_thread_back_swipe_returns_to_list_instead_of_leaving_app():
+    """Bug: swipe-back/browser-back mobile mentre un thread è aperto usciva
+    dall'app (history non intercettata). ``openThread`` deve pushare UNA
+    history entry solo al primo ingresso nel thread (non una per ogni
+    cambio contatto) e il popstate handler deve chiudere il thread
+    (tornare alla lista) invece di lasciare che il back esca dall'app;
+    solo un SECONDO back, a thread già chiuso, deve poter uscire."""
+    _run_node(r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const openStart = app.indexOf("function openThread(");
+const openEnd = app.indexOf("\nfunction normalizeEmojiSearch", openStart);
+const closeStart = app.indexOf("function closeThreadView(");
+const closeEnd = app.indexOf('\ndocument.querySelector("#dismiss-error")', closeStart);
+
+// Fake History API: a stack + a single popstate listener, close enough to
+// verify our push-once / consume-on-back contract without a real browser.
+const historyStack = [null];
+let historyIdx = 0;
+let popstateHandler = null;
+globalThis.window = {
+  addEventListener(type, handler) { if (type === "popstate") popstateHandler = handler; },
+};
+globalThis.history = {
+  pushState(s) { historyStack.length = historyIdx + 1; historyStack.push(s); historyIdx++; },
+  back() {
+    if (historyIdx === 0) return; // would leave the app: nothing left to pop
+    historyIdx--;
+    popstateHandler();
+  },
+};
+globalThis.state = { active: null, editing: null, messages: [], telegramRefreshTimer: null };
+globalThis.loadMessages = () => {};
+globalThis.closeEmojiPicker = () => {};
+globalThis.closeReactionPicker = () => {};
+globalThis.cancelReply = () => {};
+globalThis.cancelEdit = () => {};
+globalThis.protocolIcon = () => "";
+globalThis.renderContacts = () => {};
+globalThis.markRead = () => {};
+globalThis.abortMediaRequests = () => {};
+globalThis.updateTelegramRefreshTimer = () => {};
+globalThis.clearTelegramRefreshTimer = () => {};
+globalThis.document = {
+  createElement: () => ({ className: "", textContent: "" }),
+  querySelector: () => ({ addEventListener() {} }),
+};
+let threadOpenClass = false;
+const appClasses = {
+  add() { threadOpenClass = true; },
+  remove() { threadOpenClass = false; },
+  contains: (name) => name === "thread-open" && threadOpenClass,
+};
+globalThis.elements = {
+  threadName: {}, threadMeta: {}, app: { classList: appClasses }, composerShell: {},
+  messages: { replaceChildren() {}, append() {} },
+};
+vm.runInThisContext(app.slice(openStart, openEnd));
+vm.runInThisContext(app.slice(closeStart, closeEnd));
+
+// Open a thread, switch contact while it stays open: must push ONE entry.
+openThread({ id: "a", protocol: "signal", display_name: "A" });
+openThread({ id: "b", protocol: "signal", display_name: "B" });
+assert.equal(historyIdx, 1, "contact switch while thread stays open must not push a 2nd entry");
+assert.equal(threadOpenClass, true);
+
+// First back (swipe-back / browser back): closes the thread, does NOT leave the app.
+history.back();
+assert.equal(threadOpenClass, false, "first back must return to the chat list");
+assert.equal(historyIdx, 0);
+
+// Second back (already at the list): nothing left to intercept -> would leave the app.
+history.back();
+assert.equal(historyIdx, 0);
+
+// Reopening after a close must push again (no stale "already pushed" state).
+openThread({ id: "c", protocol: "signal", display_name: "C" });
+assert.equal(historyIdx, 1, "reopening a thread after a close must push a fresh entry");
+history.back();
+assert.equal(threadOpenClass, false);
 """)
 
 
