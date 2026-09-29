@@ -532,6 +532,7 @@ class WhatsAppBackend(ChatBackend):
                     event.payload.get("text") or "",
                     bool(event.payload.get("is_mine")),
                     int(event.payload.get("timestamp") or 0),
+                    require_history_source=True,
                 )
                 if hit is not None:
                     event = ChatEvent(
@@ -1402,6 +1403,13 @@ class WhatsAppBackend(ChatBackend):
         # cronologicamente, poi li ingeriamo nel cache.
         msgs = [m for m in raw if isinstance(m, dict)]
         msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
+        # Snapshot della cache PRIMA di questa ingestione: il confronto
+        # per l'edit-detection sotto deve avvenire solo contro messaggi già
+        # noti da una fetch/sessione precedente, mai contro "fratelli" dello
+        # stesso batch storico appena ingeriti in QUESTO ciclo (altrimenti
+        # più messaggi INOLTRATI insieme — ts ravvicinati — si scambiano a
+        # vicenda per un edit e uno dei due sparisce dalla UI).
+        pre_history_entries = list(self.cache.get(contact_id, []))
         # Riconciliazione read/delivery dallo storico: per i messaggi MIEI già
         # confermati (ack >= 2 = DEVICE) emettiamo eventi receipt (single
         # mutation point: nessuna scrittura cache/DB qui — sarà process_receipt
@@ -1422,16 +1430,18 @@ class WhatsAppBackend(ChatBackend):
                 # Uno storico WAHA riporta il testo GIÀ editato con id/ts
                 # originali: se il messaggio è già in cache con testo diverso,
                 # aggiorna la riga esistente invece di ingerire un duplicato.
-                if self._detect_edit(
+                edit_hit = self._detect_edit(
                     contact_id,
                     str(payload.get("id") or ""),
                     payload.get("text", ""),
                     is_mine,
                     int(payload.get("timestamp") or 0),
-                ):
+                    candidates_override=pre_history_entries,
+                )
+                if edit_hit is not None:
                     self.apply_edit(
                         contact_id,
-                        str(payload.get("id")),
+                        str(edit_hit.get("id") or payload.get("id")),
                         payload.get("text", ""),
                         is_mine=is_mine,
                     )
@@ -2765,6 +2775,7 @@ class WhatsAppBackend(ChatBackend):
                 "quote_content_type": data.get("quote_content_type"),
                 "batch_id": data.get("batch_id"),
                 "batch_index": data.get("batch_index"),
+                "_from_history": reconcile,
             },
         )
         return True
@@ -2776,6 +2787,9 @@ class WhatsAppBackend(ChatBackend):
         text: str,
         is_mine: bool,
         ts_ms: int,
+        *,
+        require_history_source: bool = False,
+        candidates_override: list[dict] | None = None,
     ) -> dict | None:
         """Ritorna l'entry cached target di un edit, o None.
 
@@ -2785,11 +2799,37 @@ class WhatsAppBackend(ChatBackend):
            possono differire tra webhook e REST (/api/messages), quindi un edit
            di un messaggio caricato via fetch_history potrebbe non matchare
            per id.  Il timestamp WhatsApp dell'edit è quello ORIGINALE.
+
+           ``require_history_source=True`` limita i candidati del fallback
+           (2) a righe originariamente ingerite da ``fetch_history``
+           (``reconcile=True``, marcate ``_from_history``): sulla live
+           webhook path (1) copre già l'edit reale (id stabile
+           webhook-webhook), quindi il fallback lì serve SOLO al caso
+           "id instabile REST↔webhook".  Senza questo filtro, due messaggi
+           NUOVI e distinti (es. più messaggi inoltrati insieme, che
+           arrivano ravvicinati nello stesso ±2s) vengono scambiati per un
+           edit: il secondo sovrascrive il testo del primo invece di
+           comparire come bolla propria.
+
+           ``candidates_override`` fissa il pool di entry cached contro cui
+           confrontare (uno snapshot *precedente* all'ingestione corrente),
+           invece di leggere ``self.cache`` dal vivo.  Serve a
+           ``fetch_history``: quando una chat viene aperta per la prima
+           volta (cache vuota) e lo storico contiene più messaggi INOLTRATI
+           insieme (ts ravvicinati, stesso batch), senza questo snapshot il
+           secondo messaggio del batch troverebbe il primo — appena
+           ingerito da questa stessa chiamata — come candidato unico entro
+           ±2s e verrebbe scambiato per un suo edit invece di comparire
+           come bolla propria.
         """
         if not text:
             return None
         normalized_text = _norm(text)
-        entries = self.cache.get(contact_id, [])
+        entries = (
+            candidates_override
+            if candidates_override is not None
+            else self.cache.get(contact_id, [])
+        )
         if msg_id:
             for msg in entries:
                 if bool(msg.get("is_mine")) != bool(is_mine):
@@ -2806,6 +2846,7 @@ class WhatsAppBackend(ChatBackend):
                 for m in entries
                 if not m.get("is_mine")
                 and m.get("msg_type", "text") == "text"
+                and (not require_history_source or m.get("_from_history"))
                 and abs(int(m.get("timestamp") or 0) - ts_ms) <= 2000
                 and _norm(m.get("text", "")) != normalized_text
             ]
