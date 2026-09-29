@@ -727,6 +727,121 @@ class TestWhatsAppEvents:
         assert ev is not None
         assert ev.payload["sender"] == "999999999@lid"
 
+    def test_mention_in_text_resolved_to_contact_name(self):
+        """Bug: WhatsApp lascia un @mention nel body come "@<numero/lid>"
+        grezzo invece di risolverlo al nome del contatto (lo fa l'app
+        ufficiale lato client). ``@191882160263217`` deve diventare
+        ``@Marco``."""
+        from models import ChatContact
+
+        contacts = {
+            "191882160263217@lid": ChatContact(
+                id="191882160263217@lid",
+                display_name="Marco",
+                protocol=PROTOCOL_WHATSAPP,
+            ),
+        }
+        ev = _msg(
+            {
+                "id": "m1",
+                "from": "123456789@g.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "participant": "3912345678@c.us",
+                "body": (
+                    "Dovevo giocare oggi 12:30 con @191882160263217 ma sono influenzato"
+                ),
+            },
+            contacts,
+        )
+        assert ev is not None
+        assert ev.payload["text"] == (
+            "Dovevo giocare oggi 12:30 con @Marco ma sono influenzato"
+        )
+
+    def test_mention_unknown_contact_left_unchanged(self):
+        """Un @<numero> che non corrisponde a nessun contatto noto resta
+        invariato (mai una sostituzione indovinata)."""
+        ev = _msg(
+            {
+                "id": "m2",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "body": "ciao @999999999999999 come va",
+            },
+            {},
+        )
+        assert ev is not None
+        assert ev.payload["text"] == "ciao @999999999999999 come va"
+
+    def test_mention_no_matching_contact_among_known_contacts_left_unchanged(self):
+        """Con una rubrica NON vuota ma senza alcun contatto per quel
+        numero, la sostituzione (regex + lookup) deve comunque lasciare il
+        testo invariato invece di indovinare."""
+        from models import ChatContact
+
+        contacts = {
+            "111111111@lid": ChatContact(
+                id="111111111@lid", display_name="Alice", protocol=PROTOCOL_WHATSAPP
+            ),
+        }
+        ev = _msg(
+            {
+                "id": "m2b",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "body": "ciao @999999999999999 come va",
+            },
+            contacts,
+        )
+        assert ev is not None
+        assert ev.payload["text"] == "ciao @999999999999999 come va"
+
+    def test_mention_short_digit_run_not_treated_as_phone_number(self):
+        """Un "@" seguito da pochi digit (es. un anno, un orario senza i
+        due punti) non deve mai matchare per puro caso un numero/lid reale
+        a 5+ cifre: resta testo normale."""
+        ev = _msg(
+            {
+                "id": "m3",
+                "from": "3912345678@c.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "body": "vediamoci @20",
+            },
+            {},
+        )
+        assert ev is not None
+        assert ev.payload["text"] == "vediamoci @20"
+
+    def test_mention_multiple_in_same_message_all_resolved(self):
+        """Più mention nello stesso messaggio vengono risolte tutte."""
+        from models import ChatContact
+
+        contacts = {
+            "111111111@lid": ChatContact(
+                id="111111111@lid", display_name="Alice", protocol=PROTOCOL_WHATSAPP
+            ),
+            "222222222@lid": ChatContact(
+                id="222222222@lid", display_name="Bob", protocol=PROTOCOL_WHATSAPP
+            ),
+        }
+        ev = _msg(
+            {
+                "id": "m4",
+                "from": "123456789@g.us",
+                "timestamp": 1700000000,
+                "fromMe": False,
+                "participant": "3912345678@c.us",
+                "body": "@111111111 e @222222222 potete venire?",
+            },
+            contacts,
+        )
+        assert ev is not None
+        assert ev.payload["text"] == "@Alice e @Bob potete venire?"
+
     def test_direct_message_not_group(self):
         """Un messaggio diretto (@c.us) non è un gruppo."""
         ev = _msg(

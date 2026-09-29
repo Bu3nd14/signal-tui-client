@@ -321,6 +321,37 @@ def _resolve_sender_name(sender: str, contacts_by_jid: dict | None) -> str:
     return sender
 
 
+# WhatsApp leaves an in-text @mention as a literal "@<digits>" substring in
+# the message body — the mentioned participant's phone number or @lid id,
+# same shape as a group ``sender`` JID — instead of resolving it to a name
+# (the official app does that client-side against its own contact list).
+# 5-20 digits covers real phone/LID numbers; the trailing ``(?!\d)`` keeps a
+# longer run from being truncated.
+_MENTION_RE = re.compile(r"@(\d{5,20})(?!\d)")
+
+
+def _resolve_text_mentions(
+    text: str | None, contacts_by_jid: dict | None
+) -> str | None:
+    """Replace raw WhatsApp ``@<number>`` mentions with the contact's name.
+
+    Reuses ``_resolve_sender_name``'s exact-JID / number-part matching, so a
+    digit run that isn't an actual known contact is left untouched (never a
+    guess) — e.g. "vediamoci @2024" with no such contact renders unchanged.
+    """
+    if not text or "@" not in text or not contacts_by_jid:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        digits = match.group(1)
+        resolved = _resolve_sender_name(f"{digits}@lid", contacts_by_jid)
+        if resolved == f"{digits}@lid":
+            return match.group(0)
+        return f"@{resolved}"
+
+    return _MENTION_RE.sub(_replace, text)
+
+
 def _event_from_message(
     raw: dict, contacts_by_jid: dict | None = None
 ) -> list[ChatEvent]:
@@ -391,6 +422,7 @@ def _event_from_message(
         or (raw.get("message") or {}).get("conversation")
         or ""
     )
+    text = _resolve_text_mentions(text, contacts_by_jid)
     ts = raw.get("timestamp")
     ts_ms = 0
     if isinstance(ts, (int, float)):
@@ -400,10 +432,8 @@ def _event_from_message(
         ts_ms = t * 1000 if t < 10**12 else t
     msg_id = raw.get("id") or (raw.get("key") or {}).get("id") or str(ts_ms)
     msg_type = _msg_type(raw)
-    caption = (
-        raw.get("caption")
-        or str(raw.get("body") or raw.get("text") or "").strip()
-        or ""
+    caption = _resolve_text_mentions(raw.get("caption") or "", contacts_by_jid) or (
+        text.strip() or ""
     )
     if _looks_like_embedded_media(caption):
         caption = ""
@@ -543,7 +573,7 @@ def _event_from_message(
     sender = _resolve_sender_name(sender, contacts_by_jid)
 
     quote = raw.get("replyTo") or raw.get("quote") or raw.get("quotedMessage")
-    quote_text = _wa_quote_text(quote)
+    quote_text = _resolve_text_mentions(_wa_quote_text(quote), contacts_by_jid)
     quote_timestamp = None
     quote_author = None
     reply_to_message_id = None
