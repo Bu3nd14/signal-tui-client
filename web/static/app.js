@@ -1447,6 +1447,8 @@ function renderMessages(messages, protocol) {
   }
   const nextNodes = new Map();
   const orderedEls = [];
+  // true se almeno un nodo è stato ricostruito (fingerprint cambiato).
+  let rebuilt = false;
   for (const item of displayed) {
     const key = messageNodeKey(item);
     // Fingerprint del contenuto: se identico a quello con cui il nodo
@@ -1461,6 +1463,7 @@ function renderMessages(messages, protocol) {
     if (existing && existing.fingerprint === fingerprint) {
       nodeEntry = existing;
     } else {
+      rebuilt = true;
       const built = buildMessageNode(item, protocol, stickToBottom);
       nodeEntry = {
         el: built.el,
@@ -1480,13 +1483,73 @@ function renderMessages(messages, protocol) {
     nextNodes.set(key, nodeEntry);
     orderedEls.push(nodeEntry.el);
   }
-  // replaceChildren con nodi già esistenti li sposta (detach+reattach),
-  // non li ricrea: i nodi riusati (fingerprint invariato) restano gli stessi
-  // elementi DOM, quindi niente re-fetch di immagini/quote né spinner.
-  elements.messages.replaceChildren(...orderedEls);
+  // Il patch al DOM deve essere il minimo indispensabile: replaceChildren su
+  // tutta la lista riattacca (detach+reattach) ogni nodo e sulle chat lunghe
+  // blocca il main thread. Scegliamo quindi la strategia meno invasiva.
+  const prevKeys = [...previousNodes.keys()];
+  const nextKeys = [...nextNodes.keys()];
+  const currentChildren = [...elements.messages.children];
+  const prevEls = prevKeys.map((key) => previousNodes.get(key).el);
+  // Il DOM corrisponde davvero ai nodi del render precedente?
+  const domInSync =
+    currentChildren.length === prevEls.length
+    && currentChildren.every((el, i) => el === prevEls[i]);
+  const sameSequence =
+    currentChildren.length === orderedEls.length
+    && currentChildren.every((el, i) => el === orderedEls[i]);
+  // Gli stub DOM dei test possono non implementare replaceWith: se un nodo è
+  // stato ricostruito e replaceWith manca, ripieghiamo sul replaceChildren.
+  const supportsReplaceWith =
+    !rebuilt || typeof prevEls[0]?.replaceWith === "function";
+
+  let domChanged = false;
+  if (sameSequence) {
+    // Nulla è cambiato: nessuna scrittura DOM (evita il reflow che causava il jank).
+  } else if (supportsReplaceWith && domInSync && prevKeys.length === nextKeys.length
+             && isPositionalReplacement(prevKeys, nextKeys)) {
+    // Stesse posizioni, alcune chiavi sostituite (es. optimistic opt:X -> id
+    // confermato): sostituisci in place solo i nodi diversi.
+    domChanged = true;
+    for (let i = 0; i < orderedEls.length; i += 1) {
+      if (currentChildren[i] !== orderedEls[i]) currentChildren[i].replaceWith(orderedEls[i]);
+    }
+  } else if (supportsReplaceWith && domInSync && prevKeys.length < nextKeys.length
+             && prevKeys.every((key, i) => key === nextKeys[i])) {
+    // Append-only (caso comune: nuovi messaggi/ottimistico in coda): sostituisci
+    // in place gli eventuali nodi ricostruiti nel prefisso e appendi i nuovi.
+    domChanged = true;
+    for (const key of nextKeys) {
+      const entry = nextNodes.get(key);
+      const prev = previousNodes.get(key);
+      if (prev && prev.el !== entry.el) prev.el.replaceWith(entry.el);
+    }
+    for (let i = prevKeys.length; i < nextKeys.length; i += 1) {
+      elements.messages.append(nextNodes.get(nextKeys[i]).el);
+    }
+  } else {
+    // Riordino/rimozioni/dubbi sulla corrispondenza col DOM: fallback sicuro.
+    domChanged = true;
+    elements.messages.replaceChildren(...orderedEls);
+  }
+
   state.messageNodes = nextNodes;
-  if (wasAtBottom) scrollThreadToBottom();
-  else elements.messages.scrollTop = Math.min(prevScrollTop, elements.messages.scrollHeight);
+  if (domChanged) {
+    if (wasAtBottom) scrollThreadToBottom();
+    else elements.messages.scrollTop = Math.min(prevScrollTop, elements.messages.scrollHeight);
+  }
+}
+
+function isPositionalReplacement(prevKeys, nextKeys) {
+  // true se le differenze sono solo sostituzioni nella stessa posizione (una
+  // chiave esce e una nuova entra), non riordini. O(n) con due Set.
+  if (prevKeys.length !== nextKeys.length) return false;
+  const prevSet = new Set(prevKeys);
+  const nextSet = new Set(nextKeys);
+  for (let i = 0; i < prevKeys.length; i += 1) {
+    if (prevKeys[i] === nextKeys[i]) continue;
+    if (nextSet.has(prevKeys[i]) || prevSet.has(nextKeys[i])) return false;
+  }
+  return true;
 }
 
 function copyReactions(reactions) {
@@ -2110,7 +2173,13 @@ function updateComposer() {
   // e inviare il messaggio successivo senza aspettare che il precedente
   // arrivi a destinazione (ogni invio ha un optimistic_id indipendente).
   const busy = state.editSending || state.voiceStarting || Boolean(state.voiceRecorder) || state.attachmentSending;
-  const spinning = busy || state.sending > 0;
+  // L'outbox non incrementa state.sending: guardiamo anche gli optimistic della
+  // chat attiva in stato "sending", così lo spinner appare anche per i testi.
+  const activeSending = state.optimistic.some((item) =>
+    item.optimisticStatus === "sending"
+    && item.protocol === state.active?.protocol
+    && item.contactId === state.active?.id);
+  const spinning = busy || state.sending > 0 || activeSending;
   elements.sendMessage.disabled = busy || (!elements.messageInput.value.trim() && !state.stagedAttachments.length);
   elements.messageInput.disabled = busy;
   elements.cancelReply.disabled = busy;
@@ -2592,6 +2661,7 @@ function onOutboxUpdate(record) {
   }
   if (changed && state.active) {
     renderMessages(state.messages, state.active.protocol);
+    updateComposer();
   }
 }
 
