@@ -289,6 +289,15 @@ class WhatsAppBackend(ChatBackend):
         self._media_lock = threading.Lock()
         self._media_resolver_thread: threading.Thread | None = None
         self._media_resolver_stop = False
+        #: @lid mentioned in a message's text but neither a known contact
+        #: nor in the persistent lid cache (e.g. a group member who has
+        #: never sent a message we've processed): resolved in background so
+        #: at least FUTURE mentions of the same person show a name/phone
+        #: instead of the raw internal id (see _schedule_mention_lid_resolve).
+        self._mention_lid_pending: dict[str, dict] = {}
+        self._mention_lid_lock = threading.Lock()
+        self._mention_lid_resolver_thread: threading.Thread | None = None
+        self._mention_lid_resolver_stop = False
 
         # ── Address book (rubrica completa) ────────────────────────────
         self._address_book: list[ChatContact] | None = None
@@ -500,7 +509,12 @@ class WhatsAppBackend(ChatBackend):
                 if chat and msg_id:
                     self._schedule_media_resolve(chat, str(msg_id))
 
-        events = _event_from_raw(raw, self._contacts_by_jid, self._lid_lookup)
+        events = _event_from_raw(
+            raw,
+            self._contacts_by_jid,
+            self._lid_lookup,
+            self._schedule_mention_lid_resolve,
+        )
         if not events:
             # Even when the raw event is not recognised as a receipt/typing
             # (e.g. message.ack with status < 2), enqueue the synthetic message
@@ -751,6 +765,13 @@ class WhatsAppBackend(ChatBackend):
         thread = self._media_resolver_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2)
+        self._mention_lid_resolver_stop = True
+        mention_thread = self._mention_lid_resolver_thread
+        if (
+            mention_thread is not None
+            and mention_thread is not threading.current_thread()
+        ):
+            mention_thread.join(timeout=2)
 
     # ─── Contacts / active chats (one-shot discovery, no polling) ────
     # La ricezione degli eventi è tutta PUSH via webhook (handle_webhook).  I
@@ -1422,7 +1443,12 @@ class WhatsAppBackend(ChatBackend):
                 msg_id = m.get("id") or (m.get("key") or {}).get("id")
                 if msg_id:
                     self._schedule_media_resolve(contact_id, str(msg_id))
-            events = _event_from_message(m, self._contacts_by_jid, self._lid_lookup)
+            events = _event_from_message(
+                m,
+                self._contacts_by_jid,
+                self._lid_lookup,
+                self._schedule_mention_lid_resolve,
+            )
             for event in events:
                 payload = event.payload
 
@@ -2126,7 +2152,10 @@ class WhatsAppBackend(ChatBackend):
                             normalized.setdefault("id", msg_id)
                             normalized.setdefault("timestamp", fallback_ts)
                             events = _event_from_message(
-                                normalized, self._contacts_by_jid, self._lid_lookup
+                                normalized,
+                                self._contacts_by_jid,
+                                self._lid_lookup,
+                                self._schedule_mention_lid_resolve,
                             )
                     except Exception:
                         logger.debug(
@@ -2159,6 +2188,92 @@ class WhatsAppBackend(ChatBackend):
                             )
             except Exception:
                 logger.debug("WhatsApp media resolver loop failed", exc_info=True)
+            time.sleep(0.5)
+
+    def _schedule_mention_lid_resolve(self, jid: str) -> None:
+        """Schedule background resolution of a mentioned ``@lid``.
+
+        Called when a text @mention resolves through neither a known
+        contact nor the persistent lid cache (typically a group member who
+        has never sent a message we've processed, so nothing warmed up
+        their lid).  Resolving it here means later messages mentioning the
+        same person show a name/phone instead of the raw internal id — the
+        message that triggered this call keeps showing the raw id (its
+        text isn't retroactively patched).
+        """
+        if not jid or self._mention_lid_resolver_stop:
+            return
+        with self._mention_lid_lock:
+            if jid in self._mention_lid_pending:
+                return
+            self._mention_lid_pending[jid] = {"attempts": 0, "next": time.time()}
+        self._start_mention_lid_resolver()
+
+    def _start_mention_lid_resolver(self) -> None:
+        """Start the mentioned-lid resolver thread once."""
+        with self._mention_lid_lock:
+            if self._mention_lid_resolver_stop:
+                return
+            thread = self._mention_lid_resolver_thread
+            if thread is not None and thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._mention_lid_resolve_loop,
+                name="wa-mention-lid-resolver",
+                daemon=True,
+            )
+            self._mention_lid_resolver_thread = thread
+            thread.start()
+
+    def _mention_lid_resolve_loop(self) -> None:
+        """Resolve pending mentioned lids without blocking message ingestion."""
+        delays = (2.0, 5.0, 15.0)
+        while not self._mention_lid_resolver_stop:
+            try:
+                now = time.time()
+                with self._mention_lid_lock:
+                    due = [
+                        jid
+                        for jid, pending in self._mention_lid_pending.items()
+                        if pending["next"] <= now
+                    ]
+                for jid in due:
+                    if self._mention_lid_resolver_stop:
+                        break
+                    with self._mention_lid_lock:
+                        pending = self._mention_lid_pending.get(jid)
+                        if pending is None or pending["next"] > time.time():
+                            continue
+                        pending["attempts"] += 1
+                        attempts = pending["attempts"]
+                    resolved = None
+                    try:
+                        resolved = self._lid_resolve_remote(jid)
+                    except Exception:
+                        logger.debug(
+                            "WhatsApp mention lid resolve failed: jid=%s attempt=%s",
+                            jid,
+                            attempts,
+                            exc_info=True,
+                        )
+                    if resolved:
+                        self._lid_cache_save()
+                        with self._mention_lid_lock:
+                            self._mention_lid_pending.pop(jid, None)
+                        continue
+                    with self._mention_lid_lock:
+                        pending = self._mention_lid_pending.get(jid)
+                        if pending is None:
+                            continue
+                        if attempts < 3:
+                            pending["next"] = time.time() + delays[attempts - 1]
+                        else:
+                            self._mention_lid_pending.pop(jid, None)
+                            logger.debug(
+                                "WhatsApp mention lid resolve give up: jid=%s", jid
+                            )
+            except Exception:
+                logger.debug("WhatsApp mention lid resolver loop failed", exc_info=True)
             time.sleep(0.5)
 
     # ─── Event consumption (for the TUI poll worker) ──────────────────
