@@ -157,7 +157,7 @@ Tipo (`models.ChatEvent.type`) e payload prodotti dai backend e dispatchati da `
 | `"message_edit"` | `{edit_message_id: str, text, timestamp: int (ts ORIGINALE), edit_timestamp: int\|None, is_mine: bool, sender, contact?: ChatContact\|None, msg_type: "text"}` | tutti |
 | `"typing"` | `{action: "STARTED"\|"STOPPED"}` | Signal, WhatsApp (presence), Telegram |
 | `"receipt"` | Signal: `{receipt: {isDelivery, isRead, timestamps[]}}`; WhatsApp/Telegram: `{message_ids: [...], is_read: bool}` (consumato con `contact_id` dell'evento) | tutti |
-| `"contact_update"` | definito in `models.ChatEvent` (payload ChatContact dict); nessun dispatcher UI dedicato oggi | — |
+| `"contact_update"` | `{phone: str, display_name: str\|None, contact: ChatContact}` | WhatsApp (risoluzione dinamica `@lid` in `protocols/whatsapp.py`); dispatchato da `tui/events.py::_handle_contact_update_event` |
 
 Dettagli campi e semantica: [CONTRACTS.md](CONTRACTS.md#32-eventi-chatevent).
 

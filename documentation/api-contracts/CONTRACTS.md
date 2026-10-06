@@ -130,9 +130,9 @@ ChatEvent(type: str, protocol: str, contact_id: str, payload: dict)
 | `message_edit` | `{edit_message_id: str, text: str, timestamp: int (ts ORIGINALE), edit_timestamp: int\|None, is_mine: bool, sender: str, contact: ChatContact\|None, msg_type: "text"}` | consumato da `_handle_edit_event`; chiama `backend.apply_edit(...)` |
 | `typing` | `{action: "STARTED"\|"STOPPED"}` | effimero: mai in cache/chat log |
 | `receipt` | Signal `{receipt: {isDelivery: bool, isRead: bool, timestamps: [int]}}`; WA/TG `{message_ids: [str], is_read: bool}` | vedi §7 |
-| `contact_update` | definito in `models.ChatEvent` (payload ChatContact dict) | nessun dispatcher UI dedicato al momento |
+| `contact_update` | `{phone: str, display_name: str\|None, contact: ChatContact}` | dispatchato da `tui/events.py::_handle_contact_update_event`; emesso da WhatsApp su risoluzione dinamica di un `@lid` |
 
-Il dispatch UI (`tui/events.py::_handle_event`) gestisce nell'ordine: typing → receipt → message_edit → message; tipi ignoti → ignorati.
+Il dispatch UI (`tui/events.py::_handle_event`) gestisce nell'ordine: typing → receipt → message_edit → message → sent-mirror → contact_update; tipi ignoti → ignorati.
 
 Test trasversali: `tests/test_ui_protocol.py`, `tests/test_backends.py`, fixture envelope in `tests/conftest.py` (`sample_envelope_text/image/receipt`).
 

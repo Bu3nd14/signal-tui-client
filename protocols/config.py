@@ -318,6 +318,11 @@ def get_wa_lid_cache_ttl_days() -> int:
     return _get_int("wa_lid_cache_ttl_days", "WA_LID_CACHE_TTL_DAYS", 30)
 
 
+def get_wa_lid_retry_cooldown_s() -> int:
+    """Cooldown di ri-armo per lid non risolti (default 300s)."""
+    return _get_int("wa_lid_retry_cooldown_s", "WA_LID_RETRY_COOLDOWN_S", 300)
+
+
 def get_picker_max_results() -> int:
     """Return the max number of rendered picker results (default ``50``)."""
     return _get_int("picker_max_results", "PICKER_MAX_RESULTS", 50)

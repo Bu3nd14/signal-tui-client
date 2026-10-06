@@ -41,6 +41,7 @@ from .base import ChatBackend, should_upgrade_outgoing_attachment
 from .config import (
     get_address_book_ttl_s,
     get_wa_lid_cache_ttl_days,
+    get_wa_lid_retry_cooldown_s,
     get_whatsapp_api_key,  # noqa: F401  re-export (whatsapp_rest reads it via protocols.whatsapp)
     get_whatsapp_media_dir,
     get_whatsapp_session_name,
@@ -183,6 +184,19 @@ def _looks_like_phone(name: str, phone: str | None) -> bool:
     return name_digits == phone_digits
 
 
+def _is_placeholder_display_name(
+    display_name: str, contact_id: str, phone: str | None
+) -> bool:
+    """True se display_name è un fallback sostituibile (mai un nome reale)."""
+    if not display_name:
+        return True
+    if display_name == contact_id:
+        return True
+    if contact_id.endswith("@lid") and display_name == contact_id.split("@", 1)[0]:
+        return True
+    return _looks_like_phone(display_name, phone or _jid_digits(contact_id))
+
+
 def _build_address_book_name_map(book: list[ChatContact]) -> dict[str, str]:
     """Mappa telefono->nome e lid->nome, SOLO da entry rubrica (source == 'wa_book')."""
     name_map: dict[str, str] = {}
@@ -298,6 +312,12 @@ class WhatsAppBackend(ChatBackend):
         self._mention_lid_lock = threading.Lock()
         self._mention_lid_resolver_thread: threading.Thread | None = None
         self._mention_lid_resolver_stop = False
+        #: Cooldown di ri-armo per i lid che hanno già esaurito i tentativi:
+        #: evita che i trigger secondari (webhook/history) ri-schedulino in
+        #: continuazione lo stesso lid non risolvibile.  Vedi
+        #: ``_schedule_contact_lid_resolve``.
+        self._contacts_lock = threading.Lock()
+        self._lid_attempt_cooldown: dict[str, float] = {}
 
         # ── Address book (rubrica completa) ────────────────────────────
         self._address_book: list[ChatContact] | None = None
@@ -536,6 +556,9 @@ class WhatsAppBackend(ChatBackend):
         # raw event key to avoid repeats.
         for event in events:
             if event.type == "message":
+                # Ogni messaggio è un trigger di ri-armo per la risoluzione
+                # dinamica del lid del contatto (scoperto dopo l'avvio).
+                self._schedule_contact_lid_resolve(event.contact_id)
                 # Lazy per-chat presence subscribe on the first message from a
                 # contact we haven't subscribed yet (covers new chats).
                 self._presence_subscribe_lazy(event.contact_id)
@@ -865,8 +888,10 @@ class WhatsAppBackend(ChatBackend):
                     extras=extras,
                 )
             )
-        self.contacts = contacts
-        self._contacts_by_jid = {cc.id: cc for cc in contacts}
+        by_jid = {cc.id: cc for cc in contacts}
+        with ChatBackend._register_lock, self._contacts_lock:
+            self.contacts = contacts
+            self._contacts_by_jid = by_jid
         try:
             book = self.list_address_book_sync(force=False)
             _apply_address_book_names(self.contacts, _build_address_book_name_map(book))
@@ -913,12 +938,26 @@ class WhatsAppBackend(ChatBackend):
         ``_contacts_by_jid[@lid] → stesso oggetto`` (``setdefault``: non
         sovrascrive un mapping reale preesistente).
         """
-        appended = super().register_contact(contact)
-        if appended:
-            self._contacts_by_jid[contact.id] = contact
-        # L'alias è tentato anche quando il contatto è già noto: la cache LID
-        # può essersi popolata dopo la prima registrazione (§3.4).
-        self._register_lid_alias(contact)
+        # Append + aggiornamento mappa nella STESSA sezione critica usata dallo
+        # swap di ``_load_contacts`` (ordine lock ``_register_lock →
+        # _contacts_lock``).  Senza questo, lo swap del loader può inserirsi tra
+        # l'append (in ``super().register_contact``) e l'update di
+        # ``_contacts_by_jid``, lasciando un'entry orfana: contatto risolvibile
+        # via ``_identify_contact`` ma assente da ``self.contacts``.  La logica
+        # di dedup/append replica ``ChatBackend.register_contact`` perché quel
+        # metodo acquisisce già ``_register_lock`` (Lock non rientrante).
+        with ChatBackend._register_lock, self._contacts_lock:
+            appended = all(
+                existing.cache_key != contact.cache_key for existing in self.contacts
+            )
+            if appended:
+                self.contacts.append(contact)
+                self._contacts_by_jid[contact.id] = contact
+            # L'alias è tentato anche quando il contatto è già noto: la cache
+            # LID può essersi popolata dopo la prima registrazione (§3.4).
+            # Ordine lock: _register_lock → _contacts_lock → _lid_lock.
+            self._register_lid_alias(contact)
+        self._schedule_contact_lid_resolve(contact.id)
         return appended
 
     def _register_lid_alias(self, contact: ChatContact) -> None:
@@ -1450,6 +1489,8 @@ class WhatsAppBackend(ChatBackend):
                 self._schedule_mention_lid_resolve,
             )
             for event in events:
+                if event.type == "message":
+                    self._schedule_contact_lid_resolve(event.contact_id)
                 payload = event.payload
 
                 is_mine = payload.get("is_mine", False)
@@ -2190,24 +2231,147 @@ class WhatsAppBackend(ChatBackend):
                 logger.debug("WhatsApp media resolver loop failed", exc_info=True)
             time.sleep(0.5)
 
-    def _schedule_mention_lid_resolve(self, jid: str) -> None:
-        """Schedule background resolution of a mentioned ``@lid``.
+    def _schedule_lid_resolve(self, jid: str, kind: str) -> None:
+        """Dedup/coalescing di un ``@lid`` da risolvere in background.
 
-        Called when a text @mention resolves through neither a known
-        contact nor the persistent lid cache (typically a group member who
-        has never sent a message we've processed, so nothing warmed up
-        their lid).  Resolving it here means later messages mentioning the
-        same person show a name/phone instead of the raw internal id — the
-        message that triggered this call keeps showing the raw id (its
-        text isn't retroactively patched).
+        Regola di upgrade: se il lid è già pending, un ``kind="contact"``
+        promuove l'entry (mai il contrario), così la risoluzione seguirà il
+        percorso più ricco (apply sul contatto).  Tutto l'accesso a
+        ``_mention_lid_pending`` avviene sotto ``_mention_lid_lock``;
+        ``_start_mention_lid_resolver`` è invocato FUORI dal lock per evitare
+        il self-deadlock.
         """
-        if not jid or self._mention_lid_resolver_stop:
+        if not jid or not jid.endswith("@lid"):
+            return
+        if self._mention_lid_resolver_stop:
             return
         with self._mention_lid_lock:
-            if jid in self._mention_lid_pending:
+            pending = self._mention_lid_pending.get(jid)
+            if pending is not None:
+                if kind == "contact":
+                    pending["kind"] = "contact"
                 return
-            self._mention_lid_pending[jid] = {"attempts": 0, "next": time.time()}
+            self._mention_lid_pending[jid] = {
+                "attempts": 0,
+                "next": time.time(),
+                "kind": kind,
+            }
         self._start_mention_lid_resolver()
+
+    def _schedule_mention_lid_resolve(self, jid: str) -> None:
+        """Wrapper retro-compatibile: schedula la risoluzione di un mention.
+
+        Chiamato quando un @mention non si risolve né da un contatto noto né
+        dalla cache lid persistente (tipicamente un membro di gruppo che non
+        ha mai mandato un messaggio processato).  Così i mention FUTURI della
+        stessa persona mostrano nome/numero invece dell'id interno grezzo; il
+        messaggio che ha innescato la chiamata resta invariato.
+        """
+        self._schedule_lid_resolve(jid, "mention")
+
+    def _schedule_contact_lid_resolve(self, jid: str) -> None:
+        """Schedula la risoluzione dinamica del ``@lid`` di un contatto.
+
+        Trigger: un messaggio webhook/storico da un ``@lid`` scoperto dopo
+        l'avvio, mai risolto dal warm-up dei contatti.  N4: ``_lid_lookup``
+        è I/O lazy su ``_lid_cache_load``, tipicamente già caricato da
+        ``_load_contacts`` (memory-only dopo il primo load).  N6:
+        ``attempts`` è condiviso per-lid e NON viene resettato sull'upgrade
+        mention→contact: il budget di tentativi è per lid, deliberatamente.
+        """
+        if not jid or not jid.endswith("@lid"):
+            return
+        if self._mention_lid_resolver_stop:
+            return
+        if not self._rest:
+            return
+        cached_phone = self._lid_lookup(jid)  # solo positivo; N4
+        if cached_phone:
+            # Già risolto in cache: nessuna chiamata REST (una sola resolve
+            # per lid).  Il contatto però può non essere ancora materializzato
+            # — o avere un display_name illeggibile (raw ``@lid``/``@c.us``) —
+            # quindi applichiamo la risoluzione DALLA CACHE.  Il guard sul
+            # display evita di ri-applicare il fallback ``+phone`` già
+            # leggibile (nessun evento duplicate dal re-trigger di
+            # ``register_contact``).
+            target = self._identify_contact(jid)
+            display = target.display_name if target is not None else ""
+            if (
+                target is None
+                or not display
+                or "@" in display
+                or display == jid.split("@", 1)[0]
+            ):
+                self._apply_contact_lid_resolution(jid, cached_phone)
+            return
+        now = time.monotonic()
+        with self._mention_lid_lock:
+            last = self._lid_attempt_cooldown.get(jid)
+            if last is not None and (now - last) < get_wa_lid_retry_cooldown_s():
+                return
+            pending = self._mention_lid_pending.get(jid)
+            if pending is not None:
+                pending["kind"] = "contact"
+                return
+            self._mention_lid_pending[jid] = {
+                "attempts": 0,
+                "next": now,
+                "kind": "contact",
+            }
+        self._start_mention_lid_resolver()  # FUORI dal lock
+
+    def _apply_contact_lid_resolution(self, jid: str, phone: str) -> None:
+        """Applica al contatto la risoluzione dinamica di un ``@lid``.
+
+        Single mutation point: aggiorna extras/display_name ed enqueue-a un
+        ``contact_update`` (NON chiama ``push_event``: lo fa la TUI).
+        Double-checked locking: nessun lock è tenuto durante
+        ``register_contact`` (ordine lock ``_contacts_lock → _lid_lock``).
+        """
+        entry = (self._lid_map or {}).get(jid)  # N5
+        name_cache = entry.get("name") if isinstance(entry, dict) else None
+        name_rubrica = _cached_address_book_name(self, phone or None, jid or None)
+        new_name = name_rubrica or name_cache or (f"+{phone}" if phone else None)
+
+        target = self._identify_contact(jid)
+        if target is None:
+            target = next((c for c in list(self.contacts) if c.id == jid), None)
+        if target is None:
+            created = ChatContact(
+                id=jid,
+                display_name=new_name or jid,
+                protocol=PROTOCOL_WHATSAPP,
+                extras={},
+            )
+            self.register_contact(created)  # nessun lock tenuto qui
+            target = self._identify_contact(jid) or created
+        # Robustezza (nota avversariale): invariante bidirezionale, cioè
+        # ``_contacts_by_jid[jid]`` presente ANCHE in ``self.contacts``.  Lo
+        # swap di ``_load_contacts`` può essersi inserito tra la
+        # materializzazione e qui; ri-ancoriamo il target nella STESSA sezione
+        # critica dello swap (``_register_lock → _contacts_lock``), senza mai
+        # tenere ``_contacts_lock`` attorno a ``register_contact``.
+        with ChatBackend._register_lock, self._contacts_lock:
+            listed = next((c for c in self.contacts if c.id == target.id), None)
+            if listed is None:
+                self.contacts.append(target)
+            else:
+                target = listed
+            self._contacts_by_jid.setdefault(jid, target)
+
+        target.extras = {**target.extras, "phone": phone, "lid": jid}
+        if _is_placeholder_display_name(target.display_name, jid, phone):
+            target.display_name = new_name or target.display_name
+
+        self._address_book = None
+        self._enqueue_event(
+            ChatEvent(
+                type="contact_update",
+                protocol=PROTOCOL_WHATSAPP,
+                contact_id=jid,
+                payload={"phone": phone, "display_name": new_name, "contact": target},
+            )
+        )
 
     def _start_mention_lid_resolver(self) -> None:
         """Start the mentioned-lid resolver thread once."""
@@ -2259,7 +2423,11 @@ class WhatsAppBackend(ChatBackend):
                     if resolved:
                         self._lid_cache_save()
                         with self._mention_lid_lock:
-                            self._mention_lid_pending.pop(jid, None)
+                            popped = self._mention_lid_pending.pop(jid, None)
+                            kind = (popped or {}).get("kind", "mention")
+                            self._lid_attempt_cooldown.pop(jid, None)
+                        if kind == "contact":
+                            self._apply_contact_lid_resolution(jid, resolved)
                         continue
                     with self._mention_lid_lock:
                         pending = self._mention_lid_pending.get(jid)
@@ -2269,6 +2437,7 @@ class WhatsAppBackend(ChatBackend):
                             pending["next"] = time.time() + delays[attempts - 1]
                         else:
                             self._mention_lid_pending.pop(jid, None)
+                            self._lid_attempt_cooldown[jid] = time.monotonic()
                             logger.debug(
                                 "WhatsApp mention lid resolve give up: jid=%s", jid
                             )

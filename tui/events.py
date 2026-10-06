@@ -63,7 +63,36 @@ class EventHandlingMixin:
             return self._handle_message_event(event)
         if event.type == "sent-mirror":
             return self._handle_sent_mirror_event(event)
+        if event.type == "contact_update":
+            return self._handle_contact_update_event(event)
         return False
+
+    def _handle_contact_update_event(self, event: ChatEvent) -> bool:
+        """Applica in UI un contatto risolto dinamicamente.
+
+        Il backend è l'unico punto di mutazione del contatto: qui marchiamo
+        solo la lista come sporca e, se la web UI è attiva, inoltriamo il push.
+        Non ingerisce messaggi né duplica la logica di
+        ``_handle_message_event``.
+        """
+        cache_key = contact_cache_key(event.protocol, event.contact_id)
+        self._contact_list_dirty = True
+        self._dirty_contact_keys.add(cache_key)
+        if getattr(self, "_web_enabled", False):
+            from web.bridge import push_event
+
+            push_event(
+                {
+                    "type": "contact_update",
+                    "payload": {
+                        "protocol": event.protocol,
+                        "contact_id": event.contact_id,
+                        "display_name": event.payload.get("display_name"),
+                        "phone": event.payload.get("phone"),
+                    },
+                }
+            )
+        return True
 
     def _handle_sent_mirror_event(self, event: ChatEvent) -> bool:
         """Handle the lightweight ``sent-mirror`` notification (batch sends).
@@ -104,14 +133,18 @@ class EventHandlingMixin:
                 display_name=_resolve_placeholder_name(backend, event.contact_id),
                 protocol=event.protocol,
             )
-            # New contact discovered live — add to lists and trigger re-render
-            existing = {c.cache_key for c in self.contacts}
-            if contact.cache_key not in existing:
-                self.contacts.append(contact)
-                if hasattr(backend, "contacts"):
-                    backend.contacts.append(contact)
-                self._contact_list_dirty = True
-                self._dirty_contact_keys.add(contact.cache_key)
+        # Ensure the contact is in the TUI list: a contact materialized by the
+        # dynamic lid resolver and returned by ``_identify_contact`` must still
+        # be added, so this check lives OUTSIDE the ``contact is None`` branch.
+        existing = {c.cache_key for c in self.contacts}
+        if contact.cache_key not in existing:
+            self.contacts.append(contact)
+            if hasattr(backend, "register_contact"):
+                backend.register_contact(contact)
+            elif hasattr(backend, "contacts"):
+                backend.contacts.append(contact)
+            self._contact_list_dirty = True
+            self._dirty_contact_keys.add(contact.cache_key)
 
         # Promote the contact in the "most recent first" ordering; the
         # re-sort/render is deferred to the end of the poll batch by the
@@ -146,14 +179,18 @@ class EventHandlingMixin:
                     display_name=_resolve_placeholder_name(backend, event.contact_id),
                     protocol=event.protocol,
                 )
-                # New contact discovered live — add to lists and trigger re-render
-                existing = {c.cache_key for c in self.contacts}
-                if contact.cache_key not in existing:
-                    self.contacts.append(contact)
-                    if hasattr(backend, "contacts"):
-                        backend.contacts.append(contact)
-                    self._contact_list_dirty = True
-                    self._dirty_contact_keys.add(contact.cache_key)
+        # Ensure the contact is in the TUI list: a contact materialized by the
+        # dynamic lid resolver and returned by ``_identify_contact`` must still
+        # be added, so this check lives OUTSIDE the ``contact is None`` branch.
+        existing = {c.cache_key for c in self.contacts}
+        if contact.cache_key not in existing:
+            self.contacts.append(contact)
+            if hasattr(backend, "register_contact"):
+                backend.register_contact(contact)
+            elif hasattr(backend, "contacts"):
+                backend.contacts.append(contact)
+            self._contact_list_dirty = True
+            self._dirty_contact_keys.add(contact.cache_key)
         cache_key = contact.cache_key
         ts = event.payload.get("timestamp", 0)
         is_mine = event.payload.get("is_mine", False)

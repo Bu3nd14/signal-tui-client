@@ -14,6 +14,8 @@ import json
 import os
 import sqlite3
 import sys
+import threading
+import time
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -33,6 +35,7 @@ from protocols.whatsapp import (
     _event_from_raw,
     _event_from_receipt,
     _event_from_typing,
+    _is_placeholder_display_name,
     _looks_like_phone,
     _resolve_wa_media_chat_id,
 )
@@ -4758,3 +4761,452 @@ def test_mark_read_uses_send_seen_and_404_still_marks_local(caplog):
     records = [r for r in caplog.records if "path=/api/sendSeen" in r.getMessage()]
     assert len(records) == 1
     assert records[0].levelno == logging.DEBUG
+
+
+class TestWhatsAppLiveContactLidResolver:
+    """Bug: un messaggio da una persona in rubrica ma non nella chat list
+    arriva con JID/numero grezzo e resta così per sempre.  Il backend risolve
+    dinamicamente i ``@lid`` scoperti dopo l'avvio e notifica la UI con un
+    evento ``contact_update`` (single mutation point sul backend)."""
+
+    def _mocked(self) -> WhatsAppBackend:
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._lid_map = {}
+        return backend
+
+    # ── N1: apply senza/con materialize ───────────────────────────────
+
+    def test_n1_apply_updates_existing_target_without_materialize(self):
+        backend = self._mocked()
+        backend._lid_map = {
+            "111@lid": {
+                "phone": "393331112222",
+                "name": "Luca",
+                "resolved_at": int(time.time()),
+            }
+        }
+        target = ChatContact(
+            id="111@lid",
+            display_name="111",
+            protocol=PROTOCOL_WHATSAPP,
+            extras={"jid": "111@lid"},
+        )
+        backend.contacts = [target]
+        backend._contacts_by_jid = {"111@lid": target}
+
+        done = []
+
+        def run():
+            backend._apply_contact_lid_resolution("111@lid", "393331112222")
+            done.append(True)
+
+        worker = threading.Thread(target=run)
+        worker.start()
+        worker.join(timeout=3)
+        assert not worker.is_alive(), "deadlock in _apply_contact_lid_resolution"
+        assert done == [True]
+
+        assert target.extras["phone"] == "393331112222"
+        assert target.extras["lid"] == "111@lid"
+        assert target.display_name == "Luca"
+        assert backend._address_book is None
+        events = backend.poll_once()
+        assert [e.type for e in events] == ["contact_update"]
+        assert events[0].contact_id == "111@lid"
+        assert events[0].payload["display_name"] == "Luca"
+        assert events[0].payload["contact"] is target
+
+    def test_n1_apply_materializes_unknown_contact(self):
+        backend = self._mocked()
+        backend._lid_map = {
+            "222@lid": {
+                "phone": "393331112222",
+                "name": None,
+                "resolved_at": int(time.time()),
+            }
+        }
+        backend._apply_contact_lid_resolution("222@lid", "393331112222")
+        assert "222@lid" in backend._contacts_by_jid
+        created = backend._contacts_by_jid["222@lid"]
+        assert created in backend.contacts
+        assert created.extras["phone"] == "393331112222"
+        assert created.display_name == "+393331112222"
+        events = backend.poll_once()
+        assert [e.type for e in events] == ["contact_update"]
+        assert events[0].payload["contact"] is created
+
+    # ── N2: concorrenza load/register senza lost update o deadlock ────
+
+    def test_n2_concurrent_load_and_register_never_torn(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.list_contacts.return_value = [
+            {"id": "1@c.us", "name": "Loaded", "last_ts": 0}
+        ]
+        backend._lid_resolver_started = True
+        backend._lid_map = {}
+        backend.list_address_book_sync = MagicMock(return_value=[])
+
+        for index in range(60):
+            barrier = threading.Barrier(2)
+            errors: list[Exception] = []
+
+            def loader(barrier=barrier, errors=errors):
+                try:
+                    barrier.wait(timeout=2)
+                    backend._load_contacts()
+                except Exception as exc:  # noqa: BLE001 - failure path
+                    errors.append(exc)
+
+            def registrar(index=index, barrier=barrier, errors=errors):
+                try:
+                    barrier.wait(timeout=2)
+                    backend.register_contact(
+                        ChatContact(
+                            id=f"{index}@c.us",
+                            display_name=f"R{index}",
+                            protocol=PROTOCOL_WHATSAPP,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - failure path
+                    errors.append(exc)
+
+            ta = threading.Thread(target=loader)
+            tb = threading.Thread(target=registrar)
+            ta.start()
+            tb.start()
+            ta.join(timeout=3)
+            tb.join(timeout=3)
+            assert not ta.is_alive() and not tb.is_alive(), (
+                "deadlock in _load_contacts/register_contact"
+            )
+            assert errors == []
+
+            loaded = next(c for c in backend.contacts if c.id == "1@c.us")
+            assert backend._contacts_by_jid["1@c.us"] is loaded
+            # Nessuno stato "torn": ogni contatto in lista ha il mapping
+            # coerente in _contacts_by_jid ...
+            for contact in list(backend.contacts):
+                assert backend._contacts_by_jid.get(contact.id) is contact
+            # ... e viceversa: nessuna entry orfana nella mappa (contatto
+            # risolvibile via _identify_contact ma assente da self.contacts).
+            # Lo swap del loader e l'append+update del registrar devono essere
+            # atomici (stessa sezione critica _register_lock → _contacts_lock).
+            for jid, contact in list(backend._contacts_by_jid.items()):
+                assert any(listed is contact for listed in backend.contacts), (
+                    f"entry orfana {jid} -> {contact.id} assente da self.contacts"
+                )
+
+        backend.disconnect_sync()
+
+    def test_n2_apply_materialize_survives_concurrent_load(self):
+        """Lo swap del loader tra register e setdefault non deve lasciare
+        un'entry orfana nella mappa (contatto assente da ``self.contacts``)."""
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.list_contacts.return_value = [
+            {"id": "1@c.us", "name": "Loaded", "last_ts": 0}
+        ]
+        backend.list_address_book_sync = MagicMock(return_value=[])
+        backend._lid_resolver_started = True
+        backend._lid_map = {
+            "x@lid": {
+                "phone": "393331112222",
+                "name": "X",
+                "resolved_at": int(time.time()),
+            }
+        }
+
+        orig_register = backend.register_contact
+
+        def register_then_reload(contact):
+            result = orig_register(contact)
+            backend._load_contacts()  # swap subito dopo la materializzazione
+            return result
+
+        backend.register_contact = register_then_reload
+        backend._apply_contact_lid_resolution("x@lid", "393331112222")
+
+        resolved = backend._contacts_by_jid["x@lid"]
+        assert any(c is resolved for c in backend.contacts)
+        for jid, contact in list(backend._contacts_by_jid.items()):
+            assert any(listed is contact for listed in backend.contacts), (
+                f"entry orfana {jid} -> {contact.id} assente da self.contacts"
+            )
+
+    # ── N3: upgrade mention → contact ─────────────────────────────────
+
+    def test_n3_mention_entry_upgraded_to_contact_is_applied(self):
+        backend = self._mocked()
+        backend._lid_map = {}
+        backend._rest.resolve_contact.return_value = {
+            "id": "393330000000@c.us",
+            "name": "Marco",
+        }
+        try:
+            with backend._mention_lid_lock:
+                backend._mention_lid_pending["333@lid"] = {
+                    "attempts": 0,
+                    "next": time.time() + 1000,
+                    "kind": "mention",
+                }
+            backend._schedule_contact_lid_resolve("333@lid")
+            with backend._mention_lid_lock:
+                assert backend._mention_lid_pending["333@lid"]["kind"] == "contact"
+                backend._mention_lid_pending["333@lid"]["next"] = 0
+            backend._start_mention_lid_resolver()
+
+            deadline = time.monotonic() + 3
+            while (
+                time.monotonic() < deadline
+                and "333@lid" in backend._mention_lid_pending
+            ):
+                time.sleep(0.02)
+
+            with backend._mention_lid_lock:
+                assert "333@lid" not in backend._mention_lid_pending
+            assert backend._contacts_by_jid["333@lid"].display_name == "Marco"
+            events = backend.poll_once()
+            assert any(
+                e.type == "contact_update" and e.contact_id == "333@lid" for e in events
+            )
+            backend._rest.resolve_contact.assert_called_once_with("333@lid")
+        finally:
+            backend.disconnect_sync()
+
+    # ── B2: cooldown dopo give-up, poi ri-armo ────────────────────────
+
+    def test_b2_cooldown_after_give_up_blocks_then_rearms(self, monkeypatch):
+        backend = self._mocked()
+        backend._lid_map = {"444@lid": {"phone": None, "resolved_at": int(time.time())}}
+        backend._rest.resolve_contact.return_value = None
+        try:
+            backend._schedule_contact_lid_resolve("444@lid")
+            observed = -1
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                with backend._mention_lid_lock:
+                    pending = backend._mention_lid_pending.get("444@lid")
+                    if pending is None:
+                        break
+                    if pending["attempts"] != observed:
+                        observed = pending["attempts"]
+                        pending["next"] = 0
+                time.sleep(0.02)
+
+            assert backend._rest.resolve_contact.call_count == 3
+            with backend._mention_lid_lock:
+                assert "444@lid" not in backend._mention_lid_pending
+            assert "444@lid" in backend._lid_attempt_cooldown
+
+            # Ferma il resolver per rendere deterministici i ri-armi.
+            backend._mention_lid_resolver_stop = True
+            thread = backend._mention_lid_resolver_thread
+            if thread is not None:
+                thread.join(timeout=2)
+            backend._mention_lid_resolver_stop = False
+            backend._start_mention_lid_resolver = lambda: None
+
+            # Cooldown attivo: nessun ri-armo.
+            backend._schedule_contact_lid_resolve("444@lid")
+            with backend._mention_lid_lock:
+                assert "444@lid" not in backend._mention_lid_pending
+
+            # Cooldown scaduto: ri-armo.
+            monkeypatch.setattr(
+                "protocols.whatsapp.get_wa_lid_retry_cooldown_s", lambda: 0
+            )
+            backend._schedule_contact_lid_resolve("444@lid")
+            with backend._mention_lid_lock:
+                assert "444@lid" in backend._mention_lid_pending
+                assert backend._mention_lid_pending["444@lid"]["kind"] == "contact"
+        finally:
+            backend._mention_lid_resolver_stop = True
+            backend.disconnect_sync()
+
+    # ── B4: cache positiva → materializza dalla cache, zero rete ──────
+
+    def test_cache_hit_materializes_without_rest_and_readable_name(self):
+        """Un @lid già in cache (ma non materializzato) diventa un contatto
+        con fallback leggibile ``+phone`` senza alcuna ``resolve_contact``."""
+        backend = self._mocked()
+        backend._lid_map = {
+            "888@lid": {
+                "phone": "393331112222",
+                "name": None,
+                "resolved_at": int(time.time()),
+            }
+        }
+        backend._schedule_contact_lid_resolve("888@lid")
+
+        assert backend._rest.resolve_contact.call_count == 0
+        contact = backend._contacts_by_jid["888@lid"]
+        assert contact.display_name == "+393331112222"
+        assert "@lid" not in contact.display_name
+        assert contact.extras["phone"] == "393331112222"
+        events = backend.poll_once()
+        assert [e.type for e in events] == ["contact_update"]
+        assert events[0].contact_id == "888@lid"
+
+    def test_cache_hit_real_name_is_not_reapplied(self):
+        """Se il contatto ha già un nome reale, la cache positiva non deve
+        ri-applicare né emettere un secondo ``contact_update``."""
+        backend = self._mocked()
+        backend._lid_map = {
+            "888@lid": {
+                "phone": "393331112222",
+                "name": "Giulia",
+                "resolved_at": int(time.time()),
+            }
+        }
+        existing = ChatContact(
+            id="888@lid",
+            display_name="Giulia",
+            protocol=PROTOCOL_WHATSAPP,
+            extras={"phone": "393331112222", "lid": "888@lid"},
+        )
+        backend.contacts = [existing]
+        backend._contacts_by_jid = {"888@lid": existing}
+
+        backend._schedule_contact_lid_resolve("888@lid")
+
+        assert backend._rest.resolve_contact.call_count == 0
+        assert backend.poll_once() == []
+
+    def test_cache_hit_known_raw_lid_display_is_upgraded_once(self):
+        """Un contatto noto con display_name raw ``@lid`` viene corretto dalla
+        cache (una sola volta) e poi il trigger è idempotente."""
+        backend = self._mocked()
+        backend._lid_map = {
+            "888@lid": {
+                "phone": "393331112222",
+                "name": None,
+                "resolved_at": int(time.time()),
+            }
+        }
+        existing = ChatContact(
+            id="888@lid",
+            display_name="888@lid",
+            protocol=PROTOCOL_WHATSAPP,
+        )
+        backend.contacts = [existing]
+        backend._contacts_by_jid = {"888@lid": existing}
+
+        backend._schedule_contact_lid_resolve("888@lid")
+
+        assert existing.display_name == "+393331112222"
+        assert "@lid" not in existing.display_name
+        assert backend._rest.resolve_contact.call_count == 0
+        assert [e.type for e in backend.poll_once()] == ["contact_update"]
+
+        backend._schedule_contact_lid_resolve("888@lid")
+        assert backend.poll_once() == []
+
+    # ── B3: unit placeholder ──────────────────────────────────────────
+
+    def test_b3_is_placeholder_display_name(self):
+        assert _is_placeholder_display_name("", "1@c.us", None) is True
+        assert _is_placeholder_display_name("123@lid", "123@lid", None) is True
+        assert _is_placeholder_display_name("123", "123@lid", None) is True
+        assert _is_placeholder_display_name("+39123", "1@c.us", "39123") is True
+        assert _is_placeholder_display_name("Alice", "123@lid", None) is False
+        assert _is_placeholder_display_name("Alice", "1@c.us", "39123") is False
+
+    # ── End-to-end: webhook da @lid sconosciuto ───────────────────────
+
+    def test_end_to_end_webhook_unknown_lid_resolves_display(self):
+        backend = self._mocked()
+        backend._lid_map = {}
+        backend._rest.resolve_contact.return_value = {
+            "id": "393331234567@c.us",
+            "name": "Giulia",
+        }
+        try:
+            envelope = {
+                "event": "message",
+                "payload": {
+                    "id": "lid-msg-1",
+                    "from": "555123@lid",
+                    "fromMe": False,
+                    "body": "hey",
+                    "timestamp": 1700000000,
+                },
+            }
+            assert backend.handle_webhook(envelope) is True
+
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                contact = backend._contacts_by_jid.get("555123@lid")
+                if contact is not None and contact.display_name == "Giulia":
+                    break
+                time.sleep(0.02)
+
+            contact = backend._contacts_by_jid.get("555123@lid")
+            assert contact is not None
+            assert contact.display_name == "Giulia"
+            assert contact.extras.get("phone") == "393331234567"
+            events = backend.poll_once()
+            assert any(e.type == "contact_update" for e in events)
+        finally:
+            backend.disconnect_sync()
+
+    # ── Web manager espone il nome risolto ────────────────────────────
+
+    def test_web_manager_list_contacts_exposes_resolved_name(self):
+        from protocols.manager import BackendManager
+
+        backend = self._mocked()
+        backend._lid_map = {
+            "777@lid": {
+                "phone": "393330001111",
+                "name": "WebName",
+                "resolved_at": int(time.time()),
+            }
+        }
+        backend._apply_contact_lid_resolution("777@lid", "393330001111")
+
+        manager = BackendManager()
+        manager.register(backend)
+        resolved = [c for c in manager.list_contacts() if c.id == "777@lid"]
+        assert resolved and resolved[0].display_name == "WebName"
+
+    # ── Dedup mention+contact: una sola entry / una sola resolve ──────
+
+    def test_dedup_mention_then_contact_single_resolve(self):
+        backend = self._mocked()
+        backend._lid_map = {}
+        calls: list[str] = []
+        release = threading.Event()
+
+        def slow_resolve(jid):
+            calls.append(jid)
+            release.wait(timeout=3)
+            return {"id": "393330000000@c.us", "name": "Dedup"}
+
+        backend._rest.resolve_contact.side_effect = slow_resolve
+        try:
+            backend._schedule_mention_lid_resolve("999@lid")
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not calls:
+                time.sleep(0.01)
+            assert calls == ["999@lid"]
+
+            backend._schedule_contact_lid_resolve("999@lid")
+            with backend._mention_lid_lock:
+                assert list(backend._mention_lid_pending) == ["999@lid"]
+                assert backend._mention_lid_pending["999@lid"]["kind"] == "contact"
+
+            release.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                with backend._mention_lid_lock:
+                    if "999@lid" not in backend._mention_lid_pending:
+                        break
+                time.sleep(0.01)
+
+            assert calls == ["999@lid"]
+            assert backend._contacts_by_jid["999@lid"].display_name == "Dedup"
+        finally:
+            release.set()
+            backend.disconnect_sync()
