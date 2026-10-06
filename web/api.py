@@ -1711,21 +1711,24 @@ def create_api_router() -> Any:
         request: Request,
         proto: Literal["signal", "whatsapp", "telegram"],
         contact_id: str,
+        refresh: bool = False,
     ) -> list[dict[str, Any]]:
-        if proto == "telegram":
+        if refresh or proto == "telegram":
             try:
                 backend = request.app.state.manager.get(proto)
-                refreshed = await asyncio.to_thread(
-                    backend.fetch_history, contact_id, 20
-                )
-                logger.debug(
-                    "telegram reactions refresh: %s -> %d",
-                    contact_id,
-                    len(refreshed),
-                )
+                fetch = getattr(backend, "fetch_history", None)
+                if fetch is not None and contact_id:
+                    refreshed = await asyncio.to_thread(fetch, contact_id, 20)
+                    logger.debug(
+                        "%s history refresh: %s -> %d",
+                        proto,
+                        contact_id,
+                        len(refreshed),
+                    )
             except Exception:
                 logger.debug(
-                    "telegram reactions refresh failed: %s",
+                    "%s history refresh failed: %s",
+                    proto,
                     contact_id,
                     exc_info=True,
                 )

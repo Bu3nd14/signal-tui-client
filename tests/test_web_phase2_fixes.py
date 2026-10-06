@@ -64,6 +64,44 @@ def test_messages_refreshes_only_telegram_history(protocol, expected_calls):
         telegram.fetch_history.assert_called_once_with("42", 20)
 
 
+def test_messages_refreshes_whatsapp_history_when_refresh_requested():
+    whatsapp = SimpleNamespace(fetch_history=MagicMock(return_value=[{}, {}]))
+    manager = SimpleNamespace(
+        get=MagicMock(return_value=whatsapp),
+        list_contacts=MagicMock(return_value=[]),
+    )
+    app = FastAPI()
+    app.state.manager = manager
+    app.include_router(create_api_router())
+
+    with patch("web.api._messages", return_value=[]), TestClient(app) as client:
+        response = client.get(
+            "/api/messages",
+            params={"proto": "whatsapp", "contact_id": "42", "refresh": "1"},
+        )
+
+    assert response.status_code == 200
+    whatsapp.fetch_history.assert_called_once_with("42", 20)
+
+
+def test_messages_refresh_without_fetch_history_is_safe():
+    manager = SimpleNamespace(
+        get=MagicMock(return_value=SimpleNamespace()),
+        list_contacts=MagicMock(return_value=[]),
+    )
+    app = FastAPI()
+    app.state.manager = manager
+    app.include_router(create_api_router())
+
+    with patch("web.api._messages", return_value=[]), TestClient(app) as client:
+        response = client.get(
+            "/api/messages",
+            params={"proto": "whatsapp", "contact_id": "42", "refresh": "1"},
+        )
+
+    assert response.status_code == 200
+
+
 def test_telegram_attachment_upgrade_works_in_both_event_orders(monkeypatch, tmp_path):
     db_file = _db(monkeypatch, tmp_path)
     media_dir = tmp_path / "telegram-media"
