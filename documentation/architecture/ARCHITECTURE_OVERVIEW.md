@@ -167,7 +167,7 @@ Vedi `tui/send.py::on_message_text_area_submitted` e `_send_message_worker`:
 
 ## 7. Punti di estensione
 
-- Aggiungere un protocollo = implementare `ChatBackend` (`backends/base.py`), registrarlo in `tui/app.py::__init__` e gestire eventuali nuovi tipi evento in `tui/events.py::_handle_event`. I tipi evento oggi supportati sono: `message`, `message_edit`, `typing`, `receipt`, `contact_update` (definito in `models.ChatEvent`; i primi quattro sono quelli effettivamente dispatchati dalla UI).
+- Aggiungere un protocollo = implementare `ChatBackend` (`backends/base.py`), registrarlo in `tui/app.py::__init__` e gestire eventuali nuovi tipi evento in `tui/events.py::_handle_event`. I tipi evento oggi supportati sono: `message`, `message_edit`, `typing`, `receipt`, `contact_update` (definito in `models.ChatEvent`; tutti dispatchati dalla UI, `contact_update` via `_handle_contact_update_event`).
 - Le funzionalità opzionali del contratto base (edit, rubrica, pairing) hanno default sicuri: `edit_message_sync → False`, `apply_edit → None`, `list_address_book_sync → contacts correnti`, `needs_pairing → False`.
 
 ## Documenti collegati

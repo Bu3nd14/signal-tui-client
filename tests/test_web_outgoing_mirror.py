@@ -1743,8 +1743,9 @@ def test_sent_mirror_uses_backend_identify_when_not_in_tui_list():
 
     assert app._handle_sent_mirror_event(event) is True
     assert known.last_message_ts == 1_787_250_931_234
-    # Known contact: no placeholder appended, no duplicates.
-    assert app.contacts == []
+    # Known contact: promoted into the TUI list (the dynamic lid resolver may
+    # materialize a contact the TUI has never seen), no placeholder duplicate.
+    assert app.contacts == [known]
 
 
 def test_sent_mirror_creates_placeholder_for_unknown_contact():

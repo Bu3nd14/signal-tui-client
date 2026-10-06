@@ -3118,6 +3118,16 @@ function connectSocket() {
             loadMessages();
           }
           break;
+        case "contact_update":
+          loadContacts({ quiet: true });
+          if (state.active && state.active.id === String(update.payload.contact_id)
+              && state.active.protocol === update.payload.protocol) {
+            if (update.payload.display_name) {
+              state.active.display_name = update.payload.display_name;
+              if (elements.threadName) elements.threadName.textContent = update.payload.display_name;
+            }
+          }
+          break;
         case "receipt":
           applyReceiptUpdates(update.payload);
           break;
