@@ -418,6 +418,40 @@ class TestWADedup:
             }
         ]
 
+    def test_c_us_duplicate_with_lid_number_dedups_on_real_phone(self):
+        """Due righe @c.us Praful: ``number`` LID non crea un contatto fantasma."""
+        raw = [
+            {
+                "id": "491621098189@c.us",
+                "number": "101649158803580",
+                "name": "Praful Mechanda",
+                "pushname": "Praful",
+            },
+            {
+                "id": "491621098189@c.us",
+                "number": "491621098189",
+                "name": "Praful Mechanda",
+                "pushname": "Praful",
+            },
+        ]
+        assert _dedup_book_contacts(raw) == [
+            {"phone": "491621098189", "name": "Praful Mechanda", "pushname": "Praful"}
+        ]
+
+    def test_c_us_row_with_only_lid_number_keeps_real_phone(self):
+        """Anche da sola, una riga @c.us con ``number`` LID usa le cifre di ``id``."""
+        raw = [
+            {
+                "id": "491621098189@c.us",
+                "number": "101649158803580",
+                "name": "Praful",
+                "pushname": None,
+            }
+        ]
+        assert _dedup_book_contacts(raw) == [
+            {"phone": "491621098189", "name": "Praful", "pushname": None}
+        ]
+
 
 class TestWARestAddressBook:
     """🔌 Nuovi metodi REST del client WhatsApp."""
