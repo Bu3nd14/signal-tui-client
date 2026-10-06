@@ -102,13 +102,16 @@ def _jid_digits(jid: str) -> str:
 def _dedup_book_contacts(raw: list[dict]) -> list[dict]:
     """Deduplicate the WAHA address book by phone number (pure, unit-testable).
 
-    Key = digits of the phone number.  WAHA exposes an explicit ``number``
-    field (``id`` may instead be a ``@lid`` "linked identifier"); when present
-    it takes priority over the digits of ``id`` so a ``@lid`` row is keyed by
-    the real phone and can be looked up by the group-sender resolver.
-    ``_serialized`` dict ids are handled.  Entries with an empty key or
-    ``@broadcast``/``@newsletter``/``@g.us`` are dropped.  Among duplicates of
-    the same number the winner is chosen by: (1) a non-empty ``name`` over
+    Key = digits of the phone number.  For phone-based jids (``@c.us`` /
+    ``@s.whatsapp.net``) the authoritative source is ``id``: WAHA may expose a
+    *duplicate* ``@c.us`` row whose ``number`` holds the LID digits (not the
+    phone), which would otherwise create a ghost contact.  The explicit
+    ``number`` field is therefore prioritised **only** for ``@lid`` rows (where
+    ``id`` is the linked identifier and ``number`` is the real phone), so the
+    row is keyed by the real phone and can be looked up by the group-sender
+    resolver.  ``_serialized`` dict ids are handled.  Entries with an empty key
+    or ``@broadcast``/``@newsletter``/``@g.us`` are dropped.  Among duplicates
+    of the same number the winner is chosen by: (1) a non-empty ``name`` over
     only-``pushname``, (2) the ``@c.us`` domain, (3) first occurrence (stable).
 
     Output rows carry an additive ``lid`` key when the source id (or an
@@ -138,9 +141,16 @@ def _dedup_book_contacts(raw: list[dict]) -> list[dict]:
         if "@broadcast" in jid or "@newsletter" in jid or jid.endswith("@g.us"):
             continue
         # WAHA: a ``@lid`` contact carries the linked identifier in ``id`` and
-        # the real phone in ``number``.  Prefer the explicit number when given.
-        number_field = entry.get("number") or entry.get("phoneNumber")
-        digits = _jid_digits(str(number_field)) if number_field else _jid_digits(jid)
+        # the real phone in ``number`` (prefer it there).  For phone-based jids
+        # the ``id`` is authoritative: a duplicate ``@c.us`` row may carry LID
+        # digits in ``number`` and must not spawn a ghost contact.
+        if jid.endswith(("@c.us", "@s.whatsapp.net")):
+            digits = _jid_digits(jid)
+        else:
+            number_field = entry.get("number") or entry.get("phoneNumber")
+            digits = (
+                _jid_digits(str(number_field)) if number_field else _jid_digits(jid)
+            )
         if not digits:
             continue
         lid = jid if jid.endswith("@lid") else _jid_string(entry.get("lid"))
@@ -1429,6 +1439,27 @@ class WhatsAppBackend(ChatBackend):
         except Exception:
             logger.warning("WhatsApp presence subscribe sweep failed", exc_info=True)
 
+    def _resolve_fetch_lid(self, contact_id: str) -> str | None:
+        """Ritorna l'alias ``@lid`` su cui ripiegare per una chat ``@c.us``.
+
+        Su WAHA moderno una chat attiva può esistere solo sotto ``@lid`` anche
+        se la rubrica l'ha registrata col numero (``@c.us``): la GET
+        ``/api/messages`` sul ``@c.us`` può quindi tornare vuota o "No LID".
+        L'alias viene preso prima dagli ``extras`` del contatto registrato, poi
+        dalla cache LID inversa (zero rete).
+        """
+        if not contact_id.endswith("@c.us"):
+            return None
+        contact = self._contacts_by_jid.get(contact_id)
+        if contact is not None:
+            lid = _jid_string(contact.extras.get("lid"))
+            if lid and lid.endswith("@lid") and lid != contact_id:
+                return lid
+        lid = self._phone_to_lid(_jid_digits(contact_id))
+        if lid and lid.endswith("@lid") and lid != contact_id:
+            return lid
+        return None
+
     def fetch_history(self, contact_id: str, limit: int = 20) -> list[dict]:
         """Scarica lo storico remoto di una chat da WAHA e lo salva nel cache.
 
@@ -1438,25 +1469,35 @@ class WhatsAppBackend(ChatBackend):
         gli arrivi live, limitati).  Normalizza i messaggi con
         ``_event_from_message`` e li ingerisce nel cache locale.
 
+        Se il ``@c.us`` non ha storico prova l'eventuale alias ``@lid``
+        (``_resolve_fetch_lid``), ma ingerisce sempre sotto ``contact_id``.
+
         Ritorna la lista (già ordinata) dei messaggi normalizzati per il
         contatto, oppure ``[]`` se l'API non risponde (fallback non distruttivo).
         """
-        if (
-            not _is_fetchable_jid(contact_id)
-            or contact_id in self._history_unfetchable
-            or not self._rest
-        ):
+        if not _is_fetchable_jid(contact_id) or not self._rest:
             return []
         # Lazy per-chat presence subscribe: aprire una chat è il segnale che
         # vogliamo anche il suo indicatore di digitazione.
         self._presence_subscribe_lazy(contact_id)
-        raw = self._rest.list_messages(contact_id, limit=limit)
-        if (
-            raw == []
-            and self._rest.last_status == 500
-            and "No LID" in (self._rest.last_error or "")
-        ):
-            self._history_unfetchable.add(contact_id)
+        candidates = [contact_id]
+        lid = self._resolve_fetch_lid(contact_id)
+        if lid:
+            candidates.append(lid)
+        raw = None
+        for index, chat_id in enumerate(candidates):
+            if chat_id in self._history_unfetchable:
+                continue
+            raw = self._rest.list_messages(chat_id, limit=limit)
+            if isinstance(raw, list) and raw:
+                break
+            no_lid = self._rest.last_status == 500 and "No LID" in (
+                self._rest.last_error or ""
+            )
+            # Blacklista per-sessione solo l'ULTIMO candidato: con un alias
+            # ``@lid`` disponibile un "No LID" sul ``@c.us`` non è definitivo.
+            if no_lid and index == len(candidates) - 1:
+                self._history_unfetchable.add(chat_id)
         if not isinstance(raw, list):
             return []
         # WAHA ritorna i messaggi dal più recente in giù; li riordiniamo

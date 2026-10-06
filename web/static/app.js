@@ -1681,14 +1681,14 @@ function setMessageTick(entry, status) {
   entry.tickEl.title = title;
 }
 
-async function loadMessages() {
+async function loadMessages(refresh = false) {
   const active = state.active;
   if (!active) return;
   state.messageRequest?.abort();
   const controller = new AbortController();
   state.messageRequest = controller;
   try {
-    const query = new URLSearchParams({ proto: active.protocol, contact_id: active.id });
+    const query = new URLSearchParams({ proto: active.protocol, contact_id: active.id, ...(refresh ? { refresh: "1" } : {}) });
     const response = await apiFetch(`/api/messages?${query}`, { signal: controller.signal });
     const messages = await response.json();
     if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
@@ -2014,7 +2014,7 @@ function openThread(contact) {
   loading.textContent = "Caricamento messaggi…";
   elements.messages.append(loading);
   abortMediaRequests();
-  loadMessages();
+  loadMessages(true);
 }
 
 function normalizeEmojiSearch(value) {
@@ -3086,7 +3086,7 @@ function connectSocket() {
     elements.connection.className = "connection-state online";
     setDotColor(COLOR_GREEN);
     elements.connection.textContent = "live";
-    if (state.active) loadMessages();
+    if (state.active) loadMessages(true);
     flushOutbox();
   };
   socket.onmessage = (event) => {

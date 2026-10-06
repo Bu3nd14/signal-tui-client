@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.error
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -4695,6 +4695,159 @@ def test_fetch_history_negative_caches_no_lid_500_for_session():
     assert backend.fetch_history("123@c.us") == []
 
     backend._rest.list_messages.assert_called_once_with("123@c.us", limit=20)
+
+
+def _book_contact_cus(phone: str, lid: str | None = None) -> ChatContact:
+    extras: dict[str, object] = {"phone": phone, "source": "wa_book"}
+    if lid:
+        extras["lid"] = lid
+    return ChatContact(
+        id=f"{phone}@c.us",
+        display_name="Mario",
+        protocol=PROTOCOL_WHATSAPP,
+        extras=extras,
+    )
+
+
+def _history_from(from_jid: str, text: str) -> list[dict]:
+    return [
+        {
+            "id": "m1",
+            "from": from_jid,
+            "fromMe": False,
+            "body": text,
+            "timestamp": 1700000000,
+        }
+    ]
+
+
+def test_fetch_history_falls_back_to_lid_when_cus_empty():
+    """Un contatto rubrica non-chat-attiva: lo storico è sotto ``@lid``."""
+    backend = _make_backend()
+    phone = "15771304468671"
+    cus = f"{phone}@c.us"
+    lid = "19645297868955@lid"
+    backend._contacts_by_jid[cus] = _book_contact_cus(phone, lid)
+    backend._rest.list_messages = MagicMock(
+        side_effect=[[], _history_from(lid, "ciao dal lid")]
+    )
+
+    result = backend.fetch_history(cus, limit=20)
+
+    assert backend._rest.list_messages.call_args_list == [
+        call(cus, limit=20),
+        call(lid, limit=20),
+    ]
+    assert len(result) == 1
+    assert backend.cache[cus][0]["text"] == "ciao dal lid"
+
+
+def test_fetch_history_no_lid_fallback_when_cus_has_data():
+    """Con storico sul ``@c.us`` non si interroga mai l'alias ``@lid``."""
+    backend = _make_backend()
+    phone = "15771304468671"
+    cus = f"{phone}@c.us"
+    lid = "19645297868955@lid"
+    backend._contacts_by_jid[cus] = _book_contact_cus(phone, lid)
+    backend._rest.list_messages = MagicMock(return_value=_history_from(cus, "ciao"))
+
+    result = backend.fetch_history(cus, limit=20)
+
+    backend._rest.list_messages.assert_called_once_with(cus, limit=20)
+    assert len(result) == 1
+    assert backend.cache[cus][0]["text"] == "ciao"
+
+
+def test_fetch_history_cus_not_blacklisted_when_lid_fallback_exists():
+    """Un "No LID" sul ``@c.us`` non è definitivo se esiste l'alias ``@lid``."""
+    backend = _make_backend()
+    phone = "15771304468671"
+    cus = f"{phone}@c.us"
+    lid = "19645297868955@lid"
+    backend._contacts_by_jid[cus] = _book_contact_cus(phone, lid)
+    backend._rest = MagicMock()
+
+    def stub(chat_id, limit=20):
+        if chat_id == cus:
+            backend._rest.last_status = 500
+            backend._rest.last_error = "No LID for user 15771304468671"
+            return []
+        backend._rest.last_status = 200
+        backend._rest.last_error = None
+        return _history_from(lid, "ciao dal lid")
+
+    backend._rest.list_messages.side_effect = stub
+
+    assert backend.fetch_history(cus, limit=20)
+    assert cus not in backend._history_unfetchable
+
+    # Una seconda fetch ritenta ancora il ``@c.us`` (nessuna blacklist).
+    assert backend.fetch_history(cus, limit=20)
+    assert backend._rest.list_messages.call_args_list.count(call(cus, limit=20)) == 2
+
+
+def test_fetch_history_blacklists_lid_when_both_no_lid():
+    """Se anche il ``@lid`` risponde "No LID" viene blacklistato per-sessione."""
+    backend = _make_backend()
+    phone = "15771304468671"
+    cus = f"{phone}@c.us"
+    lid = "19645297868955@lid"
+    backend._contacts_by_jid[cus] = _book_contact_cus(phone, lid)
+    backend._rest = MagicMock()
+
+    def stub(chat_id, limit=20):
+        backend._rest.last_status = 500
+        backend._rest.last_error = "No LID for user 15771304468671"
+        return []
+
+    backend._rest.list_messages.side_effect = stub
+
+    assert backend.fetch_history(cus, limit=20) == []
+    assert lid in backend._history_unfetchable
+    assert cus not in backend._history_unfetchable
+
+
+def test_resolve_fetch_lid_prefers_contact_extras_over_phone_cache():
+    """``extras["lid"]`` vince sulla reverse lookup della cache LID."""
+    backend = _make_backend()
+    phone = "15771304468671"
+    cus = f"{phone}@c.us"
+    extras_lid = "111@lid"
+    cache_lid = "222@lid"
+    backend._contacts_by_jid[cus] = _book_contact_cus(phone, extras_lid)
+    backend._phone_to_lid = MagicMock(return_value=cache_lid)
+    backend._rest.list_messages = MagicMock(
+        side_effect=[[], _history_from(extras_lid, "ciao")]
+    )
+
+    backend.fetch_history(cus, limit=20)
+
+    backend._phone_to_lid.assert_not_called()
+    assert backend._rest.list_messages.call_args_list == [
+        call(cus, limit=20),
+        call(extras_lid, limit=20),
+    ]
+
+
+def test_resolve_fetch_lid_falls_back_to_phone_cache():
+    """Senza ``extras["lid"]`` si usa la reverse lookup phone → ``@lid``."""
+    backend = _make_backend()
+    phone = "15771304468671"
+    cus = f"{phone}@c.us"
+    cache_lid = "222@lid"
+    backend._contacts_by_jid[cus] = _book_contact_cus(phone, lid=None)
+    backend._phone_to_lid = MagicMock(return_value=cache_lid)
+    backend._rest.list_messages = MagicMock(
+        side_effect=[[], _history_from(cache_lid, "ciao")]
+    )
+
+    backend.fetch_history(cus, limit=20)
+
+    backend._phone_to_lid.assert_called_once_with(phone)
+    assert backend._rest.list_messages.call_args_list == [
+        call(cus, limit=20),
+        call(cache_lid, limit=20),
+    ]
 
 
 def test_request_http_error_logs_local_status_and_single_line(caplog):
