@@ -92,7 +92,7 @@ def test_avatar_errors_do_not_write_negative_marker(monkeypatch, tmp_path):
     assert not avatar_cache._no_photo_marker(path).exists()
 
 
-@pytest.mark.parametrize("proto", ["telegram"])
+@pytest.mark.parametrize("proto", ["email"])
 def test_avatar_rejects_other_protocols(monkeypatch, tmp_path, proto):
     client = _client(monkeypatch, tmp_path, FakeRest(_AVATAR_URL))
 
@@ -208,7 +208,7 @@ def test_static_assets_declare_thread_avatar_and_stealth():
     assert 'id="thread-avatar"' in index
     assert 'id="stealth-toggle"' in index
     assert "style.css?v=68" in index
-    assert "app.js?v=122" in index
+    assert "app.js?v=123" in index
 
     app = Path("web/static/app.js").read_text(encoding="utf-8")
     assert "STEALTH_KEY" in app
@@ -280,7 +280,10 @@ assert.equal(
   contactAvatarUrl({ protocol: "signal", id: "+393357405121" }),
   "/api/contact-avatar?proto=signal&contact_id=%2B393357405121",
 );
-assert.equal(contactAvatarUrl({ protocol: "telegram", id: "1@c.us" }), null);
+assert.equal(
+  contactAvatarUrl({ protocol: "telegram", id: "1@c.us" }),
+  "/api/contact-avatar?proto=telegram&contact_id=1%40c.us",
+);
 assert.equal(contactAvatarUrl(null), null);
 """
     completed = subprocess.run(
@@ -407,16 +410,155 @@ def test_signal_avatar_rejects_path_traversal(monkeypatch, tmp_path):
     assert response.status_code == 404
 
 
-def test_avatar_rejects_telegram(monkeypatch, tmp_path):
-    response = _signal_avatar(
-        _signal_client(SignalBackend()), "1@c.us", proto="telegram"
-    )
-
-    assert response.status_code == 404
-
-
 @pytest.mark.parametrize("identifier", ["", "../x", "a/b", "a\\b", ".."])
 def test_resolve_avatar_path_rejects_unsafe(monkeypatch, tmp_path, identifier):
     monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
 
     assert resolve_avatar_path(identifier) is None
+
+
+_TG_JPEG = b"\xff\xd8\xff\xe0telegram-jpeg"
+_TG_PNG = b"\x89PNG\r\n\x1a\ntelegram-png"
+
+
+class FakeTelegramBackend:
+    def __init__(self, data: bytes | None):
+        self.data = data
+        self.calls = 0
+
+    def get_profile_photo_bytes(self, contact_id: str):
+        self.calls += 1
+        if self.data is None:
+            return None
+        return self.data, "image/jpeg"
+
+
+def _telegram_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, backend: FakeTelegramBackend
+) -> TestClient:
+    monkeypatch.setattr(avatar_cache, "CACHE_DIR", tmp_path)
+    manager = SimpleNamespace(
+        get=lambda protocol: backend if protocol == "telegram" else None
+    )
+    app = FastAPI()
+    app.state.manager = manager
+    app.include_router(create_api_router())
+    return TestClient(app)
+
+
+def test_telegram_avatar_serves_jpeg(monkeypatch, tmp_path):
+    backend = FakeTelegramBackend(_TG_JPEG)
+    client = _telegram_client(monkeypatch, tmp_path, backend)
+
+    response = client.get(_avatar_request(contact_id="123", proto="telegram"))
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content == _TG_JPEG
+    assert response.headers["cache-control"] == "private, max-age=86400"
+    assert backend.calls == 1
+
+
+def test_telegram_avatar_serves_png(monkeypatch, tmp_path):
+    backend = FakeTelegramBackend(_TG_PNG)
+    client = _telegram_client(monkeypatch, tmp_path, backend)
+
+    response = client.get(_avatar_request(contact_id="123", proto="telegram"))
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content == _TG_PNG
+
+
+def test_telegram_avatar_missing_returns_404(monkeypatch, tmp_path):
+    backend = FakeTelegramBackend(None)
+    client = _telegram_client(monkeypatch, tmp_path, backend)
+
+    response = client.get(_avatar_request(contact_id="123", proto="telegram"))
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "No profile picture"}
+    assert backend.calls == 1
+
+
+def test_telegram_avatar_cache_hit_and_ttl_refresh(monkeypatch, tmp_path):
+    monkeypatch.setattr(avatar_cache, "CACHE_DIR", tmp_path)
+    backend = FakeTelegramBackend(b"one")
+
+    first = avatar_cache.resolve_telegram_avatar(backend, "123")
+    second = avatar_cache.resolve_telegram_avatar(backend, "123")
+
+    assert first is not None and first == second
+    assert backend.calls == 1
+
+    backend.data = b"two"
+    beyond_ttl = time.time() + avatar_cache.TELEGRAM_AVATAR_TTL_SECONDS + 1
+    refreshed = avatar_cache.resolve_telegram_avatar(backend, "123", now=beyond_ttl)
+
+    assert refreshed is not None
+    assert refreshed[0] == b"two"
+    assert backend.calls == 2
+
+
+def test_concurrent_telegram_avatar_requests_fetch_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(avatar_cache, "CACHE_DIR", tmp_path)
+
+    class SlowBackend:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_profile_photo_bytes(self, contact_id: str):
+            self.calls += 1
+            time.sleep(0.05)
+            return _TG_JPEG, "image/jpeg"
+
+    backend = SlowBackend()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _index: avatar_cache.resolve_telegram_avatar(backend, "123"),
+                range(2),
+            )
+        )
+
+    assert all(result is not None for result in results)
+    assert backend.calls == 1
+
+
+def test_telegram_negative_marker_used_within_ttl(monkeypatch, tmp_path):
+    monkeypatch.setattr(avatar_cache, "CACHE_DIR", tmp_path)
+    backend = FakeTelegramBackend(None)
+
+    assert avatar_cache.resolve_telegram_avatar(backend, "123") is None
+    assert backend.calls == 1
+    path = avatar_cache._avatar_path_for("telegram-avatars", "123")
+    assert avatar_cache._no_photo_marker(path).is_file()
+
+    assert (
+        avatar_cache.resolve_telegram_avatar(
+            backend, "123", now=time.time() + avatar_cache.NO_PHOTO_TTL_SECONDS - 1
+        )
+        is None
+    )
+    assert backend.calls == 1
+
+    assert (
+        avatar_cache.resolve_telegram_avatar(
+            backend, "123", now=time.time() + avatar_cache.NO_PHOTO_TTL_SECONDS + 1
+        )
+        is None
+    )
+    assert backend.calls == 2
+
+
+def test_resolve_avatar_dispatches_telegram(monkeypatch, tmp_path):
+    monkeypatch.setattr(avatar_cache, "CACHE_DIR", tmp_path)
+    backend = FakeTelegramBackend(_TG_PNG)
+    manager = SimpleNamespace(
+        get=lambda protocol: backend if protocol == "telegram" else None
+    )
+
+    result = avatar_cache.resolve_avatar("telegram", manager, "123")
+
+    assert result == (_TG_PNG, "image/png")
+    assert backend.calls == 1

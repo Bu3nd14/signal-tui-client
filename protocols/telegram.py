@@ -43,6 +43,7 @@ from .config import (
     get_telegram_api_id,
     get_telegram_session_path,
 )
+from .media_utils import MAX_AVATAR_BYTES, sniff_image_content_type
 
 logger = logging.getLogger(__name__)
 
@@ -465,6 +466,53 @@ class TelegramBackend(ChatBackend):
         except Exception:
             logger.debug("Telegram: partial media download failed", exc_info=True)
             return None
+
+    def get_profile_photo_bytes(self, contact_id: str) -> tuple[bytes, str] | None:
+        """Return ``(data, content_type)`` for a peer avatar, or ``None``.
+
+        Telethon ``download_profile_photo(entity, file=bytes)`` downloads in
+        memory and returns the image ``bytes`` (or ``None`` when the peer has
+        no photo).  Covers users, groups and channels (negative ids).  Best
+        effort: never raises, runs on the dedicated event loop.
+        """
+        if self._client is None or self._loop is None:
+            return None
+        if not self._connected or not self._loop.is_running():
+            return None
+        try:
+            eid = int(contact_id)
+        except (ValueError, TypeError):
+            return None
+
+        async def _fetch() -> bytes | None:
+            try:
+                data = await self._client.download_profile_photo(eid, file=bytes)
+            except Exception:
+                logger.debug(
+                    "Telegram: profile photo lookup failed, retrying via entity",
+                    exc_info=True,
+                )
+                try:
+                    entity = await self._resolve_input_entity(eid)
+                    data = await self._client.download_profile_photo(entity, file=bytes)
+                except Exception:
+                    logger.debug(
+                        "Telegram: profile photo unavailable for %s", eid, exc_info=True
+                    )
+                    return None
+            return data
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(_fetch(), self._loop)
+            data = future.result(timeout=15)
+        except Exception:
+            logger.debug(
+                "Telegram: profile photo fetch failed for %s", contact_id, exc_info=True
+            )
+            return None
+        if not data or len(data) > MAX_AVATAR_BYTES:
+            return None
+        return data, sniff_image_content_type(data)
 
     # ─── Lifecycle ─────────────────────────────────────────────────────────
 

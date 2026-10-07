@@ -1625,7 +1625,7 @@ def create_api_router() -> Any:
 
     @router.get("/contact-avatar")
     async def contact_avatar(request: Request, proto: str, contact_id: str) -> Any:
-        if proto not in {"whatsapp", "signal"}:
+        if proto not in {"whatsapp", "signal", "telegram"}:
             raise HTTPException(status_code=404, detail="Not Found")
         if not contact_id.strip():
             raise HTTPException(status_code=400, detail="Invalid request")

@@ -1159,3 +1159,69 @@ class TestTelegramDisconnectLifecycle:
         client.disconnect.assert_not_called()
         assert backend._loop is None
         assert backend._client is None
+
+
+class TestTelegramProfilePhoto:
+    def _ready_backend(self, monkeypatch, download):
+        backend = _backend()
+        backend._connected = True
+        backend._loop = MagicMock()
+        backend._loop.is_running.return_value = True
+        backend._client = SimpleNamespace(
+            download_profile_photo=download,
+            get_input_entity=AsyncMock(return_value="entity"),
+        )
+        monkeypatch.setattr(
+            "protocols.telegram.asyncio.run_coroutine_threadsafe",
+            lambda coro, _loop: SimpleNamespace(
+                result=lambda timeout: asyncio.run(coro)
+            ),
+        )
+        return backend
+
+    def test_returns_none_without_client_or_running_loop(self):
+        backend = _backend()
+        assert backend.get_profile_photo_bytes("42") is None
+
+        backend._client = SimpleNamespace()
+        backend._loop = MagicMock()
+        backend._loop.is_running.return_value = False
+        assert backend.get_profile_photo_bytes("42") is None
+
+    def test_returns_none_for_non_numeric_id(self, monkeypatch):
+        backend = self._ready_backend(
+            monkeypatch, AsyncMock(return_value=b"\xff\xd8\xff")
+        )
+
+        assert backend.get_profile_photo_bytes("not-an-int") is None
+        backend._client.download_profile_photo.assert_not_awaited()
+
+    def test_returns_bytes_and_sniffed_content_type(self, monkeypatch):
+        photo = b"\xff\xd8\xff\xe0jpeg"
+        backend = self._ready_backend(monkeypatch, AsyncMock(return_value=photo))
+
+        assert backend.get_profile_photo_bytes("42") == (photo, "image/jpeg")
+        backend._client.download_profile_photo.assert_awaited_once_with(42, file=bytes)
+
+    def test_returns_none_when_no_photo(self, monkeypatch):
+        backend = self._ready_backend(monkeypatch, AsyncMock(return_value=None))
+
+        assert backend.get_profile_photo_bytes("42") is None
+
+    def test_falls_back_to_input_entity(self, monkeypatch):
+        photo = b"\xff\xd8\xff\xe0jpeg"
+        backend = self._ready_backend(
+            monkeypatch,
+            AsyncMock(side_effect=[RuntimeError("no entity"), photo]),
+        )
+
+        assert backend.get_profile_photo_bytes("42") == (photo, "image/jpeg")
+        backend._client.get_input_entity.assert_awaited_once_with(42)
+        assert backend._client.download_profile_photo.await_count == 2
+
+    def test_returns_none_on_exception(self, monkeypatch):
+        backend = self._ready_backend(
+            monkeypatch, AsyncMock(side_effect=RuntimeError("boom"))
+        )
+
+        assert backend.get_profile_photo_bytes("42") is None
