@@ -2,6 +2,7 @@
 
 const TOKEN_KEY = "signal-tui-web-token";
 const PROTOCOL_KEY = "signal-tui-web-proto";
+const STEALTH_KEY = "signal-tui-web-stealth";
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 // Heartbeat watchdog: the server fans out a ``{"type":"heartbeat"}`` frame
 // every ~5s (web/ws.py).  If nothing at all arrives for this long, the socket
@@ -38,6 +39,9 @@ const state = {
     return PROTOCOLS.includes(saved) ? saved : "signal";
   })(),
   active: null,
+  // True quando le immagini profilo sono nascoste (solo iniziali): nessuna
+  // richiesta a /api/contact-avatar parte mentre è attiva.
+  stealth: localStorage.getItem(STEALTH_KEY) === "1",
   // True quando è stata pushata una history entry per il thread aperto
   // (mobile back/swipe-back): evita di accumulare una entry per ogni
   // cambio di contatto mentre il thread resta aperto.
@@ -97,6 +101,7 @@ const elements = {
   messages: document.querySelector("#message-list"),
   threadName: document.querySelector("#thread-name"),
   threadMeta: document.querySelector("#thread-meta"),
+  threadAvatar: document.querySelector("#thread-avatar"),
   connection: document.querySelector("#connection-state"),
   errorBanner: document.querySelector("#error-banner"),
   errorText: document.querySelector("#error-text"),
@@ -111,6 +116,7 @@ const elements = {
   tokenInput: document.querySelector("#token-input"),
   tokenError: document.querySelector("#token-error"),
   saveToken: document.querySelector("#save-token"),
+  stealthToggle: document.querySelector("#stealth-toggle"),
   composer: document.querySelector("#composer"),
   composerShell: document.querySelector("#composer-shell"),
   messageInput: document.querySelector("#message-input"),
@@ -279,6 +285,7 @@ function releaseAvatarSlot() {
 }
 
 function contactAvatarUrl(contact) {
+  if (state.stealth) return null;
   if (!contact || contact.protocol !== "whatsapp" || !contact.id) return null;
   return `/api/contact-avatar?proto=whatsapp&contact_id=${encodeURIComponent(contact.id)}`;
 }
@@ -357,6 +364,18 @@ function setupContactAvatar(avatarEl, contact, url) {
   } else {
     load();
   }
+}
+
+function renderThreadAvatar(contact) {
+  const avatar = elements.threadAvatar;
+  if (!avatar) return;
+  avatar.replaceChildren();
+  if (!contact) return;
+  // La testata è sempre visibile: nessun IntersectionObserver, fetch diretto
+  // riusando la cache di sessione (blob URL già pronto → applicazione sincrona).
+  avatar.textContent = contactInitial(contact);
+  const url = contactAvatarUrl(contact);
+  if (url) void attachContactAvatar(avatar, contact, url);
 }
 
 function protocolIcon(protocol, size = 15) {
@@ -2099,6 +2118,7 @@ function openThread(contact) {
   if (contact.protocol === "telegram") void loadTelegramReactions();
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
+  renderThreadAvatar(contact);
   elements.app.classList.add("thread-open");
   // Push una history entry SOLO al primo ingresso nel thread (lista →
   // thread): così il back/swipe-back del browser (mobile) la consuma
@@ -3286,6 +3306,13 @@ function connectSocket() {
 document.querySelector("#refresh-contacts").addEventListener("click", () => loadContacts());
 document.querySelector("#open-token").addEventListener("click", () => requestToken());
 document.querySelector("#close-link-dialog").addEventListener("click", () => elements.linkDialog.close());
+elements.stealthToggle.checked = state.stealth;
+elements.stealthToggle.addEventListener("change", () => {
+  state.stealth = elements.stealthToggle.checked;
+  localStorage.setItem(STEALTH_KEY, state.stealth ? "1" : "0");
+  renderContacts();
+  renderThreadAvatar(state.active);
+});
 document.addEventListener("visibilitychange", () => {
   if (
     document.visibilityState === "visible"

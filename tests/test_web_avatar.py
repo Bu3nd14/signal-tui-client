@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -196,3 +197,42 @@ def test_negative_marker_is_used_within_ttl(monkeypatch, tmp_path):
         is None
     )
     assert rest.calls == 2
+
+
+def test_static_assets_declare_thread_avatar_and_stealth():
+    index = Path("web/static/index.html").read_text(encoding="utf-8")
+    assert 'id="thread-avatar"' in index
+    assert 'id="stealth-toggle"' in index
+    assert "style.css?v=68" in index
+    assert "app.js?v=120" in index
+
+    app = Path("web/static/app.js").read_text(encoding="utf-8")
+    assert "STEALTH_KEY" in app
+    assert "function renderThreadAvatar(" in app
+
+
+def test_stealth_disables_contact_avatar_url_in_node():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const block = app.slice(
+  app.indexOf("function contactInitial("),
+  app.indexOf("function setupContactAvatar("),
+);
+vm.runInThisContext(block);
+globalThis.state = { stealth: true };
+assert.equal(contactAvatarUrl({ protocol: "whatsapp", id: "1@c.us" }), null);
+globalThis.state = { stealth: false };
+assert.equal(
+  contactAvatarUrl({ protocol: "whatsapp", id: "1@c.us" }),
+  "/api/contact-avatar?proto=whatsapp&contact_id=1%40c.us",
+);
+assert.equal(contactAvatarUrl({ protocol: "signal", id: "1@c.us" }), null);
+assert.equal(contactAvatarUrl(null), null);
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
