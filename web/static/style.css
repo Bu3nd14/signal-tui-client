@@ -193,6 +193,9 @@ h2 { font-size: 1.05rem; }
 .thread-heading { display: flex; min-width: 0; flex: 1; align-items: center; gap: 10px; }
 .thread-heading-text { min-width: 0; }
 .thread-avatar { width: 38px; height: 38px; flex: none; }
+.thread-avatar.has-photo { cursor: pointer; }
+.thread-avatar.has-photo:hover,
+.thread-avatar.has-photo:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .thread-heading h2, .thread-heading p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .thread-heading p { margin-top: 3px; color: var(--muted); font-size: .78rem; text-transform: capitalize; }
 .typing-bubble {

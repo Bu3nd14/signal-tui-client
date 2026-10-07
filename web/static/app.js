@@ -290,7 +290,7 @@ function contactAvatarUrl(contact) {
   return `/api/contact-avatar?proto=whatsapp&contact_id=${encodeURIComponent(contact.id)}`;
 }
 
-async function attachContactAvatar(avatarEl, contact, url) {
+async function attachContactAvatar(avatarEl, contact, url, onLoaded) {
   const key = String(contact.id);
   const cached = state.avatarCache.get(key);
   if (cached === "missing") return;
@@ -302,6 +302,7 @@ async function attachContactAvatar(avatarEl, contact, url) {
     // so rebuilding the list on selection / incoming messages is flicker-free.
     image.src = cached;
     avatarEl.replaceChildren(image);
+    if (onLoaded) onLoaded();
     return;
   }
   let acquired = false;
@@ -316,6 +317,7 @@ async function attachContactAvatar(avatarEl, contact, url) {
       // leaving an empty circle. Replace the initial's text node only.
       avatarEl.replaceChildren(image);
       state.avatarCache.set(key, objectUrl);
+      if (onLoaded) onLoaded();
     }, { once: true });
     image.addEventListener("error", () => {
       URL.revokeObjectURL(objectUrl);
@@ -369,13 +371,19 @@ function setupContactAvatar(avatarEl, contact, url) {
 function renderThreadAvatar(contact) {
   const avatar = elements.threadAvatar;
   if (!avatar) return;
+  avatar.onclick = null;
+  avatar.classList.remove("has-photo");
   avatar.replaceChildren();
   if (!contact) return;
   // La testata è sempre visibile: nessun IntersectionObserver, fetch diretto
   // riusando la cache di sessione (blob URL già pronto → applicazione sincrona).
   avatar.textContent = contactInitial(contact);
   const url = contactAvatarUrl(contact);
-  if (url) void attachContactAvatar(avatar, contact, url);
+  if (!url) return;
+  void attachContactAvatar(avatar, contact, url, () => {
+    avatar.classList.add("has-photo");
+    avatar.onclick = () => openImageModal(url, contact.display_name || contact.id);
+  });
 }
 
 function protocolIcon(protocol, size = 15) {

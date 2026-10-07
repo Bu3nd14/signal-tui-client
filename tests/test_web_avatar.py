@@ -204,11 +204,54 @@ def test_static_assets_declare_thread_avatar_and_stealth():
     assert 'id="thread-avatar"' in index
     assert 'id="stealth-toggle"' in index
     assert "style.css?v=68" in index
-    assert "app.js?v=120" in index
+    assert "app.js?v=121" in index
 
     app = Path("web/static/app.js").read_text(encoding="utf-8")
     assert "STEALTH_KEY" in app
     assert "function renderThreadAvatar(" in app
+
+
+def test_thread_avatar_opens_image_modal_only_with_photo():
+    app = Path("web/static/app.js").read_text(encoding="utf-8")
+    style = Path("web/static/style.css").read_text(encoding="utf-8")
+
+    block = app[
+        app.index("function renderThreadAvatar(") : app.index("function protocolIcon(")
+    ]
+    assert "openImageModal(url" in block
+    assert 'avatar.classList.add("has-photo")' in block
+    assert 'avatar.classList.remove("has-photo")' in block
+
+    assert ".thread-avatar.has-photo" in style
+    assert "cursor: pointer" in style
+
+
+def test_attach_contact_avatar_calls_on_loaded_from_cache():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const block = app.slice(
+  app.indexOf("async function attachContactAvatar("),
+  app.indexOf("function contactAvatarObserverInstance("),
+);
+vm.runInThisContext(block);
+globalThis.state = { avatarCache: new Map([["1@c.us", "blob:cached"]]) };
+globalThis.document = { createElement: () => ({ className: "", alt: "", src: "" }) };
+let replaced = null;
+const avatarEl = { replaceChildren(node) { replaced = node; } };
+let loaded = 0;
+(async () => {
+  await attachContactAvatar(avatarEl, { id: "1@c.us" }, "/api/avatar", () => { loaded += 1; });
+  assert.equal(loaded, 1);
+  assert.equal(replaced.src, "blob:cached");
+})().catch((error) => { console.error(error); process.exit(1); });
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_stealth_disables_contact_avatar_url_in_node():
