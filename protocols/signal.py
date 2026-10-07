@@ -1254,16 +1254,20 @@ class SignalBackend(ChatBackend):
                     identifiers.append("+" + phone.lstrip("+"))
 
         for identifier in identifiers:
-            path = resolve_avatar_path(identifier)
-            if path is None:
-                continue
-            try:
-                if path.stat().st_size > _MAX_AVATAR_BYTES:
+            # signal-cli stores the (higher-resolution) profile photo as
+            # ``profile-<id>`` and a contact thumbnail as ``contact-<id>``:
+            # prefer the profile photo, fall back to the thumbnail.
+            for prefix in ("profile", "contact"):
+                path = resolve_avatar_path(identifier, prefix)
+                if path is None:
                     continue
-                data = path.read_bytes()
-            except OSError:
-                continue
-            return data, _sniff_image_content_type(data)
+                try:
+                    if path.stat().st_size > _MAX_AVATAR_BYTES:
+                        continue
+                    data = path.read_bytes()
+                except OSError:
+                    continue
+                return data, _sniff_image_content_type(data)
         return None
 
     # ─── Envelope parsing → normalized events ─────────────────────────

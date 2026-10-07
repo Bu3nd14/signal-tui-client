@@ -376,6 +376,29 @@ def test_signal_avatar_phone_fallback_for_uuid(monkeypatch, tmp_path):
     assert response.content == _SIGNAL_JPEG
 
 
+def test_signal_avatar_profile_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+    (tmp_path / "profile-+393356912240").write_bytes(_SIGNAL_JPEG)
+
+    response = _signal_avatar(_signal_client(SignalBackend()), "+393356912240")
+
+    assert response.status_code == 200
+    assert response.content == _SIGNAL_JPEG
+
+
+def test_signal_avatar_prefers_profile_over_contact(monkeypatch, tmp_path):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+    profile = b"\xff\xd8\xff\xe0profile"
+    contact = b"\xff\xd8\xff\xe0contact"
+    (tmp_path / "profile-+393357405121").write_bytes(profile)
+    (tmp_path / "contact-+393357405121").write_bytes(contact)
+
+    response = _signal_avatar(_signal_client(SignalBackend()), "+393357405121")
+
+    assert response.status_code == 200
+    assert response.content == profile
+
+
 def test_signal_avatar_rejects_path_traversal(monkeypatch, tmp_path):
     monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
 

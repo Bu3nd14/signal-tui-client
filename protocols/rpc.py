@@ -183,11 +183,13 @@ def get_attachment_path(attachment_id: str) -> Path | None:
     return None
 
 
-def resolve_avatar_path(identifier: str) -> Path | None:
+def resolve_avatar_path(identifier: str, prefix: str = "contact") -> Path | None:
     """Resolve a Signal contact identifier to a local avatar path.
 
+    ``prefix`` selects the signal-cli file family: ``profile-`` holds the
+    (higher-resolution) profile photo, ``contact-`` the contact thumbnail.
     Best-effort mirror of :func:`get_attachment_path`: returns the Path of the
-    ``contact-<identifier>`` avatar when it exists and is readable, or ``None``
+    ``<prefix>-<identifier>`` avatar when it exists and is readable, or ``None``
     otherwise.  Never raises; the identifier is restricted to a safe charset so
     ``/``, ``\\``, ``\\0`` and ``..`` can never escape the avatars directory.
     """
@@ -195,7 +197,7 @@ def resolve_avatar_path(identifier: str) -> Path | None:
         return None
     if re.fullmatch(r"[0-9A-Za-z.+\-]+", identifier) is None:
         return None
-    candidate = SIGNAL_CLI_AVATARS_DIR / f"contact-{identifier}"
+    candidate = SIGNAL_CLI_AVATARS_DIR / f"{prefix}-{identifier}"
     if not candidate.resolve().is_relative_to(SIGNAL_CLI_AVATARS_DIR.resolve()):
         logger.warning("Rejected avatar path outside the avatars directory")
         return None
