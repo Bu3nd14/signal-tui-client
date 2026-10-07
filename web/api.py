@@ -1623,6 +1623,25 @@ def create_api_router() -> Any:
         contacts = search_contacts(manager.list_address_book_sync(force=False), query)
         return [_contact_payload(contact, unread) for contact in contacts]
 
+    @router.get("/contact-avatar")
+    async def contact_avatar(request: Request, proto: str, contact_id: str) -> Any:
+        if proto != "whatsapp":
+            raise HTTPException(status_code=404, detail="Not Found")
+        if not contact_id.strip():
+            raise HTTPException(status_code=400, detail="Invalid request")
+        from web.avatar_cache import resolve_whatsapp_avatar
+
+        backend = request.app.state.manager.get("whatsapp")
+        rest = getattr(backend, "_rest", None)
+        path = await asyncio.to_thread(resolve_whatsapp_avatar, rest, contact_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="No profile picture")
+        return FileResponse(
+            path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=86400"},
+        )
+
     @router.post("/log")
     def client_log(payload: dict[str, Any]) -> dict[str, str]:
         message = str(payload.get("message") or "")[:500]

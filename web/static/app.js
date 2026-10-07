@@ -2,6 +2,7 @@
 
 const TOKEN_KEY = "signal-tui-web-token";
 const PROTOCOL_KEY = "signal-tui-web-proto";
+const STEALTH_KEY = "signal-tui-web-stealth";
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 // Heartbeat watchdog: the server fans out a ``{"type":"heartbeat"}`` frame
 // every ~5s (web/ws.py).  If nothing at all arrives for this long, the socket
@@ -38,6 +39,9 @@ const state = {
     return PROTOCOLS.includes(saved) ? saved : "signal";
   })(),
   active: null,
+  // True quando le immagini profilo sono nascoste (solo iniziali): nessuna
+  // richiesta a /api/contact-avatar parte mentre è attiva.
+  stealth: localStorage.getItem(STEALTH_KEY) === "1",
   // True quando è stata pushata una history entry per il thread aperto
   // (mobile back/swipe-back): evita di accumulare una entry per ogni
   // cambio di contatto mentre il thread resta aperto.
@@ -59,6 +63,7 @@ const state = {
   // Map<attachmentId, { url, width, height }>. width/height sono null finché
   // non noti: vengono catturati da naturalWidth/Height al primo load reale.
   mediaCache: new Map(),
+  avatarCache: new Map(),
   transcriptions: new Map(),
   messages: [],
   optimistic: [],
@@ -96,6 +101,7 @@ const elements = {
   messages: document.querySelector("#message-list"),
   threadName: document.querySelector("#thread-name"),
   threadMeta: document.querySelector("#thread-meta"),
+  threadAvatar: document.querySelector("#thread-avatar"),
   connection: document.querySelector("#connection-state"),
   errorBanner: document.querySelector("#error-banner"),
   errorText: document.querySelector("#error-text"),
@@ -110,6 +116,7 @@ const elements = {
   tokenInput: document.querySelector("#token-input"),
   tokenError: document.querySelector("#token-error"),
   saveToken: document.querySelector("#save-token"),
+  stealthToggle: document.querySelector("#stealth-toggle"),
   composer: document.querySelector("#composer"),
   composerShell: document.querySelector("#composer-shell"),
   messageInput: document.querySelector("#message-input"),
@@ -253,6 +260,132 @@ function contactInitial(contact) {
   return (contact.display_name || contact.id || "?").trim().charAt(0).toUpperCase();
 }
 
+const MAX_AVATAR_FETCHES = 6;
+let activeAvatarFetches = 0;
+const avatarFetchQueue = [];
+let contactAvatarObserver = null;
+
+function acquireAvatarSlot() {
+  if (activeAvatarFetches < MAX_AVATAR_FETCHES) {
+    activeAvatarFetches += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    avatarFetchQueue.push(() => {
+      activeAvatarFetches += 1;
+      resolve();
+    });
+  });
+}
+
+function releaseAvatarSlot() {
+  activeAvatarFetches -= 1;
+  const next = avatarFetchQueue.shift();
+  if (next) next();
+}
+
+function contactAvatarUrl(contact) {
+  if (state.stealth) return null;
+  if (!contact || contact.protocol !== "whatsapp" || !contact.id) return null;
+  return `/api/contact-avatar?proto=whatsapp&contact_id=${encodeURIComponent(contact.id)}`;
+}
+
+async function attachContactAvatar(avatarEl, contact, url, onLoaded) {
+  const key = String(contact.id);
+  const cached = state.avatarCache.get(key);
+  if (cached === "missing") return;
+  const image = document.createElement("img");
+  image.className = "avatar-img";
+  image.alt = "";
+  if (typeof cached === "string") {
+    // Reuse the blob URL fetched earlier this session: no network round-trip,
+    // so rebuilding the list on selection / incoming messages is flicker-free.
+    image.src = cached;
+    avatarEl.replaceChildren(image);
+    if (onLoaded) onLoaded();
+    return;
+  }
+  let acquired = false;
+  try {
+    await acquireAvatarSlot();
+    acquired = true;
+    const response = await apiFetch(url);
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    image.addEventListener("load", () => {
+      // Keep the freshly loaded <img>: textContent = "" would wipe it too,
+      // leaving an empty circle. Replace the initial's text node only.
+      avatarEl.replaceChildren(image);
+      state.avatarCache.set(key, objectUrl);
+      if (onLoaded) onLoaded();
+    }, { once: true });
+    image.addEventListener("error", () => {
+      URL.revokeObjectURL(objectUrl);
+      image.remove();
+      state.avatarCache.set(key, "missing");
+    }, { once: true });
+    image.src = objectUrl;
+    avatarEl.append(image);
+  } catch {
+    state.avatarCache.set(key, "missing");
+  } finally {
+    if (acquired) releaseAvatarSlot();
+  }
+}
+
+function contactAvatarObserverInstance() {
+  if (!("IntersectionObserver" in window)) return null;
+  if (!contactAvatarObserver) {
+    contactAvatarObserver = new window.IntersectionObserver((entries, observer) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer.unobserve(entry.target);
+        entry.target._loadAvatar?.();
+        delete entry.target._loadAvatar;
+      }
+    }, {
+      root: elements.contacts,
+      rootMargin: "200px",
+    });
+  }
+  return contactAvatarObserver;
+}
+
+function setupContactAvatar(avatarEl, contact, url) {
+  const load = () => attachContactAvatar(avatarEl, contact, url);
+  // Already resolved this session (blob URL cached, or known missing): apply
+  // synchronously so a list rebuild doesn't re-fetch / flicker every avatar.
+  if (state.avatarCache.has(String(contact.id))) {
+    load();
+    return;
+  }
+  const observer = contactAvatarObserverInstance();
+  if (observer) {
+    avatarEl._loadAvatar = load;
+    observer.observe(avatarEl);
+  } else {
+    load();
+  }
+}
+
+function renderThreadAvatar(contact) {
+  const avatar = elements.threadAvatar;
+  if (!avatar) return;
+  avatar.onclick = null;
+  avatar.classList.remove("has-photo");
+  avatar.replaceChildren();
+  if (!contact) return;
+  // La testata è sempre visibile: nessun IntersectionObserver, fetch diretto
+  // riusando la cache di sessione (blob URL già pronto → applicazione sincrona).
+  avatar.textContent = contactInitial(contact);
+  const url = contactAvatarUrl(contact);
+  if (!url) return;
+  void attachContactAvatar(avatar, contact, url, () => {
+    avatar.classList.add("has-photo");
+    avatar.onclick = () => openImageModal(url, contact.display_name || contact.id);
+  });
+}
+
 function protocolIcon(protocol, size = 15) {
   const icons = {
     signal: `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 0q-.934 0-1.83.139l.17 1.111a11 11 0 0 1 3.32 0l.172-1.111A12 12 0 0 0 12 0M9.152.34A12 12 0 0 0 5.77 1.742l.584.961a10.8 10.8 0 0 1 3.066-1.27zm5.696 0-.268 1.094a10.8 10.8 0 0 1 3.066 1.27l.584-.962A12 12 0 0 0 14.848.34M12 2.25a9.75 9.75 0 0 0-8.539 14.459c.074.134.1.292.064.441l-1.013 4.338 4.338-1.013a.62.62 0 0 1 .441.064A9.7 9.7 0 0 0 12 21.75c5.385 0 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25m-7.092.068a12 12 0 0 0-2.59 2.59l.909.664a11 11 0 0 1 2.345-2.345zm14.184 0-.664.909a11 11 0 0 1 2.345 2.345l.909-.664a12 12 0 0 0-2.59-2.59M1.742 5.77A12 12 0 0 0 .34 9.152l1.094.268a10.8 10.8 0 0 1 1.269-3.066zm20.516 0-.961.584a10.8 10.8 0 0 1 1.27 3.066l1.093-.268a12 12 0 0 0-1.402-3.383M.138 10.168A12 12 0 0 0 0 12q0 .934.139 1.83l1.111-.17A11 11 0 0 1 1.125 12q0-.848.125-1.66zm23.723.002-1.111.17q.125.812.125 1.66c0 .848-.042 1.12-.125 1.66l1.111.172a12.1 12.1 0 0 0 0-3.662M1.434 14.58l-1.094.268a12 12 0 0 0 .96 2.591l-.265 1.14 1.096.255.36-1.539-.188-.365a10.8 10.8 0 0 1-.87-2.35m21.133 0a10.8 10.8 0 0 1-1.27 3.067l.962.584a12 12 0 0 0 1.402-3.383zm-1.793 3.848a11 11 0 0 1-2.345 2.345l.664.909a12 12 0 0 0 2.59-2.59zm-19.959 1.1L.357 21.48a1.8 1.8 0 0 0 2.162 2.161l1.954-.455-.256-1.095-1.953.455a.675.675 0 0 1-.81-.81l.454-1.954zm16.832 1.769a10.8 10.8 0 0 1-3.066 1.27l.268 1.093a12 12 0 0 0 3.382-1.402zm-10.94.213-1.54.36.256 1.095 1.139-.266c.814.415 1.683.74 2.591.961l.268-1.094a10.8 10.8 0 0 1-2.35-.869zm3.634 1.24-.172 1.111a12.1 12.1 0 0 0 3.662 0l-.17-1.111q-.812.125-1.66.125a11 11 0 0 1-1.66-.125"/></svg>`,
@@ -378,6 +511,7 @@ function updateFavicon() {
 }
 
 function renderContacts() {
+  contactAvatarObserver?.disconnect();
   elements.contacts.replaceChildren();
   updateBackendStatuses();
   const base = state.searchResults ?? state.contacts;
@@ -414,6 +548,8 @@ function renderContacts() {
     const avatar = document.createElement("span");
     avatar.className = "avatar";
     avatar.textContent = contactInitial(contact);
+    const avatarUrl = contactAvatarUrl(contact);
+    if (avatarUrl) setupContactAvatar(avatar, contact, avatarUrl);
     const copy = document.createElement("span");
     copy.className = "contact-copy";
     const main = document.createElement("span");
@@ -1990,6 +2126,7 @@ function openThread(contact) {
   if (contact.protocol === "telegram") void loadTelegramReactions();
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
+  renderThreadAvatar(contact);
   elements.app.classList.add("thread-open");
   // Push una history entry SOLO al primo ingresso nel thread (lista →
   // thread): così il back/swipe-back del browser (mobile) la consuma
@@ -3177,6 +3314,13 @@ function connectSocket() {
 document.querySelector("#refresh-contacts").addEventListener("click", () => loadContacts());
 document.querySelector("#open-token").addEventListener("click", () => requestToken());
 document.querySelector("#close-link-dialog").addEventListener("click", () => elements.linkDialog.close());
+elements.stealthToggle.checked = state.stealth;
+elements.stealthToggle.addEventListener("change", () => {
+  state.stealth = elements.stealthToggle.checked;
+  localStorage.setItem(STEALTH_KEY, state.stealth ? "1" : "0");
+  renderContacts();
+  renderThreadAvatar(state.active);
+});
 document.addEventListener("visibilitychange", () => {
   if (
     document.visibilityState === "visible"

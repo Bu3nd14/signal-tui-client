@@ -969,6 +969,7 @@ globalThis.cancelReply = () => {};
 globalThis.updateTelegramRefreshTimer = () => {};
 globalThis.protocolIcon = () => "";
 globalThis.renderContacts = () => {};
+globalThis.renderThreadAvatar = () => {};
 globalThis.document = { createElement: node };
 globalThis.loadMessages = () => {
   assert.equal(controller.aborted, true);

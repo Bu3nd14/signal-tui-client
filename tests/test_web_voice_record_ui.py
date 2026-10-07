@@ -612,8 +612,8 @@ globalThis.apiFetch = async () => ({ status: 200 });
 def test_static_assets_declare_voice_record_ui():
     index = Path("web/static/index.html").read_text(encoding="utf-8")
     assert 'id="voice-record"' in index
-    assert "style.css?v=66" in index
-    assert "app.js?v=116" in index
+    assert "style.css?v=68" in index
+    assert "app.js?v=121" in index
     menu = re.search(r'<div id="composer-menu".*?</div>', index, re.DOTALL)
     assert menu is not None
     assert 'id="voice-record"' in menu.group(0)

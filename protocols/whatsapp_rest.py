@@ -396,6 +396,21 @@ class WhatsAppRESTClient:
             offset += limit
         return out
 
+    def get_profile_picture_url(self, contact_id: str, timeout: int = 10) -> str | None:
+        """URL foto profilo via GET /api/contacts/profile-picture (best-effort)."""
+        from urllib.parse import quote
+
+        result = self._request(
+            "GET",
+            f"/api/contacts/profile-picture?session={self.session_name}"
+            f"&contactId={quote(contact_id, safe='')}",
+            timeout=timeout,
+        )
+        if not isinstance(result, dict):
+            return None
+        url = result.get("profilePictureURL")
+        return url if isinstance(url, str) and url else None
+
     def check_number_exists(self, phone_digits: str) -> bool | None:
         """Best-effort check ``GET /api/contacts/check-exists`` (timeout 5).
 
