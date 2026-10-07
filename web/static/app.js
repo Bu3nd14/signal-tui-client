@@ -299,7 +299,9 @@ async function attachContactAvatar(avatarEl, contact, url) {
     image.hidden = true;
     image.addEventListener("load", () => {
       image.hidden = false;
-      avatarEl.textContent = "";
+      // Keep the freshly loaded <img>: textContent = "" would wipe it too,
+      // leaving an empty circle. Replace the initial's text node only.
+      avatarEl.replaceChildren(image);
       state.avatarCache.set(key, "ok");
     }, { once: true });
     image.addEventListener("error", () => {
