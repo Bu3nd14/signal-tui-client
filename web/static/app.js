@@ -286,8 +286,9 @@ function releaseAvatarSlot() {
 
 function contactAvatarUrl(contact) {
   if (state.stealth) return null;
-  if (!contact || contact.protocol !== "whatsapp" || !contact.id) return null;
-  return `/api/contact-avatar?proto=whatsapp&contact_id=${encodeURIComponent(contact.id)}`;
+  if (!contact || !contact.id) return null;
+  if (contact.protocol !== "whatsapp" && contact.protocol !== "signal") return null;
+  return `/api/contact-avatar?proto=${contact.protocol}&contact_id=${encodeURIComponent(contact.id)}`;
 }
 
 async function attachContactAvatar(avatarEl, contact, url, onLoaded) {

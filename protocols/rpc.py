@@ -9,6 +9,7 @@ attachment-path resolution.  No Textual dependency.
 import json
 import logging
 import os
+import re
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -67,6 +68,8 @@ SSE_URL = f"http://127.0.0.1:{DAEMON_HTTP_PORT}/api/v1/events"
 SIGNAL_CLI_ATTACHMENTS_DIR = (
     Path.home() / ".local" / "share" / "signal-cli" / "attachments"
 )
+# Directory where signal-cli stores contact avatars
+SIGNAL_CLI_AVATARS_DIR = Path.home() / ".local" / "share" / "signal-cli" / "avatars"
 # ─── Signal CLI ──────────────────────────────────────────────────────────────
 
 
@@ -177,6 +180,29 @@ def get_attachment_path(attachment_id: str) -> Path | None:
         return None
     if att_path.exists() and att_path.is_file():
         return att_path
+    return None
+
+
+def resolve_avatar_path(identifier: str, prefix: str = "contact") -> Path | None:
+    """Resolve a Signal contact identifier to a local avatar path.
+
+    ``prefix`` selects the signal-cli file family: ``profile-`` holds the
+    (higher-resolution) profile photo, ``contact-`` the contact thumbnail.
+    Best-effort mirror of :func:`get_attachment_path`: returns the Path of the
+    ``<prefix>-<identifier>`` avatar when it exists and is readable, or ``None``
+    otherwise.  Never raises; the identifier is restricted to a safe charset so
+    ``/``, ``\\``, ``\\0`` and ``..`` can never escape the avatars directory.
+    """
+    if not identifier:
+        return None
+    if re.fullmatch(r"[0-9A-Za-z.+\-]+", identifier) is None:
+        return None
+    candidate = SIGNAL_CLI_AVATARS_DIR / f"{prefix}-{identifier}"
+    if not candidate.resolve().is_relative_to(SIGNAL_CLI_AVATARS_DIR.resolve()):
+        logger.warning("Rejected avatar path outside the avatars directory")
+        return None
+    if candidate.is_file():
+        return candidate
     return None
 
 

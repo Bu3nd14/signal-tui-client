@@ -11,6 +11,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from models import PROTOCOL_SIGNAL, ChatContact
+from protocols import rpc as rpc_module
+from protocols.rpc import resolve_avatar_path
+from protocols.signal import SignalBackend
 from web import avatar_cache
 from web.api import create_api_router
 
@@ -88,7 +92,7 @@ def test_avatar_errors_do_not_write_negative_marker(monkeypatch, tmp_path):
     assert not avatar_cache._no_photo_marker(path).exists()
 
 
-@pytest.mark.parametrize("proto", ["signal", "telegram"])
+@pytest.mark.parametrize("proto", ["telegram"])
 def test_avatar_rejects_other_protocols(monkeypatch, tmp_path, proto):
     client = _client(monkeypatch, tmp_path, FakeRest(_AVATAR_URL))
 
@@ -204,7 +208,7 @@ def test_static_assets_declare_thread_avatar_and_stealth():
     assert 'id="thread-avatar"' in index
     assert 'id="stealth-toggle"' in index
     assert "style.css?v=68" in index
-    assert "app.js?v=121" in index
+    assert "app.js?v=122" in index
 
     app = Path("web/static/app.js").read_text(encoding="utf-8")
     assert "STEALTH_KEY" in app
@@ -272,10 +276,147 @@ assert.equal(
   contactAvatarUrl({ protocol: "whatsapp", id: "1@c.us" }),
   "/api/contact-avatar?proto=whatsapp&contact_id=1%40c.us",
 );
-assert.equal(contactAvatarUrl({ protocol: "signal", id: "1@c.us" }), null);
+assert.equal(
+  contactAvatarUrl({ protocol: "signal", id: "+393357405121" }),
+  "/api/contact-avatar?proto=signal&contact_id=%2B393357405121",
+);
+assert.equal(contactAvatarUrl({ protocol: "telegram", id: "1@c.us" }), null);
 assert.equal(contactAvatarUrl(null), null);
 """
     completed = subprocess.run(
         ["node", "-e", source], capture_output=True, text=True, check=False
     )
     assert completed.returncode == 0, completed.stderr
+
+
+_SIGNAL_JPEG = b"\xff\xd8\xff\xe0signal-jpeg"
+_SIGNAL_PNG = b"\x89PNG\r\n\x1a\nsignal-png"
+_SIGNAL_UUID = "2233ac4d-1b9e-4e0a-9d3f-12ab34cd56ef"
+
+
+def _signal_client(backend) -> TestClient:
+    manager = SimpleNamespace(
+        get=lambda protocol: backend if protocol == "signal" else None
+    )
+    app = FastAPI()
+    app.state.manager = manager
+    app.include_router(create_api_router())
+    return TestClient(app)
+
+
+def _signal_avatar(client: TestClient, contact_id: str, proto: str = "signal"):
+    return client.get(
+        "/api/contact-avatar",
+        params={"proto": proto, "contact_id": contact_id},
+    )
+
+
+def test_signal_avatar_serves_jpeg(monkeypatch, tmp_path):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+    (tmp_path / "contact-+393357405121").write_bytes(_SIGNAL_JPEG)
+    client = _signal_client(SignalBackend())
+
+    response = _signal_avatar(client, "+393357405121")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content == _SIGNAL_JPEG
+    assert response.headers["cache-control"] == "private, max-age=86400"
+
+
+def test_signal_avatar_serves_png(monkeypatch, tmp_path):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+    (tmp_path / "contact-+393357405121").write_bytes(_SIGNAL_PNG)
+
+    response = _signal_avatar(_signal_client(SignalBackend()), "+393357405121")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert response.content == _SIGNAL_PNG
+
+
+def test_signal_avatar_missing_returns_404(monkeypatch, tmp_path):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+
+    response = _signal_avatar(_signal_client(SignalBackend()), "+393357405121")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "No profile picture"}
+
+
+def test_signal_avatar_uuid_literal(monkeypatch, tmp_path):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+    (tmp_path / f"contact-{_SIGNAL_UUID}").write_bytes(_SIGNAL_JPEG)
+
+    response = _signal_avatar(_signal_client(SignalBackend()), _SIGNAL_UUID)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content == _SIGNAL_JPEG
+
+
+def test_signal_avatar_phone_fallback_for_uuid(monkeypatch, tmp_path):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+    (tmp_path / "contact-+393357405121").write_bytes(_SIGNAL_JPEG)
+    backend = SignalBackend()
+    backend._set_contacts(
+        [
+            ChatContact(
+                _SIGNAL_UUID,
+                "Mario",
+                PROTOCOL_SIGNAL,
+                extras={"phone": "393357405121"},
+            )
+        ]
+    )
+
+    response = _signal_avatar(_signal_client(backend), _SIGNAL_UUID)
+
+    assert response.status_code == 200
+    assert response.content == _SIGNAL_JPEG
+
+
+def test_signal_avatar_profile_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+    (tmp_path / "profile-+393356912240").write_bytes(_SIGNAL_JPEG)
+
+    response = _signal_avatar(_signal_client(SignalBackend()), "+393356912240")
+
+    assert response.status_code == 200
+    assert response.content == _SIGNAL_JPEG
+
+
+def test_signal_avatar_prefers_profile_over_contact(monkeypatch, tmp_path):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+    profile = b"\xff\xd8\xff\xe0profile"
+    contact = b"\xff\xd8\xff\xe0contact"
+    (tmp_path / "profile-+393357405121").write_bytes(profile)
+    (tmp_path / "contact-+393357405121").write_bytes(contact)
+
+    response = _signal_avatar(_signal_client(SignalBackend()), "+393357405121")
+
+    assert response.status_code == 200
+    assert response.content == profile
+
+
+def test_signal_avatar_rejects_path_traversal(monkeypatch, tmp_path):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+
+    response = _signal_avatar(_signal_client(SignalBackend()), "../../etc/passwd")
+
+    assert response.status_code == 404
+
+
+def test_avatar_rejects_telegram(monkeypatch, tmp_path):
+    response = _signal_avatar(
+        _signal_client(SignalBackend()), "1@c.us", proto="telegram"
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("identifier", ["", "../x", "a/b", "a\\b", ".."])
+def test_resolve_avatar_path_rejects_unsafe(monkeypatch, tmp_path, identifier):
+    monkeypatch.setattr(rpc_module, "SIGNAL_CLI_AVATARS_DIR", tmp_path)
+
+    assert resolve_avatar_path(identifier) is None
