@@ -285,7 +285,18 @@ function contactAvatarUrl(contact) {
 
 async function attachContactAvatar(avatarEl, contact, url) {
   const key = String(contact.id);
-  if (state.avatarCache.get(key) === "missing") return;
+  const cached = state.avatarCache.get(key);
+  if (cached === "missing") return;
+  const image = document.createElement("img");
+  image.className = "avatar-img";
+  image.alt = "";
+  if (typeof cached === "string") {
+    // Reuse the blob URL fetched earlier this session: no network round-trip,
+    // so rebuilding the list on selection / incoming messages is flicker-free.
+    image.src = cached;
+    avatarEl.replaceChildren(image);
+    return;
+  }
   let acquired = false;
   try {
     await acquireAvatarSlot();
@@ -293,16 +304,11 @@ async function attachContactAvatar(avatarEl, contact, url) {
     const response = await apiFetch(url);
     const blob = await response.blob();
     const objectUrl = URL.createObjectURL(blob);
-    const image = document.createElement("img");
-    image.className = "avatar-img";
-    image.alt = "";
-    image.hidden = true;
     image.addEventListener("load", () => {
-      image.hidden = false;
       // Keep the freshly loaded <img>: textContent = "" would wipe it too,
       // leaving an empty circle. Replace the initial's text node only.
       avatarEl.replaceChildren(image);
-      state.avatarCache.set(key, "ok");
+      state.avatarCache.set(key, objectUrl);
     }, { once: true });
     image.addEventListener("error", () => {
       URL.revokeObjectURL(objectUrl);
@@ -338,6 +344,12 @@ function contactAvatarObserverInstance() {
 
 function setupContactAvatar(avatarEl, contact, url) {
   const load = () => attachContactAvatar(avatarEl, contact, url);
+  // Already resolved this session (blob URL cached, or known missing): apply
+  // synchronously so a list rebuild doesn't re-fetch / flicker every avatar.
+  if (state.avatarCache.has(String(contact.id))) {
+    load();
+    return;
+  }
   const observer = contactAvatarObserverInstance();
   if (observer) {
     avatarEl._loadAvatar = load;
