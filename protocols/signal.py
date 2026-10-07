@@ -43,6 +43,7 @@ from models import (
 
 from .base import ChatBackend
 from .config import get_address_book_ttl_s
+from .media_utils import MAX_AVATAR_BYTES, sniff_image_content_type
 
 logger = logging.getLogger(__name__)
 _fh = logging.FileHandler("/tmp/signal-sse.log", mode="w")
@@ -253,23 +254,6 @@ def _extract_quote_thumbnail(
     except OSError:
         return None
     return path
-
-
-_MAX_AVATAR_BYTES = 5 * 1024 * 1024
-
-
-def _sniff_image_content_type(data: bytes) -> str:
-    """Best-effort image type from a small magic-byte prefix.
-
-    Falls back to ``image/jpeg`` (signal-cli stores avatars as JPEG).
-    """
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/jpeg"
 
 
 class SignalBackend(ChatBackend):
@@ -1262,12 +1246,12 @@ class SignalBackend(ChatBackend):
                 if path is None:
                     continue
                 try:
-                    if path.stat().st_size > _MAX_AVATAR_BYTES:
+                    if path.stat().st_size > MAX_AVATAR_BYTES:
                         continue
                     data = path.read_bytes()
                 except OSError:
                     continue
-                return data, _sniff_image_content_type(data)
+                return data, sniff_image_content_type(data)
         return None
 
     # ─── Envelope parsing → normalized events ─────────────────────────
