@@ -158,11 +158,13 @@ h2 { font-size: 1.05rem; }
   display: grid;
   width: 42px;
   height: 42px;
+  overflow: hidden;
   place-items: center;
   border-radius: 50%;
   background: linear-gradient(145deg, #365071, #202d3d);
   font-weight: 750;
 }
+.avatar-img { width:100%; height:100%; object-fit:cover; border-radius:inherit; display:block; }
 .contact-copy { min-width: 0; overflow: hidden; }
 .contact-main { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .contact-main .contact-name { min-width: 0; flex: 1 1 auto; }
