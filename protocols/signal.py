@@ -77,6 +77,7 @@ from protocols.rpc import (
     _send_subprocess,
     find_signal_cli,
     get_attachment_path,
+    resolve_avatar_path,
 )
 
 # Window (ms) within which an outgoing message echo is considered the same
@@ -252,6 +253,23 @@ def _extract_quote_thumbnail(
     except OSError:
         return None
     return path
+
+
+_MAX_AVATAR_BYTES = 5 * 1024 * 1024
+
+
+def _sniff_image_content_type(data: bytes) -> str:
+    """Best-effort image type from a small magic-byte prefix.
+
+    Falls back to ``image/jpeg`` (signal-cli stores avatars as JPEG).
+    """
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
 
 
 class SignalBackend(ChatBackend):
@@ -1212,6 +1230,41 @@ class SignalBackend(ChatBackend):
         if candidate.is_file():
             return candidate
         return get_attachment_path(attachment_id)
+
+    def get_profile_photo_bytes(self, contact_id: str) -> tuple[bytes, str] | None:
+        """Return ``(data, content_type)`` for a contact's local avatar, or None.
+
+        Candidates are tried in order: the literal ``contact-<contact_id>``, the
+        address-book phone (``contact-+<phone>``) when ``contact_id`` is an ACI
+        uuid, and the bare digits (``contact-<digits>``) for ``+``-prefixed ids.
+        Best-effort: never raises and never reads outside the avatars directory.
+        """
+        if not contact_id:
+            return None
+        identifiers = [contact_id]
+        if contact_id.startswith("+"):
+            digits = contact_id[len("+") :]
+            if digits:
+                identifiers.append(digits)
+        else:
+            contact = self.find_contact(contact_id)
+            if contact is not None:
+                phone = str(contact.extras.get("phone") or "").strip()
+                if phone:
+                    identifiers.append("+" + phone.lstrip("+"))
+
+        for identifier in identifiers:
+            path = resolve_avatar_path(identifier)
+            if path is None:
+                continue
+            try:
+                if path.stat().st_size > _MAX_AVATAR_BYTES:
+                    continue
+                data = path.read_bytes()
+            except OSError:
+                continue
+            return data, _sniff_image_content_type(data)
+        return None
 
     # ─── Envelope parsing → normalized events ─────────────────────────
 

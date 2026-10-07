@@ -110,3 +110,37 @@ def resolve_whatsapp_avatar(
             except OSError:
                 logger.debug("Unable to write avatar negative marker", exc_info=True)
         return None
+
+
+def resolve_avatar(
+    proto: str, manager: Any, contact_id: str
+) -> tuple[bytes, str] | None:
+    """Return ``(data, content_type)`` for a contact avatar, or ``None``.
+
+    Dispatches to the protocol backend: WhatsApp reuses the on-disk cache via
+    :func:`resolve_whatsapp_avatar`; Signal reads the local signal-cli avatar
+    file.  Best-effort: never raises.
+    """
+    if not contact_id:
+        return None
+    try:
+        if proto == "whatsapp":
+            backend = manager.get("whatsapp")
+            rest = getattr(backend, "_rest", None)
+            path = resolve_whatsapp_avatar(rest, contact_id)
+            if path is None:
+                return None
+            try:
+                return path.read_bytes(), "image/jpeg"
+            except OSError:
+                return None
+        if proto == "signal":
+            backend = manager.get("signal")
+            resolver = getattr(backend, "get_profile_photo_bytes", None)
+            if resolver is None:
+                return None
+            return resolver(contact_id)
+        return None
+    except Exception:
+        logger.debug("Avatar resolution failed for %s", proto, exc_info=True)
+        return None

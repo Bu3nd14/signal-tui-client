@@ -1147,7 +1147,7 @@ def _group_sender_resolver(manager: Any, proto: str):
 def create_api_router() -> Any:
     """Build the FastAPI router without making FastAPI a core dependency."""
     from fastapi import APIRouter, HTTPException, Request
-    from fastapi.responses import FileResponse, JSONResponse
+    from fastapi.responses import FileResponse, JSONResponse, Response
     from starlette.exceptions import HTTPException as StarletteHTTPException
 
     router = APIRouter(prefix="/api")
@@ -1625,20 +1625,21 @@ def create_api_router() -> Any:
 
     @router.get("/contact-avatar")
     async def contact_avatar(request: Request, proto: str, contact_id: str) -> Any:
-        if proto != "whatsapp":
+        if proto not in {"whatsapp", "signal"}:
             raise HTTPException(status_code=404, detail="Not Found")
         if not contact_id.strip():
             raise HTTPException(status_code=400, detail="Invalid request")
-        from web.avatar_cache import resolve_whatsapp_avatar
+        from web.avatar_cache import resolve_avatar
 
-        backend = request.app.state.manager.get("whatsapp")
-        rest = getattr(backend, "_rest", None)
-        path = await asyncio.to_thread(resolve_whatsapp_avatar, rest, contact_id)
-        if path is None:
+        result = await asyncio.to_thread(
+            resolve_avatar, proto, request.app.state.manager, contact_id
+        )
+        if result is None:
             raise HTTPException(status_code=404, detail="No profile picture")
-        return FileResponse(
-            path,
-            media_type="image/jpeg",
+        data, content_type = result
+        return Response(
+            content=data,
+            media_type=content_type,
             headers={"Cache-Control": "private, max-age=86400"},
         )
 
