@@ -23,13 +23,13 @@ html[data-skin="teams"] {
 html[data-skin="teams"] .sidebar { background: #121212; }
 html[data-skin="teams"] .thread-panel { background: #1a191e; }
 html[data-skin="teams"] .composer-shell { background: #1a191e; } /* barra input = colore finestra chat (desktop+mobile) */
-/* Hover e selezione con lo stesso grigio (il più chiaro dei due, #3b3a3f):
+/* Hover e selezione con lo stesso colore del campo di input #242329;
    la chat selezionata si distingue per il bordino. La selezione prevale
    anche mentre è in hover. */
-html[data-skin="teams"] .contact:hover { background: #3b3a3f; }
+html[data-skin="teams"] .contact:hover { background: #242329; }
 html[data-skin="teams"] .contact.active,
 html[data-skin="teams"] .contact.active:hover {
-  background: #3b3a3f;
+  background: #242329;
   box-shadow: inset 0 0 0 1px #5a5a5a;
 }
 html[data-skin="teams"] .avatar { background: linear-gradient(145deg, #5b5fc7, #3a3a6e); }
