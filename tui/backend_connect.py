@@ -4,7 +4,10 @@ import logging
 import time
 
 from models import (
+    PROTOCOL_WHATSAPP,
     contact_cache_key,
+    contact_storage_keys,
+    dedup_cross_key,
 )
 from protocols import (
     ChatBackend,
@@ -99,8 +102,7 @@ class BackendConnectMixin:
         # ri-appenderebbe i messaggi senza id (Signal, optimistic send) ad ogni
         # merge → duplicati in UI per tutte le chat.  Dedup quindi anche per
         # identità esatta (is_mine, testo, timestamp).
-        for cid, msgs in backend.cache.items():
-            key = contact_cache_key(proto, cid)
+        def _merge_messages(key: str, msgs: list[dict]) -> None:
             ui_msgs = self._cache.setdefault(key, [])
             by_key = {_dedup_key(m): m for m in ui_msgs if _dedup_key(m) is not None}
             by_id = {m.get("id"): m for m in ui_msgs if m.get("id")}
@@ -160,6 +162,43 @@ class BackendConnectMixin:
                         by_key[dk] = m
                 by_identity[identity] = m
             ui_msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
+
+        if proto == PROTOCOL_WHATSAPP:
+            # Cache-union cross-key: un doppio JID WhatsApp (@c.us/@lid) può
+            # avere lo stesso messaggio fisico sotto entrambe le chiavi DB.
+            # Processiamo ogni contatto UNA volta: union delle sue chiavi
+            # storage, dedup cross-key, merge nella sola chiave canonica.
+            key_owner: dict[str, object] = {}
+            for contact in getattr(backend, "contacts", []):
+                for storage_key in contact_storage_keys(contact):
+                    key_owner.setdefault(storage_key, contact)
+            processed: set[str] = set()
+            for cid, msgs in backend.cache.items():
+                owner = key_owner.get(cid)
+                if owner is None:
+                    _merge_messages(contact_cache_key(proto, cid), msgs)
+                    continue
+                if owner.id in processed:
+                    continue
+                processed.add(owner.id)
+                tagged = [
+                    (storage_key, m)
+                    for storage_key in contact_storage_keys(owner)
+                    for m in backend.cache.get(storage_key, [])
+                ]
+                kept_pairs = dedup_cross_key(
+                    tagged,
+                    canonical_key=owner.id,
+                    key_of=lambda pair: pair[0],
+                    normalize=lambda pair: pair[1],
+                )
+                _merge_messages(
+                    contact_cache_key(proto, owner.id),
+                    [m for _key, m in kept_pairs],
+                )
+        else:
+            for cid, msgs in backend.cache.items():
+                _merge_messages(contact_cache_key(proto, cid), msgs)
 
         # ── Merge contatti (aggiunge nuovi, aggiorna last_message_ts) ──
         existing_ids = {c.cache_key for c in self.contacts}

@@ -12,6 +12,7 @@ No Textual dependency.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,102 @@ def contact_cache_key(protocol: str, contact_id: str) -> str:
     WhatsApp, so the key must be namespaced by protocol.
     """
     return f"{protocol}:{contact_id}"
+
+
+def contact_storage_keys(contact: Any) -> list[str]:
+    """Chiavi di storage (= contact id lato DB) per un contatto WhatsApp.
+
+    Un doppio JID dello stesso telefono (``@c.us`` attivo + ``@lid``, o il
+    ghost rubrica ``@c.us``) produce storico DB diviso su due ``contact_number``.
+    Questa mappa identifica TUTTE le chiavi equivalenti partendo dal contatto
+    canonico, così read/send/UI possono operare in union cross-key.
+
+    Pure: nessuna dipendenza dal backend, nessuna I/O.  Per i protocolli non
+    WhatsApp ritorna la sola chiave del contatto.  L'ordine è preservato: la
+    chiave canonica è sempre la prima.
+    """
+    if contact.protocol != PROTOCOL_WHATSAPP:
+        return [contact.id]
+    cid = str(contact.id or "")
+    if not cid or "@" not in cid or cid.endswith("@g.us"):
+        return [cid]
+    keys = [cid]
+    lid = str(contact.extras.get("lid") or "")
+    phone = str(contact.extras.get("phone") or "")
+    if cid.endswith("@lid"):
+        if phone:
+            keys.append(f"{phone}@c.us")
+    else:  # @c.us / @s.whatsapp.net
+        if lid and lid.endswith("@lid"):
+            keys.append(lid)
+        if phone and f"{phone}@c.us" not in keys and not cid.endswith("@c.us"):
+            keys.append(f"{phone}@c.us")
+    deduped: list[str] = []
+    for key in keys:
+        if key not in deduped:
+            deduped.append(key)
+    return deduped
+
+
+def _cross_key_message_equivalent(a: Any, b: Any) -> bool:
+    """True se due messaggi (dict-like con ``id``) sono lo stesso messaggio fisico.
+
+    Usato dalla read-union cross-key WhatsApp.  Se l'id (``msg_id`` nei row
+    SQLite, ``id`` nei dict TUI) è presente e uguale, i due record sono lo
+    stesso messaggio **sempre**, anche con ``attachment_id`` diverso: un twin
+    ``@c.us``/``@lid`` può registrare lo stesso allegato come URL WAHA da una
+    parte e file locale ``sent-*`` dall'altra.  In assenza di id coincide la
+    tupla esatta ``(is_mine, text, timestamp, msg_type, attachment_id)``
+    (nessuna finestra temporale).
+
+    L'eccezione multi-allegato (id uguale, attachment distinti = allegati
+    diversi) NON si applica cross-key: i multi-allegato Signal/WhatsApp
+    condividono la stessa ``contact_number`` e restano nella chiave canonica,
+    che non viene mai deduplicata.
+    """
+    aid, bid = a.get("id"), b.get("id")
+    if aid and bid and aid == bid:
+        return True
+    return (
+        bool(a.get("is_mine")) == bool(b.get("is_mine"))
+        and (a.get("text") or "") == (b.get("text") or "")
+        and int(a.get("timestamp") or 0) == int(b.get("timestamp") or 0)
+        and (a.get("msg_type") or "") == (b.get("msg_type") or "")
+        and (a.get("attachment_id") or None) == (b.get("attachment_id") or None)
+    )
+
+
+def dedup_cross_key(
+    records: list[Any],
+    canonical_key: str,
+    key_of: Callable[[Any], str],
+    normalize: Callable[[Any], Any],
+) -> list[Any]:
+    """Dedup cross-key in due passate (pure, ordine preservato).
+
+    1. le righe con ``key_of(r) == canonical_key`` sono tenute INTEGRE
+       (multi-allegato della stessa chat inclusi);
+    2. per ogni riga alias (``key_of(r) != canonical_key``) la si scarta se il
+       suo ``normalize(r)`` è equivalente (``_cross_key_message_equivalent``)
+       a uno dei normalize già tenuti, altrimenti la si appende.
+
+    Con meno di 2 chiavi distinte è un no-op (nessuna dedup single-key).
+    """
+    if not records:
+        return records
+    if len({key_of(r) for r in records}) < 2:
+        return records
+    kept = [r for r in records if key_of(r) == canonical_key]
+    kept_norm = [normalize(r) for r in kept]
+    for r in records:
+        if key_of(r) == canonical_key:
+            continue
+        norm = normalize(r)
+        if any(_cross_key_message_equivalent(norm, other) for other in kept_norm):
+            continue
+        kept.append(r)
+        kept_norm.append(norm)
+    return kept
 
 
 # ─── Media kinds ──────────────────────────────────────────────────────────────

@@ -10,6 +10,8 @@ from textual.widgets import Button, Static
 
 from models import (
     PROTOCOL_SIGNAL,
+    contact_storage_keys,
+    dedup_cross_key,
     is_media_quote_placeholder,
     media_kind_from_mime,
 )
@@ -1310,9 +1312,25 @@ class ChatViewMixin:
         message's text was updated (an edit).  A status-only upgrade does NOT
         count as a change (nothing to re-render).
         """
-        backend_msgs = getattr(backend, "cache", {}).get(contact.id, [])
-        if not backend_msgs:
+        # Cache-union cross-key: per un contatto WhatsApp il backend cache può
+        # avere lo storico sotto qualunque chiave alias della union (@c.us/@lid).
+        # Tracciamo la chiave sorgente e applichiamo la dedup cross-key (stesso
+        # msg_id a attachment diverso compreso) PRIMA del loop intra-chiave.
+        backend_cache = getattr(backend, "cache", {})
+        tagged: list[tuple[str, dict]] = [
+            (storage_key, m)
+            for storage_key in contact_storage_keys(contact)
+            for m in backend_cache.get(storage_key, [])
+        ]
+        if not tagged:
             return False
+        kept_pairs = dedup_cross_key(
+            tagged,
+            canonical_key=contact.id,
+            key_of=lambda pair: pair[0],
+            normalize=lambda pair: pair[1],
+        )
+        backend_msgs: list[dict] = [m for _key, m in kept_pairs]
 
         ui_key = contact.cache_key
         ui_msgs = self._cache.setdefault(ui_key, [])

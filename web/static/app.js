@@ -3264,16 +3264,30 @@ function connectSocket() {
             loadMessages();
           }
           break;
-        case "contact_update":
-          loadContacts({ quiet: true });
-          if (state.active && state.active.id === String(update.payload.contact_id)
-              && state.active.protocol === update.payload.protocol) {
-            if (update.payload.display_name) {
-              state.active.display_name = update.payload.display_name;
-              if (elements.threadName) elements.threadName.textContent = update.payload.display_name;
+        case "contact_update": {
+          if (update.payload && update.payload.merged_into) {
+            const loserId = String(update.payload.contact_id);
+            const winnerId = String(update.payload.merged_into);
+            state.contacts = state.contacts.filter(c => !(c.id === loserId && c.protocol === update.payload.protocol));
+            if (state.searchResults) {
+              state.searchResults = state.searchResults.filter(c => !(c.id === loserId && c.protocol === update.payload.protocol));
+            }
+            if (state.active && state.active.id === loserId && state.active.protocol === update.payload.protocol) {
+              state.active = state.contacts.find(c => c.id === winnerId && c.protocol === update.payload.protocol) || state.active;
+            }
+            loadContacts({ quiet: true });
+          } else {
+            loadContacts({ quiet: true });
+            if (state.active && state.active.id === String(update.payload.contact_id)
+                && state.active.protocol === update.payload.protocol) {
+              if (update.payload.display_name) {
+                state.active.display_name = update.payload.display_name;
+                if (elements.threadName) elements.threadName.textContent = update.payload.display_name;
+              }
             }
           }
           break;
+        }
         case "receipt":
           applyReceiptUpdates(update.payload);
           break;

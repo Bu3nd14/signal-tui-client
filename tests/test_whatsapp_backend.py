@@ -1429,10 +1429,14 @@ class TestWhatsAppBackend:
         ):
             backend._load_contacts()
         extras = backend.contacts[0].extras
+        # Design rev3 punto 9: i contatti da /chats sono marcati come chat
+        # attive (source/is_chat_active) oltre a jid/phone/last_message_ts.
         assert extras == {
             "jid": "393331234567@c.us",
             "last_message_ts": 1700000000000,
             "phone": "393331234567",
+            "source": "wa_chats",
+            "is_chat_active": True,
         }
 
     def test_send_message_sync_calls_rest(self):
@@ -4910,7 +4914,11 @@ def test_mark_read_uses_send_seen_and_404_still_marks_local(caplog):
         "path": "http://api.test/api/sendSeen",
         "payload": {"session": "default", "chatId": "123@c.us"},
     }
-    mark_local.assert_called_once_with("123@c.us", protocol=PROTOCOL_WHATSAPP)
+    # Design rev3 punto 13: la persistenza locale passa anche le chiavi alias
+    # della read-union (vuote qui: nessun contatto risolto in _contacts_by_jid).
+    mark_local.assert_called_once_with(
+        "123@c.us", protocol=PROTOCOL_WHATSAPP, extra_keys=()
+    )
     records = [r for r in caplog.records if "path=/api/sendSeen" in r.getMessage()]
     assert len(records) == 1
     assert records[0].levelno == logging.DEBUG

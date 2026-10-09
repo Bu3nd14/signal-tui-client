@@ -20,6 +20,8 @@ from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
 from models import (
+    contact_storage_keys,
+    dedup_cross_key,
     is_caption_like,
     is_media_quote_placeholder_composite,
     is_whatsapp_synthetic_media_text,
@@ -186,7 +188,12 @@ def _contact_payload(
         "protocol": str(contact.protocol),
         "extras": extras,
         "last_message_ts": int(extras.get("last_message_ts", 0) or 0),
-        "unread": unread.get((contact.protocol, contact.id), 0),
+        # Read-union: somma gli unread di tutte le chiavi alias dello stesso
+        # contatto WhatsApp (storico DB diviso fra @c.us e @lid).
+        "unread": sum(
+            unread.get((contact.protocol, key), 0)
+            for key in contact_storage_keys(contact)
+        ),
     }
 
 
@@ -203,11 +210,16 @@ def _message_edit_id(row: sqlite3.Row | dict[str, Any]) -> str | None:
 
 
 def _message_row_for_edit(
-    protocol: str, contact_id: str, message_id: str
+    protocol: str,
+    contact_id: str,
+    message_id: str,
+    extra_keys: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     import protocols.db as backend
     from protocols.db import _DB_LOCK
 
+    keys = [contact_id, *(key for key in extra_keys if key)]
+    placeholders = ", ".join("?" for _ in keys)
     with _DB_LOCK:
         try:
             connection = sqlite3.connect(backend.DB_FILE)
@@ -215,13 +227,14 @@ def _message_row_for_edit(
             try:
                 row = connection.execute(
                     "SELECT id, msg_id, text, is_mine, timestamp, protocol, msg_type, "
-                    "status FROM messages WHERE protocol = ? AND contact_number = ? "
+                    "status FROM messages "
+                    f"WHERE protocol = ? AND contact_number IN ({placeholders}) "
                     "AND (msg_id = ? OR (? = 'signal' AND msg_id IS NULL "
                     "AND timestamp = CAST(? AS INTEGER))) "
                     "ORDER BY CASE WHEN msg_id = ? THEN 0 ELSE 1 END LIMIT 1",
                     (
                         protocol,
-                        contact_id,
+                        *keys,
                         message_id,
                         protocol,
                         message_id,
@@ -375,10 +388,48 @@ def _aggregate_reactions(
     return result
 
 
-def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
+def _row_message_identity(row: sqlite3.Row) -> dict[str, Any]:
+    """Normalizza un row SQLite nella forma attesa da ``_cross_key_message_equivalent``.
+
+    Il rowid ``id`` (chiave di ordinamento) NON è l'identità del messaggio:
+    l'identità cross-key è ``msg_id`` ed è mappata sul campo ``id``.
+    """
+    return {
+        "id": row["msg_id"],
+        "is_mine": row["is_mine"],
+        "text": row["text"],
+        "timestamp": row["timestamp"],
+        "msg_type": row["msg_type"],
+        "attachment_id": row["attachment_id"],
+    }
+
+
+def _cross_key_dedup_rows(rows: list[sqlite3.Row], canonical: str) -> list[sqlite3.Row]:
+    """Dedup read-union cross-key (due passate, regola condivisa in ``models``).
+
+    Tiene integre le righe della chiave canonica; per le alias scarta i twin
+    equivalenti (stesso ``msg_id``, attachment a parte, oppure tupla esatta).
+    La dedup per chiave avviene DOPO aver raccolto tutte le canoniche, così
+    un'alias con rowid minore del twin canonico non genera un duplicato.
+    """
+    kept = dedup_cross_key(
+        rows,
+        canonical_key=canonical,
+        key_of=lambda row: row["contact_number"],
+        normalize=_row_message_identity,
+    )
+    kept.sort(key=lambda r: (int(r["timestamp"]), int(r["id"])))
+    return kept
+
+
+def _messages(
+    protocol: str, contact_id: str, extra_keys: tuple[str, ...] = ()
+) -> list[dict[str, Any]]:
     import protocols.db as backend
     from protocols.db import _DB_LOCK, _reactions_for_contact
 
+    keys = [contact_id, *(key for key in extra_keys if key)]
+    placeholders = ", ".join("?" for _ in keys)
     with _DB_LOCK:
         try:
             connection = sqlite3.connect(backend.DB_FILE)
@@ -391,14 +442,17 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
                     "quote_text, quote_timestamp, quote_author, quote_attachment_id, "
                     "quote_content_type, quote_attachment_path, status, edited, read, "
                     "reply_to_message_id, batch_id, batch_index "
-                    "FROM messages WHERE protocol = ? AND contact_number = ? "
+                    f"FROM messages WHERE protocol = ? "
+                    f"AND contact_number IN ({placeholders}) "
                     "ORDER BY timestamp, id",
-                    (protocol, contact_id),
+                    (protocol, *keys),
                 ).fetchall()
             finally:
                 connection.close()
         except sqlite3.Error:
             return []
+        if len(keys) > 1:
+            rows = _cross_key_dedup_rows(rows, contact_id)
 
     messages = []
     for row in rows:
@@ -518,6 +572,8 @@ def _messages(protocol: str, contact_id: str) -> list[dict[str, Any]]:
             }
         )
 
+    # Le reazioni restano single-key (scelta di design): la read-union
+    # cross-key copre i messaggi, non l'aggregazione reazioni.
     reactions_by_message = _aggregate_reactions(
         rows, _reactions_for_contact(protocol, contact_id)
     )
@@ -1737,26 +1793,37 @@ def create_api_router() -> Any:
         contact_id: str,
         refresh: bool = False,
     ) -> list[dict[str, Any]]:
+        # Canonicalizza PRIMA del fetch remoto: una richiesta con l'id del ghost
+        # (@c.us) apre lo storico sulla chat attiva (@lid), R-G.  La read-union
+        # poi unisce comunque lo storico DB diviso fra le due chiavi.
+        manager = request.app.state.manager
+        get_backend = getattr(manager, "get", None)
+        backend = get_backend(proto) if callable(get_backend) else None
+        find_contact = getattr(backend, "find_contact", None)
+        contact = find_contact(contact_id) if callable(find_contact) else None
+        canonical_id = contact.id if contact is not None else contact_id
         if refresh or proto == "telegram":
             try:
-                backend = request.app.state.manager.get(proto)
                 fetch = getattr(backend, "fetch_history", None)
-                if fetch is not None and contact_id:
-                    refreshed = await asyncio.to_thread(fetch, contact_id, 20)
+                if fetch is not None and canonical_id:
+                    refreshed = await asyncio.to_thread(fetch, canonical_id, 20)
                     logger.debug(
                         "%s history refresh: %s -> %d",
                         proto,
-                        contact_id,
+                        canonical_id,
                         len(refreshed),
                     )
             except Exception:
                 logger.debug(
                     "%s history refresh failed: %s",
                     proto,
-                    contact_id,
+                    canonical_id,
                     exc_info=True,
                 )
-        result = _messages(proto, contact_id)
+        extra_keys = (
+            tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
+        )
+        result = _messages(proto, contact_id, extra_keys=extra_keys)
         is_group = contact_id.endswith("@g.us")
         if not is_group:
             manager = request.app.state.manager
@@ -1835,13 +1902,24 @@ def create_api_router() -> Any:
         ):
             raise HTTPException(status_code=400, detail="Invalid request")
 
-        row = _message_row_for_edit(protocol, contact_id, message_id)
+        # Read-union cross-key: la riga può stare sotto la chiave alias (@c.us
+        # ghost) mentre la richiesta arriva col canonical (@lid).
+        manager = request.app.state.manager
+        get_backend = getattr(manager, "get", None)
+        backend = get_backend(protocol) if callable(get_backend) else None
+        find_contact = getattr(backend, "find_contact", None)
+        contact = find_contact(contact_id) if callable(find_contact) else None
+        edit_keys = (
+            tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
+        )
+        row = _message_row_for_edit(
+            protocol, contact_id, message_id, extra_keys=edit_keys
+        )
         if row is None:
             raise HTTPException(status_code=404, detail="Not Found")
         if _message_edit_id(row) is None:
             raise HTTPException(status_code=400, detail="Message not editable")
 
-        manager = request.app.state.manager
         try:
             edited = await asyncio.to_thread(
                 manager.edit_message_sync,
