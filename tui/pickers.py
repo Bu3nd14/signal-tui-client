@@ -96,7 +96,7 @@ class PickerMixin:
         """
         if self.whatsapp_backend is not None:
             self.whatsapp_backend.start_lid_resolver()
-        contacts = self.manager.list_address_book_sync(protocols=scope)
+        contacts = self.manager.list_address_book_sync(protocols=scope, force=True)
         errors = dict(self.manager.address_book_errors)
 
         def _apply() -> None:

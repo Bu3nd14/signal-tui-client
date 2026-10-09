@@ -19,11 +19,25 @@ import inspect
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from models import ChatContact, ChatEvent
+
+
+@dataclass
+class AddressBookRefreshResult:
+    """Outcome of a ``ChatBackend.refresh_contacts_sync`` run.
+
+    ``errors`` is set (and no mutation committed) when the remote fetch fails;
+    an empty-but-alive API commits and leaves ``errors`` as ``None``.
+    """
+
+    protocol: str
+    new_contacts: list[ChatContact] = field(default_factory=list)
+    renamed_contacts: list[ChatContact] = field(default_factory=list)
+    errors: str | None = None
 
 
 def should_upgrade_outgoing_attachment(
@@ -353,6 +367,41 @@ class ChatBackend(ABC):
         Delega a ``list_address_book_sync`` via ``asyncio.to_thread``.
         """
         return await asyncio.to_thread(self.list_address_book_sync)
+
+    def refresh_contacts_sync(self, force: bool = True) -> AddressBookRefreshResult:
+        """Re-fetch dei contatti e ri-applicazione dei nomi rubrica IN PLACE.
+
+        Bloccante (SOLO worker thread).  Contratto:
+
+        - NON solleva mai: su errore remoto ritorna ``errors`` valorizzato e NON
+          committa alcuna mutazione (fetch-fallita ≠ fetch-vuota).
+        - MERGE IN PLACE: aggiorna ``display_name``/``last_message_ts``/extras
+          sugli OGGETTI esistenti di ``self.contacts``; appende solo i NUOVI; NON
+          sostituisce mai gli OGGETTI dei contatti già noti (preserva
+          l'identità-oggetto condivisa con la TUI e i ghost).  Il riferimento
+          ``self.contacts`` può essere riassegnato al rebuild della lista, ma
+          l'invariante reale è l'identità oggetto dei contatti "kept".
+        - Aggiorna i lookup per MERGE (mai replace distruttivo).
+        - NON riscrive lo storico renderizzato.
+        - Emette un ``contact_update`` per ogni contatto nuovo/rinominato.
+
+        Default (base): no-op → risultato vuoto.  I ``_MinimalBackend`` dei test
+        ereditano il default (zero impatto sui test esistenti).
+        """
+        return AddressBookRefreshResult(self.protocol)
+
+    def _contact_update_event(self, contact: ChatContact) -> ChatEvent:
+        """Build the canonical ``contact_update`` event for *contact*."""
+        return ChatEvent(
+            type="contact_update",
+            protocol=self.protocol,
+            contact_id=contact.id,
+            payload={
+                "display_name": contact.display_name,
+                "phone": contact.extras.get("phone"),
+                "contact": contact,
+            },
+        )
 
     def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
         """Cerca un contatto nella cache rubrica in-memory (zero rete).

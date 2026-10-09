@@ -36,7 +36,11 @@ from models import (
     msg_type_for_media_kind,
 )
 
-from .base import ChatBackend, should_upgrade_outgoing_attachment
+from .base import (
+    AddressBookRefreshResult,
+    ChatBackend,
+    should_upgrade_outgoing_attachment,
+)
 from .config import (
     get_address_book_ttl_s,
     get_telegram_api_hash,
@@ -64,6 +68,27 @@ _AVAILABLE_REACTIONS_TTL_S = 600
 
 # Prefix for lazy-download media references (``tgref:<chat_id>:<msg_id>``).
 _TGREF_PREFIX = "tgref:"
+
+
+def _to_int(value: object) -> int | None:
+    """Parse *value* to ``int`` or return ``None``.
+
+    Canonical helper (never raises): ``"42"`` → 42, ``"-100"`` → -100,
+    ``"--1"`` → ``None``, ``"x"`` → ``None``.
+    """
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return None
+
+
+def _tg_is_placeholder(contact: ChatContact) -> bool:
+    """True when *contact* still carries a replaceable display name."""
+    return (
+        not contact.display_name
+        or contact.display_name == contact.id
+        or contact.display_name.isdigit()
+    )
 
 
 def _tg_media_kind(msg: Any) -> tuple[str | None, str | None, str | None]:
@@ -260,6 +285,9 @@ class TelegramBackend(ChatBackend):
         # Normalised contact list
         self.contacts: list[ChatContact] = []
         self._contacts_by_id: dict[int, ChatContact] = {}
+        #: Guards read-modify-write mutations of ``_contacts_by_id``/``contacts``
+        #: (address-book merge, dialog refresh) shared with the Telethon loop.
+        self._contacts_lock = threading.Lock()
 
         # Address book (rubrica completa) — cache + TTL
         self._address_book: list[ChatContact] | None = None
@@ -783,6 +811,68 @@ class TelegramBackend(ChatBackend):
         self._contacts_by_id = by_id
         self._reconcile_read_state()
 
+    async def _load_contacts_merge(self) -> list[ChatContact]:
+        """Refresh dialogs and merge them IN PLACE (no wipe, no object swap).
+
+        Variante di ``_load_contacts`` che su errore di ``get_dialogs``
+        RILANCIA (il chiamante ritorna ``errors`` senza committare).  Preserva
+        ghost, ``access_hash`` e ``read_outbox_max_id``.  Ritorna i NUOVI
+        contatti.
+        """
+        dialogs = await self._client.get_dialogs(limit=200)  # raise su errore
+        # Build "fresh" MIRRORANDO _load_contacts: ``_entity_to_contact`` non
+        # popola ``last_message_ts`` né ``read_outbox_max_id`` (v3.1).  Senza
+        # questo, il merge sotto (``f.last_message_ts``,
+        # ``f.extras["read_outbox_max_id"]``) non avrebbe dati da applicare.
+        fresh: list[ChatContact] = []
+        for d in dialogs:
+            cc = self._entity_to_contact(d.entity)
+            if d.message and d.message.date:
+                cc.last_message_ts = int(d.message.date.timestamp() * 1000)
+            read_max_id = getattr(d, "read_outbox_max_id", None)
+            if read_max_id:
+                cc.extras["read_outbox_max_id"] = int(read_max_id)
+            fresh.append(cc)
+        fresh_by_id: dict[int, ChatContact] = {}
+        for c in fresh:
+            eid = _to_int(c.id)
+            if eid is not None:
+                fresh_by_id[eid] = c
+        kept: list[ChatContact] = []
+        for c in self.contacts:
+            f = fresh_by_id.pop(_to_int(c.id), None)
+            if f is not None:
+                if (
+                    f.display_name
+                    and f.display_name != c.display_name
+                    and _tg_is_placeholder(c)
+                ):
+                    c.display_name = f.display_name
+                if f.last_message_ts > (c.last_message_ts or 0):
+                    c.last_message_ts = f.last_message_ts
+                read_max = f.extras.get("read_outbox_max_id")
+                if read_max:
+                    c.extras["read_outbox_max_id"] = int(read_max)
+                kept.append(c)
+            elif c.extras.get("ghost"):
+                kept.append(c)
+        new: list[ChatContact] = []
+        with self._contacts_lock:
+            kept_ids = {_to_int(c.id) for c in kept}
+            for f in fresh:
+                if _to_int(f.id) not in kept_ids:
+                    new.append(f)
+                    kept.append(f)
+            self.contacts = kept
+            by_id: dict[int, ChatContact] = {}
+            for c in kept:
+                eid = _to_int(c.id)
+                if eid is not None:
+                    by_id[eid] = c
+            self._contacts_by_id = by_id
+        self._reconcile_read_state()
+        return new
+
     def _reconcile_read_state(self) -> None:
         """Mark outgoing messages as read based on server ``read_outbox_max_id``.
 
@@ -1072,13 +1162,84 @@ class TelegramBackend(ChatBackend):
 
         # Extend the lookup index with book users (used by _identify_contact
         # and the send fallback) without touching self.contacts (main list).
-        for cc in book:
-            try:
-                self._contacts_by_id.setdefault(int(cc.id), cc)
-            except (ValueError, TypeError):
-                continue
+        with self._contacts_lock:
+            for cc in book:
+                eid = _to_int(cc.id)
+                if eid is not None:
+                    self._contacts_by_id.setdefault(eid, cc)
 
         return list(self._address_book)
+
+    def _apply_book_to_contacts(self, book: list[ChatContact]) -> None:
+        """Merge the address book into ``self.contacts``/``_contacts_by_id``.
+
+        Never replaces an existing dialog object (object identity preserved);
+        ``access_hash`` is filled only when missing.
+        """
+        by_id: dict[int, ChatContact] = {}
+        for c in book:
+            eid = _to_int(c.id)
+            if eid is not None:
+                by_id[eid] = c
+        with self._contacts_lock:
+            for c in self.contacts:
+                eid = _to_int(c.id)
+                b = by_id.get(eid) if eid is not None else None
+                if b is None:
+                    continue
+                if (
+                    b.display_name
+                    and b.display_name != c.display_name
+                    and _tg_is_placeholder(c)
+                ):
+                    c.display_name = b.display_name
+                if not c.extras.get("access_hash") and b.extras.get("access_hash"):
+                    c.extras["access_hash"] = b.extras["access_hash"]
+            for b in book:
+                eid = _to_int(b.id)
+                if eid is None:
+                    continue
+                existing = self._contacts_by_id.get(eid)
+                if existing is None:
+                    self._contacts_by_id[eid] = b
+                else:
+                    if (
+                        b.display_name
+                        and _tg_is_placeholder(existing)
+                        and b.display_name != existing.display_name
+                    ):
+                        existing.display_name = b.display_name
+                    if not existing.extras.get("access_hash") and b.extras.get(
+                        "access_hash"
+                    ):
+                        existing.extras["access_hash"] = b.extras["access_hash"]
+
+    def refresh_contacts_sync(self, force: bool = True) -> AddressBookRefreshResult:
+        """Re-fetch dialogs + rubrica e applica i nomi IN PLACE (merge, no wipe)."""
+        if self._loop is None or self._client is None or not self._connected:
+            return AddressBookRefreshResult(PROTOCOL_TELEGRAM, errors="not connected")
+        before = {c.id: c.display_name for c in self.contacts}
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._load_contacts_merge(), self._loop
+            )
+            new = future.result(timeout=20)
+        except Exception as exc:
+            logger.warning("Telegram refresh: get_dialogs failed", exc_info=True)
+            return AddressBookRefreshResult(PROTOCOL_TELEGRAM, errors=str(exc))
+        try:
+            book = self.list_address_book_sync(force=force)
+            self._apply_book_to_contacts(book)
+        except Exception:
+            logger.warning("Telegram refresh: book apply failed", exc_info=True)
+        renamed = [
+            c
+            for c in self.contacts
+            if c.id in before and before[c.id] != c.display_name
+        ]
+        for c in new + renamed:
+            self._events.put(self._contact_update_event(c))
+        return AddressBookRefreshResult(PROTOCOL_TELEGRAM, new, renamed)
 
     def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
         """Cerca un contatto nella cache rubrica in-memory (zero rete).

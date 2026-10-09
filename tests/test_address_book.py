@@ -33,10 +33,10 @@ from models import (
     ChatContact,
 )
 from protocols import config
-from protocols.base import ChatBackend
+from protocols.base import AddressBookRefreshResult, ChatBackend
 from protocols.manager import BackendManager
 from protocols.signal import SignalBackend
-from protocols.telegram import TelegramBackend
+from protocols.telegram import TelegramBackend, _tg_is_placeholder, _to_int
 from protocols.whatsapp import WhatsAppBackend, _dedup_book_contacts
 from protocols.whatsapp_rest import WhatsAppRESTClient
 
@@ -1542,3 +1542,525 @@ class TestFixtureIntegration:
         assert mamma.extras["phone"] == ""  # contatto senza numero preservato
         # access_hash anonimizzato a 0 → backend lo mappa a "" (nessun hash).
         assert mamma.extras["access_hash"] == ""
+
+
+# ─── Refresh dinamico: config getters (design v3 §10) ───────────────────────
+
+
+class TestDynamicRefreshConfig:
+    """⚙️ Getter della rubrica dinamica: env → config.json → default."""
+
+    def test_interval_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        monkeypatch.delenv("DYNAMIC_REFRESH_INTERVAL_S", raising=False)
+        assert config.get_dynamic_refresh_interval_s() == 300
+
+    def test_interval_env(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        monkeypatch.setenv("DYNAMIC_REFRESH_INTERVAL_S", "42")
+        assert config.get_dynamic_refresh_interval_s() == 42
+
+    def test_interval_env_invalid(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        monkeypatch.setenv("DYNAMIC_REFRESH_INTERVAL_S", "nope")
+        assert config.get_dynamic_refresh_interval_s() == 300
+
+    def test_interval_config(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        monkeypatch.delenv("DYNAMIC_REFRESH_INTERVAL_S", raising=False)
+        (tmp_path / "config.json").write_text(
+            json.dumps({"dynamic_refresh_interval_s": 90})
+        )
+        assert config.get_dynamic_refresh_interval_s() == 90
+
+    def test_cooldown_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        monkeypatch.delenv("DYNAMIC_REFRESH_COOLDOWN_S", raising=False)
+        assert config.get_dynamic_refresh_cooldown_s() == 60
+
+    def test_cooldown_env(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        monkeypatch.setenv("DYNAMIC_REFRESH_COOLDOWN_S", "30")
+        assert config.get_dynamic_refresh_cooldown_s() == 30
+
+    def test_cooldown_env_invalid(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        monkeypatch.setenv("DYNAMIC_REFRESH_COOLDOWN_S", "x")
+        assert config.get_dynamic_refresh_cooldown_s() == 60
+
+    def test_cooldown_config(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
+        monkeypatch.delenv("DYNAMIC_REFRESH_COOLDOWN_S", raising=False)
+        (tmp_path / "config.json").write_text(
+            json.dumps({"dynamic_refresh_cooldown_s": 15})
+        )
+        assert config.get_dynamic_refresh_cooldown_s() == 15
+
+
+# ─── Refresh dinamico WhatsApp (design v3 §4.1) ─────────────────────────────
+
+
+def _wa_refresh_backend() -> WhatsAppBackend:
+    backend = _wa_backend()
+    backend._connected = True
+    backend.start_lid_resolver = MagicMock()
+    # Rubrica "viva" ma vuota: nessun errore, nessun contatto.
+    backend._rest.list_all_contacts.return_value = []
+    return backend
+
+
+def _drain_events(backend) -> list:
+    events = []
+    while not backend._events.empty():
+        events.append(backend._events.get_nowait())
+    return events
+
+
+class TestWARefreshContacts:
+    """♻️ ``refresh_contacts_sync``: errore ≠ vuoto, merge in place, alias R4."""
+
+    def test_fetch_none_returns_errors_and_no_mutation(self):
+        backend = _wa_refresh_backend()
+        existing = _chat("1@c.us", "Mario", ts=100)
+        backend.contacts = [existing]
+        backend._contacts_by_jid = {"1@c.us": existing}
+        backend._rest.list_contacts.return_value = None
+
+        result = backend.refresh_contacts_sync()
+
+        assert result.errors
+        assert result.new_contacts == []
+        assert result.renamed_contacts == []
+        assert backend.contacts == [existing]
+        assert backend._contacts_by_jid["1@c.us"] is existing
+
+    def test_fetch_empty_commits_and_preserves_ghost(self):
+        backend = _wa_refresh_backend()
+        regular = _chat("1@c.us", "Mario", ts=100)
+        ghost = _chat("2@c.us", "2@c.us", ts=5)
+        ghost.extras["ghost"] = True
+        backend.contacts = [regular, ghost]
+        backend._contacts_by_jid = {c.id: c for c in backend.contacts}
+        backend._rest.list_contacts.return_value = []
+
+        result = backend.refresh_contacts_sync()
+
+        assert result.errors is None
+        assert backend.contacts == [ghost]
+        assert backend._contacts_by_jid == {"2@c.us": ghost}
+
+    def test_new_and_renamed_with_kept_identity(self):
+        backend = _wa_refresh_backend()
+        existing = _chat("1@c.us", "1@c.us", ts=100)
+        backend.contacts = [existing]
+        backend._contacts_by_jid = {"1@c.us": existing}
+        backend._rest.list_contacts.return_value = [
+            {"id": "1@c.us", "name": "Mario Rossi", "last_ts": 100},
+            {"id": "2@c.us", "name": "Luigi", "last_ts": 200},
+        ]
+        backend._rest.list_all_contacts.return_value = []
+
+        result = backend.refresh_contacts_sync()
+
+        assert len(result.new_contacts) == 1
+        assert result.new_contacts[0].id == "2@c.us"
+        assert len(result.renamed_contacts) == 1
+        assert result.renamed_contacts[0] is existing
+        # BLOCCANTE 1: l'oggetto kept è lo STESSO, aggiornato in place.
+        kept = next(c for c in backend.contacts if c.id == "1@c.us")
+        assert kept is existing
+        assert existing.display_name == "Mario Rossi"
+        # Un ``contact_update`` per ogni nuovo/rinominato.
+        updates = [e for e in _drain_events(backend) if e.type == "contact_update"]
+        ids = {e.contact_id for e in updates}
+        assert ids == {"1@c.us", "2@c.us"}
+
+    def test_lid_alias_restored_after_rebuild(self):
+        backend = _wa_refresh_backend()
+        now = int(time.time())
+        backend._lid_map = {"999@lid": {"phone": "393331234567", "resolved_at": now}}
+        contact = _chat("393331234567@c.us", "Mario", ts=10)
+        contact.extras["phone"] = "393331234567"
+        backend.contacts = [contact]
+        backend._contacts_by_jid = {contact.id: contact}
+        backend._register_lid_alias(contact)
+        assert backend._contacts_by_jid["999@lid"] is contact
+        backend._rest.list_contacts.return_value = [
+            {"id": "393331234567@c.us", "name": "Mario", "last_ts": 10}
+        ]
+        backend._rest.list_all_contacts.return_value = []
+
+        backend.refresh_contacts_sync()
+
+        # R4: l'alias @lid sopravvive al rebuild della mappa JID.
+        assert backend._contacts_by_jid.get("999@lid") is contact
+
+    def test_does_not_regress_last_message_ts(self):
+        backend = _wa_refresh_backend()
+        existing = _chat("1@c.us", "Mario", ts=2000)
+        backend.contacts = [existing]
+        backend._contacts_by_jid = {"1@c.us": existing}
+        backend._rest.list_contacts.return_value = [
+            {"id": "1@c.us", "name": "Mario", "last_ts": 1000}
+        ]
+        backend._rest.list_all_contacts.return_value = []
+
+        backend.refresh_contacts_sync()
+
+        assert existing.last_message_ts >= 2000
+
+
+# ─── Refresh dinamico Telegram (design v3 §4.2) ─────────────────────────────
+
+
+def _tg_dialog(entity, *, read_outbox_max_id=None, message=None) -> SimpleNamespace:
+    """Fake Telethon dialog returned by ``client.get_dialogs``."""
+    return SimpleNamespace(
+        entity=entity, read_outbox_max_id=read_outbox_max_id, message=message
+    )
+
+
+def _tg_refresh_backend(monkeypatch, contacts=None, users=None) -> TelegramBackend:
+    backend = _tg_backend_with_book(monkeypatch, users or [], contacts)
+    backend._client.get_dialogs = AsyncMock(return_value=[])
+    return backend
+
+
+class TestTelegramRefreshContacts:
+    """♻️ ``refresh_contacts_sync``: no wipe, merge in place, ghost, R5/R8."""
+
+    def test_get_dialogs_error_leaves_state_untouched(self, monkeypatch):
+        existing = _tg_dialog_contact(10, "Ada", ts=100, read_max=7)
+        existing.extras["access_hash"] = "h-1"
+        backend = _tg_refresh_backend(monkeypatch, contacts=[existing])
+        backend._client.get_dialogs = AsyncMock(side_effect=RuntimeError("RPC down"))
+        before_contacts = list(backend.contacts)
+        before_by_id = dict(backend._contacts_by_id)
+
+        result = backend.refresh_contacts_sync()
+
+        assert result.errors
+        assert backend.contacts == before_contacts
+        assert backend._contacts_by_id == before_by_id
+
+    def test_rename_preserves_object_access_hash_and_read_max(self, monkeypatch):
+        existing = _tg_dialog_contact(10, "10", ts=100, read_max=99)
+        existing.extras["access_hash"] = "hash-99"
+        backend = _tg_refresh_backend(monkeypatch, contacts=[existing])
+        user = _tg_user(id=10, first_name="Ada", last_name="Lovelace", access_hash=111)
+        backend._client.get_dialogs = AsyncMock(return_value=[_tg_dialog(user)])
+
+        result = backend.refresh_contacts_sync()
+
+        assert len(result.renamed_contacts) == 1
+        kept = backend._contacts_by_id[10]
+        assert kept is existing
+        assert kept is backend.contacts[0]
+        assert kept.display_name == "Ada Lovelace"
+        assert kept.extras["access_hash"] == "hash-99"
+        assert kept.extras["read_outbox_max_id"] == 99
+
+    def test_ghost_preserved_when_absent_from_dialogs(self, monkeypatch):
+        ghost = _tg_dialog_contact(77, "77", ts=5)
+        ghost.extras["ghost"] = True
+        backend = _tg_refresh_backend(monkeypatch, contacts=[ghost])
+        backend._client.get_dialogs = AsyncMock(return_value=[])
+
+        backend.refresh_contacts_sync()
+
+        assert ghost in backend.contacts
+        assert backend._contacts_by_id[77] is ghost
+
+    def test_refresh_updates_read_outbox_max_id_from_dialog(self, monkeypatch):
+        existing = _tg_dialog_contact(10, "Ada", ts=100)  # senza read_max
+        backend = _tg_refresh_backend(monkeypatch, contacts=[existing])
+        user = _tg_user(id=10, first_name="Ada", access_hash=1)
+        backend._client.get_dialogs = AsyncMock(
+            return_value=[_tg_dialog(user, read_outbox_max_id=55)]
+        )
+
+        backend.refresh_contacts_sync()
+
+        assert existing.extras.get("read_outbox_max_id") == 55
+
+    def test_to_int_is_canonical(self):
+        assert _to_int("--1") is None
+        assert _to_int("-100") == -100
+        assert _to_int("42") == 42
+        assert _to_int("x") is None
+        assert _to_int(None) is None
+        assert _to_int(7) == 7
+
+    def test_tg_is_placeholder_guard_not_inverted(self):
+        placeholder = ChatContact(
+            id="10", display_name="10", protocol=PROTOCOL_TELEGRAM
+        )
+        named = ChatContact(id="10", display_name="Ada", protocol=PROTOCOL_TELEGRAM)
+        no_name = ChatContact(id="10", display_name="", protocol=PROTOCOL_TELEGRAM)
+        assert _tg_is_placeholder(placeholder) is True
+        assert _tg_is_placeholder(no_name) is True
+        assert _tg_is_placeholder(named) is False
+
+    def test_pure_rename_no_duplicates(self, monkeypatch):
+        existing = _tg_dialog_contact(10, "10", ts=1)
+        backend = _tg_refresh_backend(monkeypatch, contacts=[existing])
+        user = _tg_user(id=10, first_name="Ada")
+        backend._client.get_dialogs = AsyncMock(return_value=[_tg_dialog(user)])
+
+        result = backend.refresh_contacts_sync()
+
+        assert result.new_contacts == []
+        assert len(result.renamed_contacts) == 1
+        assert len(backend.contacts) == 1
+        assert len(backend._contacts_by_id) == 1
+
+
+# ─── Refresh dinamico Signal (design v3 §4.3) ───────────────────────────────
+
+
+def _signal_refresh_backend() -> SignalBackend:
+    backend = SignalBackend()
+    backend._use_daemon = True
+    backend._rpc = MagicMock()
+    # Il refresh non deve MAI passare dal subprocess (R4/4.3).
+    backend._load_contacts_subprocess = MagicMock()
+    return backend
+
+
+class TestSignalRefreshContacts:
+    """♻️ ``refresh_contacts_sync``: RPC-only, no subprocess, ghost, R2/R3."""
+
+    def test_rpc_error_returns_errors_without_mutation_or_subprocess(self):
+        backend = _signal_refresh_backend()
+        existing = ChatContact(
+            id="+391234567890",
+            display_name="Mario",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "a1", "number": "+391234567890"},
+        )
+        backend.contacts = [existing]
+        backend._contacts_by_key = {existing.cache_key: existing}
+        backend._rpc._call.return_value = {"error": "boom"}
+
+        result = backend.refresh_contacts_sync()
+
+        assert result.errors == "boom"
+        assert backend.contacts == [existing]
+        assert backend._rpc._call.call_args[0][0] == "listContacts"
+        backend._load_contacts_subprocess.assert_not_called()
+
+    def test_unexpected_result_returns_errors_no_subprocess(self):
+        backend = _signal_refresh_backend()
+        backend._rpc._call.return_value = {"result": {"not": "a list"}}
+
+        result = backend.refresh_contacts_sync()
+
+        assert result.errors
+        backend._load_contacts_subprocess.assert_not_called()
+
+    def test_new_and_renamed_restores_ts_from_cache(self):
+        backend = _signal_refresh_backend()
+        existing = ChatContact(
+            id="+391234567890",
+            display_name="Vecchio",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"aci": "a1", "number": "+391234567890"},
+        )
+        backend.contacts = [existing]
+        backend._contacts_by_key = {existing.cache_key: existing}
+        backend.cache = {"+391111111111": [{"timestamp": 4321}]}
+        backend._rpc._call.return_value = {
+            "result": [
+                {"number": "+391234567890", "name": "Mario", "uuid": "a1"},
+                {"number": "+391111111111", "name": "Luigi", "uuid": "a2"},
+            ]
+        }
+
+        result = backend.refresh_contacts_sync()
+
+        assert len(result.renamed_contacts) == 1
+        assert result.renamed_contacts[0] is existing
+        assert existing.display_name == "Mario"
+        assert len(result.new_contacts) == 1
+        new = result.new_contacts[0]
+        assert new.id == "+391111111111"
+        assert new.last_message_ts == 4321
+        assert backend._address_book is None
+        backend._load_contacts_subprocess.assert_not_called()
+
+    def test_parse_contact_dict_extracts_fields(self):
+        backend = _signal_refresh_backend()
+
+        from_uuid = backend._parse_contact_dict({"uuid": "uuid-1"})
+        assert from_uuid.number == "uuid-1"
+        assert from_uuid.name == "uuid-1"
+        assert from_uuid.aci == "uuid-1"
+
+        explicit = backend._parse_contact_dict(
+            {"number": "+39123", "name": "Mario", "aci": "aci-9"}
+        )
+        assert explicit.number == "+39123"
+        assert explicit.name == "Mario"
+        assert explicit.aci == "aci-9"
+
+    def test_parse_contact_dict_matches_parse_and_update(self):
+        backend = _signal_refresh_backend()
+        backend.cache = {}
+        data = [{"number": "+391234567890", "name": "Mario", "uuid": "a1"}]
+        expected = backend._to_chat_contact(backend._parse_contact_dict(data[0]))
+
+        backend._parse_and_update_contacts(data)
+
+        assert len(backend.contacts) == 1
+        got = backend.contacts[0]
+        assert got.id == expected.id
+        assert got.display_name == expected.display_name
+        assert got.extras["aci"] == expected.extras["aci"]
+        assert got.extras["number"] == expected.extras["number"]
+
+    def test_ghost_preserved_when_absent_from_list_contacts(self):
+        backend = _signal_refresh_backend()
+        ghost = ChatContact(
+            id="+399999999999",
+            display_name="+399999999999",
+            protocol=PROTOCOL_SIGNAL,
+            extras={"ghost": True},
+        )
+        backend.contacts = [ghost]
+        backend._contacts_by_key = {ghost.cache_key: ghost}
+        backend._rpc._call.return_value = {"result": []}
+
+        result = backend.refresh_contacts_sync()
+
+        assert result.errors is None
+        assert backend.contacts == [ghost]
+        assert backend._contacts_by_key[ghost.cache_key] is ghost
+
+
+# ─── Refresh dinamico Manager (design v3 §5, R8) ────────────────────────────
+
+
+class TestManagerRefreshContacts:
+    """🗂️ Fan-out refresh: isolamento errori, scoping, shutdown non bloccante."""
+
+    def test_no_backends_returns_empty(self):
+        manager = BackendManager()
+        assert manager.refresh_contacts_sync() == {}
+
+    def test_protocol_scoping(self):
+        manager = BackendManager()
+        sig = _MinimalBackend()
+        sig.protocol = PROTOCOL_SIGNAL
+        sig.refresh_contacts_sync = MagicMock(
+            return_value=AddressBookRefreshResult(PROTOCOL_SIGNAL)
+        )
+        wa = _MinimalBackend()
+        wa.protocol = PROTOCOL_WHATSAPP
+        wa.refresh_contacts_sync = MagicMock(
+            return_value=AddressBookRefreshResult(PROTOCOL_WHATSAPP)
+        )
+        manager.register(sig)
+        manager.register(wa)
+
+        result = manager.refresh_contacts_sync(protocols={PROTOCOL_WHATSAPP})
+
+        assert set(result) == {PROTOCOL_WHATSAPP}
+        wa.refresh_contacts_sync.assert_called_once_with(force=True)
+        sig.refresh_contacts_sync.assert_not_called()
+
+    def test_error_isolation_keeps_other_backends(self):
+        manager = BackendManager()
+        ok = _MinimalBackend()
+        ok.protocol = PROTOCOL_SIGNAL
+        ok.refresh_contacts_sync = MagicMock(
+            return_value=AddressBookRefreshResult(PROTOCOL_SIGNAL)
+        )
+        bad = _MinimalBackend()
+        bad.protocol = PROTOCOL_TELEGRAM
+        bad.refresh_contacts_sync = MagicMock(side_effect=RuntimeError("boom"))
+        manager.register(ok)
+        manager.register(bad)
+
+        result = manager.refresh_contacts_sync()
+
+        assert result[PROTOCOL_SIGNAL].errors is None
+        assert result[PROTOCOL_TELEGRAM].errors == "boom"
+
+    def test_force_forwarded(self):
+        manager = BackendManager()
+        backend = _MinimalBackend()
+        backend.protocol = PROTOCOL_SIGNAL
+        backend.refresh_contacts_sync = MagicMock(
+            return_value=AddressBookRefreshResult(PROTOCOL_SIGNAL)
+        )
+        manager.register(backend)
+
+        manager.refresh_contacts_sync(force=False)
+
+        backend.refresh_contacts_sync.assert_called_once_with(force=False)
+
+    def test_shutdown_is_non_blocking(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        manager = BackendManager()
+        backend = _MinimalBackend()
+        backend.protocol = PROTOCOL_SIGNAL
+        backend.refresh_contacts_sync = MagicMock(
+            return_value=AddressBookRefreshResult(PROTOCOL_SIGNAL)
+        )
+        manager.register(backend)
+
+        captured = {}
+        real_shutdown = ThreadPoolExecutor.shutdown
+
+        def spy(self, wait=True, *, cancel_futures=False):
+            captured["wait"] = wait
+            captured["cancel_futures"] = cancel_futures
+            return real_shutdown(self, wait=wait, cancel_futures=cancel_futures)
+
+        with patch("protocols.manager.ThreadPoolExecutor.shutdown", spy):
+            manager.refresh_contacts_sync()
+
+        assert captured == {"wait": False, "cancel_futures": True}
+
+
+# ─── Refresh dinamico: guardie "non connesso" + default base ────────────────
+
+
+class TestRefreshNotConnectedGuards:
+    """🛡️ ``refresh_contacts_sync`` non solleva mai e segnala lo stato."""
+
+    def test_base_default_is_noop(self):
+        backend = _MinimalBackend([_contact("+391234567890", "Mario")])
+
+        result = backend.refresh_contacts_sync()
+
+        assert isinstance(result, AddressBookRefreshResult)
+        assert result.new_contacts == []
+        assert result.renamed_contacts == []
+        assert result.errors is None
+        assert backend.contacts[0].display_name == "Mario"
+
+    def test_whatsapp_not_connected(self):
+        backend = _wa_backend()  # _connected resta False
+
+        result = backend.refresh_contacts_sync()
+
+        assert result.errors == "not connected"
+
+    def test_telegram_not_connected(self):
+        backend = TelegramBackend()
+
+        result = backend.refresh_contacts_sync()
+
+        assert result.errors == "not connected"
+
+    def test_signal_daemon_not_running(self):
+        backend = SignalBackend()
+        backend._use_daemon = False
+        backend._load_contacts_subprocess = MagicMock()
+
+        result = backend.refresh_contacts_sync()
+
+        assert result.errors == "daemon not running"
+        backend._load_contacts_subprocess.assert_not_called()

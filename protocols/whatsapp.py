@@ -37,7 +37,11 @@ from models import (
 )
 from protocols.db import _ECHO_MATCH_WINDOW_MS
 
-from .base import ChatBackend, should_upgrade_outgoing_attachment
+from .base import (
+    AddressBookRefreshResult,
+    ChatBackend,
+    should_upgrade_outgoing_attachment,
+)
 from .config import (
     get_address_book_ttl_s,
     get_wa_lid_cache_ttl_days,
@@ -877,6 +881,19 @@ class WhatsAppBackend(ChatBackend):
         self._lid_cache_load()
         # Single call — list_contacts now uses only /chats with 5 s timeout.
         raw_contacts = self._rest.list_contacts() or []
+        contacts = self._build_contacts_from_raw(raw_contacts)
+        by_jid = {cc.id: cc for cc in contacts}
+        with ChatBackend._register_lock, self._contacts_lock:
+            self.contacts = contacts
+            self._contacts_by_jid = by_jid
+        try:
+            book = self.list_address_book_sync(force=False)
+            _apply_address_book_names(self.contacts, _build_address_book_name_map(book))
+        except Exception:
+            logger.warning("Address book merge failed", exc_info=True)
+
+    def _build_contacts_from_raw(self, raw_contacts: list[dict]) -> list[ChatContact]:
+        """Convert a raw ``/chats`` payload into normalized ``ChatContact``s."""
         contacts: list[ChatContact] = []
         for c in raw_contacts:
             jid = c.get("id") or c.get("jid") or c.get("remoteJid")
@@ -898,15 +915,55 @@ class WhatsAppBackend(ChatBackend):
                     extras=extras,
                 )
             )
-        by_jid = {cc.id: cc for cc in contacts}
-        with ChatBackend._register_lock, self._contacts_lock:
-            self.contacts = contacts
-            self._contacts_by_jid = by_jid
-        try:
-            book = self.list_address_book_sync(force=False)
-            _apply_address_book_names(self.contacts, _build_address_book_name_map(book))
-        except Exception:
-            logger.warning("Address book merge failed", exc_info=True)
+        return contacts
+
+    def _merge_contacts_in_place(
+        self, fresh: list[ChatContact]
+    ) -> tuple[list[ChatContact], list[ChatContact]]:
+        """Merge *fresh* into ``self.contacts`` preserving object identity.
+
+        Must be called under ``_register_lock → _contacts_lock``.  Existing
+        objects are updated in place (ghosts preserved, aliases ``@lid``
+        restored); only genuinely new contacts are appended.  Returns
+        ``(new_contacts, dropped_contacts)``.
+        """
+        fresh_by_id = {c.id: c for c in fresh}
+        kept: list[ChatContact] = []
+        new: list[ChatContact] = []
+        dropped: list[ChatContact] = []
+        for c in self.contacts:
+            f = fresh_by_id.pop(c.id, None)
+            if f is None:
+                if c.extras.get("ghost"):
+                    kept.append(c)
+                else:
+                    dropped.append(c)
+                continue
+            if (
+                f.display_name
+                and f.display_name != c.id
+                and f.display_name != c.display_name
+            ):
+                c.display_name = f.display_name
+            if f.last_message_ts > (c.last_message_ts or 0):
+                c.last_message_ts = f.last_message_ts
+            for k in ("phone", "lid"):  # NIENTE "last_message_ts" (v3.1)
+                if k in f.extras:
+                    c.extras[k] = f.extras[k]
+            kept.append(c)
+        for f in fresh_by_id.values():
+            new.append(f)
+            kept.append(f)
+        self.contacts = kept
+        self._contacts_by_jid = {c.id: c for c in kept}
+        # R4: the rebuild loses the ``@lid`` aliases registered by
+        # ``_register_lid_alias``; re-run them for every ``@c.us`` (idempotent,
+        # ``setdefault``).  Lock order ``_register_lock → _contacts_lock →
+        # _lid_lock`` is respected (``_phone_to_lid`` only takes ``_lid_lock``).
+        for c in kept:
+            if c.id.endswith("@c.us"):
+                self._register_lid_alias(c)
+        return new, dropped
 
     def _jid_to_phone(self, jid: str) -> str:
         """Best-effort phone (digits only) for a WhatsApp JID, or ``""``.
@@ -1109,6 +1166,38 @@ class WhatsAppBackend(ChatBackend):
                 return list(self._address_book)
             return []
         return list(self._address_book)
+
+    def refresh_contacts_sync(self, force: bool = True) -> AddressBookRefreshResult:
+        """Re-fetch ``/chats`` + rubrica e applica i nomi IN PLACE.
+
+        Distingue fetch-fallita (``None`` → ``errors``, nessuna mutazione) da
+        fetch-vuota (``[]``, API viva → commit).  Preserva l'identità-oggetto dei
+        contatti kept e i ghost; ripristina gli alias ``@lid``.
+        """
+        if not self._rest or not self._connected:
+            return AddressBookRefreshResult(PROTOCOL_WHATSAPP, errors="not connected")
+        before = {c.id: c.display_name for c in self.contacts}
+        raw = self._rest.list_contacts()  # None = errore trasporto
+        if raw is None:
+            return AddressBookRefreshResult(
+                PROTOCOL_WHATSAPP, errors="fetch /chats failed"
+            )
+        fresh = self._build_contacts_from_raw(raw)
+        with ChatBackend._register_lock, self._contacts_lock:
+            new, _dropped = self._merge_contacts_in_place(fresh)
+        try:
+            book = self.list_address_book_sync(force=force)
+            _apply_address_book_names(self.contacts, _build_address_book_name_map(book))
+        except Exception:
+            logger.warning("WhatsApp refresh: book apply failed", exc_info=True)
+        renamed = [
+            c
+            for c in self.contacts
+            if c.id in before and before[c.id] != c.display_name
+        ]
+        for c in new + renamed:
+            self._enqueue_event(self._contact_update_event(c))
+        return AddressBookRefreshResult(PROTOCOL_WHATSAPP, new, renamed)
 
     def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
         """Cerca un contatto nella cache rubrica in-memory (zero rete).

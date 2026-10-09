@@ -41,7 +41,7 @@ from models import (
     parse_quote_attachment_descriptor,
 )
 
-from .base import ChatBackend
+from .base import AddressBookRefreshResult, ChatBackend
 from .config import get_address_book_ttl_s
 from .media_utils import MAX_AVATAR_BYTES, sniff_image_content_type
 
@@ -447,18 +447,20 @@ class SignalBackend(ChatBackend):
                 legacy.append(Contact(number=number, name=name, aci=aci))
         return [self._to_chat_contact(c) for c in legacy]
 
+    def _parse_contact_dict(self, c: dict) -> Contact:
+        """Da un dict ``listContacts`` a un ``Contact`` legacy."""
+        number = c.get("number") or c.get("uuid", "") or ""
+        name = (
+            c.get("name")
+            or c.get("givenName")
+            or (c.get("profile") or {}).get("givenName")
+            or number
+        )
+        aci = c.get("uuid", "") or c.get("aci", "")
+        return Contact(number=number, name=name, aci=aci)
+
     def _parse_and_update_contacts(self, contacts_data: list[dict]) -> None:
-        contacts = []
-        for c in contacts_data:
-            number = c.get("number") or c.get("uuid", "") or ""
-            name = (
-                c.get("name")
-                or c.get("givenName")
-                or (c.get("profile") or {}).get("givenName")
-                or number
-            )
-            aci = c.get("uuid", "") or c.get("aci", "")
-            contacts.append(Contact(number=number, name=name, aci=aci))
+        contacts = [self._parse_contact_dict(c) for c in contacts_data]
         self._set_contacts([self._to_chat_contact(c) for c in contacts])
 
     def _set_contacts(self, contacts: list[ChatContact]) -> None:
@@ -528,6 +530,65 @@ class SignalBackend(ChatBackend):
         self._address_book = result
         self._address_book_ts = now
         return list(self._address_book)
+
+    def _merge_contacts_in_place(
+        self, fresh: list[ChatContact]
+    ) -> tuple[list[ChatContact], list[ChatContact]]:
+        """Merge *fresh* into ``self.contacts`` preserving object identity.
+
+        Existing objects are updated in place; ghost contacts absent from
+        ``fresh`` are preserved (open-or-create); contacts removed from the book
+        are dropped.  Restores ``last_message_ts`` for new contacts from SQLite.
+        Returns ``(new_contacts, renamed_contacts)``.
+        """
+        fresh_by_key = {c.cache_key: c for c in fresh}
+        new: list[ChatContact] = []
+        renamed: list[ChatContact] = []
+        keep_ids: set[str] = set()
+        for c in self.contacts:
+            f = fresh_by_key.pop(c.cache_key, None)
+            if f is None:
+                if c.extras.get("ghost"):
+                    keep_ids.add(c.cache_key)
+                continue
+            if f.display_name != c.display_name:
+                renamed.append(c)
+                c.display_name = f.display_name
+            c.extras["aci"] = f.extras.get("aci", "")
+            c.extras["number"] = f.extras.get("number", c.id)
+            keep_ids.add(c.cache_key)
+        for f in fresh:
+            if f.cache_key not in keep_ids:
+                new.append(f)
+        for c in new:
+            c.last_message_ts = max(
+                (m.get("timestamp") or 0 for m in (self.cache.get(c.id) or [])),
+                default=0,
+            )
+        self.contacts = [c for c in self.contacts if c.cache_key in keep_ids] + new
+        self._contacts_by_key = {c.cache_key: c for c in self.contacts}
+        return new, renamed
+
+    def refresh_contacts_sync(self, force: bool = True) -> AddressBookRefreshResult:
+        """Re-fetch ``listContacts`` via RPC (mai subprocess) e merge in place."""
+        if not self._use_daemon:
+            return AddressBookRefreshResult(
+                PROTOCOL_SIGNAL, errors="daemon not running"
+            )
+        raw = self._rpc._call("listContacts")  # timeout HTTP 30s
+        if "error" in raw:
+            return AddressBookRefreshResult(PROTOCOL_SIGNAL, errors=str(raw["error"]))
+        data = raw.get("result")
+        if not isinstance(data, list):
+            return AddressBookRefreshResult(
+                PROTOCOL_SIGNAL, errors="unexpected RPC result"
+            )
+        fresh = [self._to_chat_contact(self._parse_contact_dict(c)) for c in data]
+        new, renamed = self._merge_contacts_in_place(fresh)
+        self._address_book = None
+        for c in new + renamed:
+            self._event_queue.put(self._contact_update_event(c))
+        return AddressBookRefreshResult(PROTOCOL_SIGNAL, new, renamed)
 
     def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
         """Signal: la rubrica completa coincide con ``self.contacts``.

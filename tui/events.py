@@ -12,7 +12,7 @@ from models import (
     protocol_emoji,
     protocol_name,
 )
-from protocols.whatsapp import _jid_digits
+from protocols.whatsapp import _is_placeholder_display_name, _jid_digits
 from ui_components import (
     MessageWidget,
 )
@@ -39,6 +39,28 @@ def _resolve_placeholder_name(backend, contact_id: str) -> str:
 
     name = _cached_address_book_name(backend, phone or None, lid or None)
     return name or contact_id
+
+
+def _looks_unresolved(contact: ChatContact) -> bool:
+    """True when *contact* still shows a placeholder instead of a real name."""
+    if contact.protocol == PROTOCOL_WHATSAPP:
+        return _is_placeholder_display_name(
+            contact.display_name, contact.id, contact.extras.get("phone")
+        )
+    return (
+        not contact.display_name
+        or contact.display_name == contact.id
+        or contact.display_name.isdigit()
+    )
+
+
+def _signal_stable_key(c: ChatContact) -> str:
+    """Identità stabile Signal per il dedup: ``aci`` (UUID) o numero normalizzato."""
+    aci = c.extras.get("aci")
+    if aci:
+        return f"aci:{aci}"
+    number = c.extras.get("number") or c.id
+    return f"phone:{''.join(ch for ch in str(number) if ch.isdigit())}"
 
 
 class EventHandlingMixin:
@@ -68,14 +90,45 @@ class EventHandlingMixin:
         return False
 
     def _handle_contact_update_event(self, event: ChatEvent) -> bool:
-        """Applica in UI un contatto risolto dinamicamente.
+        """Applica/appende in UI un contatto risolto dinamicamente.
 
-        Il backend è l'unico punto di mutazione del contatto: qui marchiamo
-        solo la lista come sporca e, se la web UI è attiva, inoltriamo il push.
-        Non ingerisce messaggi né duplica la logica di
-        ``_handle_message_event``.
+        - Aggiorna ``display_name``/``phone`` sull'oggetto esistente della lista
+          TUI, oppure APPENDE il nuovo contatto (la lista principale non viene
+          ricostruita).  Mai riscrittura dello storico: tocca solo ``self.contacts``.
+        - R1: per Signal deduplica il cambio di id uuid↔number via
+          ``_signal_stable_key`` (rimuove la voce stale, evita righe duplicate).
         """
         cache_key = contact_cache_key(event.protocol, event.contact_id)
+        contact = event.payload.get("contact")
+        new_name = event.payload.get("display_name")
+        phone = event.payload.get("phone")
+
+        if contact is not None and event.protocol == PROTOCOL_SIGNAL:
+            stable = _signal_stable_key(contact)
+            if stable:
+                for stale in list(self.contacts):
+                    if (
+                        stale.cache_key != cache_key
+                        and stale.protocol == PROTOCOL_SIGNAL
+                        and _signal_stable_key(stale) == stable
+                    ):
+                        self.contacts.remove(stale)
+                        widgets = getattr(self, "_contact_widgets", None)
+                        if widgets is not None:
+                            widgets.pop(stale.cache_key, None)
+                        self._dirty_contact_keys.add(stale.cache_key)
+                        break
+
+        target = next((c for c in self.contacts if c.cache_key == cache_key), None)
+        if target is None and contact is not None:
+            self.contacts.append(contact)  # NUOVO contatto → in lista
+            target = contact
+        elif target is not None:
+            if new_name and target.display_name != new_name:
+                target.display_name = new_name
+            if phone and not target.extras.get("phone"):
+                target.extras["phone"] = phone
+
         self._contact_list_dirty = True
         self._dirty_contact_keys.add(cache_key)
         if getattr(self, "_web_enabled", False):
@@ -87,8 +140,8 @@ class EventHandlingMixin:
                     "payload": {
                         "protocol": event.protocol,
                         "contact_id": event.contact_id,
-                        "display_name": event.payload.get("display_name"),
-                        "phone": event.payload.get("phone"),
+                        "display_name": new_name,
+                        "phone": phone,
                     },
                 }
             )
@@ -167,6 +220,7 @@ class EventHandlingMixin:
             return False
 
         contact = event.payload.get("contact")
+        was_placeholder = False
         if contact is None:
             # Resolve via the backend's contact table, or fall back to a
             # placeholder built from the event's contact id.
@@ -174,16 +228,23 @@ class EventHandlingMixin:
             if identify is not None:
                 contact = identify(event.contact_id)
             if contact is None:
+                was_placeholder = True
                 contact = ChatContact(
                     id=event.contact_id,
                     display_name=_resolve_placeholder_name(backend, event.contact_id),
                     protocol=event.protocol,
                 )
-        # Ensure the contact is in the TUI list: a contact materialized by the
-        # dynamic lid resolver and returned by ``_identify_contact`` must still
-        # be added, so this check lives OUTSIDE the ``contact is None`` branch.
-        existing = {c.cache_key for c in self.contacts}
-        if contact.cache_key not in existing:
+        # RIANCORAGGIO: preferisci l'oggetto già nella lista TUI (identità
+        # stabile) così gli aggiornamenti a display_name/last_message_ts si
+        # riflettono su sort/render.  Se assente, appendilo e registralo sul
+        # backend (un contatto materializzato dal resolver lid deve comunque
+        # entrare in lista).
+        tui_contact = next(
+            (c for c in self.contacts if c.cache_key == contact.cache_key), None
+        )
+        if tui_contact is not None:
+            contact = tui_contact
+        else:
             self.contacts.append(contact)
             if hasattr(backend, "register_contact"):
                 backend.register_contact(contact)
@@ -194,6 +255,13 @@ class EventHandlingMixin:
         cache_key = contact.cache_key
         ts = event.payload.get("timestamp", 0)
         is_mine = event.payload.get("is_mine", False)
+
+        # Trigger lazy scoped: il nome non è (più) risolto → chiedi un refresh
+        # del solo protocollo del messaggio (throttled dal cooldown del worker).
+        if was_placeholder or _looks_unresolved(contact):
+            schedule = getattr(self, "schedule_address_book_refresh", None)
+            if schedule is not None:
+                schedule(event.protocol)
 
         # Aggiorna il timestamp dell'ultimo messaggio del contatto così la
         # lista contatti (ordinata per "ultimo messaggio") risente subito del
