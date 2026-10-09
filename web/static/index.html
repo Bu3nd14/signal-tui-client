@@ -9,18 +9,20 @@
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/icon.svg">
   <meta name="theme-color" content="#101720">
+  <script>try{document.documentElement.dataset.skin=localStorage.getItem("signal-tui-web-skin")||"";}catch(e){}</script>
   <link rel="stylesheet" href="/style.css?v=68">
+  <link rel="stylesheet" href="/teams-skin.css?v=9">
 </head>
 <body>
   <div id="app" class="app-shell">
     <aside class="sidebar" aria-label="Conversazioni">
       <header class="sidebar-header">
         <div>
-          <h1>Conversazioni</h1>
+          <h1><span class="skin-default">Conversazioni</span><span class="skin-teams">Chat</span></h1>
         </div>
         <div class="header-actions">
           <button id="refresh-contacts" class="icon-button" type="button" aria-label="Ricarica conversazioni" title="Ricarica">↻</button>
-          <button id="open-token" class="icon-button" type="button" aria-label="Collega backend" title="Collega backend">☰</button>
+          <button id="open-token" class="icon-button" type="button" aria-label="Collega backend" title="Collega backend"><span class="skin-default">☰</span><span class="skin-teams">⋯</span></button>
         </div>
       </header>
       <div id="protocol-tabs" class="protocol-tabs" role="tablist" aria-label="Seleziona backend">
@@ -123,8 +125,12 @@
           <span id="openai-key-status" class="link-option-status" aria-live="polite">Non configurata</span>
         </div>
         <div class="link-option">
-          <label class="link-option-name" for="stealth-toggle">Modalità stealth</label>
+          <label class="link-option-name" for="stealth-toggle">Modalità lean</label>
           <input id="stealth-toggle" type="checkbox" aria-label="Nascondi le immagini profilo">
+        </div>
+        <div class="link-option">
+          <label class="link-option-name" for="skin-toggle">Skin Microsoft Teams</label>
+          <input id="skin-toggle" type="checkbox" aria-label="Attiva skin Microsoft Teams">
         </div>
         <div class="link-option link-option-token">
           <label class="link-option-name" for="token-input">Token web</label>
@@ -141,6 +147,6 @@
 
   <script src="/reconcile.js?v=7" defer></script>
   <script src="/outbox.js?v=1" defer></script>
-  <script src="/app.js?v=123" defer></script>
+  <script src="/app.js?v=124" defer></script>
 </body>
 </html>

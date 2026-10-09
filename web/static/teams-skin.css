@@ -1,0 +1,97 @@
+/* Skin "Microsoft Teams" — POC, isolata e revertibile.
+   Attivazione: <html data-skin="teams"> (impostato dallo script inline in
+   index.html leggendo localStorage "signal-tui-web-skin" e dal toggle nel
+   dialog "Collega backend"). Senza l'attributo questo file non ha effetto:
+   style.css resta la skin di default e non viene toccato. */
+
+html[data-skin="teams"] {
+  --bg: #201f27;
+  --panel: #2d2c2c;
+  --panel-raised: #3b3a3f;
+  --line: #484644;
+  --text: #f5f5f5;
+  --muted: #a6a6a6;
+  --accent: #5b5fc7;
+  --incoming: #292929;
+  --outgoing: #2f2f4a;
+  --danger: #ff5f57;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  color-scheme: dark;
+}
+
+/* Colori hardcoded prioritari (selettori più specifici di style.css). */
+html[data-skin="teams"] .sidebar { background: #2d2c2c; }
+html[data-skin="teams"] .thread-panel { background: #201f27; }
+html[data-skin="teams"] .contact.active { background: #5b5fc73d; }
+html[data-skin="teams"] .avatar { background: linear-gradient(145deg, #5b5fc7, #3a3a6e); }
+
+html[data-skin="teams"] .message-quote { border-left-color: #b3b6ff; }
+html[data-skin="teams"] .message-quote strong,
+html[data-skin="teams"] .reply-copy strong { color: #b3b6ff; }
+html[data-skin="teams"] .message-sender { color: #b5b0f2; }
+html[data-skin="teams"] .tick-sent,
+html[data-skin="teams"] .tick-delivered { color: #b3b6ff; }
+
+html[data-skin="teams"] .emoji-search,
+html[data-skin="teams"] .link-key-controls input { background: #201f27; }
+
+/* Tinte del vecchio blu accento -> viola Teams, stesso alpha. */
+html[data-skin="teams"] .protocol-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+html[data-skin="teams"] .protocol-tab.active:hover,
+html[data-skin="teams"] .protocol-tab.active:focus-visible {
+  background: #4f52b2;
+  border-color: #4f52b2;
+}
+html[data-skin="teams"] .reaction-chip.mine { border-color: #5b5fc766; background: #5b5fc72e; }
+html[data-skin="teams"] .reaction-picker button:hover,
+html[data-skin="teams"] .reaction-picker button:focus-visible { background: #5b5fc735; }
+html[data-skin="teams"] .composer textarea:focus { box-shadow: 0 0 0 3px #5b5fc725; }
+html[data-skin="teams"] .composer-icon-button:hover,
+html[data-skin="teams"] .composer-icon-button:focus-visible,
+html[data-skin="teams"] .composer-icon-button[aria-expanded="true"] { background: #5b5fc725; }
+html[data-skin="teams"] .emoji-tab.active { background: #5b5fc725; }
+html[data-skin="teams"] .emoji-cell:hover,
+html[data-skin="teams"] .emoji-cell:focus-visible { background: #5b5fc735; }
+html[data-skin="teams"] .transcribe-button:hover,
+html[data-skin="teams"] .transcribe-button:focus-visible { background: #5b5fc725; }
+html[data-skin="teams"] .link-key-controls input:focus { box-shadow: 0 0 0 3px #5b5fc725; }
+
+/* Etichette/caratteri alternativi per skin: lo span nascosto via display:none
+   è escluso dallo screen reader. La prima regola nasconde la variante Teams
+   nella skin di default (teams-skin.css è sempre linkato). Vale sia per il
+   titolo "Conversazioni"→"Chat" sia per l'icona del menu ☰→⋯. */
+.sidebar-header .skin-teams { display: none; }
+html[data-skin="teams"] .sidebar-header .skin-default { display: none; }
+html[data-skin="teams"] .sidebar-header .skin-teams { display: inline; }
+/* Titolo sidebar bianco nella skin Teams. */
+html[data-skin="teams"] .sidebar-header h1 { color: #ffffff; }
+
+/* Lista chat compatta (avatar/font molto ridotti). Scope .contact .avatar:
+   .avatar è condivisa con il thread-header, non toccarla globalmente. */
+html[data-skin="teams"] .contact {
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 7px;
+}
+/* In Teams l'icona del backend accanto al nome non serve: la nascondiamo e
+   togliamo la quarta colonna dalla griglia. */
+html[data-skin="teams"] .contact > .protocol-icon { display: none; }
+html[data-skin="teams"] .contact .avatar {
+  width: 26px;
+  height: 26px;
+  font-size: .64rem;
+}
+html[data-skin="teams"] .contact-name { font-size: .82rem; font-weight: 400; color: var(--muted); }
+/* Solo la chat selezionata ha il nome bianco; le altre restano grigie. */
+html[data-skin="teams"] .contact.active .contact-name { color: #ffffff; }
+html[data-skin="teams"] .unread-badge {
+  min-width: 18px;
+  padding: 2px 5px;
+  font-size: .6rem;
+}
+/* Testo dei messaggi leggermente più piccolo nell'area conversazione. */
+html[data-skin="teams"] .message-text { font-size: .9rem; }

@@ -3,6 +3,7 @@
 const TOKEN_KEY = "signal-tui-web-token";
 const PROTOCOL_KEY = "signal-tui-web-proto";
 const STEALTH_KEY = "signal-tui-web-stealth";
+const SKIN_KEY = "signal-tui-web-skin";
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 // Heartbeat watchdog: the server fans out a ``{"type":"heartbeat"}`` frame
 // every ~5s (web/ws.py).  If nothing at all arrives for this long, the socket
@@ -42,6 +43,7 @@ const state = {
   // True quando le immagini profilo sono nascoste (solo iniziali): nessuna
   // richiesta a /api/contact-avatar parte mentre è attiva.
   stealth: localStorage.getItem(STEALTH_KEY) === "1",
+  skin: localStorage.getItem(SKIN_KEY) === "teams",
   // True quando è stata pushata una history entry per il thread aperto
   // (mobile back/swipe-back): evita di accumulare una entry per ogni
   // cambio di contatto mentre il thread resta aperto.
@@ -117,6 +119,7 @@ const elements = {
   tokenError: document.querySelector("#token-error"),
   saveToken: document.querySelector("#save-token"),
   stealthToggle: document.querySelector("#stealth-toggle"),
+  skinToggle: document.querySelector("#skin-toggle"),
   composer: document.querySelector("#composer"),
   composerShell: document.querySelector("#composer-shell"),
   messageInput: document.querySelector("#message-input"),
@@ -3326,6 +3329,12 @@ elements.stealthToggle.addEventListener("change", () => {
   localStorage.setItem(STEALTH_KEY, state.stealth ? "1" : "0");
   renderContacts();
   renderThreadAvatar(state.active);
+});
+elements.skinToggle.checked = state.skin;
+elements.skinToggle.addEventListener("change", () => {
+  state.skin = elements.skinToggle.checked;
+  localStorage.setItem(SKIN_KEY, state.skin ? "teams" : "");
+  document.documentElement.dataset.skin = state.skin ? "teams" : "";
 });
 document.addEventListener("visibilitychange", () => {
   if (
