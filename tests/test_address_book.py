@@ -846,6 +846,25 @@ class TestWAAddressBookCache:
         backend._rest.list_all_contacts.side_effect = Exception("boom")
         assert backend.list_address_book_sync(force=True) == first
 
+    def test_error_none_does_not_wipe_cached_book(self):
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._rest.list_all_contacts.return_value = [
+            {"id": "393331234567@c.us", "name": "Rudy Cell", "pushname": None}
+        ]
+        backend.contacts = []
+
+        first = backend.list_address_book_sync()
+        assert len(first) == 1
+
+        backend._rest.list_all_contacts.return_value = None  # timeout, no raise
+
+        result = backend.list_address_book_sync(force=True)
+
+        assert result == first
+        assert len(backend._address_book) == 1
+        assert backend._address_book[0].display_name == "Rudy Cell"
+
     def test_error_returns_empty(self):
         backend = _wa_backend()
         backend.start_lid_resolver = MagicMock()
