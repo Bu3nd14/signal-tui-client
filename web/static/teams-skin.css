@@ -58,6 +58,8 @@ html[data-skin="teams"] .reaction-chip.mine { border-color: #5b5fc766; backgroun
 html[data-skin="teams"] .reaction-picker button:hover,
 html[data-skin="teams"] .reaction-picker button:focus-visible { background: #5b5fc735; }
 html[data-skin="teams"] .composer textarea:focus { box-shadow: 0 0 0 3px #5b5fc725; }
+/* Textarea del composer allineata al testo delle bolle (.message-text è .9rem). */
+html[data-skin="teams"] .composer textarea { font-size: .9rem; }
 html[data-skin="teams"] .composer-icon-button:hover,
 html[data-skin="teams"] .composer-icon-button:focus-visible,
 html[data-skin="teams"] .composer-icon-button[aria-expanded="true"] { background: #5b5fc725; }
