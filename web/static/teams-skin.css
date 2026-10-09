@@ -22,7 +22,15 @@ html[data-skin="teams"] {
 /* Colori hardcoded prioritari (selettori più specifici di style.css). */
 html[data-skin="teams"] .sidebar { background: #2d2c2c; }
 html[data-skin="teams"] .thread-panel { background: #201f27; }
-html[data-skin="teams"] .contact.active { background: #5b5fc73d; }
+/* Hover e selezione con lo stesso grigio (il più chiaro dei due, #3b3a3f):
+   la chat selezionata si distingue per il bordino. La selezione prevale
+   anche mentre è in hover. */
+html[data-skin="teams"] .contact:hover { background: #3b3a3f; }
+html[data-skin="teams"] .contact.active,
+html[data-skin="teams"] .contact.active:hover {
+  background: #3b3a3f;
+  box-shadow: inset 0 0 0 1px #5a5a5a;
+}
 html[data-skin="teams"] .avatar { background: linear-gradient(145deg, #5b5fc7, #3a3a6e); }
 
 html[data-skin="teams"] .message-quote { border-left-color: #b3b6ff; }
@@ -95,3 +103,25 @@ html[data-skin="teams"] .unread-badge {
 }
 /* Testo dei messaggi leggermente più piccolo nell'area conversazione. */
 html[data-skin="teams"] .message-text { font-size: .9rem; }
+
+/* Scrollbar visibile solo al passaggio del mouse sulle aree di chat
+   (lista conversazioni + finestra messaggi). Firefox usa scrollbar-color,
+   WebKit/Chromium i pseudo-elementi ::-webkit-scrollbar-*. */
+html[data-skin="teams"] .contact-list,
+html[data-skin="teams"] .message-list {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+html[data-skin="teams"] .contact-list:hover,
+html[data-skin="teams"] .message-list:hover {
+  scrollbar-color: #6b6b6b transparent;
+}
+html[data-skin="teams"] .contact-list::-webkit-scrollbar,
+html[data-skin="teams"] .message-list::-webkit-scrollbar { width: 8px; height: 8px; }
+html[data-skin="teams"] .contact-list::-webkit-scrollbar-thumb,
+html[data-skin="teams"] .message-list::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 8px;
+}
+html[data-skin="teams"] .contact-list:hover::-webkit-scrollbar-thumb,
+html[data-skin="teams"] .message-list:hover::-webkit-scrollbar-thumb { background: #6b6b6b; }
