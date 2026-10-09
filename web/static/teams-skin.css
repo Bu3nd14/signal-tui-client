@@ -20,8 +20,9 @@ html[data-skin="teams"] {
 }
 
 /* Colori hardcoded prioritari (selettori più specifici di style.css). */
-html[data-skin="teams"] .sidebar { background: #2d2c2c; }
-html[data-skin="teams"] .thread-panel { background: #201f27; }
+html[data-skin="teams"] .sidebar { background: #121212; }
+html[data-skin="teams"] .thread-panel { background: #1a191e; }
+html[data-skin="teams"] .composer-shell { background: #1a191e; } /* barra input = colore finestra chat (desktop+mobile) */
 /* Hover e selezione con lo stesso grigio (il più chiaro dei due, #3b3a3f):
    la chat selezionata si distingue per il bordino. La selezione prevale
    anche mentre è in hover. */
@@ -60,6 +61,13 @@ html[data-skin="teams"] .reaction-picker button:focus-visible { background: #5b5
 html[data-skin="teams"] .composer textarea:focus { box-shadow: 0 0 0 3px #5b5fc725; }
 /* Textarea del composer allineata al testo delle bolle (.message-text è .9rem). */
 html[data-skin="teams"] .composer textarea { font-size: .9rem; }
+/* Bordo grigio chiaro del campo di input (il focus resta accent viola). */
+html[data-skin="teams"] .composer textarea { border-color: #c0c0c0; }
+/* Campo di input un po' più chiaro, resta più scuro della barra #1a191e. */
+html[data-skin="teams"] .composer textarea { background: #242329; }
+/* Riga al bordo inferiore del campo di input: blu chiara solo a campo attivo. */
+html[data-skin="teams"] .composer textarea { border-bottom-width: 2px; }
+html[data-skin="teams"] .composer textarea:focus { border-bottom-color: #6ea8fe; }
 html[data-skin="teams"] .composer-icon-button:hover,
 html[data-skin="teams"] .composer-icon-button:focus-visible,
 html[data-skin="teams"] .composer-icon-button[aria-expanded="true"] { background: #5b5fc725; }
