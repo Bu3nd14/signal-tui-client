@@ -1671,18 +1671,14 @@ class TestWARefreshContacts:
         assert kept is existing
         assert existing.display_name == "Mario Rossi"
         # Un ``contact_update`` per ogni nuovo/rinominato.
-        updates = [
-            e for e in _drain_events(backend) if e.type == "contact_update"
-        ]
+        updates = [e for e in _drain_events(backend) if e.type == "contact_update"]
         ids = {e.contact_id for e in updates}
         assert ids == {"1@c.us", "2@c.us"}
 
     def test_lid_alias_restored_after_rebuild(self):
         backend = _wa_refresh_backend()
         now = int(time.time())
-        backend._lid_map = {
-            "999@lid": {"phone": "393331234567", "resolved_at": now}
-        }
+        backend._lid_map = {"999@lid": {"phone": "393331234567", "resolved_at": now}}
         contact = _chat("393331234567@c.us", "Mario", ts=10)
         contact.extras["phone"] = "393331234567"
         backend.contacts = [contact]
@@ -1737,9 +1733,7 @@ class TestTelegramRefreshContacts:
         existing = _tg_dialog_contact(10, "Ada", ts=100, read_max=7)
         existing.extras["access_hash"] = "h-1"
         backend = _tg_refresh_backend(monkeypatch, contacts=[existing])
-        backend._client.get_dialogs = AsyncMock(
-            side_effect=RuntimeError("RPC down")
-        )
+        backend._client.get_dialogs = AsyncMock(side_effect=RuntimeError("RPC down"))
         before_contacts = list(backend.contacts)
         before_by_id = dict(backend._contacts_by_id)
 
@@ -1753,9 +1747,7 @@ class TestTelegramRefreshContacts:
         existing = _tg_dialog_contact(10, "10", ts=100, read_max=99)
         existing.extras["access_hash"] = "hash-99"
         backend = _tg_refresh_backend(monkeypatch, contacts=[existing])
-        user = _tg_user(
-            id=10, first_name="Ada", last_name="Lovelace", access_hash=111
-        )
+        user = _tg_user(id=10, first_name="Ada", last_name="Lovelace", access_hash=111)
         backend._client.get_dialogs = AsyncMock(return_value=[_tg_dialog(user)])
 
         result = backend.refresh_contacts_sync()

@@ -158,9 +158,7 @@ class TestMessageEventReanchor:
 class TestContactUpdateEvent:
     def test_appends_new_contact_without_touching_cache(self):
         app = _App(_wa_backend(), contacts=[])
-        new = ChatContact(
-            id="9@c.us", display_name="Nina", protocol=PROTOCOL_WHATSAPP
-        )
+        new = ChatContact(id="9@c.us", display_name="Nina", protocol=PROTOCOL_WHATSAPP)
 
         assert app._handle_contact_update_event(_contact_update_event(new)) is True
 
@@ -400,9 +398,7 @@ class TestLazyTrigger:
         app = _App(backend, contacts=[placeholder])
 
         app._handle_message_event(
-            _message_event(
-                PROTOCOL_TELEGRAM, "42", contact=placeholder, timestamp=4000
-            )
+            _message_event(PROTOCOL_TELEGRAM, "42", contact=placeholder, timestamp=4000)
         )
 
         assert app.scheduled == [PROTOCOL_TELEGRAM]
@@ -472,9 +468,7 @@ class TestScheduler:
             sched.stop_address_book_refresh()
             first.join(timeout=2)
 
-    def test_lazy_cooldown_throttles_second_rapid_wake(
-        self, patch_refresh_config
-    ):
+    def test_lazy_cooldown_throttles_second_rapid_wake(self, patch_refresh_config):
         patch_refresh_config(interval=3600, cooldown=3600)
         mgr = _RecordingManager()
         sched = _Scheduler(mgr)
@@ -493,9 +487,7 @@ class TestScheduler:
             sched.stop_address_book_refresh()
             sched._address_book_refresh_thread.join(timeout=2)
 
-    def test_periodic_cadence_independent_of_lazy_cooldown(
-        self, patch_refresh_config
-    ):
+    def test_periodic_cadence_independent_of_lazy_cooldown(self, patch_refresh_config):
         patch_refresh_config(interval=0.1, cooldown=3600)
         mgr = _RecordingManager()
         sched = _Scheduler(mgr)
@@ -570,9 +562,7 @@ class TestDynamicAddressBookIntegration:
         screen = MagicMock()
         screen.is_mounted = True
 
-        _PickerHarness(manager)._address_book_worker(
-            1, {PROTOCOL_WHATSAPP}, screen
-        )
+        _PickerHarness(manager)._address_book_worker(1, {PROTOCOL_WHATSAPP}, screen)
 
         manager.list_address_book_sync.assert_called_once_with(
             protocols={PROTOCOL_WHATSAPP}, force=True
