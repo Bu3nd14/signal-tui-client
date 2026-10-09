@@ -503,7 +503,7 @@ self._address_book_refresh_stop = False
 self._address_book_refresh_wake = threading.Event()
 self._address_book_refresh_lock = threading.Lock()      # guarda last_lazy + pending protocols
 self._address_book_last_periodic = 0.0                  # monotonic, cadenza periodica
-self._address_book_last_lazy = 0.0                      # monotonic, cooldown lazy
+self._address_book_last_lazy = 0.0                      # ri-armato a inizio loop (v3.2)
 self._address_book_pending_protocols: set[str] = set()  # scoping lazy
 self._address_book_refresh_thread: threading.Thread | None = None
 ```
@@ -515,6 +515,12 @@ def _address_book_refresh_loop(self):
     interval = get_dynamic_refresh_interval_s()
     cooldown = get_dynamic_refresh_cooldown_s()
     self._address_book_last_periodic = time.monotonic()
+    # v3.2 — BUG fix: NON lasciare `_last_lazy = 0.0`.  `time.monotonic()`
+    # parte dal boot: su una macchina avviata da meno di `cooldown` secondi
+    # (runner CI freschi, host appena riavviato) `now - 0.0 < cooldown` sarebbe
+    # vero e il PRIMO lazy verrebbe erroneamente throttled.  Lo si ri-arma
+    # "cooldown fa" così il primo lazy scatta sempre immediatamente.
+    self._address_book_last_lazy = self._address_book_last_periodic - cooldown
     while not self._address_book_refresh_stop:
         now = time.monotonic()
         remaining = max(0.0, interval - (now - self._address_book_last_periodic))

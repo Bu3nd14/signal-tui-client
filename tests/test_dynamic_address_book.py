@@ -487,6 +487,40 @@ class TestScheduler:
             sched.stop_address_book_refresh()
             sched._address_book_refresh_thread.join(timeout=2)
 
+    def test_first_lazy_fires_with_small_monotonic(
+        self, patch_refresh_config, monkeypatch
+    ):
+        """Regressione BUG scheduler v3.2: host "fresco" (uptime < cooldown).
+
+        Con ``time.monotonic()`` piccolo (es. 5.0, runner CI appena avviato) e
+        cooldown grande, il PRIMO lazy deve partire: se il loop lasciasse
+        ``_last_lazy = 0.0`` il guard ``now - last_lazy < cooldown`` lo
+        throttlerebbe per sempre (fino al periodico).  Un secondo wake
+        ravvicinato deve invece restare throttled.
+        """
+        import tui.address_book_refresh as abr
+
+        # Forza un uptime piccolo: il test non deve dipendere dall'host.
+        monkeypatch.setattr(abr.time, "monotonic", lambda: 5.0)
+        patch_refresh_config(interval=3600, cooldown=3600)
+        mgr = _RecordingManager()
+        sched = _Scheduler(mgr)
+        sched.start_address_book_refresh()
+        try:
+            sched.schedule_address_book_refresh(PROTOCOL_SIGNAL)
+            # NB: niente _wait_until qui (usa time.monotonic, patchato).
+            assert mgr.called.wait(2.0), "primo lazy non partito (uptime < cooldown)"
+            assert len(mgr.calls) == 1
+            assert mgr.calls[0][0] == {PROTOCOL_SIGNAL}
+
+            # Secondo wake ravvicinato: throttled dal cooldown.
+            sched.schedule_address_book_refresh(PROTOCOL_WHATSAPP)
+            time.sleep(0.25)
+            assert len(mgr.calls) == 1
+        finally:
+            sched.stop_address_book_refresh()
+            sched._address_book_refresh_thread.join(timeout=2)
+
     def test_periodic_cadence_independent_of_lazy_cooldown(self, patch_refresh_config):
         patch_refresh_config(interval=0.1, cooldown=3600)
         mgr = _RecordingManager()
