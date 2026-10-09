@@ -63,6 +63,42 @@ def _signal_stable_key(c: ChatContact) -> str:
     return f"phone:{''.join(ch for ch in str(number) if ch.isdigit())}"
 
 
+def _cache_find_existing(msgs: list[dict], m: dict) -> dict | None:
+    """Trova la voce equivalente a *m* in *msgs* (identità di ``_merge_backend_cache``)."""
+    is_mine = bool(m.get("is_mine", False))
+    text = m.get("text", "")
+    ts = int(m.get("timestamp") or 0)
+    mid = m.get("id")
+    inc_att = m.get("attachment_id")
+    for existing in msgs:
+        if bool(existing.get("is_mine", False)) != is_mine:
+            continue
+        if mid and existing.get("id") and existing.get("id") == mid:
+            ex_att = existing.get("attachment_id")
+            if not (inc_att and ex_att and inc_att != ex_att):
+                return existing
+        if existing.get("text", "") != text:
+            continue
+        existing_ts = int(existing.get("timestamp") or 0)
+        if not is_mine:
+            if abs(existing_ts - ts) <= 5000:
+                return existing
+        elif mid:
+            if not existing.get("id") and abs(existing_ts - ts) <= 600000:
+                return existing
+        elif abs(existing_ts - ts) <= 5000:
+            return existing
+    return None
+
+
+def _merge_cached_messages(dest: list[dict], src: list[dict]) -> None:
+    """Merge add-only (dedup per identità) di *src* in *dest*, poi ordina per ts."""
+    for m in src:
+        if _cache_find_existing(dest, m) is None:
+            dest.append(m)
+    dest.sort(key=lambda m: int(m.get("timestamp") or 0))
+
+
 class EventHandlingMixin:
     def _handle_event(self, event: ChatEvent) -> bool:
         """Dispatch a normalized ``ChatEvent`` from a backend poll worker.
@@ -97,7 +133,14 @@ class EventHandlingMixin:
           ricostruita).  Mai riscrittura dello storico: tocca solo ``self.contacts``.
         - R1: per Signal deduplica il cambio di id uuid↔number via
           ``_signal_stable_key`` (rimuove la voce stale, evita righe duplicate).
+        - ``payload["merged_into"]`` (WhatsApp): il ghost loser è stato fuso in
+          un winner già in lista; lo rimuove (lista, widget, cache) e ri-ancora
+          la selezione, senza appendere il contatto.
         """
+        merged_into = event.payload.get("merged_into")
+        if merged_into and event.protocol == PROTOCOL_WHATSAPP:
+            return self._handle_contact_merged_event(event, str(merged_into))
+
         cache_key = contact_cache_key(event.protocol, event.contact_id)
         contact = event.payload.get("contact")
         new_name = event.payload.get("display_name")
@@ -142,6 +185,50 @@ class EventHandlingMixin:
                         "contact_id": event.contact_id,
                         "display_name": new_name,
                         "phone": phone,
+                    },
+                }
+            )
+        return True
+
+    def _handle_contact_merged_event(self, event: ChatEvent, merged_into: str) -> bool:
+        """Rimuove dalla UI il ghost loser fuso in *merged_into* (WhatsApp).
+
+        Non appende ``payload["contact"]``: il winner è già nella lista.  Unisce
+        la cache del loser nel winner (add-only) e ripunta la selezione.
+        """
+        loser_key = contact_cache_key(event.protocol, event.contact_id)
+        winner_key = contact_cache_key(event.protocol, merged_into)
+        self.contacts = [c for c in self.contacts if c.cache_key != loser_key]
+        widgets = getattr(self, "_contact_widgets", None)
+        if widgets is not None:
+            widgets.pop(loser_key, None)
+        dirty = getattr(self, "_dirty_contact_keys", None)
+        if dirty is not None:
+            dirty.add(loser_key)
+        loser_msgs = self._cache.get(loser_key)
+        if loser_msgs:
+            _merge_cached_messages(self._cache.setdefault(winner_key, []), loser_msgs)
+        self._cache.pop(loser_key, None)
+        if (
+            self.selected_contact is not None
+            and self.selected_contact.cache_key == loser_key
+        ):
+            winner = next((c for c in self.contacts if c.cache_key == winner_key), None)
+            if winner is not None:
+                self.selected_contact = winner
+        self._contact_list_dirty = True
+        if getattr(self, "_web_enabled", False):
+            from web.bridge import push_event
+
+            push_event(
+                {
+                    "type": "contact_update",
+                    "payload": {
+                        "protocol": event.protocol,
+                        "contact_id": event.contact_id,
+                        "merged_into": merged_into,
+                        "display_name": event.payload.get("display_name"),
+                        "phone": event.payload.get("phone"),
                     },
                 }
             )

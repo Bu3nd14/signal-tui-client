@@ -1088,15 +1088,26 @@ def _prune_cache(limit: int | None = None, *, now_ms: int | None = None) -> int:
     return deleted
 
 
-def _mark_as_read(contact_number: str, protocol: str = "signal"):
-    """Mark all messages for a contact as read."""
+def _mark_as_read(
+    contact_number: str, protocol: str = "signal", extra_keys: tuple[str, ...] = ()
+):
+    """Mark all messages for a contact as read.
+
+    ``extra_keys`` estende la marcatura alle chiavi alias della union cross-key
+    WhatsApp (doppio JID ``@c.us``/``@lid``): lo storico è diviso su più
+    ``contact_number`` ma appartiene alla stessa persona.  Default ``()`` per
+    i caller storici (Signal/Telegram invariati).
+    """
+    keys = [contact_number, *(key for key in extra_keys if key)]
+    placeholders = ", ".join("?" for _ in keys)
     _init_db()
     with _DB_LOCK:
         conn = sqlite3.connect(DB_FILE)
         try:
             conn.execute(
-                "UPDATE messages SET read = 1 WHERE contact_number = ? AND protocol = ?",
-                (contact_number, protocol),
+                "UPDATE messages SET read = 1 "
+                f"WHERE protocol = ? AND contact_number IN ({placeholders})",
+                (protocol, *keys),
             )
             conn.commit()
         finally:

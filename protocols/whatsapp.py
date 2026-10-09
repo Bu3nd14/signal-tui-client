@@ -30,6 +30,7 @@ from models import (
     PROTOCOL_WHATSAPP,
     ChatContact,
     ChatEvent,
+    contact_storage_keys,
     is_caption_like,
     is_sent_mirror_attachment_id,
     media_kind_from_mime,
@@ -882,10 +883,14 @@ class WhatsAppBackend(ChatBackend):
         # Single call — list_contacts now uses only /chats with 5 s timeout.
         raw_contacts = self._rest.list_contacts() or []
         contacts = self._build_contacts_from_raw(raw_contacts)
-        by_jid = {cc.id: cc for cc in contacts}
         with ChatBackend._register_lock, self._contacts_lock:
             self.contacts = contacts
-            self._contacts_by_jid = by_jid
+            # Post-pass fold identità: /chats può restituire sia @lid sia @c.us
+            # della stessa persona; tieni la chat attiva e rimuovi il twin.
+            merged = self._fold_contacts_locked()
+            self._rebuild_jid_aliases()
+        for loser, winner in merged:
+            self._enqueue_event(self._merged_contact_event(loser, winner))
         try:
             book = self.list_address_book_sync(force=False)
             _apply_address_book_names(self.contacts, _build_address_book_name_map(book))
@@ -901,7 +906,15 @@ class WhatsAppBackend(ChatBackend):
                 continue
             name = c.get("name") or c.get("pushName") or c.get("notifyName") or ""
             last_ts = int(c.get("last_ts") or 0)
-            extras: dict[str, object] = {"jid": jid, "last_message_ts": last_ts}
+            extras: dict[str, object] = {
+                "jid": jid,
+                "last_message_ts": last_ts,
+                # Marker chat attiva: guida il fold identità (@c.us ↔ @lid) e
+                # distingue la chat reale dal ghost solo-rubrica.  Non
+                # sovrascrive un eventuale "ghost".
+                "source": "wa_chats",
+                "is_chat_active": True,
+            }
             phone = self._contact_phone(jid)
             if phone:
                 extras["phone"] = phone
@@ -939,6 +952,9 @@ class WhatsAppBackend(ChatBackend):
                 else:
                     dropped.append(c)
                 continue
+            # Contatto ri-fetchato da /chats: non è più un ghost book-only.
+            c.extras.pop("ghost", None)
+            c.extras["is_chat_active"] = True
             if (
                 f.display_name
                 and f.display_name != c.id
@@ -955,14 +971,16 @@ class WhatsAppBackend(ChatBackend):
             new.append(f)
             kept.append(f)
         self.contacts = kept
-        self._contacts_by_jid = {c.id: c for c in kept}
-        # R4: the rebuild loses the ``@lid`` aliases registered by
-        # ``_register_lid_alias``; re-run them for every ``@c.us`` (idempotent,
-        # ``setdefault``).  Lock order ``_register_lock → _contacts_lock →
-        # _lid_lock`` is respected (``_phone_to_lid`` only takes ``_lid_lock``).
-        for c in kept:
-            if c.id.endswith("@c.us"):
-                self._register_lid_alias(c)
+        # Post-pass fold identità: i twin book-only (@c.us) della stessa
+        # persona di una chat attiva vengono rimossi e aliasati.
+        merged = self._fold_contacts_locked()
+        dropped.extend(loser for loser, _winner in merged)
+        if merged:
+            survivors = {id(c) for c in self.contacts}
+            new = [c for c in new if id(c) in survivors]
+        self._rebuild_jid_aliases()
+        for loser, winner in merged:
+            self._enqueue_event(self._merged_contact_event(loser, winner))
         return new, dropped
 
     def _jid_to_phone(self, jid: str) -> str:
@@ -991,40 +1009,264 @@ class WhatsAppBackend(ChatBackend):
         """
         return self._jid_to_phone(jid)
 
+    # ─── Fold per identità (@c.us ↔ @lid) ─────────────────────────────
+
+    def _contact_dedup_phone(self, contact: ChatContact) -> str:
+        """Telefono usato per il fold identità, o ``""``.
+
+        ``@g.us``/non-JID/vuoto → ``""``; ``@c.us``/``@s.whatsapp.net`` → cifre
+        del JID; ``@lid`` → cache LID TTL-aware (:meth:`_lid_lookup`).  MAI
+        ``_jid_to_phone`` né ``extras["phone"]``: l'identità deve venire dal
+        JID, non da un campo che può contenere l'id interno scambiato per numero.
+        """
+        cid = str(contact.id or "")
+        if not cid or "@" not in cid or cid.endswith("@g.us"):
+            return ""
+        if cid.endswith(("@c.us", "@s.whatsapp.net")):
+            return _jid_digits(cid)
+        if cid.endswith("@lid"):
+            return self._lid_lookup(cid) or ""
+        return ""
+
+    def _fold_match_keys(self, contact: ChatContact) -> set[str]:
+        """Chiavi identità per il fold: telefono risolto, lid dichiarato, id ``@lid``."""
+        keys: set[str] = set()
+        phone = self._contact_dedup_phone(contact)
+        if phone:
+            keys.add(phone)
+        lid = str(contact.extras.get("lid") or "")
+        if lid:
+            keys.add(lid)
+        cid = str(contact.id or "")
+        if cid.endswith("@lid"):
+            keys.add(cid)
+        return keys
+
+    def _is_active_chat(self, contact: ChatContact) -> bool:
+        """True se il contatto è una chat attiva (non un ghost solo-rubrica)."""
+        return bool(contact.extras.get("is_chat_active")) or (
+            contact.extras.get("source") == "wa_chats"
+        )
+
+    def _winner(self, a: ChatContact, b: ChatContact, cache: dict) -> ChatContact:
+        """Sceglie il contatto canonico fra due twin di identità (pura).
+
+        Precedenza stretta: (1) chat attiva; (2) ``last_message_ts`` maggiore;
+        (3) presenza della chiave in *cache* (storico reale); (4) ``@lid``;
+        (5) ``a``.
+        """
+        a_active = self._is_active_chat(a)
+        b_active = self._is_active_chat(b)
+        if a_active != b_active:
+            return a if a_active else b
+        if a.last_message_ts != b.last_message_ts:
+            return a if a.last_message_ts > b.last_message_ts else b
+        a_cached = a.cache_key in cache
+        b_cached = b.cache_key in cache
+        if a_cached != b_cached:
+            return a if a_cached else b
+        a_lid = str(a.id or "").endswith("@lid")
+        b_lid = str(b.id or "").endswith("@lid")
+        if a_lid != b_lid:
+            return a if a_lid else b
+        return a
+
+    def _fold_by_identity(
+        self, incoming: ChatContact, cache: dict
+    ) -> list[ChatContact]:
+        """Contatti già presenti che sono twin di *incoming* (da rimuovere)."""
+        incoming_keys = self._fold_match_keys(incoming)
+        if not incoming_keys:
+            return []
+        return [
+            c
+            for c in self.contacts
+            if str(c.id) != str(incoming.id)
+            and (self._fold_match_keys(c) & incoming_keys)
+        ]
+
+    def _merge_contact_metadata(self, target: ChatContact, source: ChatContact) -> None:
+        """Fonde in *target* i metadati utili di *source*.
+
+        ``display_name`` solo se *target* è un placeholder; ``phone``/``lid`` se
+        mancanti; ``last_message_ts`` = max.  MAI ``extras["ghost"]``.
+        """
+        if _is_placeholder_display_name(
+            target.display_name, target.id, target.extras.get("phone")
+        ):
+            src_name = source.display_name
+            if src_name and not _is_placeholder_display_name(
+                src_name, source.id, source.extras.get("phone")
+            ):
+                target.display_name = src_name
+        for key in ("phone", "lid"):
+            if not target.extras.get(key) and source.extras.get(key):
+                target.extras[key] = source.extras[key]
+        target.last_message_ts = max(target.last_message_ts, source.last_message_ts)
+
+    def _repoint_contact_locked(self, removed: ChatContact, survivor: ChatContact):
+        """Rimuove *removed* dalla lista e ripunta ogni alias a *survivor*.
+
+        Mantiene l'invariante "nessuna entry orfana": ogni valore di
+        ``_contacts_by_jid`` resta presente in ``self.contacts``.
+        """
+        if removed is not survivor:
+            self.contacts = [c for c in self.contacts if c is not removed]
+        for key, value in list(self._contacts_by_jid.items()):
+            if value is removed:
+                self._contacts_by_jid[key] = survivor
+
+    def _merged_contact_event(
+        self, removed: ChatContact, survivor: ChatContact
+    ) -> ChatEvent:
+        """Evento ``contact_update`` con ``merged_into`` per il twin rimosso."""
+        return ChatEvent(
+            type="contact_update",
+            protocol=PROTOCOL_WHATSAPP,
+            contact_id=removed.id,
+            payload={
+                "merged_into": survivor.id,
+                "contact": survivor,
+                "display_name": survivor.display_name,
+                "phone": survivor.extras.get("phone"),
+            },
+        )
+
+    def _fold_contacts_locked(self) -> list[tuple[ChatContact, ChatContact]]:
+        """Post-pass fold per identità su ``self.contacts`` (sotto lock).
+
+        Ritorna la lista ``(loser, winner)`` delle rimozioni.  Da chiamare con
+        ``_register_lock → _contacts_lock`` e cache LID già caricata.
+        """
+        merged: list[tuple[ChatContact, ChatContact]] = []
+        survivors: list[ChatContact] = []
+        for contact in list(self.contacts):
+            keys = self._fold_match_keys(contact)
+            winner = None
+            for existing in survivors:
+                if not keys:
+                    break
+                if self._fold_match_keys(existing) & keys:
+                    winner = self._winner(existing, contact, self.cache)
+                    break
+            if winner is None:
+                survivors.append(contact)
+                continue
+            loser = contact if winner is existing else existing
+            if winner is contact:
+                survivors.remove(existing)
+                survivors.append(contact)
+            self._merge_contact_metadata(winner, loser)
+            merged.append((loser, winner))
+        if merged:
+            self.contacts = survivors
+            for loser, winner in merged:
+                self._repoint_contact_locked(loser, winner)
+        return merged
+
+    def _rebuild_jid_aliases(self) -> None:
+        """Ricostruisce ``_contacts_by_jid`` da ``self.contacts`` + alias bidirezionali.
+
+        Da chiamare sotto ``_register_lock → _contacts_lock`` con la cache LID
+        già caricata.  Base ``{id: contatto}``; poi aliases ``@lid → @c.us``
+        (reverse phone) e ``<phone>@c.us → @lid``.  Ogni valore resta un
+        contatto presente in ``self.contacts`` (nessuna entry orfana).
+        """
+        self._contacts_by_jid = {c.id: c for c in self.contacts}
+        for contact in self.contacts:
+            cid = str(contact.id or "")
+            if cid.endswith(("@c.us", "@s.whatsapp.net")):
+                self._register_lid_alias(contact)
+            elif cid.endswith("@lid"):
+                phone = str(contact.extras.get("phone") or "")
+                if phone:
+                    self._contacts_by_jid.setdefault(f"{phone}@c.us", contact)
+
     def _identify_contact(self, jid: str) -> ChatContact | None:
         """Resolve a JID to a known ``ChatContact`` (or a placeholder)."""
         return self._contacts_by_jid.get(jid)
 
-    def register_contact(self, contact: ChatContact) -> bool:
-        """Registra un contatto (open-or-create) anche nella lookup JID→contact.
+    def find_contact(self, contact_id: str) -> ChatContact | None:
+        """Cerca un contatto per id: lista, alias JID, rubrica (zero rete).
 
-        Oltre all'append in ``self.contacts`` (default di ``ChatBackend``),
-        aggiorna ``_contacts_by_jid`` così ``_identify_contact`` e il webhook
-        riconoscono subito il ghost senza creare placeholder duplicati.  Per un
-        ghost ``@c.us`` con un ``@lid`` in cache reverse registra anche l'alias
+        Override di ``ChatBackend.find_contact``: oltre al match esatto in
+        ``self.contacts`` risolve gli alias bidirezionali ``@c.us ↔ @lid``
+        anti-orfani (``_identify_contact``), purché il target sia ancora in
+        lista, e infine la rubrica.
+        """
+        for contact in self.contacts:
+            if str(contact.id) == contact_id:
+                return contact
+        identified = self._identify_contact(contact_id)
+        if identified is not None and identified in self.contacts:
+            return identified
+        return self.find_address_book_contact(contact_id)
+
+    def register_contact(self, contact: ChatContact) -> bool:
+        """Registra un contatto (open-or-create) con fold identità ``@c.us ↔ @lid``.
+
+        Oltre all'append in ``self.contacts``, aggiorna ``_contacts_by_jid`` e,
+        se esiste un twin della stessa identità/telefono, tiene il winner
+        (:meth:`_winner`) rimuovendo il ghost aliasato (``merged_into``).  Per un
+        ghost ``@c.us`` con un ``@lid`` in cache reverse registra l'alias
         ``_contacts_by_jid[@lid] → stesso oggetto`` (``setdefault``: non
         sovrascrive un mapping reale preesistente).
+
+        La ``_lid_cache_load()`` è forzata FUORI dai lock: il fold legge la
+        cache LID (zero rete) ma non deve fare I/O disco tenendo
+        ``_register_lock``/``_contacts_lock``.
         """
         # Append + aggiornamento mappa nella STESSA sezione critica usata dallo
         # swap di ``_load_contacts`` (ordine lock ``_register_lock →
         # _contacts_lock``).  Senza questo, lo swap del loader può inserirsi tra
-        # l'append (in ``super().register_contact``) e l'update di
-        # ``_contacts_by_jid``, lasciando un'entry orfana: contatto risolvibile
-        # via ``_identify_contact`` ma assente da ``self.contacts``.  La logica
-        # di dedup/append replica ``ChatBackend.register_contact`` perché quel
-        # metodo acquisisce già ``_register_lock`` (Lock non rientrante).
+        # l'append e l'update di ``_contacts_by_jid``, lasciando un'entry
+        # orfana: contatto risolvibile via ``_identify_contact`` ma assente da
+        # ``self.contacts``.  La logica replica ``ChatBackend.register_contact``
+        # perché quel metodo acquisisce già ``_register_lock`` (non rientrante).
+        self._lid_cache_load()
+        merged_events: list[ChatEvent] = []
+        appended = False
         with ChatBackend._register_lock, self._contacts_lock:
-            appended = all(
-                existing.cache_key != contact.cache_key for existing in self.contacts
+            known = any(
+                existing.cache_key == contact.cache_key for existing in self.contacts
             )
-            if appended:
-                self.contacts.append(contact)
-                self._contacts_by_jid[contact.id] = contact
-            # L'alias è tentato anche quando il contatto è già noto: la cache
-            # LID può essersi popolata dopo la prima registrazione (§3.4).
-            # Ordine lock: _register_lock → _contacts_lock → _lid_lock.
-            self._register_lid_alias(contact)
+            if known:
+                # R-D: dedup esatto ma NON early-return secco: l'alias va
+                # ritentato perché la cache LID può essersi popolata dopo la
+                # prima registrazione (§3.4).
+                self._register_lid_alias(contact)
+            else:
+                losers = self._fold_by_identity(contact, self.cache)
+                losing_loser = next(
+                    (
+                        loser
+                        for loser in losers
+                        if self._winner(contact, loser, self.cache) is loser
+                    ),
+                    None,
+                )
+                if losing_loser is not None:
+                    # Il contatto in arrivo perde: non appenderlo; aliasa al
+                    # survivor e fondi i suoi metadati nel loser vincente.
+                    self._repoint_contact_locked(contact, losing_loser)
+                    self._contacts_by_jid[str(contact.id)] = losing_loser
+                    self._merge_contact_metadata(losing_loser, contact)
+                    merged_events.append(
+                        self._merged_contact_event(contact, losing_loser)
+                    )
+                else:
+                    for loser in losers:
+                        self._repoint_contact_locked(loser, contact)
+                        self._contacts_by_jid[str(loser.id)] = contact
+                        self._merge_contact_metadata(contact, loser)
+                        merged_events.append(self._merged_contact_event(loser, contact))
+                    self.contacts.append(contact)
+                    self._contacts_by_jid[contact.id] = contact
+                    appended = True
+                self._register_lid_alias(contact)
         self._schedule_contact_lid_resolve(contact.id)
+        for event in merged_events:
+            self._enqueue_event(event)
         return appended
 
     def _register_lid_alias(self, contact: ChatContact) -> None:
@@ -1190,6 +1432,9 @@ class WhatsAppBackend(ChatBackend):
                 PROTOCOL_WHATSAPP, errors="fetch /chats failed"
             )
         fresh = self._build_contacts_from_raw(raw)
+        # Cache LID caricata FUORI dai lock: _merge_contacts_in_place fa il fold
+        # identità che legge la cache (memory-only dopo il load).
+        self._lid_cache_load()
         with ChatBackend._register_lock, self._contacts_lock:
             new, _dropped = self._merge_contacts_in_place(fresh)
         try:
@@ -2112,12 +2357,21 @@ class WhatsAppBackend(ChatBackend):
         await asyncio.to_thread(self.mark_read_sync, contact_id)
 
     def mark_read_sync(self, contact_id: str) -> None:
-        """Synchronous mark-read, for use from the TUI's sync callbacks."""
+        """Synchronous mark-read con read-union cross-key (``@c.us``/``@lid``).
+
+        Il mark-read remoto usa l'id canonico risolto; la persistenza locale
+        marca come lette anche le chiavi alias della union, così lo storico
+        DB diviso fra doppio JID non lascia un residuo non letto.
+        """
+        contact = self._identify_contact(contact_id)
         if self._rest:
-            self._rest.mark_read(contact_id)
+            self._rest.mark_read(contact.id if contact is not None else contact_id)
         from protocols.db import _mark_as_read
 
-        _mark_as_read(contact_id, protocol=PROTOCOL_WHATSAPP)
+        extra_keys = contact_storage_keys(contact)[1:] if contact is not None else []
+        _mark_as_read(
+            contact_id, protocol=PROTOCOL_WHATSAPP, extra_keys=tuple(extra_keys)
+        )
 
     # ─── Attachments ──────────────────────────────────────────────────
 
@@ -2460,11 +2714,16 @@ class WhatsAppBackend(ChatBackend):
     def _apply_contact_lid_resolution(self, jid: str, phone: str) -> None:
         """Applica al contatto la risoluzione dinamica di un ``@lid``.
 
-        Single mutation point: aggiorna extras/display_name ed enqueue-a un
-        ``contact_update`` (NON chiama ``push_event``: lo fa la TUI).
-        Double-checked locking: nessun lock è tenuto durante
-        ``register_contact`` (ordine lock ``_contacts_lock → _lid_lock``).
+        Single mutation point: aggiorna extras/display_name, fa il fold per
+        identità (rimuovendo l'eventuale twin ``@c.us``) ed enqueue-a un
+        ``contact_update`` (NON chiama ``push_event``: lo fa la TUI).  Nessun
+        re-id: il ``@lid`` resta canonico.
+
+        La cache LID è pre-caricata FUORI dai lock; ``register_contact`` gira
+        senza lock tenuti (ordine lock ``_register_lock → _contacts_lock →
+        _lid_lock``).
         """
+        self._lid_cache_load()
         entry = (self._lid_map or {}).get(jid)  # N5
         name_cache = entry.get("name") if isinstance(entry, dict) else None
         name_rubrica = _cached_address_book_name(self, phone or None, jid or None)
@@ -2473,21 +2732,24 @@ class WhatsAppBackend(ChatBackend):
         target = self._identify_contact(jid)
         if target is None:
             target = next((c for c in list(self.contacts) if c.id == jid), None)
-        if target is None:
-            created = ChatContact(
+        created = target is None
+        if created:
+            target = ChatContact(
                 id=jid,
                 display_name=new_name or jid,
                 protocol=PROTOCOL_WHATSAPP,
                 extras={},
             )
-            self.register_contact(created)  # nessun lock tenuto qui
-            target = self._identify_contact(jid) or created
+            self.register_contact(target)  # nessun lock tenuto qui
+            target = self._identify_contact(jid) or target
         # Robustezza (nota avversariale): invariante bidirezionale, cioè
         # ``_contacts_by_jid[jid]`` presente ANCHE in ``self.contacts``.  Lo
         # swap di ``_load_contacts`` può essersi inserito tra la
         # materializzazione e qui; ri-ancoriamo il target nella STESSA sezione
         # critica dello swap (``_register_lock → _contacts_lock``), senza mai
-        # tenere ``_contacts_lock`` attorno a ``register_contact``.
+        # tenere ``_contacts_lock`` attorno a ``register_contact``.  extras e
+        # fold stanno nella stessa sezione (nessuna I/O disco: cache pre-caricata).
+        merged_events: list[ChatEvent] = []
         with ChatBackend._register_lock, self._contacts_lock:
             listed = next((c for c in self.contacts if c.id == target.id), None)
             if listed is None:
@@ -2495,20 +2757,30 @@ class WhatsAppBackend(ChatBackend):
             else:
                 target = listed
             self._contacts_by_jid.setdefault(jid, target)
-
-        target.extras = {**target.extras, "phone": phone, "lid": jid}
-        if _is_placeholder_display_name(target.display_name, jid, phone):
-            target.display_name = new_name or target.display_name
+            target.extras = {**target.extras, "phone": phone, "lid": jid}
+            if created:
+                # Derivato da un messaggio reale: è una chat attiva.
+                target.extras["is_chat_active"] = True
+                target.extras["source"] = "wa_chats"
+            for loser in self._fold_by_identity(target, self.cache):
+                self._repoint_contact_locked(loser, target)
+                self._contacts_by_jid[str(loser.id)] = target
+                self._merge_contact_metadata(target, loser)
+                merged_events.append(self._merged_contact_event(loser, target))
+            if _is_placeholder_display_name(target.display_name, jid, phone):
+                target.display_name = new_name or target.display_name
 
         self._address_book = None
         self._enqueue_event(
             ChatEvent(
                 type="contact_update",
                 protocol=PROTOCOL_WHATSAPP,
-                contact_id=jid,
+                contact_id=target.id,
                 payload={"phone": phone, "display_name": new_name, "contact": target},
             )
         )
+        for event in merged_events:
+            self._enqueue_event(event)
 
     def _start_mention_lid_resolver(self) -> None:
         """Start the mentioned-lid resolver thread once."""
