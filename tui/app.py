@@ -33,6 +33,7 @@ from protocols import (
     WhatsAppBackend,
 )
 from protocols.config import signal_enabled, telegram_enabled, whatsapp_enabled
+from tui.address_book_refresh import DynamicAddressBookMixin
 from tui.backend_connect import BackendConnectMixin
 from tui.chat_view import ChatViewMixin
 from tui.contacts import ContactListMixin
@@ -70,6 +71,7 @@ class SignalTUI(
     UnreadReplyMixin,
     DownloadModeMixin,
     PickerMixin,
+    DynamicAddressBookMixin,
 ):
     """Main Signal TUI App with JSON-RPC daemon over HTTP."""
 
@@ -269,6 +271,17 @@ class SignalTUI(
         # True while a transient or persistent status message is on display.
         self._status_active: bool = False
 
+        # Dynamic address-book refresh (periodic + lazy) — see
+        # ``tui.address_book_refresh.DynamicAddressBookMixin``.  States live here
+        # (NOT in ``on_mount``) so tests patching ``on_mount`` stay thread-free.
+        self._address_book_refresh_stop = False
+        self._address_book_refresh_wake = threading.Event()
+        self._address_book_refresh_lock = threading.Lock()
+        self._address_book_last_periodic = 0.0
+        self._address_book_last_lazy = 0.0
+        self._address_book_pending_protocols: set[str] = set()
+        self._address_book_refresh_thread: threading.Thread | None = None
+
     def compose(self):
         yield Header()
         yield Horizontal(
@@ -333,6 +346,7 @@ class SignalTUI(
             self.run_worker(self._connect_telegram, exclusive=False, thread=True)
 
         self._init_native_renderer()
+        self.start_address_book_refresh()
 
     def _init_native_renderer(self) -> None:
         """Set up the kitty renderer when the terminal supports it (R3).
@@ -614,6 +628,7 @@ class SignalTUI(
     def on_exit_app(self):
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
+        self.stop_address_book_refresh()
         try:
             self._hires_executor.shutdown(wait=False)
         except Exception as _e:

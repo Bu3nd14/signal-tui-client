@@ -313,6 +313,16 @@ def get_address_book_ttl_s() -> int:
     return _get_int("address_book_ttl_s", "ADDRESS_BOOK_TTL_S", 300)
 
 
+def get_dynamic_refresh_interval_s() -> int:
+    """Return the dynamic address-book refresh interval in seconds (default ``300``)."""
+    return _get_int("dynamic_refresh_interval_s", "DYNAMIC_REFRESH_INTERVAL_S", 300)
+
+
+def get_dynamic_refresh_cooldown_s() -> int:
+    """Return the dynamic address-book lazy-refresh cooldown in seconds (default ``60``)."""
+    return _get_int("dynamic_refresh_cooldown_s", "DYNAMIC_REFRESH_COOLDOWN_S", 60)
+
+
 def get_wa_lid_cache_ttl_days() -> int:
     """Return the WhatsApp ``@lid``→number cache TTL in days (default ``30``)."""
     return _get_int("wa_lid_cache_ttl_days", "WA_LID_CACHE_TTL_DAYS", 30)

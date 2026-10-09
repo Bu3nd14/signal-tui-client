@@ -20,7 +20,7 @@ from models import (
     parse_quote_attachment_descriptor,
 )
 
-from .base import ChatBackend
+from .base import AddressBookRefreshResult, ChatBackend
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +123,48 @@ class BackendManager:
                         exc_info=True,
                     )
         return contacts
+
+    def refresh_contacts_sync(
+        self, protocols: set[str] | None = None, force: bool = True
+    ) -> dict[str, AddressBookRefreshResult]:
+        """Fan-out parallelo del refresh dinamico dei contatti.
+
+        NON usa il context manager ``with ThreadPoolExecutor`` (il cui
+        ``__exit__`` fa ``shutdown(wait=True)`` e bloccherebbe anche dopo
+        ``future.result(timeout)``).  Gli errori sono isolati per backend: un
+        backend che fallisce o va in timeout non impedisce agli altri di
+        ritornare; il metodo non solleva mai verso il chiamante.
+        """
+        backends = [
+            backend
+            for backend in self._backends.values()
+            if protocols is None or backend.protocol in protocols
+        ]
+        results: dict[str, AddressBookRefreshResult] = {}
+        if not backends:
+            return results
+        pool = ThreadPoolExecutor(max_workers=3)
+        try:
+            futures = {
+                pool.submit(backend.refresh_contacts_sync, force=force): backend
+                for backend in backends
+            }
+            for future, backend in futures.items():
+                try:
+                    results[backend.protocol] = future.result(timeout=30)
+                except Exception as exc:
+                    results[backend.protocol] = AddressBookRefreshResult(
+                        backend.protocol, errors=str(exc)
+                    )
+                    logger.warning(
+                        "Dynamic refresh failed for %s: %s",
+                        backend.protocol,
+                        exc,
+                        exc_info=True,
+                    )
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        return results
 
     async def send_message(
         self,

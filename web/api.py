@@ -1610,7 +1610,9 @@ def create_api_router() -> Any:
         return [_contact_payload(contact, unread) for contact in contacts]
 
     @router.get("/contacts/book")
-    def contacts_book(request: Request, q: str) -> list[dict[str, Any]]:
+    def contacts_book(
+        request: Request, q: str, force: bool = False
+    ) -> list[dict[str, Any]]:
         unread = _unread_counts()
         manager = request.app.state.manager
         query = (q or "").strip()
@@ -1618,9 +1620,11 @@ def create_api_router() -> Any:
             return []
         # Rubrica completa aggregata (come il picker TUI, in background):
         # lenta, il client la chiama dopo aver già mostrato i risultati delle chat.
+        # ``force`` è disponibile ma non passato dal frontend di default per non
+        # martellare WAHA a ogni keystroke.
         from contact_picker import search_contacts  # lazy: evitare import TUI all'avvio
 
-        contacts = search_contacts(manager.list_address_book_sync(force=False), query)
+        contacts = search_contacts(manager.list_address_book_sync(force=force), query)
         return [_contact_payload(contact, unread) for contact in contacts]
 
     @router.get("/contact-avatar")
