@@ -1069,7 +1069,14 @@ class WhatsAppBackend(ChatBackend):
             return list(self._address_book)
         try:
             raw = self._rest.list_all_contacts() if self._rest else None
-            book = _dedup_book_contacts(raw or [])
+            if raw is None:
+                # Errore di trasporto (timeout WAHA / _rest assente): NON toccare la
+                # cache. Un libro vuoto legittimo è `raw == []`, che passa oltre e
+                # committa regolarmente.
+                if self._address_book is not None:
+                    return list(self._address_book)
+                return []
+            book = _dedup_book_contacts(raw)
             chats = list(self.contacts)
 
             by_phone: dict[str, ChatContact] = {}
