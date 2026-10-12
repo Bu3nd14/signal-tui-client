@@ -274,55 +274,102 @@ class WhatsAppRESTClient:
 
     # ── Contacts ──────────────────────────────────────────────────────
 
-    def list_contacts(self) -> list[dict]:
-        """Return the raw contacts list (may contain nested ``data``).
+    def _normalize_chat(self, chat: dict) -> dict | None:
+        """Normalize a single WAHA chat dict, or ``None`` when it has no id."""
+        cid = chat.get("id")
+        if isinstance(cid, dict):
+            cid = cid.get("_serialized") or cid.get("id")
+        if not cid:
+            return None
+        name = chat.get("name") or chat.get("pushName") or chat.get("notifyName")
+        # Timestamp (seconds) of the last message/activity.  On WAHA
+        # ``/api/{session}/chats`` the field is ``timestamp`` (epoch s) and
+        # optionally ``lastMessage`` (object with ``t``).  Best-effort, 0
+        # if absent so the contact simply sorts as "no messages yet".
+        last_ts = 0
+        raw_t = chat.get("timestamp") or chat.get("t")
+        if isinstance(raw_t, (int, float)):
+            last_ts = int(raw_t * 1000) if raw_t < 10**12 else int(raw_t)
+        else:
+            lm = chat.get("lastMessage") or chat.get("last_message")
+            if isinstance(lm, dict):
+                ts = lm.get("t") or lm.get("timestamp")
+                if isinstance(ts, (int, float)):
+                    last_ts = int(ts * 1000) if ts < 10**12 else int(ts)
+        return {
+            "id": cid,
+            "name": name or cid,
+            "isGroup": bool(chat.get("isGroup")),
+            "last_ts": last_ts,
+            "unread": int(chat.get("unreadCount") or 0),
+        }
+
+    def _fetch_chats_page(
+        self, limit: int | None, offset: int | None, timeout: int = 5
+    ) -> list[dict] | None:
+        """Fetch one page of ``GET /api/{session}/chats``.
+
+        Without ``limit``/``offset`` the query string is omitted (legacy
+        behavior, WAHA's default page = 20).  Returns ``None`` on
+        transport/HTTP error, ``[]`` on an empty/non-list response.
+        """
+        path = f"/api/{self.session_name}/chats"
+        if limit is not None and offset is not None:
+            path += f"?limit={limit}&offset={offset}"
+        result = self._request("GET", path, timeout=timeout)
+        if result is None:
+            return None
+        if not isinstance(result, list):
+            return []
+        return [chat for chat in result if isinstance(chat, dict)]
+
+    def list_contacts(
+        self, *, paginate: bool = False, limit: int = 500
+    ) -> list[dict] | None:
+        """Return the session's chats (aka the active contacts).
 
         Tries the classic ``GET /api/contacts?session=...`` first.  On the
         current WAHA "core" builds that endpoint is broken (it may return 500
         with a ``TypeError`` in ``ContactsController``) — in that case we fall
         back to ``GET /api/{session}/chats``, which returns the session's chats
-        (aka the active contacts) with ``id._serialized`` + ``name``.
+        with ``id._serialized`` + ``name``.
+
+        ``paginate=False`` (default) issues a single unpaginated request,
+        preserving the historic behavior.  ``paginate=True`` walks every page
+        with ``limit``/``offset`` (same pattern as :meth:`list_lids`), so
+        groups beyond WAHA's default 20-chat page are included.
         """
-        timeout = 5
-        chats = self._request(
-            "GET",
-            f"/api/{self.session_name}/chats",
-            timeout=timeout,
-        )
-        if not chats or not isinstance(chats, list):
-            return None if chats is None else []
-        if not chats:
-            return []  # API alive, no contacts yet
+        if not paginate:
+            page = self._fetch_chats_page(None, None)
+            if page is None:
+                return None
+            return [c for c in (self._normalize_chat(ch) for ch in page) if c]
+
         out: list[dict] = []
-        for chat in chats:
-            cid = chat.get("id")
-            if isinstance(cid, dict):
-                cid = cid.get("_serialized") or cid.get("id")
-            name = chat.get("name") or chat.get("pushName") or chat.get("notifyName")
-            # Timestamp (seconds) of the last message/activity.  On WAHA
-            # ``/api/{session}/chats`` the field is ``timestamp`` (epoch s) and
-            # optionally ``lastMessage`` (object with ``t``).  Best-effort, 0
-            # if absent so the contact simply sorts as "no messages yet".
-            last_ts = 0
-            raw_t = chat.get("timestamp") or chat.get("t")
-            if isinstance(raw_t, (int, float)):
-                last_ts = int(raw_t * 1000) if raw_t < 10**12 else int(raw_t)
-            else:
-                lm = chat.get("lastMessage") or chat.get("last_message")
-                if isinstance(lm, dict):
-                    ts = lm.get("t") or lm.get("timestamp")
-                    if isinstance(ts, (int, float)):
-                        last_ts = int(ts * 1000) if ts < 10**12 else int(ts)
-            if cid:
-                out.append(
-                    {
-                        "id": cid,
-                        "name": name or cid,
-                        "isGroup": bool(chat.get("isGroup")),
-                        "last_ts": last_ts,
-                        "unread": int(chat.get("unreadCount") or 0),
-                    }
-                )
+        seen: set[str] = set()
+        offset = 0
+        max_pages = 50
+        for _ in range(max_pages):
+            if offset > 100000:
+                break
+            page = self._fetch_chats_page(limit, offset)
+            if page is None:
+                return None if offset == 0 else out
+            if not page:
+                break
+            before = len(out)
+            for chat in page:
+                normalized = self._normalize_chat(chat)
+                if normalized and normalized["id"] not in seen:
+                    seen.add(normalized["id"])
+                    out.append(normalized)
+            # WAHA ignoring ``offset`` keeps returning the same page: no new
+            # ids means we would loop forever, so stop.
+            if len(out) == before:
+                break
+            if len(page) < limit:
+                break
+            offset += limit
         return out
 
     @staticmethod
