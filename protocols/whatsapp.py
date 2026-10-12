@@ -337,6 +337,13 @@ class WhatsAppBackend(ChatBackend):
         # ── Address book (rubrica completa) ────────────────────────────
         self._address_book: list[ChatContact] | None = None
         self._address_book_ts: float = 0.0
+        #: Gruppi (@g.us) noti dalla /chats paginata: registry DUREVOLE in
+        #: memoria, mai azzerato dai ``self._address_book = None`` (resolver
+        #: LID ecc.). Popolato in ``list_address_book_sync``; consultato da
+        #: ``find_contact`` come ultimo fallback zero-rete. Ricostruito a ogni
+        #: connect via ``_load_contacts`` (non serve persistenza su disco).
+        #: Read-mostly: le scritture/letture single-key sono atomiche sotto GIL.
+        self._known_groups: dict[str, ChatContact] = {}
         #: Persistent cache ``@lid`` → phone number (lazy-loaded from disk).
         self._lid_map: dict[str, dict] | None = None
         self._lid_lock = threading.Lock()
@@ -1200,7 +1207,17 @@ class WhatsAppBackend(ChatBackend):
         identified = self._identify_contact(contact_id)
         if identified is not None and identified in self.contacts:
             return identified
-        return self.find_address_book_contact(contact_id)
+        book = self.find_address_book_contact(contact_id)
+        if book is not None:
+            return book
+        # Ultimo fallback zero-rete: gruppi reali dalla /chats paginata. Nessuna
+        # sintesi di JID arbitrari: la chiave è il JID canonico di WAHA. Snapshot
+        # locale del dict (coerente con find_address_book_contact).
+        known = self._known_groups
+        contact = known.get(contact_id)
+        if contact is not None:
+            logger.debug("find_contact: risolto %s via _known_groups", contact_id)
+        return contact
 
     def register_contact(self, contact: ChatContact) -> bool:
         """Registra un contatto (open-or-create) con fold identità ``@c.us ↔ @lid``.
@@ -1319,7 +1336,31 @@ class WhatsAppBackend(ChatBackend):
                     return list(self._address_book)
                 return []
             book = _dedup_book_contacts(raw)
+            # Merge-add: keep the enriched persistent contacts and append only
+            # the chats beyond the first /chats page (paginated fetch) so the
+            # search can find groups. ``self.contacts`` itself is left as-is.
+            self._lid_cache_load()
             chats = list(self.contacts)
+            chats_raw = (
+                self._rest.list_contacts(paginate=True, limit=500)
+                if self._rest
+                else None
+            )
+            if chats_raw is not None:
+                known = {c.id for c in chats}
+                extra = [
+                    c
+                    for c in self._build_contacts_from_raw(chats_raw)
+                    if c.id not in known
+                ]
+                chats = chats + extra
+
+            # Registry durevole dei gruppi: cattura TUTTI i @g.us (prima
+            # pagina + paginati). Accumulo monotono idempotente. Leggere
+            # ``chats`` (NON ``out_extra``, ancora vuoto qui).
+            for chat in chats:
+                if chat.id and chat.id.endswith("@g.us"):
+                    self._known_groups[chat.id] = chat
 
             by_phone: dict[str, ChatContact] = {}
             for b in book:
