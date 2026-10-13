@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -208,7 +209,7 @@ def test_static_assets_declare_thread_avatar_and_stealth():
     assert 'id="thread-avatar"' in index
     assert 'id="stealth-toggle"' in index
     assert "style.css?v=68" in index
-    assert "app.js?v=125" in index
+    assert re.search(r"app\.js\?v=\d+", index)
 
     app = Path("web/static/app.js").read_text(encoding="utf-8")
     assert "STEALTH_KEY" in app

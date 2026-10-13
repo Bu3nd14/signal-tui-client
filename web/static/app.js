@@ -695,7 +695,7 @@ function releaseMediaSlot() {
   if (next) next();
 }
 
-async function fetchImage(path, attachmentId, direction) {
+async function fetchImage(path, attachmentId, cacheKey, direction) {
   const controller = new AbortController();
   state.mediaRequests.add(controller);
   const retryDelays = [3000, 6000];
@@ -732,7 +732,11 @@ async function fetchImage(path, attachmentId, direction) {
     const blob = await response.blob();
     if (controller.signal.aborted) throw new DOMException("Aborted", "AbortError");
     const url = URL.createObjectURL(blob);
-    cacheMedia(attachmentId, url);
+    cacheMedia(cacheKey, url);
+    // mediaFailures resta keyed RAW (il WS handler la pulisce con l'id grezzo):
+    // un successo sulla versione nuova deve azzerare anche l'eventuale 404
+    // registrato su una versione precedente dello stesso attachment_id.
+    state.mediaFailures.delete(String(attachmentId));
     return url;
   } finally {
     if (acquired) releaseMediaSlot();
@@ -867,49 +871,62 @@ async function openImageModal(path, alt) {
   }
 }
 
-async function loadThumbnail(container, image, path, attachmentId, direction, onLoad, showFallback) {
-  const key = String(attachmentId);
-  if (state.mediaFailures.has(key)) {
+async function loadThumbnail(container, image, path, attachmentId, cacheKey, direction, onLoad, showFallback) {
+  const rawKey = String(attachmentId);
+  if (state.mediaFailures.has(rawKey)) {
     showFallback(container);
     return;
   }
-  let request = state.mediaLoads.get(key);
+  let request = state.mediaLoads.get(cacheKey);
   if (!request) {
-    request = fetchImage(path, key, direction);
-    state.mediaLoads.set(key, request);
+    request = fetchImage(path, attachmentId, cacheKey, direction);
+    state.mediaLoads.set(cacheKey, request);
   }
   try {
     const url = await request;
     if (!url) return;
     image.addEventListener("load", () => {
-      captureMediaDims(key, image);
+      captureMediaDims(cacheKey, image);
       container.querySelector(".attachment-loading")?.remove();
       onLoad?.();
     }, { once: true });
     image.src = url;
     // Se il load fosse già avvenuto (src ri-assegnato / decode sincrono) l'evento
     // non ripartirebbe: cattura subito. No-op nei path attuali (img fresco).
-    if (image.complete && image.naturalWidth) captureMediaDims(key, image);
+    if (image.complete && image.naturalWidth) captureMediaDims(cacheKey, image);
   } catch (error) {
     if (error.name !== "AbortError") {
       console.debug("[web] media failed", { attachment_id: attachmentId });
       showFallback(container);
     }
   } finally {
-    if (state.mediaLoads.get(key) === request) state.mediaLoads.delete(key);
+    if (state.mediaLoads.get(cacheKey) === request) state.mediaLoads.delete(cacheKey);
   }
 }
 
 function loadImage(container, image, path, attachmentId, direction, onLoad) {
-  return loadThumbnail(container, image, path, attachmentId, direction, onLoad, showImageFallback);
+  return loadThumbnail(container, image, path, attachmentId, String(attachmentId), direction, onLoad, showImageFallback);
 }
 
-function setupLazyThumbnail(container, image, path, attachmentId, direction, onLoad, showFallback) {
-  console.debug("[web] media", { attachment_id: attachmentId, cache: state.mediaCache.has(attachmentId) ? "hit" : "miss" });
-  const cached = state.mediaCache.get(attachmentId);
+// URL /api/media con version token `v=` per invalidare la cache HTTP quando il
+// file (attachment_id NON content-addressed) viene sovrascritto.
+function mediaUrl(protocol, attachmentId, version) {
+  const base = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+  return version ? `${base}?v=${encodeURIComponent(String(version))}` : base;
+}
+
+// Chiave versionata di state.mediaCache: evita collisioni da attachment_id
+// riutilizzati (stesso filename, immagini diverse).
+function mediaCacheKey(attachmentId, version) {
+  return version ? `${String(attachmentId)}|${String(version)}` : String(attachmentId);
+}
+
+function setupLazyThumbnail(container, image, path, attachmentId, cacheKey, direction, onLoad, showFallback) {
+  console.debug("[web] media", { attachment_id: attachmentId, cache: state.mediaCache.has(cacheKey) ? "hit" : "miss" });
+  const cached = state.mediaCache.get(cacheKey);
   if (cached) {
-    state.mediaCache.delete(attachmentId);
-    state.mediaCache.set(attachmentId, cached);
+    state.mediaCache.delete(cacheKey);
+    state.mediaCache.set(cacheKey, cached);
     if (cached.width && cached.height) {
       // Riserva lo spazio PRIMA di src: gli attributi width/height diventano
       // le dimensioni intrinseche dell'img; il CSS (width:auto;height:auto +
@@ -919,15 +936,15 @@ function setupLazyThumbnail(container, image, path, attachmentId, direction, onL
       image.height = cached.height;
     }
     image.addEventListener("load", () => {
-      captureMediaDims(attachmentId, image);
+      captureMediaDims(cacheKey, image);
       container.querySelector(".attachment-loading")?.remove();
       onLoad?.();
     }, { once: true });
     image.src = cached.url;
-    if (image.complete && image.naturalWidth) captureMediaDims(attachmentId, image);
+    if (image.complete && image.naturalWidth) captureMediaDims(cacheKey, image);
     return;
   }
-  const load = () => loadThumbnail(container, image, path, attachmentId, direction, onLoad, showFallback);
+  const load = () => loadThumbnail(container, image, path, attachmentId, cacheKey, direction, onLoad, showFallback);
   const observer = mediaObserver();
   if (observer) {
     container._loadMedia = load;
@@ -950,8 +967,10 @@ function imageAttachment(attachment, protocol, direction, onLoad) {
   image.alt = attachment.name || "Immagine allegata";
   container.append(loading, image);
   const attachmentId = String(attachment.attachment_id);
-  const mediaPath = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
-  const path = `${mediaPath}?w=480`;
+  const version = attachment.version;
+  const mediaPath = mediaUrl(protocol, attachmentId, version);
+  const path = `${mediaPath}${version ? "&w=480" : "?w=480"}`;
+  const cacheKey = mediaCacheKey(attachmentId, version);
   container.setAttribute("role", "button");
   container.tabIndex = 0;
   container.addEventListener("click", () => openImageModal(mediaPath, image.alt));
@@ -961,7 +980,7 @@ function imageAttachment(attachment, protocol, direction, onLoad) {
       openImageModal(mediaPath, image.alt);
     }
   });
-  setupLazyThumbnail(container, image, path, attachmentId, direction, onLoad, showImageFallback);
+  setupLazyThumbnail(container, image, path, attachmentId, cacheKey, direction, onLoad, showImageFallback);
   return container;
 }
 
@@ -1150,7 +1169,8 @@ function videoThumbAttachment(attachment, protocol, direction, onLoad) {
   badge.setAttribute("aria-hidden", "true");
   badge.textContent = "▶";
   container.append(loading, image, badge);
-  const mediaPath = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+  const version = attachment.version;
+  const mediaPath = mediaUrl(protocol, attachmentId, version);
   const open = fileAttachmentOpenHandler(mediaPath, protocol);
   container.addEventListener("click", open);
   container.addEventListener("keydown", (event) => {
@@ -1163,8 +1183,9 @@ function videoThumbAttachment(attachment, protocol, direction, onLoad) {
     const fallback = fileAttachment(attachment, protocol, direction);
     target.replaceWith(fallback);
   };
-  const path = `${mediaPath}?w=480`;
-  setupLazyThumbnail(container, image, path, attachmentId, direction, onLoad, showFallback);
+  const path = `${mediaPath}${version ? "&w=480" : "?w=480"}`;
+  const cacheKey = mediaCacheKey(attachmentId, version);
+  setupLazyThumbnail(container, image, path, attachmentId, cacheKey, direction, onLoad, showFallback);
   return container;
 }
 

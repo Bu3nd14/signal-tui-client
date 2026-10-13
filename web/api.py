@@ -1007,6 +1007,72 @@ def _attachment_media_kind(proto: str, attachment_id: str) -> str | None:
     return row[0]
 
 
+def _attachment_version(
+    manager, proto: str, root: Path, attachment_id: str
+) -> str | None:
+    """Versione cache-busting ('mtime_ns-size') dell'allegato già su disco.
+
+    Solo fast-path locale (mai lazy download). root è pre-risolta una volta per
+    richiesta. Ogni candidate è resolve()+is_relative_to(root)+is_file() prima
+    dello stat: nessun leak di mtime/size di file arbitrari (traversal/symlink
+    fuori root -> None).
+    """
+    if not attachment_id:
+        return None
+    bare = attachment_id.split("?", 1)[0]
+    name = Path(bare).name or bare
+    if proto == "signal":
+        candidates = (root / name, root / bare)
+    elif proto == "whatsapp":
+        candidates = (root / name,)
+    elif proto == "telegram":
+        candidates = (Path(bare), root / name)
+    else:
+        return None
+    root_resolved = root.resolve()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except (OSError, ValueError):
+            continue
+        if not resolved.is_relative_to(root_resolved):
+            continue
+        try:
+            st = resolved.stat()
+        except OSError:
+            continue
+        if resolved.is_file() and st.st_size >= 0:
+            return f"{st.st_mtime_ns}-{st.st_size}"
+    return None
+
+
+def _attach_media_versions(manager, proto: str, messages: list[dict[str, Any]]) -> None:
+    """Arricchisce attachment['version'] per il cache-busting; best-effort.
+
+    root risolta una sola volta. Qualunque errore (incluso OSError/PermissionError
+    dal mkdir di _ensure_media_dir per WhatsApp) degrada silenziosamente a
+    'nessuna version': la lista messaggi non deve mai fallire per un cache-buster.
+    """
+    try:
+        root = _allowed_media_root(manager, proto)
+    except Exception:  # noqa: BLE001 — funzionalità accessoria, mai 500
+        return
+    memo: dict[str, str | None] = {}
+    for message in messages:
+        att = message.get("attachment")
+        if not att or not att.get("attachment_id"):
+            continue
+        att_id = att["attachment_id"]
+        if att_id not in memo:
+            try:
+                memo[att_id] = _attachment_version(manager, proto, root, att_id)
+            except Exception:  # noqa: BLE001
+                memo[att_id] = None
+        version = memo[att_id]
+        if version:
+            att["version"] = version
+
+
 def _is_thumbnail_candidate(path: Path, proto: str, attachment_id: str) -> bool:
     content_type = (_attachment_content_type(proto, attachment_id) or "").lower()
     suffix = path.suffix.lower()
@@ -1063,8 +1129,13 @@ def _thumbnail(path: Path, proto: str, attachment_id: str, width: int) -> Path |
     from PIL import Image
 
     thumb_dir = _web_thumb_dir(proto)
+    stat = path.stat()
+    # La size entra nel digest: un overwrite che preserva mtime_ns ma cambia i
+    # byte deve invalidare la thumbnail già su disco (coerente col token client
+    # 'mtime_ns-size').
     digest = hashlib.sha1(
-        f"{path}|{path.stat().st_mtime_ns}|{width}".encode(), usedforsecurity=False
+        f"{path}|{stat.st_mtime_ns}|{stat.st_size}|{width}".encode(),
+        usedforsecurity=False,
     ).hexdigest()
     thumb = thumb_dir / f"{digest}.jpg"
     with _thumb_lock(thumb):
@@ -1824,6 +1895,7 @@ def create_api_router() -> Any:
             tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
         )
         result = _messages(proto, contact_id, extra_keys=extra_keys)
+        _attach_media_versions(manager, proto, result)
         is_group = contact_id.endswith("@g.us")
         if not is_group:
             manager = request.app.state.manager
