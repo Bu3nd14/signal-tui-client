@@ -20,11 +20,14 @@ from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
 from models import (
+    attachment_display_name,
     contact_storage_keys,
     dedup_cross_key,
     is_caption_like,
+    is_duplicate_media_identity,
     is_media_quote_placeholder_composite,
     is_whatsapp_synthetic_media_text,
+    pick_survivor_and_merge,
 )
 from web.bridge import push_event
 from web.retry import (
@@ -148,13 +151,16 @@ def _infer_attachment_type(attachment_id: str, content_type: str | None) -> str 
     return f"image/{'jpeg' if suffix in {'.jpg', '.jpeg'} else suffix[1:]}"
 
 
-def _is_whatsapp_synthetic_text(text: str | None) -> bool:
+def _is_whatsapp_synthetic_text(
+    text: str | None, attachment_id: str | None = None
+) -> bool:
     """Alias locale del predicato canonico ``models.is_whatsapp_synthetic_media_text``.
 
     Il predicato vive in ``models`` così ingest backend, dedup SQLite e web
-    condividono una sola definizione.
+    condividono una sola definizione.  *attachment_id* permette di riconoscere
+    anche un'identità ``"Media: <id>"`` che non rientra nei pattern canonici.
     """
-    return is_whatsapp_synthetic_media_text(text)
+    return is_whatsapp_synthetic_media_text(text, attachment_id=attachment_id)
 
 
 def _unread_counts() -> dict[tuple[str, str], int]:
@@ -422,6 +428,152 @@ def _cross_key_dedup_rows(rows: list[sqlite3.Row], canonical: str) -> list[sqlit
     return kept
 
 
+def _real_caption(
+    text: str | None,
+    *,
+    attachment_id: str | None,
+    media_filename: str | None,
+) -> str | None:
+    """Classifica il testo di una riga come caption reale, o ``None``.
+
+    Unica fonte di verità per la dedup intra-chiave web: scarta il vuoto,
+    l'identità media sintetica WhatsApp (``"Media: <id>"``, ``attachment_id``
+    in modalità non restrittiva come il resto del layer web) e il duplicato
+    dell'identità (testo uguale al filename del media).  Tutto il resto è una
+    caption reale.  È l'unica eccezione al ``text`` immutabile del merge.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return None
+    if is_whatsapp_synthetic_media_text(stripped, attachment_id=attachment_id):
+        return None
+    if media_filename and is_duplicate_media_identity(stripped, media_filename):
+        return None
+    return stripped
+
+
+def _basename(attachment_id: str | None) -> str:
+    """Basename di un ``attachment_id``/URL senza query string né fragment."""
+    return Path(str(attachment_id or "").split("?", 1)[0].split("#", 1)[0]).name
+
+
+def _dedup_intra_key_rows(
+    rows: list[sqlite3.Row],
+) -> list[sqlite3.Row | dict[str, Any]]:
+    """Dedup intra-chiave col merge condiviso di ``models``.
+
+    Il gruppo fisico è ``(msg_id, attachment-compat, is_mine)``: stesso
+    ``msg_id`` non vuoto, stesso ``is_mine`` e stesso ``attachment_id`` (OPPURE
+    uno dei due assente).  Id uguale con due ``attachment_id`` distinti ed
+    entrambi non vuoti sono allegati diversi (multi-allegato/batch) e restano
+    separati; un ``is_mine`` diverso non è MAI fuso (R5).
+
+    Flow unificata per media e no-media.  Il survivor è scelto con
+    ``pick_survivor_and_merge(..., prefer_attachment=has_media)`` (l'allegato,
+    se presente, non viene mai scartato).  Le caption reali del gruppo sono
+    classificate da ``_real_caption``: se ne emergono >=2 distinte il gruppo NON
+    viene fuso (anti-perdita, nessun "first-wins"); se ne emerge esattamente una
+    e il survivor non la porta, viene trasferita sul suo ``text`` (unica
+    eccezione all'immutabilità del text).  ``attachment_id``, ``msg_id``,
+    ``batch_id``, ``batch_index``, ``is_mine``, ``read`` e ``id`` restano SEMPRE
+    dal survivor.
+
+    Per ogni gruppo fuso survivor e merge sono calcolati da
+    ``models.pick_survivor_and_merge`` (status rank, ts reale, rowid; fill senza
+    sovrascrittura, sender display, ``edited=max``); le righe singole restano
+    l'oggetto originale.  In uscita l'ordine è ri-normalizzato su
+    ``(timestamp, id)``.
+
+    Nota reazioni (follow-up non bloccante): ``_aggregate_reactions`` aggancia
+    le reazioni per rowid DOPO questa dedup, quindi una reazione registrata solo
+    su ``target_timestamp`` del twin (id assente) non sopravvive.  Le reazioni
+    con ``target_msg_id`` restano corrette perché il survivor condivide l'id.
+    """
+    groups: list[dict[str, Any]] = []
+    for row in rows:
+        msg_id = row["msg_id"]
+        if not msg_id:
+            groups.append({"rows": [row], "attachments": set()})
+            continue
+        attachment_id = row["attachment_id"]
+        is_mine = bool(row["is_mine"])
+        target = None
+        for group in groups:
+            if group.get("msg_id") != msg_id or group.get("is_mine") != is_mine:
+                continue
+            attachments = group["attachments"]
+            if not attachment_id or not attachments or attachment_id in attachments:
+                # Stesso allegato OPPURE uno dei due assente: compatibili.
+                target = group
+                break
+        if target is None:
+            target = {
+                "msg_id": msg_id,
+                "is_mine": is_mine,
+                "rows": [],
+                "attachments": set(),
+            }
+            groups.append(target)
+        target["rows"].append(row)
+        if attachment_id:
+            target["attachments"].add(attachment_id)
+
+    merged: list[sqlite3.Row | dict[str, Any]] = []
+    for group in groups:
+        group_rows = group["rows"]
+        if len(group_rows) < 2:
+            merged.extend(group_rows)
+            continue
+
+        has_media = any(row["attachment_id"] for row in group_rows)
+        survivor_index, overrides = pick_survivor_and_merge(
+            group_rows, prefer_attachment=has_media
+        )
+        survivor = dict(group_rows[survivor_index])
+        survivor.update(overrides)
+
+        attachment_id = survivor["attachment_id"]
+        media_filename = (
+            (survivor["attachment_info"] or _basename(attachment_id))
+            if attachment_id
+            else None
+        )
+
+        captions = {
+            caption
+            for row in group_rows
+            if (
+                caption := _real_caption(
+                    row["text"],
+                    attachment_id=attachment_id,
+                    media_filename=media_filename,
+                )
+            )
+            is not None
+        }
+
+        if len(captions) > 1:
+            # Due caption reali distinte: due messaggi, nessuna fusione.
+            merged.extend(group_rows)
+            continue
+
+        if (
+            captions
+            and _real_caption(
+                survivor["text"],
+                attachment_id=attachment_id,
+                media_filename=media_filename,
+            )
+            is None
+        ):
+            survivor["text"] = next(iter(captions))
+
+        merged.append(survivor)
+
+    merged.sort(key=lambda row: (int(row["timestamp"] or 0), int(row["id"] or 0)))
+    return merged
+
+
 def _messages(
     protocol: str, contact_id: str, extra_keys: tuple[str, ...] = ()
 ) -> list[dict[str, Any]]:
@@ -453,6 +605,7 @@ def _messages(
             return []
         if len(keys) > 1:
             rows = _cross_key_dedup_rows(rows, contact_id)
+        rows = _dedup_intra_key_rows(rows)
 
     messages = []
     for row in rows:
@@ -461,10 +614,12 @@ def _messages(
         suppress_attachment_info_caption = False
         if row["attachment_id"]:
             attachment_id = row["attachment_id"]
-            attachment_path = attachment_id.split("?", 1)[0]
+            attachment_name = attachment_display_name(
+                row["attachment_info"], attachment_id
+            )
             attachment = {
                 "attachment_id": attachment_id,
-                "name": row["attachment_info"] or Path(attachment_path).name,
+                "name": attachment_name,
                 "type": (
                     row["content_type"]
                     or ("image/*" if row["msg_type"] == "image" else None)
@@ -508,7 +663,10 @@ def _messages(
                     stripped == info
                     or is_media_quote_placeholder(text)
                     or prefixed_info
-                    or (protocol == "whatsapp" and _is_whatsapp_synthetic_text(text))
+                    or (
+                        protocol == "whatsapp"
+                        and _is_whatsapp_synthetic_text(text, row["attachment_id"])
+                    )
                 ):
                     text = ""
             elif text and (
@@ -525,7 +683,10 @@ def _messages(
                 if (
                     is_media_quote_placeholder(text)
                     or prefixed_info
-                    or (protocol == "whatsapp" and _is_whatsapp_synthetic_text(text))
+                    or (
+                        protocol == "whatsapp"
+                        and _is_whatsapp_synthetic_text(text, row["attachment_id"])
+                    )
                 ):
                     text = ""
                     suppress_attachment_info_caption = prefixed_info
@@ -533,7 +694,7 @@ def _messages(
                 from models import is_media_quote_placeholder
 
                 if is_media_quote_placeholder(text) or _is_whatsapp_synthetic_text(
-                    text
+                    text, row["attachment_id"]
                 ):
                     text = ""
             if (

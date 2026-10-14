@@ -276,6 +276,102 @@ def test_messages_exposes_batch_fields(monkeypatch, tmp_path):
     assert {message["batch_id"] for message in messages} == {"batch-1"}
 
 
+def test_web_intra_key_dedup_single_key(monkeypatch, tmp_path):
+    """13: due righe sotto la STESSA chiave con stesso
+    ``contact_number``/``msg_id``/``attachment_id`` (una ``"Media: <id>"``,
+    una vuota) vengono fuse a livello web (dedup intra-chiave id-first,
+    coerente con la TUI)."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    contact = "125593484054624@lid"
+    msg_id = "true_125593484054624@lid_ABC"
+    attachment_id = "http://localhost:3000/api/files/default/voice.ogg"
+    _add_message_to_cache(
+        contact,
+        f"Media: {attachment_id}",
+        is_mine=False,
+        sender=contact,
+        timestamp=1_000,
+        msg_type="attachment",
+        attachment_id=attachment_id,
+        content_type="audio/ogg",
+        media_kind="voice",
+        protocol="whatsapp",
+        msg_id=msg_id,
+    )
+    _add_message_to_cache(
+        contact,
+        "",
+        is_mine=False,
+        sender="Roberto Di Maggio",
+        timestamp=1_500,
+        msg_type="attachment",
+        attachment_id=attachment_id,
+        content_type="audio/ogg",
+        media_kind="voice",
+        protocol="whatsapp",
+        msg_id=msg_id,
+    )
+
+    messages = _messages("whatsapp", contact)
+
+    assert len(messages) == 1
+    assert messages[0]["text"] == ""
+    assert messages[0]["sender"] == "Roberto Di Maggio"
+
+
+def test_web_intra_key_dedup_keeps_multi_attachment(monkeypatch, tmp_path):
+    """14: stesso ``msg_id`` ma ``attachment_id`` distinti e non vuoti sono
+    allegati separati (multi-allegato) e restano entrambi."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    for index in range(2):
+        _add_message_to_cache(
+            "42",
+            "",
+            is_mine=True,
+            sender="You",
+            timestamp=1_000,
+            msg_type="image",
+            attachment_id=f"att-{index}.jpg",
+            protocol="signal",
+            msg_id="1787250931234",
+        )
+
+    messages = _messages("signal", "42")
+
+    assert len(messages) == 2
+
+
+def test_web_intra_key_dedup_keeps_batch_members(monkeypatch, tmp_path):
+    """15: i membri di un batch (stesso ``batch_id`` e ``msg_id``) hanno
+    ``attachment_id`` distinti e restano tutti nella risposta."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    for index in range(3):
+        _add_message_to_cache(
+            "42",
+            "",
+            is_mine=True,
+            sender="You",
+            timestamp=1_787_250_931_234,
+            msg_type="image",
+            attachment_id=f"file-{index}.png",
+            protocol="signal",
+            msg_id="1787250931234",
+            batch_id="batch-1",
+            batch_index=index,
+        )
+
+    messages = _messages("signal", "42")
+
+    assert len(messages) == 3
+    assert [message["batch_index"] for message in messages] == [0, 1, 2]
+
+
 def test_load_cache_orders_same_timestamp_rows_deterministically(monkeypatch, tmp_path):
     """N righe mirror con lo stesso timestamp vengono ricaricate in ordine di
     inserimento (tie-breaker ``id``): l'eco k-esima continua a matchare la
@@ -353,6 +449,55 @@ def test_web_api_does_not_use_mimetype_as_caption(monkeypatch, tmp_path):
         assert message["text"] == ""
         assert message["attachment"] is not None
         assert message["attachment"]["type"] in ("image/jpeg", "image/*")
+
+
+def test_web_document_shows_filename_and_caption(monkeypatch, tmp_path):
+    """Non-image: filename in ``attachment.name``, caption in ``text``."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    _add_message_to_cache(
+        "555",
+        "ecco il contratto",
+        is_mine=False,
+        sender="M",
+        timestamp=1_000,
+        msg_type="attachment",
+        attachment_info="contratto.pdf",
+        attachment_id="http://localhost:3000/api/files/default/doc.pdf",
+        content_type="application/pdf",
+        protocol="whatsapp",
+        msg_id="doc-1",
+        media_kind="document",
+    )
+    result = _messages("whatsapp", "555")
+    assert len(result) == 1
+    assert result[0]["text"] == "ecco il contratto"
+    assert result[0]["attachment"]["name"] == "contratto.pdf"
+
+
+def test_web_does_not_hide_literal_media_caption(monkeypatch, tmp_path):
+    """B3: una caption utente ``"Media: ciao"`` non è un'identità sintetica."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    _add_message_to_cache(
+        "555",
+        "Media: ciao",
+        is_mine=False,
+        sender="M",
+        timestamp=1_000,
+        msg_type="attachment",
+        attachment_info="contratto.pdf",
+        attachment_id="http://localhost:3000/api/files/default/doc.pdf",
+        content_type="application/pdf",
+        protocol="whatsapp",
+        msg_id="doc-2",
+        media_kind="document",
+    )
+    result = _messages("whatsapp", "555")
+    assert len(result) == 1
+    assert result[0]["text"] == "Media: ciao"
 
 
 def test_push_on_attachment_upgrade():
@@ -1003,3 +1148,183 @@ vm.runInThisContext(app.slice(submitStart, submitEnd));
         ["node", "-e", source], capture_output=True, text=True, check=False
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_web_messages_dedup_synthetic_and_blank_same_attachment(monkeypatch, tmp_path):
+    """13: stessa chiave, stesso msg_id/attachment_id synth+blank → 1 elemento."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    attachment_id = "http://localhost:3000/api/files/default/voice.ogg"
+    _add_message_to_cache(
+        "555",
+        f"Media: {attachment_id}",
+        is_mine=False,
+        sender="125593484054624@lid",
+        timestamp=1_000,
+        msg_type="attachment",
+        attachment_id=attachment_id,
+        content_type="audio/ogg",
+        protocol="whatsapp",
+        msg_id="voice-1",
+        media_kind="voice",
+    )
+    _add_message_to_cache(
+        "555",
+        "",
+        is_mine=False,
+        sender="Roberto Di Maggio",
+        timestamp=1_500,
+        msg_type="attachment",
+        attachment_id=attachment_id,
+        content_type="audio/ogg",
+        protocol="whatsapp",
+        msg_id="voice-1",
+        media_kind="voice",
+    )
+
+    result = _messages("whatsapp", "555")
+
+    assert len(result) == 1
+    assert result[0]["text"] == ""
+    assert result[0]["sender"] == "Roberto Di Maggio"
+
+
+def test_web_messages_keeps_distinct_attachment_ids(monkeypatch, tmp_path):
+    """14: stesso msg_id ma attachment_id distinti → 2 elementi (multi-allegato)."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    first = "http://localhost:3000/api/files/default/a.ogg"
+    second = "http://localhost:3000/api/files/default/b.ogg"
+    _add_message_to_cache(
+        "555",
+        f"Media: {first}",
+        is_mine=False,
+        sender="M",
+        timestamp=1_000,
+        msg_type="attachment",
+        attachment_id=first,
+        content_type="audio/ogg",
+        protocol="whatsapp",
+        msg_id="multi-1",
+        media_kind="voice",
+    )
+    _add_message_to_cache(
+        "555",
+        f"Media: {second}",
+        is_mine=False,
+        sender="M",
+        timestamp=1_500,
+        msg_type="attachment",
+        attachment_id=second,
+        content_type="audio/ogg",
+        protocol="whatsapp",
+        msg_id="multi-1",
+        media_kind="voice",
+    )
+
+    result = _messages("whatsapp", "555")
+
+    assert len(result) == 2
+
+
+def test_web_messages_preserves_batch_members(monkeypatch, tmp_path):
+    """15: i membri di un batch (stesso msg_id, allegati distinti) restano."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    first = "http://localhost:3000/api/files/default/batch-a.pdf"
+    second = "http://localhost:3000/api/files/default/batch-b.pdf"
+    _add_message_to_cache(
+        "555",
+        f"Media: {first}",
+        is_mine=False,
+        sender="M",
+        timestamp=1_000,
+        msg_type="attachment",
+        attachment_id=first,
+        content_type="application/pdf",
+        protocol="whatsapp",
+        msg_id="batch-1",
+        media_kind="document",
+        batch_id="batch-1",
+        batch_index=0,
+    )
+    _add_message_to_cache(
+        "555",
+        f"Media: {second}",
+        is_mine=False,
+        sender="M",
+        timestamp=1_000,
+        msg_type="attachment",
+        attachment_id=second,
+        content_type="application/pdf",
+        protocol="whatsapp",
+        msg_id="batch-1",
+        media_kind="document",
+        batch_id="batch-1",
+        batch_index=1,
+    )
+
+    result = _messages("whatsapp", "555")
+
+    assert len(result) == 2
+    assert {message["batch_index"] for message in result} == {0, 1}
+
+
+def test_web_intra_key_dedup_ts_zero_prefers_real_timestamp(monkeypatch, tmp_path):
+    """R1: due twin con lo stesso ``msg_id``/``attachment_id`` ma ts=0 e ts reale
+    vengono fusi; il survivor è la riga col timestamp reale."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    contact = "125593484054624@lid"
+    attachment_id = "http://localhost:3000/api/files/default/voice.ogg"
+    for timestamp in (0, 1_700_000_000_000):
+        _add_message_to_cache(
+            contact,
+            "",
+            is_mine=False,
+            sender="M",
+            timestamp=timestamp,
+            msg_type="attachment",
+            attachment_id=attachment_id,
+            content_type="audio/ogg",
+            media_kind="voice",
+            protocol="whatsapp",
+            msg_id="voice-ts0",
+        )
+
+    messages = _messages("whatsapp", contact)
+
+    assert len(messages) == 1
+    assert messages[0]["timestamp"] == 1_700_000_000_000
+
+
+def test_web_intra_key_dedup_guards_is_mine(monkeypatch, tmp_path):
+    """R5: un ``is_mine`` diverso impedisce la fusione anche con lo stesso
+    ``msg_id`` e ``attachment_id``."""
+    _db(monkeypatch, tmp_path)
+    from protocols.db import _add_message_to_cache
+
+    contact = "125593484054624@lid"
+    attachment_id = "http://localhost:3000/api/files/default/voice.ogg"
+    for is_mine, sender in ((False, "M"), (True, "You")):
+        _add_message_to_cache(
+            contact,
+            "",
+            is_mine=is_mine,
+            sender=sender,
+            timestamp=1_000,
+            msg_type="attachment",
+            attachment_id=attachment_id,
+            content_type="audio/ogg",
+            media_kind="voice",
+            protocol="whatsapp",
+            msg_id="voice-both",
+        )
+
+    messages = _messages("whatsapp", contact)
+
+    assert len(messages) == 2

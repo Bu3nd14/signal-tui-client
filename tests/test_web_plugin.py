@@ -2301,21 +2301,23 @@ def test_messages_preserves_image_caption_cleanup(web_client, text, expected_tex
 
 
 @pytest.mark.parametrize(
-    ("attachment_info", "expected_text"),
+    ("attachment_info", "expected_text", "expected_name"),
     [
-        ("🖼️ Image", ""),
-        ("🖼️ Immagine", ""),
-        ("🖼️ Photo", ""),
-        ("🎬 Video", ""),
-        ("🎵 Audio", ""),
-        ("🎨 Sticker", ""),
-        ("📎 File", ""),
-        ("Image: IMG_1303.jpg", ""),
-        ("bellissima foto", "bellissima foto"),
+        ("🖼️ Image", "", "🖼️ Image"),
+        ("🖼️ Immagine", "", "🖼️ Immagine"),
+        ("🖼️ Photo", "", "🖼️ Photo"),
+        ("🎬 Video", "", "🎬 Video"),
+        ("🎵 Audio", "", "🎵 Audio"),
+        ("🎨 Sticker", "", "🎨 Sticker"),
+        ("📎 File", "", "📎 File"),
+        ("Image: IMG_1303.jpg", "", "Image: IMG_1303.jpg"),
+        # N3: una caption reale non è un nome file -> il name mostra il basename
+        # dell'attachment_id, mentre il testo resta la caption.
+        ("bellissima foto", "bellissima foto", "signal-image-id"),
     ],
 )
 def test_messages_attachment_info_exposes_only_real_image_captions(
-    web_client, attachment_info, expected_text
+    web_client, attachment_info, expected_text, expected_name
 ):
     client, _, db_file = web_client
     import sqlite3
@@ -2347,7 +2349,7 @@ def test_messages_attachment_info_exposes_only_real_image_captions(
     assert response.status_code == 200
     message = response.json()[0]
     assert message["text"] == expected_text
-    assert message["attachment"]["name"] == attachment_info
+    assert message["attachment"]["name"] == expected_name
 
 
 def test_web_ui_static_contracts():

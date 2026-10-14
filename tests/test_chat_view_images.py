@@ -277,6 +277,32 @@ class TestMediaKindRendering:
         )
         assert _media_display_text("", None, "attachment") == "📎 [File]"
 
+    def test_media_display_text_url_and_mime_fall_back_to_basename(self):
+        """N4: un ``attachment_info`` URL/mime-only non è un nome file; si usa
+        il basename dell'``attachment_id`` (parità col layer web)."""
+        assert (
+            _media_display_text(
+                "",
+                "http://localhost:3000/api/files/default/voice.ogg",
+                "attachment",
+                "voice",
+                "http://host/a/clip.ogg",
+            )
+            == "🎤 clip.ogg"
+        )
+        assert (
+            _media_display_text(
+                "", "audio/ogg", "attachment", "audio", "http://host/a/song.ogg"
+            )
+            == "🎵 song.ogg"
+        )
+        assert (
+            _media_display_text(
+                "", "image/jpeg", "attachment", None, "http://host/a/doc.pdf"
+            )
+            == "📎 doc.pdf"
+        )
+
     def test_cached_gif_uses_image_widget(self):
         app = SignalTUI()
         widgets = app._build_message_widgets(

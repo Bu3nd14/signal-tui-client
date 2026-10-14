@@ -2933,7 +2933,7 @@ class TestWhatsAppWebhook:
         assert backend.handle_webhook(envelope) is True
         assert backend.poll_once() == []
 
-    def test_single_media_has_synthetic_text_while_plain_text_is_unchanged(self):
+    def test_single_media_has_filename_info_and_empty_text(self):
         plain = _msg({"id": "plain", "from": "1@c.us", "text": "hello", "timestamp": 1})
         media = _msg(
             {
@@ -2945,7 +2945,9 @@ class TestWhatsAppWebhook:
             }
         )
         assert plain.payload["text"] == "hello"
-        assert media.payload["text"] == "Media: https://wa.test/photo.jpg"
+        # Non-image: filename in attachment_info, text vuoto (niente "Media: <id>").
+        assert media.payload["text"] == ""
+        assert media.payload["attachment_info"] == "photo.jpg"
 
     def test_outgoing_echo_and_ack_read_keep_the_parent_message_id(self):
         import protocols.db as backend_mod
@@ -5371,3 +5373,375 @@ class TestWhatsAppLiveContactLidResolver:
         finally:
             release.set()
             backend.disconnect_sync()
+
+
+# ─── WhatsApp media filename/caption (semantica canonica v2) ─────────────────
+
+
+class TestWhatsAppMediaNameSemantics:
+    """Il fix: per i non-image la caption va in ``text``, il filename in info."""
+
+    def test_document_with_caption_keeps_filename_and_caption(self):
+        ev = _msg(
+            {
+                "id": "doc-1",
+                "from": "1@c.us",
+                "timestamp": 1,
+                "hasMedia": True,
+                "body": "ecco il contratto",
+                "media": {
+                    "mimetype": "application/pdf",
+                    "url": "https://wa.to/doc.pdf",
+                    "filename": "contratto.pdf",
+                },
+            }
+        )
+        assert ev.payload["attachment_info"] == "contratto.pdf"
+        assert ev.payload["text"] == "ecco il contratto"
+
+    def test_document_without_filename_falls_back_to_mime_not_caption(self):
+        ev = _msg(
+            {
+                "id": "doc-2",
+                "from": "1@c.us",
+                "timestamp": 1,
+                "hasMedia": True,
+                "body": "ecco il contratto",
+                "media": {
+                    "mimetype": "application/pdf",
+                    "url": "https://wa.to/doc.pdf",
+                },
+            }
+        )
+        assert ev.payload["attachment_info"] == "application/pdf"
+        assert ev.payload["text"] == "ecco il contratto"
+
+    def test_document_filename_equal_to_caption_is_kept_twice(self):
+        ev = _msg(
+            {
+                "id": "doc-3",
+                "from": "1@c.us",
+                "timestamp": 1,
+                "hasMedia": True,
+                "body": "contratto.pdf",
+                "media": {
+                    "mimetype": "application/pdf",
+                    "url": "https://wa.to/doc.pdf",
+                    "filename": "contratto.pdf",
+                },
+            }
+        )
+        assert ev.payload["attachment_info"] == "contratto.pdf"
+        assert ev.payload["text"] == "contratto.pdf"
+
+    def test_b2_nested_document_caption_preserved(self):
+        ev = _msg(
+            {
+                "id": "nested-doc",
+                "from": "1@c.us",
+                "timestamp": 1,
+                "message": {
+                    "documentMessage": {
+                        "mimetype": "application/pdf",
+                        "url": "https://wa.to/doc.pdf",
+                        "filename": "doc.pdf",
+                        "caption": "ciao",
+                    }
+                },
+            }
+        )
+        assert ev.payload["attachment_info"] == "doc.pdf"
+        assert ev.payload["text"] == "ciao"
+
+    def test_b3_restricted_predicate(self):
+        from models import is_whatsapp_synthetic_media_text
+
+        assert is_whatsapp_synthetic_media_text("Media: ciao") is False
+        assert (
+            is_whatsapp_synthetic_media_text(
+                "Media: http://x", attachment_id="http://x"
+            )
+            is True
+        )
+
+    def test_incoming_dedup_serialized_and_hex_same_attachment(self):
+        import protocols.db as backend_mod
+
+        backend = _make_backend()
+        cid = "1@c.us"
+        base = {
+            "text": "didascalia",
+            "is_mine": False,
+            "sender": "M",
+            "msg_type": "attachment",
+            "attachment_id": "att-1",
+            "attachment_info": "doc.pdf",
+            "media_kind": "document",
+        }
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            assert (
+                backend.ingest_message(cid, {**base, "id": "true_123@lid_ABC"}, 1000)
+                is True
+            )
+            assert backend.ingest_message(cid, {**base, "id": "ABC"}, 1000) is False
+            mock_add.assert_called_once()
+        assert len(backend.cache[cid]) == 1
+
+    def test_incoming_dedup_serialized_and_hex_reverse_order(self):
+        import protocols.db as backend_mod
+
+        backend = _make_backend()
+        cid = "1@c.us"
+        base = {
+            "text": "didascalia",
+            "is_mine": False,
+            "sender": "M",
+            "msg_type": "attachment",
+            "attachment_id": "att-1",
+            "attachment_info": "doc.pdf",
+            "media_kind": "document",
+        }
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            assert backend.ingest_message(cid, {**base, "id": "ABC"}, 1000) is True
+            assert (
+                backend.ingest_message(cid, {**base, "id": "true_123@lid_ABC"}, 1000)
+                is False
+            )
+            mock_add.assert_called_once()
+        assert len(backend.cache[cid]) == 1
+
+    def test_incoming_dedup_distinct_attachment_ids_kept(self):
+        import protocols.db as backend_mod
+
+        backend = _make_backend()
+        cid = "1@c.us"
+        base = {
+            "text": "",
+            "is_mine": False,
+            "sender": "M",
+            "msg_type": "attachment",
+            "attachment_info": "doc.pdf",
+            "media_kind": "document",
+        }
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            assert (
+                backend.ingest_message(cid, {**base, "attachment_id": "att-1"}, 1000)
+                is True
+            )
+            assert (
+                backend.ingest_message(cid, {**base, "attachment_id": "att-2"}, 3000)
+                is True
+            )
+            assert mock_add.call_count == 2
+        assert len(backend.cache[cid]) == 2
+
+    def test_incoming_two_media_without_id_or_caption_kept(self):
+        import protocols.db as backend_mod
+
+        backend = _make_backend()
+        cid = "1@c.us"
+        base = {
+            "text": "",
+            "is_mine": False,
+            "sender": "M",
+            "msg_type": "attachment",
+            "attachment_info": "doc.pdf",
+            "media_kind": "document",
+        }
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            assert (
+                backend.ingest_message(cid, {**base, "attachment_id": "att-1"}, 1000)
+                is True
+            )
+            assert (
+                backend.ingest_message(cid, {**base, "attachment_id": "att-2"}, 3000)
+                is True
+            )
+            assert mock_add.call_count == 2
+        assert len(backend.cache[cid]) == 2
+
+    def test_incoming_distinct_canonical_ids_not_collapsed(self):
+        import protocols.db as backend_mod
+
+        backend = _make_backend()
+        cid = "1@c.us"
+        base = {
+            "text": "didascalia",
+            "is_mine": False,
+            "sender": "M",
+            "msg_type": "attachment",
+            "attachment_info": "doc.pdf",
+            "media_kind": "document",
+        }
+        with patch.object(backend_mod, "_add_message_to_cache") as mock_add:
+            assert (
+                backend.ingest_message(
+                    cid,
+                    {**base, "id": "true_123@lid_AAA", "attachment_id": "att-1"},
+                    1000,
+                )
+                is True
+            )
+            assert (
+                backend.ingest_message(
+                    cid,
+                    {**base, "id": "true_123@lid_BBB", "attachment_id": "att-2"},
+                    1005,
+                )
+                is True
+            )
+            assert mock_add.call_count == 2
+        assert len(backend.cache[cid]) == 2
+
+    def test_ack_non_image_filename_does_not_become_caption(self):
+        backend = _make_backend()
+        backend.handle_webhook(
+            {
+                "event": "message.ack",
+                "payload": {
+                    "fromMe": True,
+                    "id": "out-doc",
+                    "to": "1@c.us",
+                    "timestamp": 1700000000,
+                    "hasMedia": True,
+                    "body": "report.pdf",
+                    "media": {
+                        "mimetype": "application/pdf",
+                        "url": "https://wa.to/doc.pdf",
+                        "filename": "report.pdf",
+                    },
+                },
+            }
+        )
+        events = backend.poll_once()
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.payload["msg_type"] == "attachment"
+        assert ev.payload["attachment_info"] == "report.pdf"
+        assert ev.payload["text"] == ""
+
+    def test_ack_non_image_real_caption_kept(self):
+        backend = _make_backend()
+        backend.handle_webhook(
+            {
+                "event": "message.ack",
+                "payload": {
+                    "fromMe": True,
+                    "id": "out-doc-2",
+                    "to": "1@c.us",
+                    "timestamp": 1700000000,
+                    "hasMedia": True,
+                    "body": "guarda il documento",
+                    "media": {
+                        "mimetype": "application/pdf",
+                        "url": "https://wa.to/doc.pdf",
+                        "filename": "report.pdf",
+                    },
+                },
+            }
+        )
+        ev = backend.poll_once()[0]
+        assert ev.payload["attachment_info"] == "report.pdf"
+        assert ev.payload["text"] == "guarda il documento"
+
+    def test_self_heal_updates_caption_info_to_filename(self):
+        import protocols.db as backend_mod
+
+        backend = _make_backend()
+        cid = "1@c.us"
+        legacy = {
+            "id": "m1",
+            "text": "una didascalia",
+            "is_mine": False,
+            "sender": "M",
+            "msg_type": "attachment",
+            "attachment_id": "att-1",
+            "attachment_info": "una didascalia",
+            "media_kind": "document",
+        }
+        incoming = {**legacy, "attachment_info": "report.pdf"}
+        with (
+            patch.object(backend_mod, "_add_message_to_cache"),
+            patch.object(backend_mod, "_update_message_attachment_info") as mock_update,
+        ):
+            assert backend.ingest_message(cid, legacy, 1000) is True
+            assert backend.ingest_message(cid, incoming, 1001) == "changed"
+            mock_update.assert_called_once()
+        assert backend.cache[cid][0]["attachment_info"] == "report.pdf"
+        assert backend.cache[cid][0]["text"] == "una didascalia"
+
+    def test_self_heal_ignores_empty_incoming_info(self):
+        import protocols.db as backend_mod
+
+        backend = _make_backend()
+        cid = "1@c.us"
+        legacy = {
+            "id": "m2",
+            "text": "una didascalia",
+            "is_mine": False,
+            "sender": "M",
+            "msg_type": "attachment",
+            "attachment_id": "att-1",
+            "attachment_info": "una didascalia",
+            "media_kind": "document",
+        }
+        incoming = {**legacy, "attachment_info": None}
+        with patch.object(backend_mod, "_add_message_to_cache"):
+            assert backend.ingest_message(cid, legacy, 1000) is True
+            assert backend.ingest_message(cid, incoming, 1001) is False
+        assert backend.cache[cid][0]["attachment_info"] == "una didascalia"
+
+
+class TestIncomingAttachmentIdFirstDedup:
+    """16/17: il match id-first incoming precede il confronto sul testo."""
+
+    def test_incoming_msg_id_match_precedes_text_placeholder(self):
+        import protocols.db as backend_mod
+
+        backend = _make_backend()
+        cid = "125593484054624@lid"
+        attachment_id = "http://localhost:3000/api/files/default/voice.ogg"
+        first = {
+            "id": "true_125593484054624@lid_ABC",
+            "text": f"Media: {attachment_id}",
+            "is_mine": False,
+            "sender": "125593484054624@lid",
+            "msg_type": "attachment",
+            "attachment_id": attachment_id,
+            "attachment_info": "voice.ogg",
+            "content_type": "audio/ogg",
+            "media_kind": "voice",
+        }
+        second = {**first, "text": "", "sender": "Roberto Di Maggio"}
+
+        assert backend.ingest_message(cid, first, 1_000) is True
+        # Stesso ``msg_id``/``attachment_id`` con placeholder sintetico vs
+        # vuoto: l'id-first incoming precede il confronto sul testo, quindi il
+        # re-ingest è un duplicato (nessuna nuova riga né in cache né in SQLite).
+        assert backend.ingest_message(cid, second, 2_000) is False
+        assert len(backend.cache[cid]) == 1
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        assert count == 1
+
+    def test_incoming_msg_id_different_keeps_text_fallback(self):
+        import protocols.db as backend_mod
+
+        backend = _make_backend()
+        cid = "1@c.us"
+        first = {
+            "id": "AAA",
+            "text": "ciao",
+            "is_mine": False,
+            "sender": "M",
+            "msg_type": "text",
+        }
+        second = {**first, "id": "BBB"}
+        # Id davvero diverso: il fallback testuale (±5s) resta attivo e
+        # deduplica senza regressioni.
+        assert backend.ingest_message(cid, first, 1_000) is True
+        assert backend.ingest_message(cid, second, 1_500) is False
+        assert len(backend.cache[cid]) == 1
+        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        assert count == 1

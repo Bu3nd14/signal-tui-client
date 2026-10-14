@@ -304,7 +304,7 @@ def test_boot_dedup_transfers_real_caption_from_other_row(
     assert _all_rows()[0][1] == expected
 
 
-# ─── 8. attachment_info: a real caption survives a technical filename ────────
+# ─── 8. attachment_info: filename wins, caption survives in text (R2) ────────
 
 
 def test_boot_dedup_does_not_lose_real_caption():
@@ -315,14 +315,34 @@ def test_boot_dedup_does_not_lose_real_caption():
         info="sent-8a44cb84.pdf",
     )
     _add(
-        text=f"Media: {WA_URL}",
+        text="document caption",
         attachment_id=WA_URL,
         ts=TS_URL,
-        info="document caption",
     )
 
     assert db._dedup_outgoing_attachment_mirrors() == 1
-    assert _all_rows()[0][3] == "document caption"
+    row = _all_rows()[0]
+    assert row[1] == "document caption"  # la caption sopravvive in ``text``
+    assert row[3] == "sent-8a44cb84.pdf"  # ``info`` è il filename (R2)
+
+
+def test_boot_dedup_filename_wins_over_caption_in_info():
+    """Non-image: se il survivor ha la caption in info, vince il filename (R2)."""
+    _add(
+        text="",
+        attachment_id=SENT_ID,
+        ts=TS_SENT,
+        info="una caption reale",
+    )
+    _add(
+        text="",
+        attachment_id=WA_URL,
+        ts=TS_URL,
+        info="report.pdf",
+    )
+
+    assert db._dedup_outgoing_attachment_mirrors() == 1
+    assert _all_rows()[0][3] == "report.pdf"
 
 
 # ─── 9. batch/quote/edited fields preserved ──────────────────────────────────
@@ -623,15 +643,19 @@ def test_incoming_whatsapp_multi_media_untouched():
 
 
 @pytest.mark.parametrize(
-    ("text", "expected"),
+    ("text", "expected", "attachment_id"),
     [
-        ("Media: bella foto", False),
-        ("Media: http://x", True),
-        ("MEDIA: x", True),
-        ("", False),
-        (None, False),
-        ("media:", False),
+        ("Media: bella foto", False, None),
+        ("Media: http://x", True, None),
+        # Predicato ristretto: un token generico non basta più senza id.
+        ("MEDIA: x", False, None),
+        ("MEDIA: x", True, "x"),
+        ("", False, None),
+        (None, False, None),
+        ("media:", False, None),
     ],
 )
-def test_is_whatsapp_synthetic_media_text(text, expected):
-    assert is_whatsapp_synthetic_media_text(text) is expected
+def test_is_whatsapp_synthetic_media_text(text, expected, attachment_id):
+    assert (
+        is_whatsapp_synthetic_media_text(text, attachment_id=attachment_id) is expected
+    )

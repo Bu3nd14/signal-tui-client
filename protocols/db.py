@@ -13,9 +13,12 @@ import time
 from pathlib import Path
 
 from models import (
+    _status_rank,
     is_caption_like,
+    is_duplicate_media_identity,
     is_sent_mirror_attachment_id,
     is_whatsapp_synthetic_media_text,
+    pick_survivor_and_merge,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,17 +40,10 @@ _MIN_PRUNE_LIMIT = 100
 # ``_dedup_outgoing_attachment_mirrors`` (coppie URL-WAHA + mirror ``sent-*``).
 _ECHO_MATCH_WINDOW_MS = 600_000  # 10 minuti
 
-# Rank di delivery status condiviso.  Debito noto: le query SQL di
-# ``_update_message_status*`` e ``_dedup_messages_by_id`` replicano lo stesso
-# mapping in un CASE, per non alterarne il testo (R4).  Questa costante è la
-# fonte per il codice Python (es. la fusione delle coppie mirror outgoing).
-_STATUS_RANK = {"pending": 0, "failed": 0, "sent": 1, "delivered": 2, "read": 3}
-
-
-def _status_rank(status: str | None) -> int:
-    """Rank numerico di uno status (NULL/sconosciuto → 0)."""
-    return _STATUS_RANK.get((status or "").lower(), 0)
-
+# Debito noto: le query SQL di ``_update_message_status*`` e
+# ``_dedup_messages_by_id`` replicano il mapping rank in un CASE, per non
+# alterarne il testo (R4).  La fonte Python (``_status_rank``/
+# ``_prefer_display_sender``) è ora condivisa in ``models``.
 
 # Current schema version, persisted via ``PRAGMA user_version`` so the legacy
 # migration below is skipped once the schema is known to be up to date.
@@ -1610,15 +1606,27 @@ def _dedup_outgoing_attachment_mirrors() -> int:
                     if _missing(value) and not _missing(other[field]):
                         merged[field] = other[field]
 
-                # attachment_info: precedenza al survivor (contiene il filename
-                # tecnico durevole del mirror), MA una caption reale portata
-                # dall'altra riga non deve mai sparire; se il survivor è vuoto
-                # si prende comunque il valore di ``other``.
+                # attachment_info: per image/gif la caption vive in
+                # ``attachment_info`` (precedenza invariata: una caption reale
+                # non deve mai sparire); per i non-image vince il filename
+                # reale del mirror (R2), la caption è già stata trasferita in
+                # ``text`` dal ramo ``final_text``.  Le righe legacy hanno
+                # ``media_kind`` NULL, quindi il gate cade su ``msg_type``.
                 survivor_info = survivor["attachment_info"]
                 other_info = other["attachment_info"]
-                take_other_info = _missing(survivor_info) or (
-                    is_caption_like(other_info) and not is_caption_like(survivor_info)
-                )
+                merged_kind = survivor["media_kind"] or other["media_kind"]
+                merged_type = survivor["msg_type"] or other["msg_type"]
+                is_image = merged_kind in ("image", "gif") or merged_type == "image"
+                if is_image:
+                    take_other_info = _missing(survivor_info) or (
+                        is_caption_like(other_info)
+                        and not is_caption_like(survivor_info)
+                    )
+                else:
+                    take_other_info = _missing(survivor_info) or (
+                        is_caption_like(survivor_info)
+                        and not is_caption_like(other_info)
+                    )
                 merged_info = other_info if take_other_info else survivor_info
 
                 # R5: ``edited`` è il massimo; batch/timestamp restano del
@@ -1660,6 +1668,159 @@ def _dedup_outgoing_attachment_mirrors() -> int:
                     other["id"],
                     survivor["attachment_id"],
                     other["attachment_id"],
+                )
+                conn.execute("DELETE FROM messages WHERE id = ?", (other["id"],))
+                removed += 1
+            conn.commit()
+            return removed
+        finally:
+            conn.close()
+
+
+def _dedup_incoming_attachment_mirrors() -> int:
+    """Fondi le coppie gemelle WhatsApp incoming ``Media: <id>`` + vuota/filename.
+
+    Bug: un allegato WhatsApp in ingresso (es. vocale) può comparire doppio con
+    lo stesso ``msg_id`` e lo stesso ``attachment_id`` (``is_mine=0``): una riga
+    con ``text = "Media: <id>"`` (identità sintetica) e una con ``text = ""`` (o
+    col filename, duplicato dell'identità), con ``sender`` diverso (JID raw vs
+    nome).  ``_dedup_messages_by_id`` non le fonde perché partiziona anche per
+    ``text``.
+
+    Sono considerati solo i gruppi ``(contact_number, msg_id, attachment_id)``
+    con esattamente due righe la cui finestra temporale (calcolata SOLO sui
+    timestamp reali > 0) sta entro ``_ECHO_MATCH_WINDOW_MS``: una coppia
+    ``ts=0``+reale — o entrambi ``0``/NULL — ha diff 0 e viene fusa, mentre due
+    timestamp reali divergenti restano esclusi.
+
+    La fusione avviene SOLO quando una riga è l'identità sintetica del PROPRIO
+    allegato (``require_attachment_match=True``) e l'altra è vuota oppure ripete
+    il filename in ``attachment_info`` (``is_duplicate_media_identity``): una
+    caption reale — incluso un URL incollato — non viene mai cancellata, e due
+    righe sintetiche restano intatte.
+
+    Survivor e overrides li calcola ``models.pick_survivor_and_merge`` (status
+    rank, poi ts reale, poi rowid; fill senza sovrascrittura, sender display,
+    ``edited=max``).  Il ``text`` del survivor è azzerato solo se è l'identità
+    sintetica riconosciuta; ``batch_*`` e l'identità fisica restano del
+    survivor.  Idempotente.
+
+    Ritorna il numero di righe rimosse.
+    """
+    _init_db()
+    removed = 0
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        try:
+            conn.row_factory = sqlite3.Row
+            # R2: i ts 0/NULL sono esclusi dal calcolo della finestra, quindi una
+            # coppia 0+reale (o 0+0) ha diff 0 e si fonde; due ts reali oltre la
+            # finestra restano fuori.
+            groups = conn.execute(
+                "SELECT contact_number, msg_id, attachment_id FROM messages "
+                "WHERE protocol = 'whatsapp' AND is_mine = 0 "
+                "AND msg_id IS NOT NULL AND msg_id != '' "
+                "AND attachment_id IS NOT NULL AND attachment_id != '' "
+                "GROUP BY contact_number, msg_id, attachment_id "
+                "HAVING COUNT(*) = 2 "
+                "AND COALESCE("
+                "MAX(CASE WHEN timestamp > 0 THEN timestamp END) "
+                "- MIN(CASE WHEN timestamp > 0 THEN timestamp END), 0"
+                ") <= ?",
+                (_ECHO_MATCH_WINDOW_MS,),
+            ).fetchall()
+            for group in groups:
+                # ORDER BY solo per un log deterministico: il survivor lo sceglie
+                # l'helper (indipendente dall'ordine).
+                rows = conn.execute(
+                    "SELECT id, text, sender, status, edited, timestamp, "
+                    "attachment_info, content_type, "
+                    "media_kind, quote_text, quote_timestamp, quote_author, "
+                    "reply_to_message_id, quote_attachment_id, "
+                    "quote_attachment_path, quote_content_type "
+                    "FROM messages WHERE protocol = 'whatsapp' AND is_mine = 0 "
+                    "AND contact_number = ? AND msg_id = ? AND attachment_id = ? "
+                    "ORDER BY rowid ASC",
+                    (
+                        group["contact_number"],
+                        group["msg_id"],
+                        group["attachment_id"],
+                    ),
+                ).fetchall()
+                if len(rows) != 2:
+                    logger.warning(
+                        "incoming attachment mirror dedup skipped ambiguous group "
+                        "(contact_number=%r, msg_id=%r, attachment_id=%r, rows=%d)",
+                        group["contact_number"],
+                        group["msg_id"],
+                        group["attachment_id"],
+                        len(rows),
+                    )
+                    continue
+
+                survivor_index, overrides = pick_survivor_and_merge(rows)
+                survivor = rows[survivor_index]
+                other = rows[1 - survivor_index]
+                attachment_id = group["attachment_id"]
+
+                # ``overrides["attachment_info"]`` è il filename effettivo dopo il
+                # merge: il dup-check confronta il testo dei twin con l'identità
+                # del media (il filename può essere sul survivor o sull'altro).
+                media_filename = overrides["attachment_info"]
+                survivor_text = survivor["text"] or ""
+                other_text = other["text"] or ""
+                survivor_synth = is_whatsapp_synthetic_media_text(
+                    survivor_text,
+                    attachment_id=attachment_id,
+                    require_attachment_match=True,
+                )
+                other_synth = is_whatsapp_synthetic_media_text(
+                    other_text,
+                    attachment_id=attachment_id,
+                    require_attachment_match=True,
+                )
+                survivor_blank = not survivor_text.strip()
+                other_blank = not other_text.strip()
+                survivor_dup = is_duplicate_media_identity(
+                    survivor_text, media_filename
+                )
+                other_dup = is_duplicate_media_identity(other_text, media_filename)
+                # Fusione synth+vuoto/filename (e simmetrico): due caption reali,
+                # due synth o un URL incollato non vengono mai persi.
+                if not (
+                    (survivor_synth and (other_blank or other_dup))
+                    or (other_synth and (survivor_blank or survivor_dup))
+                ):
+                    logger.debug(
+                        "incoming attachment mirror dedup skipped "
+                        "(contact_number=%r, msg_id=%r, survivor_text=%r, "
+                        "other_text=%r)",
+                        group["contact_number"],
+                        group["msg_id"],
+                        survivor["text"],
+                        other["text"],
+                    )
+                    continue
+
+                # Azzera il text solo sulla riga synth riconosciuta: se è la
+                # survivor diventa ""; se è l'altra viene comunque eliminata.
+                if survivor_synth:
+                    overrides["text"] = ""
+
+                columns = list(overrides)
+                assignments = ", ".join(f"{column} = ?" for column in columns)
+                conn.execute(
+                    f"UPDATE messages SET {assignments} WHERE id = ?",
+                    [overrides[column] for column in columns] + [survivor["id"]],
+                )
+                logger.info(
+                    "incoming attachment mirror dedup contact=%r msg_id=%r "
+                    "survivor_id=%s removed_id=%s attachment_id=%r",
+                    group["contact_number"],
+                    group["msg_id"],
+                    survivor["id"],
+                    other["id"],
+                    attachment_id,
                 )
                 conn.execute("DELETE FROM messages WHERE id = ?", (other["id"],))
                 removed += 1
@@ -1787,8 +1948,10 @@ def run_startup_maintenance(force: bool = False) -> None:
     """Manutenzione DB idempotente, una volta per path del database.
 
     Ordine: dedup exact-dup (``_dedup_messages_by_id``) → fusione delle coppie
-    mirror outgoing WhatsApp (``_dedup_outgoing_attachment_mirrors``) →
-    rilevazione ghost text (``_detect_ghost_outgoing_text``).
+    mirror outgoing WhatsApp (``_dedup_outgoing_attachment_mirrors``) → fusione
+    delle coppie gemelle incoming WhatsApp
+    (``_dedup_incoming_attachment_mirrors``) → rilevazione ghost text
+    (``_detect_ghost_outgoing_text``).
 
     La TUI la invoca prima del primo connect dei worker
     (``tui/backend_connect.py``); ``BackendManager.connect_all`` la invoca per
@@ -1815,6 +1978,7 @@ def run_startup_maintenance(force: bool = False) -> None:
         try:
             _dedup_messages_by_id()
             _dedup_outgoing_attachment_mirrors()
+            _dedup_incoming_attachment_mirrors()
             _detect_ghost_outgoing_text()
         except Exception:
             # Never wedge later callers: drop the marker so the next attempt
