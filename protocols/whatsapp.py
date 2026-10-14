@@ -80,6 +80,15 @@ def _norm(text: object) -> str:
     return " ".join(str(text).split())
 
 
+def _same_msg_id(a: str | None, b: str | None) -> bool:
+    """True se due id (eventualmente serializzati) sono lo stesso messaggio.
+
+    Confronto sul ``canonical_msg_id`` (``true_<jid>_<hex>`` ↔ ``<hex>``): WAHA
+    espone lo stesso messaggio con forme diverse tra webhook e REST.
+    """
+    return bool(a and b and canonical_msg_id(a) == canonical_msg_id(b))
+
+
 def _resolve_wa_media_chat_id(attachment_id: str) -> tuple[str | None, str]:
     """Extract the chat JID and extensionless WAHA media name."""
     if attachment_id.startswith(("http://", "https://")):
@@ -482,16 +491,35 @@ class WhatsAppBackend(ChatBackend):
                             ack_media_kind = media_kind_from_mime(mime) or "document"
                             ack_msg_type = msg_type_for_media_kind(ack_media_kind)
                             ack_attachment_id = ack_media.get("url")
-                            ack_attachment_info = (
-                                content.get("caption")
-                                or str(
-                                    content.get("body") or content.get("text") or ""
+                            if ack_msg_type == "image":
+                                # Immagini: semantica invariata (caption-first in
+                                # attachment_info, text sintetico azzerato sotto).
+                                ack_attachment_info = (
+                                    content.get("caption")
+                                    or str(
+                                        content.get("body") or content.get("text") or ""
+                                    ).strip()
+                                    or ack_media.get("caption")
+                                    or ack_media.get("filename")
+                                    or mime
+                                    or "Media"
+                                )
+                            else:
+                                # Non-image: attachment_info è il filename reale
+                                # (o il mime come fallback), MAI la caption.
+                                ack_attachment_info = (
+                                    ack_media.get("filename") or mime or "Media"
+                                )
+                                # R5: nel body può esserci un filename tecnico;
+                                # non deve diventare una caption in bolla.
+                                ack_text = str(
+                                    content.get("caption")
+                                    or content.get("body")
+                                    or content.get("text")
+                                    or ""
                                 ).strip()
-                                or ack_media.get("caption")
-                                or ack_media.get("filename")
-                                or mime
-                                or "Media"
-                            )
+                                if ack_text and not is_caption_like(ack_text):
+                                    ack_text = ""
 
                         # Dedup by (contact, id, normalized text) so a retry of the
                         # same ack does not enqueue the synthetic message twice.
@@ -1950,6 +1978,8 @@ class WhatsAppBackend(ChatBackend):
                         "msg_type": payload.get("msg_type", "text"),
                         "attachment_info": payload.get("attachment_info"),
                         "attachment_id": payload.get("attachment_id"),
+                        "content_type": payload.get("content_type"),
+                        "media_kind": payload.get("media_kind"),
                     },
                     payload.get("timestamp", 0),
                     reconcile=True,
@@ -2345,7 +2375,7 @@ class WhatsAppBackend(ChatBackend):
                     "attachment_info": (
                         (text or filename or None)
                         if msg_type == "image"
-                        else (filename or text or None)
+                        else (filename or None)
                     )
                     if is_attachment
                     else None,
@@ -3026,27 +3056,32 @@ class WhatsAppBackend(ChatBackend):
                 or cached_attachment_id == attachment_id
                 or (cached_mirror != incoming_mirror)
             )
+            if is_mine and _same_msg_id(msg.get("id"), msg_id) and same_attachment:
+                return msg
+            # Incoming: id-first PRIMA del confronto sul testo.  Un re-ingest
+            # dello stesso messaggio con identità sintetica ``Media: <id>`` vs
+            # ``""`` condivide id e allegato ma ha text diverso: il match sul
+            # testo lo inserirebbe come nuovo duplicato.
             if (
-                is_mine
+                not is_mine
                 and msg_id
                 and msg.get("id")
-                and msg.get("id") == msg_id
+                and _same_msg_id(msg.get("id"), msg_id)
                 and same_attachment
             ):
                 return msg
             if msg.get("text") != text:
                 continue
             if not is_mine:
-                if msg_id and msg.get("id") == msg_id and same_attachment:
+                if attachment_id and cached_attachment_id == attachment_id:
                     return msg
                 if attachment_id and cached_attachment_id != attachment_id:
                     continue
-                # Text + fuzzy timestamp — unica identità stabile webhook/REST.
-                if abs(msg.get("timestamp", 0) - ts) <= 5000:
+                if text.strip() and abs(msg.get("timestamp", 0) - ts) <= 5000:
                     return msg
             elif msg_id:
                 cached_id = msg.get("id")
-                if cached_id and cached_id == msg_id:
+                if _same_msg_id(cached_id, msg_id):
                     return msg
                 # Fallback echo: SOLO per una riga ancora id-less (optimistic
                 # non confermato).  Una riga con GIÀ un id diverso è un
@@ -3364,6 +3399,17 @@ class WhatsAppBackend(ChatBackend):
             reconcile=reconcile,
         )
         if existing is not None:
+            # R12 (follow-up, non bloccante): un edit INCOMING con lo stesso
+            # ``msg_id`` ma testo divergente non ha ancora un path di routing
+            # dedicato e viene qui trattato come duplicato.  Comportamento
+            # invariato: logghiamo solo per osservabilità.
+            if (
+                not is_mine
+                and msg_id
+                and data.get("msg_type", "text") == "text"
+                and (existing.get("text") or "") != (text or "")
+            ):
+                logger.debug("incoming text divergence ignored (edit not routed)")
             if (
                 reconcile
                 and msg_id
@@ -3426,8 +3472,13 @@ class WhatsAppBackend(ChatBackend):
                 contact_id, existing, data, ts
             )
             incoming_info = data.get("attachment_info")
+            incoming_msg_type = data.get("msg_type", "text")
+            incoming_is_media = bool(
+                data.get("attachment_id")
+                or incoming_msg_type in {"image", "attachment", "sticker"}
+            )
             caption_changed = bool(
-                data.get("msg_type") == "image"
+                incoming_msg_type == "image"
                 and is_caption_like(incoming_info)
                 and not is_caption_like(existing.get("attachment_info"))
             )
@@ -3440,8 +3491,32 @@ class WhatsAppBackend(ChatBackend):
                     int(existing.get("timestamp", ts)),
                     incoming_info,
                 )
+            # R1: self-heal del NOME allegato.  Le righe legacy non-image
+            # tenevano la caption in ``attachment_info``; un ingresso successivo
+            # col filename reale (non caption-like) la sostituisce.  Guardie:
+            # media reale (``attachment_id`` o ``msg_type`` media) + info in
+            # ingresso NON vuota (un ACK di follow-up senza attachment non deve
+            # azzerare) + mai per le immagini (che mantengono la caption in
+            # info).  Il gate non usa ``media_kind``: in ``fetch_history`` può
+            # essere ``None``.
+            name_changed = bool(
+                incoming_is_media
+                and incoming_msg_type != "image"
+                and incoming_info
+                and is_caption_like(existing.get("attachment_info"))
+                and not is_caption_like(incoming_info)
+            )
+            if name_changed:
+                existing["attachment_info"] = incoming_info
+                _update_message_attachment_info(
+                    PROTOCOL_WHATSAPP,
+                    contact_id,
+                    existing.get("id") or msg_id,
+                    int(existing.get("timestamp", ts)),
+                    incoming_info,
+                )
             batch_changed = self._merge_batch_slot(contact_id, existing, data)
-            if attachment_changed or caption_changed or batch_changed:
+            if attachment_changed or caption_changed or name_changed or batch_changed:
                 return "changed"
             return False
 

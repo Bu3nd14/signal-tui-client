@@ -390,29 +390,108 @@ def is_caption_like(value: str | None) -> bool:
 
 #: Forme di identità media sintetica generate dal backend WhatsApp nel campo
 #: ``text`` (``"Media: <id>"``): URL WAHA, id ``false_...@...``/``true_...@...``,
-#: coppia ``chat:message`` o filename/id ``sent-*``.  L'identità deve essere un
-#: singolo token senza spazi: l'ultima alternativa ``\S+`` rende le precedenti
-#: ridondanti ma esplicita i formati riconosciuti (predicato canonico condiviso
-#: tra ingest backend, dedup SQLite e serializzazione web).
+#: oppure coppia ``chat:message``.  Il predicato è volutamente RISTRETTO: un
+#: singolo token qualsiasi NON è un'identità (una caption utente può iniziare
+#: con ``Media:``).  L'id esplicito (``attachment_id``) è l'unica altra via per
+#: riconoscere un'identità che non rientra nei pattern.
 _WHATSAPP_MEDIA_IDENTITY = (
     r"https?://\S+"
     r"|(?:false|true)_[^\s@]*@[^\s@]+"
     r"|\d+:\d+"
-    r"|\S+"
 )
 
 
-def is_whatsapp_synthetic_media_text(text: str | None) -> bool:
+def is_whatsapp_synthetic_media_text(
+    text: str,
+    *,
+    attachment_id: str | None = None,
+    require_attachment_match: bool = False,
+) -> bool:
     """True se *text* è un'identità media WhatsApp sintetica (``Media: <id>``),
-    non una caption utente. L'identità deve essere un singolo token senza spazi:
-    ``"Media: bella foto"`` (caption multi-parola) NON è sintetica."""
+    non una caption utente.
+
+    L'identità è riconosciuta se coincide con *attachment_id* (o col suo
+    basename) oppure, con ``require_attachment_match=False`` (default: web,
+    migrate, legacy), se rientra nei pattern canonici (URL WAHA, id serializzato
+    ``true_``/``false_``, coppia ``chat:message``).  ``"Media: bella foto"``
+    (caption multi-parola) NON è sintetica; ``"Media: ciao"`` non è riconosciuta
+    senza un ``attachment_id`` esplicito che combaci.
+
+    Con ``require_attachment_match=True`` (dedup incoming, path A) l'unica via è
+    la coincidenza con *attachment_id*: un URL media che non è l'identità del
+    proprio allegato resta una caption utente e non viene mai cancellato.
+    """
     stripped = (text or "").strip()
     if not stripped.lower().startswith("media:"):
         return False
     media_identity = stripped[len("media:") :].strip()
     if not media_identity:
         return False
+    if attachment_id:
+        aid = str(attachment_id)
+        if media_identity in (aid, Path(aid).name):
+            return True
+    if require_attachment_match:
+        return False
     return bool(re.fullmatch(_WHATSAPP_MEDIA_IDENTITY, media_identity, re.IGNORECASE))
+
+
+def is_duplicate_media_identity(text: str | None, info: str | None) -> bool:
+    """True se *text* è solo il filename del media (duplicato dell'identità).
+
+    Usato dalla fusione incoming: il ``text`` di un twin che ripete esattamente
+    il filename in ``attachment_info`` è ridondante e può essere scartato.  Una
+    caption reale (``is_caption_like``) o un URL incollato non matchano mai,
+    quindi nessuna caption utente viene persa.
+    """
+    stripped = (text or "").strip()
+    if not stripped or is_caption_like(stripped):
+        return False
+    info_stripped = (info or "").strip()
+    if not info_stripped:
+        return False
+    return stripped == info_stripped
+
+
+#: Un ``attachment_info`` composto solo da un mime non è un nome file.
+_MIME_ONLY_RE = re.compile(r"^[a-z0-9.+-]+/[a-z0-9.+-]+(?:\s*;.*)?$", re.IGNORECASE)
+
+
+def _is_http_url(value: str) -> bool:
+    """True se *value* inizia con ``http://`` o ``https://``."""
+    return value.startswith(("http://", "https://"))
+
+
+def _attachment_basename(attachment_id: str | None) -> str:
+    """Basename di un ``attachment_id``/URL, senza query string né fragment."""
+    value = str(attachment_id or "").split("?", 1)[0].split("#", 1)[0]
+    return Path(value).name
+
+
+def attachment_display_name(
+    attachment_info: str | None, attachment_id: str | None
+) -> str | None:
+    """Nome file visualizzato di un allegato, o ``None``.
+
+    Un ``attachment_info`` che è un nome file reale (non URL, non solo mime,
+    non caption utente) vince.  Altrimenti il nome si ricava dal basename
+    dell'``attachment_id`` (query/fragment rimossi); infine, se ancora assente,
+    si ricade sull'``info`` originale.  Usato da web e TUI per mostrare il
+    filename e non un URL/mime/caption.
+    """
+    info = (attachment_info or "").strip()
+    if (
+        info
+        and not _is_http_url(info)
+        and not _MIME_ONLY_RE.fullmatch(info)
+        and not is_caption_like(info)
+    ):
+        return info
+    if attachment_id:
+        basename = _attachment_basename(attachment_id)
+        if basename:
+            return basename
+    return info or None
 
 
 def is_sent_mirror_attachment_id(value: str | None) -> bool:
@@ -420,6 +499,216 @@ def is_sent_mirror_attachment_id(value: str | None) -> bool:
     if not value:
         return False
     return Path(str(value)).name.lower().startswith("sent-")
+
+
+# ─── Delivery status & twin merge helpers ────────────────────────────────────
+
+#: Rank di delivery status condiviso.  Le query SQL di ``protocols.db``
+#: replicano lo stesso mapping in un ``CASE`` per non alterarne il testo; questa
+#: costante è la fonte per il codice Python (fusione dei twin DB/web).
+_STATUS_RANK = {"pending": 0, "failed": 0, "sent": 1, "delivered": 2, "read": 3}
+
+#: Campi che ``pick_survivor_and_merge`` completa sul survivor solo se assenti
+#: (None/""), mai sovrascrivendo.  Lista canonica condivisa da DB, web e TUI.
+MERGE_FILL_FIELDS: tuple[str, ...] = (
+    "content_type",
+    "media_kind",
+    "quote_text",
+    "quote_timestamp",
+    "quote_author",
+    "reply_to_message_id",
+    "quote_attachment_id",
+    "quote_attachment_path",
+    "quote_content_type",
+    "attachment_info",
+)
+
+#: Campi che il merge non tocca MAI (identità fisica e slot immutabili).
+_MERGE_IMMUTABLE_FIELDS = frozenset(
+    {
+        "id",
+        "msg_id",
+        "attachment_id",
+        "contact_number",
+        "protocol",
+        "is_mine",
+        "read",
+        "batch_id",
+        "batch_index",
+        "text",
+    }
+)
+
+
+def _status_rank(status: str | None) -> int:
+    """Rank numerico di uno status (NULL/sconosciuto → 0)."""
+    return _STATUS_RANK.get((status or "").lower(), 0)
+
+
+def _prefer_display_sender(a: str | None, b: str | None) -> str | None:
+    """Sceglie il ``sender`` più leggibile fra due righe gemelle.
+
+    Un sender WhatsApp può essere un JID raw (``...@lid``/``@c.us``/
+    ``@s.whatsapp.net``) oppure un nome risolto (senza ``@``).  Vince il primo
+    valore non vuoto che non è un JID; se entrambi sono raw/vuoti si tiene *a*,
+    così nessun dato presente viene mai perso.
+    """
+
+    def _is_display(value: str | None) -> bool:
+        return bool(value) and "@" not in str(value)
+
+    if _is_display(a):
+        return a
+    if _is_display(b):
+        return b
+    return a or b
+
+
+def _row_field(row: Any, field: str, default: Any = None) -> Any:
+    """Legge *field* da un mapping o da una ``sqlite3.Row`` (pure)."""
+    getter = getattr(row, "get", None)
+    if getter is not None:
+        return getter(field, default)
+    try:
+        return row[field]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def _as_int(value: Any) -> int:
+    """Converte *value* in int, trattando None/non numerici come 0."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rowid_order(value: Any) -> tuple[int, int, str]:
+    """Chiave di ordinamento crescente per ``id``/rowid eterogenei."""
+    if value is None:
+        return (2, 0, "")
+    if isinstance(value, bool):
+        return (1, int(value), "")
+    if isinstance(value, int):
+        return (0, value, "")
+    try:
+        return (0, int(value), "")
+    except (TypeError, ValueError):
+        return (1, 0, str(value))
+
+
+def _survivor_sort_key(row: Any) -> tuple[int, int, int, tuple[int, int, str]]:
+    """Chiave (ascendente) di selezione: status rank, ts reale, rowid.
+
+    Il ``timestamp`` reale (≠None/≠0) batte sempre 0/None; a parità si usa
+    l'``id``/rowid crescente per un esito deterministico.
+    """
+    status = _status_rank(_row_field(row, "status"))
+    timestamp = _as_int(_row_field(row, "timestamp"))
+    real_timestamp = 1 if timestamp else 0
+    return (
+        -status,
+        -real_timestamp,
+        -timestamp,
+        _rowid_order(_row_field(row, "id")),
+    )
+
+
+def pick_survivor_and_merge(
+    rows: list[Any], *, prefer_attachment: bool = False
+) -> tuple[int, dict[str, Any]]:
+    """Sceglie il survivor di un gruppo di twin e ne calcola il merge (pure).
+
+    Input: sequenza di mapping omogenei già raggruppati dal chiamante per
+    identità fisica.  L'input non viene mutato.  Ritorna ``(indice, overrides)``:
+    l'indice del survivor nell'input e il dict dei soli campi da applicare al
+    survivor.
+
+    Selezione survivor (chiave ``_survivor_sort_key``): status rank DESC, poi
+    ``timestamp`` reale DESC (un ts reale batte 0/None), poi ``id``/rowid ASC.
+
+    Con ``prefer_attachment=True`` il POOL dei candidati survivor è ristretto
+    alle righe con ``attachment_id`` non vuoto (per non scartare l'allegato
+    quando un twin testo porta la caption: la caption verrà poi trasferita dal
+    layer web).  Se nessuna riga ha allegato ricade sul pool intero.  Fill,
+    timestamp, status, sender e ``edited`` restano calcolati sull'intero gruppo
+    e ``text``/``attachment_id`` restano immutabili.
+
+    Nota R1 (sfumatura nota, non fixata): la chiave mette lo ``status`` PRIMA
+    del ``timestamp``.  Un twin a ``ts=0`` con rank di status superiore diventa
+    quindi survivor; ``overrides["timestamp"]`` ne corregge il timestamp col ts
+    reale dell'altro twin, ma ``read`` resta quello del survivor (immutabile).
+    Rischio noto di falso "non letto"; non viene risolto qui.
+
+    Overrides: i ``MERGE_FILL_FIELDS`` sono completati solo se il survivor è
+    None/"" e un'altra riga ha valore; ``timestamp`` adotta il primo ts reale
+    scartato se il survivor è 0/None; ``status`` è riempito solo se vuoto;
+    ``sender`` è il fold di ``_prefer_display_sender`` (survivor per primo) e
+    ``edited`` è il massimo.  I campi ``_MERGE_IMMUTABLE_FIELDS`` (identità
+    fisica, ``text``, batch slot, ...) non compaiono MAI negli overrides.
+    """
+    materialized = list(rows)
+    if not materialized:
+        raise ValueError("pick_survivor_and_merge richiede almeno una riga")
+    survivor_pool: list[int] | range = range(len(materialized))
+    if prefer_attachment:
+        with_attachment = [
+            index
+            for index, row in enumerate(materialized)
+            if _row_field(row, "attachment_id")
+        ]
+        if with_attachment:
+            survivor_pool = with_attachment
+    survivor_index = min(
+        survivor_pool,
+        key=lambda index: _survivor_sort_key(materialized[index]),
+    )
+    survivor = materialized[survivor_index]
+    others = [row for index, row in enumerate(materialized) if index != survivor_index]
+
+    def _missing(value: Any) -> bool:
+        return value is None or value == ""
+
+    overrides: dict[str, Any] = {}
+    for name in MERGE_FILL_FIELDS:
+        value = _row_field(survivor, name)
+        if _missing(value):
+            for other in others:
+                candidate = _row_field(other, name)
+                if not _missing(candidate):
+                    value = candidate
+                    break
+        overrides[name] = value
+
+    timestamp = _as_int(_row_field(survivor, "timestamp"))
+    if not timestamp:
+        for other in others:
+            candidate = _as_int(_row_field(other, "timestamp"))
+            if candidate:
+                timestamp = candidate
+                break
+        if timestamp:
+            overrides["timestamp"] = timestamp
+
+    status = _row_field(survivor, "status")
+    if _missing(status):
+        for other in others:
+            candidate = _row_field(other, "status")
+            if not _missing(candidate):
+                status = candidate
+                break
+        if not _missing(status):
+            overrides["status"] = status
+
+    sender = _row_field(survivor, "sender")
+    for other in others:
+        sender = _prefer_display_sender(sender, _row_field(other, "sender"))
+    overrides["sender"] = sender
+
+    overrides["edited"] = max(
+        (_as_int(_row_field(row, "edited")) for row in materialized), default=0
+    )
+    return survivor_index, overrides
 
 
 # ─── Data models ─────────────────────────────────────────────────────────────

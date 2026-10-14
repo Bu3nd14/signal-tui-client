@@ -9,10 +9,16 @@ from textual.containers import Vertical
 from textual.widgets import Button, Static
 
 from models import (
+    MERGE_FILL_FIELDS,
     PROTOCOL_SIGNAL,
+    PROTOCOL_WHATSAPP,
+    _prefer_display_sender,
+    attachment_display_name,
     contact_storage_keys,
     dedup_cross_key,
+    is_caption_like,
     is_media_quote_placeholder,
+    is_whatsapp_synthetic_media_text,
     media_kind_from_mime,
 )
 from protocols import (
@@ -77,21 +83,52 @@ def _media_display_text(
     attachment_info: str | None,
     msg_type: str,
     media_kind: str | None = None,
+    attachment_id: str | None = None,
 ) -> str:
-    """Return the user-facing label for non-image media."""
+    """Return the user-facing label for non-image media.
+
+    Per document/video/audio/voice e ``msg_type == "attachment"`` il nome file è
+    risolto con ``models.attachment_display_name``: un ``attachment_info`` URL o
+    mime-only lascia il posto al basename dell'``attachment_id`` (parità col
+    web).  Sticker ed etichette tecniche restano invariati.
+    """
     if media_kind == "sticker":
         return f"🎨 {attachment_info or '[Sticker]'}"
     if media_kind in _KIND_ICON:
-        return (
-            f"{_KIND_ICON[media_kind]} {attachment_info or _KIND_FALLBACK[media_kind]}"
-        )
+        name = attachment_display_name(attachment_info, attachment_id)
+        return f"{_KIND_ICON[media_kind]} {name or _KIND_FALLBACK[media_kind]}"
     if msg_type == "attachment":
-        return f"📎 {attachment_info or '[File]'}"
+        name = attachment_display_name(attachment_info, attachment_id)
+        return f"📎 {name or '[File]'}"
     return text
 
 
 _TECHNICAL_LABELS = frozenset(
-    {"🖼️ Image", "🖼️ Photo", "🖼️ Immagine", "Media", "Image", "Photo", "Immagine"}
+    {
+        "🖼️ Image",
+        "🖼️ Photo",
+        "🖼️ Immagine",
+        "Media",
+        "Image",
+        "Photo",
+        "Immagine",
+        # Etichette canoniche di protocollo (Telegram/Signal/WAHA): non sono mai
+        # caption utente e non vanno promosse a bolla nel ramo ``t == info``.
+        # NB: questa helper è usata SOLO nella decisione caption, non in
+        # ``attachment_display_name``, quindi non causa la doppia emoji.
+        "🎤 Voice",
+        "🎤 voice",
+        "📎 Document",
+        "📎 document",
+        "📎 File",
+        "📎 file",
+        "🎬 Video",
+        "🎬 video",
+        "🎵 Audio",
+        "🎵 audio",
+        "🎨 Sticker",
+        "🎨 sticker",
+    }
 )
 _TECHNICAL_PREFIXES = (
     "Image: ",
@@ -180,6 +217,66 @@ def _image_caption(
     if info and not _is_technical_media_label(info):
         return info
     return None
+
+
+# BUG-2 (follow-up): il fallback web (web/api.py:696-706) non è gated su whatsapp
+# e promuove '🎤 Voice'/'📎 Document' a caption; allineare (gate whatsapp o colmare
+# is_caption_like senza rompere attachment_display_name).
+def _non_image_media_caption(
+    text: str,
+    attachment_info: str | None,
+    attachment_id: str | None,
+    protocol: str | None = None,
+) -> str | None:
+    """Caption reale di un media non-image, o ``None``.
+
+    Dopo il fix, per i media WhatsApp non-image la caption può stare in ``text``
+    (mentre ``attachment_info`` è il filename reale) oppure, per le righe legacy
+    in cui ``text`` è l'identità sintetica ``Media: <id>``, direttamente in
+    ``attachment_info``.  Il fallback caption-in-``attachment_info`` è attivo SOLO
+    per WhatsApp: per Telegram/Signal ``attachment_info`` è un'etichetta statica
+    (``🎤 Voice``, ``📎 Document``) che non va promossa a caption.  Scarta identità
+    sintetiche, segnaposto quote ed etichette tecniche; evita la doppia bolla
+    quando il testo coincide col nome già mostrato nella bolla principale.
+    """
+    t = (text or "").strip()
+    info = (attachment_info or "").strip()
+
+    if (
+        not t
+        or is_media_quote_placeholder(t)
+        or is_whatsapp_synthetic_media_text(t, attachment_id=attachment_id)
+    ):
+        # Fallback caption-in-attachment_info: SOLO WhatsApp.
+        if (
+            protocol == PROTOCOL_WHATSAPP
+            and info
+            and is_caption_like(info)
+            and attachment_display_name(attachment_info, attachment_id) != info
+        ):
+            return info
+        return None
+
+    if t == info:
+        # Etichetta tecnica di protocollo (es. `🎤 Voice`/`📎 Document`): non è
+        # una caption, anche se `attachment_display_name` la lascerebbe passare.
+        if _is_technical_media_label(t):
+            return None
+        # Parità web: mostra la caption se non è già il nome nella bolla principale.
+        return (
+            info
+            if attachment_display_name(attachment_info, attachment_id) != info
+            else None
+        )
+
+    # Signal genera ``f"{label}: {attachment_id}"``: il prefisso combacia con
+    # ``info`` solo per il testo sintetico, mai per una caption reale WhatsApp.
+    if info and t.startswith(f"{info}:"):
+        return None
+
+    if _is_technical_media_label(t):
+        return None
+    return t
 
 
 def _is_scrolled_to_bottom(chat_log: Vertical) -> bool:
@@ -360,7 +457,9 @@ class ChatViewMixin:
             return
 
         # ── Non-image messages ──────────────────────────────────────────
-        display_text = _media_display_text(text, attachment_info, msg_type, kind)
+        display_text = _media_display_text(
+            text, attachment_info, msg_type, kind, attachment_id
+        )
 
         if is_info:
             if self.selected_contact is not None:
@@ -400,6 +499,27 @@ class ChatViewMixin:
 
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
+
+        if msg_type != "text":
+            caption = _non_image_media_caption(
+                text, attachment_info, attachment_id, protocol
+            )
+            if caption:
+                is_group = bool(
+                    self.selected_contact and self.selected_contact.id.endswith("@g.us")
+                )
+                caption_widget = self._make_message_widget(
+                    text=caption,
+                    is_mine=is_mine,
+                    timestamp=timestamp,
+                    sender=sender,
+                    status=status,
+                    protocol=protocol or "",
+                    is_group=is_group,
+                    message_id=message_id,
+                )
+                chat_log.mount(caption_widget)
+                chat_log.scroll_end(animate=False)
 
     @staticmethod
     def _make_message_widget(
@@ -1393,14 +1513,15 @@ class ChatViewMixin:
                 # (never downgrade read → sent).
                 if _status_rank(m.get("status")) > _status_rank(existing.get("status")):
                     existing["status"] = m.get("status")
-                # Additive quoted-attachment metadata: a backend twin may carry
-                # the thumbnail fields while the UI entry (optimistic/older) does
-                # not — copy them without touching identity/dedup.
-                for _key in (
-                    "quote_attachment_id",
-                    "quote_attachment_path",
-                    "quote_content_type",
-                ):
+                # Metadati del twin backend (add-only): completa i campi fill
+                # canonici (lista condivisa da ``models.MERGE_FILL_FIELDS``)
+                # senza toccare identità, testo o timestamp.  Il sender adotta
+                # la forma display (nome risolto) se il backend ne porta una
+                # più leggibile di quella già presente.
+                sender = _prefer_display_sender(existing.get("sender"), m.get("sender"))
+                if sender != existing.get("sender"):
+                    existing["sender"] = sender
+                for _key in MERGE_FILL_FIELDS:
                     if existing.get(_key) is None and m.get(_key) is not None:
                         existing[_key] = m.get(_key)
                 continue
@@ -1512,7 +1633,9 @@ class ChatViewMixin:
             sticker_widget.classes = f"{alignment} msg-sticker"
             widgets.append(sticker_widget)
         else:
-            display_text = _media_display_text(text, attachment_info, msg_type, kind)
+            display_text = _media_display_text(
+                text, attachment_info, msg_type, kind, attachment_id
+            )
             widgets.append(
                 self._make_message_widget(
                     text=display_text,
@@ -1529,6 +1652,22 @@ class ChatViewMixin:
                     else None,
                 )
             )
+            caption = _non_image_media_caption(
+                text, attachment_info, attachment_id, protocol
+            )
+            if msg_type != "text" and caption:
+                widgets.append(
+                    self._make_message_widget(
+                        text=caption,
+                        is_mine=is_mine,
+                        timestamp=ts,
+                        sender=sender,
+                        status=status,
+                        protocol=protocol,
+                        is_group=is_group,
+                        message_id=message_id,
+                    )
+                )
         return widgets
 
     def _add_load_more_widget(self, remaining: int):

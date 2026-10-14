@@ -55,6 +55,32 @@ def _msg_type(raw: dict) -> str:
     return "text"
 
 
+def _wa_media_name_and_caption(
+    kind: str,
+    item_caption: str | None,
+    filename: str | None,
+    mime: str | None,
+    *,
+    fallback: str,
+) -> tuple[str, str]:
+    """Return ``(attachment_info, caption)`` for a WhatsApp media item.
+
+    Semantica canonica (fix nome allegato WhatsApp):
+
+    - ``image``/``gif``: la caption vive in ``attachment_info``, il ``text``
+      resta vuoto (invariato);
+    - ``sticker``/``voice``: ``attachment_info`` è solo il filename reale (mai
+      il mime, che non è un nome) e la caption va in ``text``;
+    - gli altri (document/video/audio): ``attachment_info`` è il filename reale,
+      il mime solo come fallback, e la caption va in ``text``.
+    """
+    if kind in ("image", "gif"):
+        return (item_caption or filename or mime or fallback), ""
+    if kind in ("sticker", "voice"):
+        return (filename or ""), (item_caption or "")
+    return (filename or mime or fallback), (item_caption or "")
+
+
 # ─── Quoted media detection ──────────────────────────────────────────────────
 # WAHA exposes a quote in multiple shapes, mirroring the media shapes handled
 # for the message itself in ``_event_from_message``: nested ``*Message`` keys
@@ -468,8 +494,11 @@ def _event_from_message(
     # 1. Flat:  top-level "attachments" array  (legacy / v1 API) — may carry multiple
     # 2. Nested: raw["message"]["imageMessage"] / ["videoMessage"] / …  (WAHA Core)
     # 3. Flat hasMedia / media fields  (current WAHA Core)
-    media_items: list[tuple[str | None, str | None, str, str | None, str | None]] = []
-    # (attachment_id, attachment_info, msg_type_override, media_kind, content_type)
+    media_items: list[
+        tuple[str | None, str | None, str, str | None, str | None, str | None]
+    ] = []
+    # (attachment_id, attachment_info, msg_type_override, media_kind,
+    #  content_type, item_caption)
 
     # Try top-level attachments first (legacy format — supports multiples).
     attachments = raw.get("attachments") or []
@@ -485,10 +514,13 @@ def _event_from_message(
             )
             kind = media_kind_from_mime(mime) or "document"
             att_type = msg_type_for_media_kind(kind)
-            att_info = (
-                caption or att.get("caption") or att.get("filename") or mime or "Media"
+            item_caption = caption or att.get("caption")
+            att_info, _ = _wa_media_name_and_caption(
+                kind, item_caption, att.get("filename"), mime, fallback="Media"
             )
-            media_items.append((att_id, att_info, att_type, kind, mime or None))
+            media_items.append(
+                (att_id, att_info, att_type, kind, mime or None, item_caption)
+            )
 
     # If still no media, look inside the nested "message" object (WAHA Core).
     if not media_items:
@@ -522,18 +554,22 @@ def _event_from_message(
                         )
                     att_type = msg_type_for_media_kind(kind)
                     att_id = media.get("id") or media.get("url")
-                    att_info = (
-                        caption
-                        or media.get("caption")
-                        or media.get("filename")
-                        or media.get("mimetype")
-                        or (
-                            f"{media_key} ({msg_id[:16]}...)"
-                            if len(str(msg_id)) > 16
-                            else f"{media_key}"
-                        )
+                    item_caption = caption or media.get("caption")
+                    fallback = (
+                        f"{media_key} ({msg_id[:16]}...)"
+                        if len(str(msg_id)) > 16
+                        else media_key
                     )
-                    media_items.append((att_id, att_info, att_type, kind, mime or None))
+                    att_info, _ = _wa_media_name_and_caption(
+                        kind,
+                        item_caption,
+                        media.get("filename"),
+                        media.get("mimetype"),
+                        fallback=fallback,
+                    )
+                    media_items.append(
+                        (att_id, att_info, att_type, kind, mime or None, item_caption)
+                    )
                     break
 
     # If still no media, look at WAHA's flat hasMedia / media fields (current WAHA Core).
@@ -547,14 +583,13 @@ def _event_from_message(
             kind = kind or "document"
             att_type = msg_type_for_media_kind(kind)
             att_id = media.get("id") or media.get("url")
-            att_info = (
-                caption
-                or media.get("caption")
-                or media.get("filename")
-                or mime
-                or "Media"
+            item_caption = caption or media.get("caption")
+            att_info, _ = _wa_media_name_and_caption(
+                kind, item_caption, media.get("filename"), mime, fallback="Media"
             )
-            media_items.append((att_id, att_info, att_type, kind, mime or None))
+            media_items.append(
+                (att_id, att_info, att_type, kind, mime or None, item_caption)
+            )
 
     # Rileva se la chat è un gruppo WhatsApp (JID termina con @g.us).
     is_group = chat_jid.endswith("@g.us")
@@ -626,15 +661,15 @@ def _event_from_message(
     ack_val = _ack_value(raw)
     if media_items:
         events: list[ChatEvent] = []
-        for i, (
+        for (
             att_id,
             att_info,
             att_type,
             media_kind,
             content_type,
-        ) in enumerate(media_items):
-            media_identity = att_id or f"{msg_id}:{i + 1}"
-            msg_text = "" if att_type == "image" else f"Media: {media_identity}"
+            item_caption,
+        ) in media_items:
+            msg_text = "" if att_type == "image" else (item_caption or "")
             events.append(
                 ChatEvent(
                     type="message",

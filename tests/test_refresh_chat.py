@@ -89,15 +89,19 @@ class _FakeChatLog:
 
 
 @pytest.mark.parametrize(
-    ("msg_type", "attachment_info", "expected"),
+    ("msg_type", "attachment_info", "expected_widgets"),
     [
-        ("attachment", "Video caption", "📎 Video caption"),
-        ("attachment", "audio/ogg", "📎 audio/ogg"),
-        ("attachment", "report.pdf", "📎 report.pdf"),
+        # N4: info caption-like/mime-only non è un nome file -> basename
+        # dell'attachment_id (qui coincide con l'id, mai col testo canonico).
+        # BUG-1: "Video caption" è una caption reale legacy WhatsApp e va
+        # mostrata in una bolla dedicata (il text è l'identità sintetica).
+        ("attachment", "Video caption", ["📎 stable-media-id", "Video caption"]),
+        ("attachment", "audio/ogg", ["📎 stable-media-id"]),
+        ("attachment", "report.pdf", ["📎 report.pdf"]),
     ],
 )
-def test_media_rendering_uses_attachment_info_not_canonical_identity(
-    msg_type, attachment_info, expected
+def test_media_rendering_resolves_filename_not_canonical_identity(
+    msg_type, attachment_info, expected_widgets
 ):
     app = SignalTUI()
     canonical_text = "Media: stable-media-id"
@@ -111,15 +115,221 @@ def test_media_rendering_uses_attachment_info_not_canonical_identity(
         "attachment_id": "stable-media-id",
     }
 
-    cached_widget = app._build_message_widgets("whatsapp", False, message)[0]
-    assert isinstance(cached_widget, MessageWidget)
-    assert cached_widget._msg_text == expected
+    # Identità sintetica (combacia con attachment_id): una sola bolla per i casi
+    # tecnici, più la caption legacy solo quando attachment_info è caption-like.
+    cached_widgets = app._build_message_widgets("whatsapp", False, message)
+    assert [
+        w._msg_text for w in cached_widgets if isinstance(w, MessageWidget)
+    ] == expected_widgets
 
     app._chat_log = _FakeChatLog()
     app._add_message(**message, protocol="whatsapp")
-    live_widget = app._chat_log.children[0]
-    assert isinstance(live_widget, MessageWidget)
-    assert live_widget._msg_text == expected
+    live = [w for w in app._chat_log.children if isinstance(w, MessageWidget)]
+    assert [w._msg_text for w in live] == expected_widgets
+
+
+def test_non_image_media_caption_helper():
+    from tui.chat_view import _non_image_media_caption
+
+    assert (
+        _non_image_media_caption("una didascalia", "report.pdf", "att-1")
+        == "una didascalia"
+    )
+    assert _non_image_media_caption("Media: att-1", "report.pdf", "att-1") is None
+    assert _non_image_media_caption("", "report.pdf", "att-1") is None
+    assert _non_image_media_caption("report.pdf", "report.pdf", "att-1") is None
+    # B3: una caption letterale "Media: ciao" NON è sintetica.
+    assert (
+        _non_image_media_caption("Media: ciao", "report.pdf", "att-1") == "Media: ciao"
+    )
+
+
+def test_non_image_media_caption_bubble_in_build_and_add():
+    app = SignalTUI()
+    message = {
+        "text": "una didascalia",
+        "is_mine": False,
+        "sender": "Mario",
+        "timestamp": 5,
+        "msg_type": "attachment",
+        "attachment_info": "report.pdf",
+        "attachment_id": "att-1",
+        "media_kind": "document",
+    }
+
+    widgets = app._build_message_widgets("whatsapp", False, message)
+    assert [w._msg_text for w in widgets if isinstance(w, MessageWidget)] == [
+        "📎 report.pdf",
+        "una didascalia",
+    ]
+
+    app._chat_log = _FakeChatLog()
+    app._add_message(**message, protocol="whatsapp")
+    live = [w for w in app._chat_log.children if isinstance(w, MessageWidget)]
+    assert [w._msg_text for w in live] == ["📎 report.pdf", "una didascalia"]
+
+
+def test_non_image_media_caption_whatsapp_fallback():
+    from tui.chat_view import _non_image_media_caption
+
+    # BUG-1: per media legacy WhatsApp la caption è in attachment_info mentre
+    # text è vuoto o l'identità sintetica "Media: <id>".
+    assert (
+        _non_image_media_caption("", "una didascalia", "att-1", "whatsapp")
+        == "una didascalia"
+    )
+    assert (
+        _non_image_media_caption("Media: att-1", "una didascalia", "att-1", "whatsapp")
+        == "una didascalia"
+    )
+    # filename e mime-only non sono caption -> nessuna bolla extra.
+    assert _non_image_media_caption("", "report.pdf", "att-1", "whatsapp") is None
+    assert (
+        _non_image_media_caption(
+            "Media: att-1", "audio/ogg; codecs=opus", "att-1", "whatsapp"
+        )
+        is None
+    )
+
+
+def test_non_image_media_caption_telegram_negative():
+    from tui.chat_view import _non_image_media_caption
+
+    # Per Telegram attachment_info è un'etichetta statica, mai una caption.
+    assert (
+        _non_image_media_caption("", "🎤 Voice", "tgref:8829363612:1414", "telegram")
+        is None
+    )
+    assert (
+        _non_image_media_caption("", "📎 Document", "tgref:8829363612:1414", "telegram")
+        is None
+    )
+
+
+def test_non_image_media_caption_telegram_negative_bubble():
+    app = SignalTUI()
+    message = {
+        "text": "",
+        "is_mine": False,
+        "sender": "Mario",
+        "timestamp": 7,
+        "msg_type": "attachment",
+        "attachment_info": "🎤 Voice",
+        "media_kind": "voice",
+        "attachment_id": "tgref:8829363612:1414",
+    }
+
+    widgets = app._build_message_widgets("telegram", False, message)
+    assert len([w for w in widgets if isinstance(w, MessageWidget)]) == 1
+
+    app._chat_log = _FakeChatLog()
+    app._add_message(**message, protocol="telegram")
+    live = [w for w in app._chat_log.children if isinstance(w, MessageWidget)]
+    assert len(live) == 1
+
+
+def test_non_image_media_caption_t_equals_info():
+    from tui.chat_view import _non_image_media_caption
+
+    # Parità web: se il nome mostrato differisce da info, la caption va mostrata.
+    assert (
+        _non_image_media_caption(
+            "una didascalia", "una didascalia", "att-1", "whatsapp"
+        )
+        == "una didascalia"
+    )
+    # report.pdf È già il nome mostrato: niente doppia bolla.
+    assert (
+        _non_image_media_caption("report.pdf", "report.pdf", "att-1", "whatsapp")
+        is None
+    )
+
+
+def test_non_image_media_caption_t_equals_info_technical_label():
+    from tui.chat_view import _non_image_media_caption
+
+    # Le etichette canoniche di protocollo non diventano caption spurie nemmeno
+    # nel ramo ``t == info``.
+    assert (
+        _non_image_media_caption("🎤 Voice", "🎤 Voice", "tgref:x", "telegram") is None
+    )
+    assert (
+        _non_image_media_caption("📎 Document", "📎 Document", "tgref:x", "telegram")
+        is None
+    )
+    # Una caption reale identica a se stessa resta invece visibile.
+    assert (
+        _non_image_media_caption(
+            "una didascalia", "una didascalia", "att-1", "whatsapp"
+        )
+        == "una didascalia"
+    )
+
+
+def test_non_image_media_caption_id_absent_no_double_bubble():
+    from tui.chat_view import _non_image_media_caption
+
+    # Senza attachment_id attachment_display_name ricade su info: niente bolla.
+    assert _non_image_media_caption("", "una didascalia", None, "whatsapp") is None
+    assert (
+        _non_image_media_caption("una didascalia", "una didascalia", None, "whatsapp")
+        is None
+    )
+
+
+def test_non_image_media_caption_signal():
+    from tui.chat_view import _non_image_media_caption
+
+    assert _non_image_media_caption("", "🖼️ Image", "att-1", "signal") is None
+    # Signal prefissa il testo col label: "🎬 Video: <id>", da sopprimere.
+    assert (
+        _non_image_media_caption("🎬 Video: att-1", "🎬 Video", "att-1", "signal")
+        is None
+    )
+
+
+def test_non_image_media_caption_placeholder_kept():
+    from tui.chat_view import _non_image_media_caption
+
+    # I segnaposto quote (🎬 Video / 🎵 Audio) restano soppressi.
+    assert (
+        _non_image_media_caption("🎬 Video", "clip.mp4", "clip.mp4", "whatsapp") is None
+    )
+    assert (
+        _non_image_media_caption("🎵 Audio", "voice.ogg", "voice.ogg", "whatsapp")
+        is None
+    )
+
+
+def test_non_image_media_caption_whatsapp_target_render():
+    from tui.chat_view import _non_image_media_caption
+
+    text = "Media: http://x/4A9299E.mp4"
+    info = "Ci siamo"
+    att_id = "http://x/4A9299E.mp4"
+    assert _non_image_media_caption(text, info, att_id, "whatsapp") == "Ci siamo"
+
+    message = {
+        "text": text,
+        "is_mine": False,
+        "sender": "Mario",
+        "timestamp": 9,
+        "msg_type": "attachment",
+        "attachment_info": info,
+        "attachment_id": att_id,
+        "media_kind": "video",
+    }
+    app = SignalTUI()
+    widgets = app._build_message_widgets("whatsapp", False, message)
+    assert [w._msg_text for w in widgets if isinstance(w, MessageWidget)] == [
+        "🎬 4A9299E.mp4",
+        "Ci siamo",
+    ]
+
+    app._chat_log = _FakeChatLog()
+    app._add_message(**message, protocol="whatsapp")
+    live = [w for w in app._chat_log.children if isinstance(w, MessageWidget)]
+    assert [w._msg_text for w in live] == ["🎬 4A9299E.mp4", "Ci siamo"]
 
 
 class TestRefreshChat:
