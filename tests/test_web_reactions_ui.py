@@ -205,7 +205,11 @@ globalThis.window = {
   setInterval(callback, delay) { intervals.push({ callback, delay }); return intervals.length; },
   clearInterval(id) { cleared.push(id); },
 };
-globalThis.state = { active: null, editing: null, messages: [], telegramRefreshTimer: null };
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(), active: null, editing: null, messages: [], telegramRefreshTimer: null };
 globalThis.history = { pushState() {} };
 globalThis.loadMessages = () => {};
 globalThis.closeEmojiPicker = () => {};
@@ -271,7 +275,11 @@ globalThis.history = {
     popstateHandler();
   },
 };
-globalThis.state = { active: null, editing: null, messages: [], telegramRefreshTimer: null };
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(), active: null, editing: null, messages: [], telegramRefreshTimer: null };
 globalThis.loadMessages = () => {};
 globalThis.closeEmojiPicker = () => {};
 globalThis.closeReactionPicker = () => {};

@@ -5,6 +5,7 @@ const PROTOCOL_KEY = "signal-tui-web-proto";
 const STEALTH_KEY = "signal-tui-web-stealth";
 const SKIN_KEY = "signal-tui-web-skin";
 const LINK_PREVIEWS_KEY = "signal-tui-web-link-previews";
+const DRAFTS_KEY = "signal-tui-web-drafts";
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 // Heartbeat watchdog: the server fans out a ``{"type":"heartbeat"}`` frame
 // every ~5s (web/ws.py).  If nothing at all arrives for this long, the socket
@@ -49,6 +50,9 @@ const state = {
   linkPreviewsEnabled: localStorage.getItem(LINK_PREVIEWS_KEY) !== "0",
   // Vista "Archiviate" della lista chat WhatsApp (come nell'app).
   showArchived: false,
+  // Bozze del composer per chat ("proto:id" -> { text, attachments }): il testo
+  // e gli allegati non inviati restano nella loro chat, mai in quella aperta dopo.
+  drafts: new Map(),
   // True quando è stata pushata una history entry per il thread aperto
   // (mobile back/swipe-back): evita di accumulare una entry per ogni
   // cambio di contatto mentre il thread resta aperto.
@@ -819,8 +823,12 @@ function pruneOrphanObjectUrls() {
     if (tab.closed) state.fileTabUrls.delete(url);
     else fileTabUrls.add(url);
   }
+  const draftUrls = new Set();
+  for (const draft of state.drafts.values()) {
+    for (const attachment of draft.attachments) if (attachment.previewUrl) draftUrls.add(attachment.previewUrl);
+  }
   for (const url of state.objectUrls) {
-    if (cachedUrls.has(url) || optimisticUrls.has(url) || fileTabUrls.has(url) || state.pinnedUrls.has(url) || url === state.modalObjectUrl) continue;
+    if (draftUrls.has(url) || cachedUrls.has(url) || optimisticUrls.has(url) || fileTabUrls.has(url) || state.pinnedUrls.has(url) || url === state.modalObjectUrl) continue;
     URL.revokeObjectURL(url);
     state.objectUrls.delete(url);
   }
@@ -2060,8 +2068,9 @@ function ensureEditedMarker(entry) {
 }
 
 function cancelEdit() {
+  // Ripristina la bozza che c'era prima di entrare in modifica.
+  elements.messageInput.value = state.editing?.draftText ?? "";
   state.editing = null;
-  elements.messageInput.value = "";
   resizeComposer();
   updateReplyBanner();
   updateComposer();
@@ -2078,6 +2087,7 @@ function startEdit(item) {
     oldText: item.text,
     protocol: state.active.protocol,
     contactId: state.active.id,
+    draftText: elements.messageInput.value,
   };
   elements.messageInput.value = item.text;
   resizeComposer();
@@ -2306,7 +2316,9 @@ function openThread(contact) {
   cancelReply();
   if (typeof cancelVoiceRecording === "function") cancelVoiceRecording();
   if (state.editing) cancelEdit();
+  stashComposerDraft(state.active);
   state.active = contact;
+  restoreComposerDraft(contact);
   state.userScrolledUp = false;
   updateTelegramRefreshTimer();
   if (contact.protocol === "telegram") void loadTelegramReactions();
@@ -2575,6 +2587,67 @@ function mediaKindFromMime(mime) {
 // richiesta verrebbe respinta con 400 "Too many attachments".
 const MAX_STAGED_ATTACHMENTS = 10;
 
+function draftKey(contact) {
+  return `${contact.protocol}:${contact.id}`;
+}
+
+function loadStoredDrafts() {
+  try {
+    const drafts = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "{}");
+    return drafts && typeof drafts === "object" ? drafts : {};
+  } catch {
+    return {};
+  }
+}
+
+// Solo il testo sopravvive al reload: gli allegati (File) restano in memoria.
+function storeDraftText(contact, text) {
+  try {
+    const drafts = loadStoredDrafts();
+    if (text.trim()) drafts[draftKey(contact)] = text;
+    else delete drafts[draftKey(contact)];
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+  } catch {
+    // Storage non disponibile: la bozza resta solo in memoria.
+  }
+}
+
+function stashComposerDraft(contact) {
+  if (!contact) return;
+  const key = draftKey(contact);
+  const text = elements.messageInput.value;
+  const attachments = state.stagedAttachments;
+  if (text || attachments.length) state.drafts.set(key, { text, attachments });
+  else state.drafts.delete(key);
+  storeDraftText(contact, text);
+  state.stagedAttachments = [];
+}
+
+function restoreComposerDraft(contact) {
+  const key = draftKey(contact);
+  const draft = state.drafts.get(key);
+  state.drafts.delete(key);
+  elements.messageInput.value = draft?.text ?? loadStoredDrafts()[key] ?? "";
+  state.stagedAttachments = draft?.attachments ?? [];
+  renderAttachmentsPreview();
+  resizeComposer();
+  updateComposer();
+}
+
+// Un invio con allegati può risolversi dopo un cambio chat: svuota lo staging
+// della chat di destinazione, non quello della chat ora aperta.
+function dropSentAttachments(contact, sent) {
+  if (state.active?.id === contact.id && state.active?.protocol === contact.protocol) {
+    clearStagedAttachments({ revoke: false });
+    return;
+  }
+  const key = draftKey(contact);
+  const draft = state.drafts.get(key);
+  if (!draft) return;
+  draft.attachments = draft.attachments.filter((attachment) => !sent.includes(attachment));
+  if (!draft.text && !draft.attachments.length) state.drafts.delete(key);
+}
+
 function clearStagedAttachments({ revoke = true } = {}) {
   // Nel path di invio (revoke:false) gli object URL NON si revocano: sono i
   // localPreviewUrl degli optimistic N e servono al primo paint; la revoca
@@ -2726,8 +2799,10 @@ async function stageOneAttachment(file) {
   // in cacheMedia. Calcolo e push sono nello stesso blocco sincrono, quindi
   // nemmeno stageAttachments concorrenti possono collidere. La chiave resta
   // memorizzata sull'item: remove, clear e invio non la ricalcolano mai.
+  // Anche le bozze delle altre chat: la mediaCache è condivisa fra le chat.
+  const allStaged = [...state.stagedAttachments, ...[...state.drafts.values()].flatMap((draft) => draft.attachments)];
   const usedIndexes = new Set(
-    state.stagedAttachments.map((item) => Number(item.attachmentId.slice(item.attachmentId.lastIndexOf("[") + 1, -1))),
+    allStaged.map((item) => Number(item.attachmentId.slice(item.attachmentId.lastIndexOf("[") + 1, -1))),
   );
   let attachmentIndex = 0;
   while (usedIndexes.has(attachmentIndex)) attachmentIndex += 1;
@@ -3271,6 +3346,7 @@ async function submitMessage() {
       // Composer svuotato solo DOPO l'accodamento persistente (§7.3).
       await outboxStore.enqueue(record);
       elements.messageInput.value = "";
+      storeDraftText(active, "");
       resizeComposer();
       updateComposer();
       if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
@@ -3286,6 +3362,7 @@ async function submitMessage() {
   state.sending += 1;
   if (attachments.length) state.attachmentSending = true;
   elements.messageInput.value = "";
+  storeDraftText(active, "");
   resizeComposer();
   updateComposer();
   if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
@@ -3322,7 +3399,7 @@ async function submitMessage() {
     for (const optimistic of optimisticItems) optimistic.optimisticStatus = "sent";
     // R2: lo staging viene svuotato solo a invio riuscito; su errore gli
     // allegati restano disponibili per il retry manuale.
-    if (attachments.length) clearStagedAttachments({ revoke: false });
+    if (attachments.length) dropSentAttachments(active, attachments);
   } catch (error) {
     for (const optimistic of optimisticItems) optimistic.optimisticStatus = "failed";
     if (error.message !== "unauthorized") showError("Impossibile inviare il messaggio.");
@@ -3726,6 +3803,7 @@ document.addEventListener("keydown", (event) => {
 elements.messageInput.addEventListener("input", () => {
   resizeComposer();
   updateComposer();
+  if (state.active && !state.editing) storeDraftText(state.active, elements.messageInput.value);
 });
 elements.messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.editing) {
