@@ -26,7 +26,13 @@ def _text(raw):
 
 def test_flat_location_webjs():
     text = _text(
-        _base(location={"latitude": "45.4642", "longitude": "9.19", "description": "Duomo\nMilano"})
+        _base(
+            location={
+                "latitude": "45.4642",
+                "longitude": "9.19",
+                "description": "Duomo\nMilano",
+            }
+        )
     )
     assert "/9j/" not in text
     assert text.startswith("📍 Posizione: Duomo")
@@ -56,7 +62,13 @@ def test_nested_location_message_outgoing():
 
 
 def test_live_location():
-    raw = _base(_data={"message": {"liveLocationMessage": {"degreesLatitude": 1, "degreesLongitude": 2}}})
+    raw = _base(
+        _data={
+            "message": {
+                "liveLocationMessage": {"degreesLatitude": 1, "degreesLongitude": 2}
+            }
+        }
+    )
     assert _text(raw).startswith("📍 Posizione in tempo reale")
 
 
