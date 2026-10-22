@@ -20,6 +20,7 @@ from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
 from models import (
+    MSG_TYPE_SYSTEM,
     attachment_display_name,
     contact_storage_keys,
     dedup_cross_key,
@@ -759,6 +760,10 @@ def _messages(
                 "batch_index": row["batch_index"],
             }
         )
+        if row["msg_type"] == MSG_TYPE_SYSTEM:
+            # Avviso di servizio (es. codice di sicurezza WhatsApp cambiato):
+            # il client lo mostra centrato, fuori dalle bolle.
+            messages[-1]["system"] = True
 
     # Le reazioni restano single-key (scelta di design): la read-union
     # cross-key copre i messaggi, non l'aggregazione reazioni.
