@@ -4,6 +4,7 @@ const TOKEN_KEY = "signal-tui-web-token";
 const PROTOCOL_KEY = "signal-tui-web-proto";
 const STEALTH_KEY = "signal-tui-web-stealth";
 const SKIN_KEY = "signal-tui-web-skin";
+const LINK_PREVIEWS_KEY = "signal-tui-web-link-previews";
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 // Heartbeat watchdog: the server fans out a ``{"type":"heartbeat"}`` frame
 // every ~5s (web/ws.py).  If nothing at all arrives for this long, the socket
@@ -44,6 +45,8 @@ const state = {
   // richiesta a /api/contact-avatar parte mentre è attiva.
   stealth: localStorage.getItem(STEALTH_KEY) === "1",
   skin: localStorage.getItem(SKIN_KEY) === "teams",
+  // Anteprime link e mappe delle posizioni: attive salvo opt-out esplicito.
+  linkPreviewsEnabled: localStorage.getItem(LINK_PREVIEWS_KEY) !== "0",
   // True quando è stata pushata una history entry per il thread aperto
   // (mobile back/swipe-back): evita di accumulare una entry per ogni
   // cambio di contatto mentre il thread resta aperto.
@@ -61,6 +64,9 @@ const state = {
   objectUrls: new Set(),
   fileTabUrls: new Map(),
   pinnedUrls: new Set(),
+  // Anteprime link: Map<url, Promise<preview|null>> e Map<url, Promise<objectUrl|null>>.
+  linkPreviews: new Map(),
+  linkPreviewImages: new Map(),
   modalObjectUrl: null,
   // Map<attachmentId, { url, width, height }>. width/height sono null finché
   // non noti: vengono catturati da naturalWidth/Height al primo load reale.
@@ -120,6 +126,7 @@ const elements = {
   saveToken: document.querySelector("#save-token"),
   stealthToggle: document.querySelector("#stealth-toggle"),
   skinToggle: document.querySelector("#skin-toggle"),
+  linkPreviewsToggle: document.querySelector("#link-previews-toggle"),
   composer: document.querySelector("#composer"),
   composerShell: document.querySelector("#composer-shell"),
   messageInput: document.querySelector("#message-input"),
@@ -252,6 +259,106 @@ function safeExternalUrl(value) {
   } catch {
     return null;
   }
+}
+
+function loadLinkPreview(url) {
+  if (!state.linkPreviews.has(url)) {
+    const request = apiFetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
+      .then((response) => response.json())
+      .catch(() => null);
+    state.linkPreviews.set(url, request);
+  }
+  return state.linkPreviews.get(url);
+}
+
+function loadLinkPreviewImage(url) {
+  if (!state.linkPreviewImages.has(url)) {
+    // Blob PINNATO come le miniature quote: la LRU media non deve revocarlo.
+    const request = apiFetch(`/api/link-preview/image?url=${encodeURIComponent(url)}`)
+      .then((response) => response.blob())
+      .then((blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        state.objectUrls.add(objectUrl);
+        state.pinnedUrls.add(objectUrl);
+        return objectUrl;
+      })
+      .catch(() => null);
+    state.linkPreviewImages.set(url, request);
+  }
+  return state.linkPreviewImages.get(url);
+}
+
+function renderLinkPreview(url, preview, stickToBottom) {
+  const card = document.createElement("a");
+  // Le miniature mappa WhatsApp sono piccole: layout compatto, non a tutta larghezza.
+  card.className = isLocationMapUrl(url) ? "link-preview link-preview-compact" : "link-preview";
+  card.href = url;
+  card.target = "_blank";
+  card.rel = "noopener noreferrer";
+  if (preview.has_image) {
+    const image = document.createElement("img");
+    image.className = "link-preview-image";
+    image.alt = "";
+    image.hidden = true;
+    image.addEventListener("load", () => {
+      image.hidden = false;
+      stickToBottom?.();
+    }, { once: true });
+    image.addEventListener("error", () => image.remove(), { once: true });
+    loadLinkPreviewImage(url).then((objectUrl) => {
+      if (objectUrl) image.src = objectUrl;
+      else image.remove();
+    });
+    card.append(image);
+  }
+  const body = document.createElement("div");
+  body.className = "link-preview-body";
+  if (preview.site_name) {
+    const site = document.createElement("span");
+    site.className = "link-preview-site";
+    site.textContent = preview.site_name;
+    body.append(site);
+  }
+  const title = document.createElement("strong");
+  title.className = "link-preview-title";
+  title.textContent = preview.title;
+  body.append(title);
+  if (preview.description) {
+    const description = document.createElement("span");
+    description.className = "link-preview-description";
+    description.textContent = preview.description;
+    body.append(description);
+  }
+  card.append(body);
+  return card;
+}
+
+function isLocationMapUrl(url) {
+  return /^https:\/\/maps\.google\.com\/\?q=-?\d{1,3}\.\d{6},-?\d{1,3}\.\d{6}$/.test(url);
+}
+
+function linkPreviewSlot(text, stickToBottom) {
+  // Anteprima solo per il primo link del messaggio, come WhatsApp.
+  const match = String(text || "").match(/https?:\/\/[^\s<]+/);
+  const url = match ? safeExternalUrl(trimUrlEnd(match[0])) : null;
+  if (!url || !state.linkPreviewsEnabled) return null;
+  const slot = document.createElement("div");
+  slot.className = "link-preview-slot";
+  const load = () => {
+    loadLinkPreview(url).then((preview) => {
+      if (!preview?.title) return;
+      slot.replaceChildren(renderLinkPreview(url, preview, stickToBottom));
+      stickToBottom?.();
+    });
+  };
+  const observer = mediaObserver();
+  if (observer) {
+    slot._loadMedia = load;
+    observer.observe(slot);
+  } else {
+    load();
+  }
+  return slot;
 }
 
 function timestampMilliseconds(value) {
@@ -1453,6 +1560,8 @@ function buildMessageNode(item, protocol, stickToBottom) {
     textEl.className = "message-text";
     textEl.replaceChildren(linkifyText(displayText));
     bubble.append(textEl);
+    const previewSlot = linkPreviewSlot(displayText, stickToBottom);
+    if (previewSlot) bubble.append(previewSlot);
   }
   const time = document.createElement("time");
   time.className = "message-time";
@@ -3364,6 +3473,16 @@ elements.stealthToggle.addEventListener("change", () => {
   localStorage.setItem(STEALTH_KEY, state.stealth ? "1" : "0");
   renderContacts();
   renderThreadAvatar(state.active);
+});
+elements.linkPreviewsToggle.checked = state.linkPreviewsEnabled;
+elements.linkPreviewsToggle.addEventListener("change", () => {
+  state.linkPreviewsEnabled = elements.linkPreviewsToggle.checked;
+  localStorage.setItem(LINK_PREVIEWS_KEY, state.linkPreviewsEnabled ? "1" : "0");
+  // Le bolle sono riusate per fingerprint: azzera i nodi per ricostruirle.
+  if (state.active) {
+    state.messageNodes = null;
+    renderMessages(state.messages, state.active.protocol);
+  }
 });
 elements.skinToggle.checked = state.skin;
 elements.skinToggle.addEventListener("change", () => {
