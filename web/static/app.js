@@ -61,6 +61,9 @@ const state = {
   objectUrls: new Set(),
   fileTabUrls: new Map(),
   pinnedUrls: new Set(),
+  // Anteprime link: Map<url, Promise<preview|null>> e Map<url, Promise<objectUrl|null>>.
+  linkPreviews: new Map(),
+  linkPreviewImages: new Map(),
   modalObjectUrl: null,
   // Map<attachmentId, { url, width, height }>. width/height sono null finché
   // non noti: vengono catturati da naturalWidth/Height al primo load reale.
@@ -252,6 +255,101 @@ function safeExternalUrl(value) {
   } catch {
     return null;
   }
+}
+
+function loadLinkPreview(url) {
+  if (!state.linkPreviews.has(url)) {
+    const request = apiFetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
+      .then((response) => response.json())
+      .catch(() => null);
+    state.linkPreviews.set(url, request);
+  }
+  return state.linkPreviews.get(url);
+}
+
+function loadLinkPreviewImage(url) {
+  if (!state.linkPreviewImages.has(url)) {
+    // Blob PINNATO come le miniature quote: la LRU media non deve revocarlo.
+    const request = apiFetch(`/api/link-preview/image?url=${encodeURIComponent(url)}`)
+      .then((response) => response.blob())
+      .then((blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        state.objectUrls.add(objectUrl);
+        state.pinnedUrls.add(objectUrl);
+        return objectUrl;
+      })
+      .catch(() => null);
+    state.linkPreviewImages.set(url, request);
+  }
+  return state.linkPreviewImages.get(url);
+}
+
+function renderLinkPreview(url, preview, stickToBottom) {
+  const card = document.createElement("a");
+  card.className = "link-preview";
+  card.href = url;
+  card.target = "_blank";
+  card.rel = "noopener noreferrer";
+  if (preview.has_image) {
+    const image = document.createElement("img");
+    image.className = "link-preview-image";
+    image.alt = "";
+    image.hidden = true;
+    image.addEventListener("load", () => {
+      image.hidden = false;
+      stickToBottom?.();
+    }, { once: true });
+    image.addEventListener("error", () => image.remove(), { once: true });
+    loadLinkPreviewImage(url).then((objectUrl) => {
+      if (objectUrl) image.src = objectUrl;
+      else image.remove();
+    });
+    card.append(image);
+  }
+  const body = document.createElement("div");
+  body.className = "link-preview-body";
+  if (preview.site_name) {
+    const site = document.createElement("span");
+    site.className = "link-preview-site";
+    site.textContent = preview.site_name;
+    body.append(site);
+  }
+  const title = document.createElement("strong");
+  title.className = "link-preview-title";
+  title.textContent = preview.title;
+  body.append(title);
+  if (preview.description) {
+    const description = document.createElement("span");
+    description.className = "link-preview-description";
+    description.textContent = preview.description;
+    body.append(description);
+  }
+  card.append(body);
+  return card;
+}
+
+function linkPreviewSlot(text, stickToBottom) {
+  // Anteprima solo per il primo link del messaggio, come WhatsApp.
+  const match = String(text || "").match(/https?:\/\/[^\s<]+/);
+  const url = match ? safeExternalUrl(trimUrlEnd(match[0])) : null;
+  if (!url) return null;
+  const slot = document.createElement("div");
+  slot.className = "link-preview-slot";
+  const load = () => {
+    loadLinkPreview(url).then((preview) => {
+      if (!preview?.title) return;
+      slot.replaceChildren(renderLinkPreview(url, preview, stickToBottom));
+      stickToBottom?.();
+    });
+  };
+  const observer = mediaObserver();
+  if (observer) {
+    slot._loadMedia = load;
+    observer.observe(slot);
+  } else {
+    load();
+  }
+  return slot;
 }
 
 function timestampMilliseconds(value) {
@@ -1453,6 +1551,8 @@ function buildMessageNode(item, protocol, stickToBottom) {
     textEl.className = "message-text";
     textEl.replaceChildren(linkifyText(displayText));
     bubble.append(textEl);
+    const previewSlot = linkPreviewSlot(displayText, stickToBottom);
+    if (previewSlot) bubble.append(previewSlot);
   }
   const time = document.createElement("time");
   time.className = "message-time";

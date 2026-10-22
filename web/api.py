@@ -1935,6 +1935,47 @@ def create_api_router() -> Any:
             headers={"Cache-Control": "private, max-age=86400"},
         )
 
+    @router.get("/link-preview")
+    async def link_preview(url: str) -> Any:
+        from web.link_preview import BlockedURLError, get_preview
+
+        try:
+            preview = await get_preview(url)
+        except BlockedURLError:
+            raise HTTPException(status_code=400, detail="URL not allowed") from None
+        if preview is None:
+            raise HTTPException(status_code=404, detail="No preview")
+        return JSONResponse(
+            content={
+                "url": preview["url"],
+                "title": preview["title"],
+                "description": preview["description"],
+                "site_name": preview["site_name"],
+                "has_image": bool(preview.get("image_url")),
+            },
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    @router.get("/link-preview/image")
+    async def link_preview_image(url: str) -> Any:
+        from web.link_preview import BlockedURLError, get_preview_image
+
+        try:
+            result = await get_preview_image(url)
+        except BlockedURLError:
+            raise HTTPException(status_code=400, detail="URL not allowed") from None
+        if result is None:
+            raise HTTPException(status_code=404, detail="No preview image")
+        data, content_type = result
+        return Response(
+            content=data,
+            media_type=content_type,
+            headers={
+                "Cache-Control": "private, max-age=86400",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @router.post("/log")
     def client_log(payload: dict[str, Any]) -> dict[str, str]:
         message = str(payload.get("message") or "")[:500]

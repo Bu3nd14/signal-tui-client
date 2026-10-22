@@ -35,6 +35,7 @@ html[data-skin="teams"] .contact.active:hover {
 html[data-skin="teams"] .avatar { background: linear-gradient(145deg, #5b5fc7, #3a3a6e); }
 
 html[data-skin="teams"] .message-quote { border-left-color: #b3b6ff; }
+html[data-skin="teams"] .link-preview { border-left-color: #b3b6ff; }
 html[data-skin="teams"] .message-quote strong,
 html[data-skin="teams"] .reply-copy strong { color: #b3b6ff; }
 html[data-skin="teams"] .message-sender { color: #b5b0f2; }
