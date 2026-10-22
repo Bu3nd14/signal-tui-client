@@ -102,6 +102,71 @@ def _looks_like_embedded_media(value: object) -> bool:
     return embedded_media_quote_placeholder(value) is not None
 
 
+# ─── Location messages ──────────────────────────────────────────────────────
+# WAHA delivers a shared position with ``body`` set to the base64 JPEG map
+# thumbnail (``/9j/...``) and the coordinates in a flat ``location`` object
+# (``latitude``/``longitude``/``name``/``address``/``description``) and/or
+# a nested ``locationMessage``/``liveLocationMessage`` (``degreesLatitude``/
+# ``degreesLongitude``) under ``message``/``_data.message``.
+
+
+def _wa_location(raw: dict) -> dict | None:
+    """Return the location dict of a WhatsApp message, or ``None``."""
+    loc = raw.get("location")
+    if isinstance(loc, dict) and (
+        loc.get("latitude") is not None or loc.get("degreesLatitude") is not None
+    ):
+        return loc
+    data = raw.get("_data") if isinstance(raw.get("_data"), dict) else {}
+    for container in (
+        raw.get("message"),
+        data.get("message"),
+        data.get("Message"),
+        raw,
+    ):
+        if not isinstance(container, dict):
+            continue
+        for key in ("locationMessage", "liveLocationMessage"):
+            nested = container.get(key)
+            if isinstance(nested, dict):
+                return {**nested, "live": nested.get("live") or key.startswith("live")}
+    if str(raw.get("type") or "").lower() in ("location", "live_location"):
+        lat = raw.get("lat") or data.get("lat")
+        lng = raw.get("lng") or data.get("lng")
+        if lat is not None and lng is not None:
+            return {"latitude": lat, "longitude": lng}
+    return None
+
+
+def _wa_location_text(loc: dict) -> str | None:
+    """Render a WhatsApp location as readable text with a Google Maps link."""
+    lat = loc.get("latitude", loc.get("degreesLatitude"))
+    lng = loc.get("longitude", loc.get("degreesLongitude"))
+    try:
+        lat_f = float(lat)
+        lng_f = float(lng)
+    except (TypeError, ValueError):
+        return None
+    label = "📍 Posizione in tempo reale" if loc.get("live") else "📍 Posizione"
+    details = [
+        str(v).strip()
+        for v in (loc.get("name"), loc.get("address"), loc.get("description"))
+        if isinstance(v, str) and v.strip() and not _looks_like_embedded_media(v)
+    ]
+    # ``description`` often repeats ``name``/``address`` joined by a newline.
+    seen: list[str] = []
+    for d in details:
+        if not any(d in s for s in seen):
+            seen = [s for s in seen if s not in d] + [d]
+    lines = [label + (": " + seen[0] if seen else "")]
+    lines.extend(seen[1:])
+    url = loc.get("url")
+    if not (isinstance(url, str) and url.startswith(("http://", "https://"))):
+        url = f"https://maps.google.com/?q={lat_f:.6f},{lng_f:.6f}"
+    lines.append(url)
+    return "\n".join(lines)
+
+
 def _wa_quote_media_type(quote: dict) -> str | None:
     """Return the neutral ``msg_type`` of a quoted WhatsApp media, or ``None``.
 
@@ -471,6 +536,13 @@ def _event_from_message(
         or (raw.get("message") or {}).get("conversation")
         or ""
     )
+    location = _wa_location(raw)
+    location_text = _wa_location_text(location) if location else None
+    if location_text:
+        # ``body`` carries the base64 map thumbnail: never show it as text.
+        text = location_text
+    elif _looks_like_embedded_media(text):
+        text = embedded_media_quote_placeholder(text) or ""
     text = _resolve_text_mentions(
         text, contacts_by_jid, lid_lookup, schedule_lid_resolve
     )
@@ -485,7 +557,7 @@ def _event_from_message(
     msg_type = _msg_type(raw)
     caption = _resolve_text_mentions(
         raw.get("caption") or "", contacts_by_jid, lid_lookup, schedule_lid_resolve
-    ) or (text.strip() or "")
+    ) or ("" if location_text else text.strip())
     if _looks_like_embedded_media(caption):
         caption = ""
 
