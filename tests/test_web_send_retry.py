@@ -1036,6 +1036,7 @@ globalThis.window = {
   SignalTuiOutbox: { replyToQuoteRecord: () => null },
 };
 globalThis.resizeComposer = () => {};
+globalThis.storeDraftText = () => {};
 globalThis.updateComposer = () => {};
 globalThis.renderMessages = () => {};
 globalThis.flushOutbox = () => { flushed = true; };

@@ -283,7 +283,11 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const submit = app.slice(app.indexOf("async function submitMessage("), app.indexOf("\nfunction encodeToken"));
-globalThis.state = {
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(),
   sending: false,
   active: { id: "alice", protocol: "signal" },
   stagedAttachments: [],

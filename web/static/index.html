@@ -10,7 +10,7 @@
   <link rel="apple-touch-icon" href="/icon.svg">
   <meta name="theme-color" content="#101720">
   <script>try{document.documentElement.dataset.skin=localStorage.getItem("signal-tui-web-skin")||"";}catch(e){}</script>
-  <link rel="stylesheet" href="/style.css?v=70">
+  <link rel="stylesheet" href="/style.css?v=72">
   <link rel="stylesheet" href="/teams-skin.css?v=24">
 </head>
 <body>
@@ -22,7 +22,11 @@
         </div>
         <div class="header-actions">
           <button id="refresh-contacts" class="icon-button" type="button" aria-label="Ricarica conversazioni" title="Ricarica">↻</button>
-          <button id="open-token" class="icon-button" type="button" aria-label="Collega backend" title="Collega backend"><span class="skin-default">☰</span><span class="skin-teams">⋯</span></button>
+          <button id="main-menu-button" class="icon-button" type="button" aria-label="Menu" title="Menu" aria-haspopup="menu" aria-expanded="false" aria-controls="main-menu"><span class="skin-default">☰</span><span class="skin-teams">⋯</span></button>
+          <div id="main-menu" class="main-menu" role="menu" hidden>
+            <button id="open-settings" class="main-menu-item" type="button" role="menuitem">⚙ Impostazioni</button>
+            <button id="open-token" class="main-menu-item" type="button" role="menuitem">🔗 Collega backend</button>
+          </div>
         </div>
       </header>
       <div id="protocol-tabs" class="protocol-tabs" role="tablist" aria-label="Seleziona backend">
@@ -47,6 +51,7 @@
             <p id="thread-meta">Seleziona una conversazione</p>
           </div>
         </div>
+        <button id="archive-button" class="icon-button archive-button" type="button" aria-label="Archivia chat" title="Archivia chat" hidden><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M10 13h4"/></svg></button>
         <span id="connection-state" class="connection-state offline">offline</span>
       </header>
       <div id="error-banner" class="error-banner" role="alert" hidden>
@@ -124,18 +129,6 @@
           </div>
           <span id="openai-key-status" class="link-option-status" aria-live="polite">Non configurata</span>
         </div>
-        <div class="link-option">
-          <label class="link-option-name" for="stealth-toggle">Modalità lean</label>
-          <input id="stealth-toggle" type="checkbox" aria-label="Nascondi le immagini profilo">
-        </div>
-        <div class="link-option">
-          <label class="link-option-name" for="link-previews-toggle">Anteprime link e mappe</label>
-          <input id="link-previews-toggle" type="checkbox" aria-label="Mostra le anteprime dei link e le mappe delle posizioni">
-        </div>
-        <div class="link-option">
-          <label class="link-option-name" for="skin-toggle">Skin Microsoft Teams</label>
-          <input id="skin-toggle" type="checkbox" aria-label="Attiva skin Microsoft Teams">
-        </div>
         <div class="link-option link-option-token">
           <label class="link-option-name" for="token-input">Token web</label>
           <div class="link-key-controls">
@@ -149,8 +142,57 @@
     </div>
   </dialog>
 
+  <dialog id="settings-dialog" class="link-dialog">
+    <div class="link-dialog-content">
+      <div class="link-dialog-header">
+        <h2>Impostazioni</h2>
+        <button id="close-settings-dialog" class="link-dialog-close" type="button" aria-label="Chiudi">×</button>
+      </div>
+      <div class="link-options">
+        <div class="link-option">
+          <label class="link-option-name" for="stealth-toggle">Modalità lean</label>
+          <input id="stealth-toggle" type="checkbox" aria-label="Nascondi le immagini profilo">
+        </div>
+        <div class="link-option">
+          <label class="link-option-name" for="link-previews-toggle">Anteprime link e mappe</label>
+          <input id="link-previews-toggle" type="checkbox" aria-label="Mostra le anteprime dei link e le mappe delle posizioni">
+        </div>
+        <div class="link-option">
+          <label class="link-option-name" for="skin-toggle">Skin Microsoft Teams</label>
+          <input id="skin-toggle" type="checkbox" aria-label="Attiva skin Microsoft Teams">
+        </div>
+        <div class="link-option">
+          <label class="link-option-name" for="cache-size-select">Messaggi salvati per chat</label>
+          <select id="cache-size-select">
+            <option value="100">100</option>
+            <option value="200">200</option>
+            <option value="500">500</option>
+          </select>
+        </div>
+        <div class="link-option">
+          <label class="link-option-name" for="background-sync-select">Scarica chat in background</label>
+          <select id="background-sync-select">
+            <option value="0">Disattivato</option>
+            <option value="10">Ultime 10 chat</option>
+            <option value="25">Ultime 25 chat</option>
+            <option value="50">Ultime 50 chat</option>
+          </select>
+        </div>
+        <div class="link-option">
+          <span class="link-option-name">Cache messaggi</span>
+          <div class="link-key-controls">
+            <span id="cache-status" class="link-option-status" aria-live="polite"></span>
+            <button id="clear-message-cache" class="primary-button" type="button">Svuota</button>
+          </div>
+        </div>
+      </div>
+      <p class="dialog-copy link-dialog-note">I messaggi salvati restano su questo dispositivo: le chat si aprono subito e si leggono anche offline.</p>
+    </div>
+  </dialog>
+
   <script src="/reconcile.js?v=7" defer></script>
   <script src="/outbox.js?v=1" defer></script>
-  <script src="/app.js?v=128" defer></script>
+  <script src="/message_cache.js?v=1" defer></script>
+  <script src="/app.js?v=131" defer></script>
 </body>
 </html>

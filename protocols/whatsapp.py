@@ -383,6 +383,14 @@ class WhatsAppBackend(ChatBackend):
         if not isinstance(raw, dict):
             return False
 
+        if str(raw.get("event") or "").lower() == "chat.archive":
+            payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+            chat_id = _jid_string(payload.get("id") or payload.get("chatId"))
+            if not chat_id:
+                return False
+            self._apply_chat_archived(chat_id, bool(payload.get("archived")))
+            return True
+
         # ── message.ack: translate into a synthetic message event only ────
         # WAHA sends message.ack INSTEAD of a separate message event for
         # outgoing echoes (including messages synced from another linked
@@ -800,6 +808,7 @@ class WhatsAppBackend(ChatBackend):
                 "message.ack.group",
                 "presence.update",
                 "message.reaction",
+                "chat.archive",
             ]
             if webhook in urls:
                 # URL già registrato — controlla se anche gli eventi sono
@@ -949,6 +958,7 @@ class WhatsAppBackend(ChatBackend):
                 # sovrascrive un eventuale "ghost".
                 "source": "wa_chats",
                 "is_chat_active": True,
+                "archived": bool(c.get("archived")),
             }
             phone = self._contact_phone(jid)
             if phone:
@@ -998,7 +1008,7 @@ class WhatsAppBackend(ChatBackend):
                 c.display_name = f.display_name
             if f.last_message_ts > (c.last_message_ts or 0):
                 c.last_message_ts = f.last_message_ts
-            for k in ("phone", "lid"):  # NIENTE "last_message_ts" (v3.1)
+            for k in ("phone", "lid", "archived"):  # NIENTE "last_message_ts" (v3.1)
                 if k in f.extras:
                     c.extras[k] = f.extras[k]
             kept.append(c)
@@ -2417,6 +2427,25 @@ class WhatsAppBackend(ChatBackend):
             )
             is not None
         )
+
+    def _apply_chat_archived(self, contact_id: str, archived: bool) -> None:
+        """Aggiorna il flag ``archived`` del contatto e notifica la UI."""
+        contact = self._identify_contact(contact_id)
+        if contact is None or bool(contact.extras.get("archived")) == archived:
+            return
+        contact.extras["archived"] = archived
+        self._enqueue_event(self._contact_update_event(contact))
+
+    def set_chat_archived_sync(self, contact_id: str, archived: bool) -> bool:
+        """Archivia/ripristina la chat su WhatsApp (sincronizzato col telefono)."""
+        if not self._rest or not self._connected:
+            return False
+        contact = self._identify_contact(contact_id)
+        chat_id = contact.id if contact is not None else contact_id
+        if not self._rest.set_chat_archived(chat_id, archived):
+            return False
+        self._apply_chat_archived(chat_id, archived)
+        return True
 
     async def mark_read(self, contact_id: str) -> None:
         """Async mark-read (interface contract)."""

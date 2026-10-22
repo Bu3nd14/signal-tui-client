@@ -157,6 +157,7 @@ class TestPaginatedListContacts:
                 "isGroup": False,
                 "last_ts": 0,
                 "unread": 0,
+                "archived": False,
             }
         ]
         assert len(seen) == 1
