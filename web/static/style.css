@@ -609,8 +609,8 @@ h2 { font-size: 1.05rem; }
 .primary-button { padding: 9px 14px; border: 1px solid var(--accent); border-radius: 9px; background: var(--accent); color: white; cursor: pointer; }
 .primary-button[hidden] { display: none; }
 
-#link-dialog { width: min(92vw, 520px); padding: 0; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--text); box-shadow: 0 24px 80px #000b; }
-#link-dialog::backdrop { background: #05080dcf; backdrop-filter: blur(3px); }
+#link-dialog, #settings-dialog { width: min(92vw, 520px); padding: 0; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--text); box-shadow: 0 24px 80px #000b; }
+#link-dialog::backdrop, #settings-dialog::backdrop { background: #05080dcf; backdrop-filter: blur(3px); }
 .link-dialog-content { padding: 24px; }
 .link-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .link-dialog-close { width: 34px; height: 34px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--muted); font-size: 1.5rem; cursor: pointer; }
@@ -627,6 +627,12 @@ h2 { font-size: 1.05rem; }
 #openai-key-input:disabled, #save-openai-key:disabled { opacity: .6; cursor: not-allowed; }
 .field-error { color: var(--danger); font-size: .78rem; }
 .link-dialog-note { margin-bottom: 0; font-size: .8rem; }
+.link-option select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; font-size: .84rem; }
+.header-actions { position: relative; }
+.main-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; display: grid; min-width: 190px; padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: 0 12px 40px #0009; }
+.main-menu[hidden] { display: none; }
+.main-menu-item { padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: .88rem; text-align: left; cursor: pointer; }
+.main-menu-item:hover, .main-menu-item:focus-visible { outline: none; background: var(--panel-raised); }
 
 @media (max-width: 900px) {
   .emoji-picker { position: absolute; right: 8px; bottom: calc(100% - 1px); width: min(310px, calc(100vw - 16px)); border: 1px solid var(--line); border-radius: 12px 12px 0 0; box-shadow: 0 -12px 35px #0008; }

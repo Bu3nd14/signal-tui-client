@@ -44,6 +44,8 @@ _PROTOCOLS = {"signal", "whatsapp", "telegram"}
 _MAX_TEXT_LENGTH = 64 * 1024
 _MAX_ATTACHMENTS = 10
 _THUMB_WIDTHS = {96, 240, 480}
+_MAX_MESSAGES_LIMIT = 2000
+_MESSAGES_LIMIT_SLACK = 50
 _THUMB_CACHE_LIMIT = 500 * 1024 * 1024
 _THUMB_LOCKS: dict[Path, threading.Lock] = {}
 _THUMB_LOCKS_GUARD = threading.Lock()
@@ -575,13 +577,34 @@ def _dedup_intra_key_rows(
 
 
 def _messages(
-    protocol: str, contact_id: str, extra_keys: tuple[str, ...] = ()
+    protocol: str,
+    contact_id: str,
+    extra_keys: tuple[str, ...] = (),
+    *,
+    limit: int | None = None,
+    since: int | None = None,
 ) -> list[dict[str, Any]]:
+    """Messages of a chat, oldest first.
+
+    ``since`` keeps only messages with ``timestamp >= since`` (the web cache's
+    delta sync); ``limit`` keeps only the newest ``limit`` messages.
+    """
     import protocols.db as backend
     from protocols.db import _DB_LOCK, _reactions_for_contact
 
     keys = [contact_id, *(key for key in extra_keys if key)]
     placeholders = ", ".join("?" for _ in keys)
+    where_since = "AND timestamp >= ? " if since is not None else ""
+    params: tuple[Any, ...] = (protocol, *keys) + (
+        (since,) if since is not None else ()
+    )
+    if limit is not None:
+        # Newest first in SQL, with slack for the rows the dedup drops; the
+        # result is put back in chronological order and trimmed below.
+        order = "ORDER BY timestamp DESC, id DESC LIMIT ?"
+        params = (*params, limit + _MESSAGES_LIMIT_SLACK)
+    else:
+        order = "ORDER BY timestamp, id"
     with _DB_LOCK:
         try:
             connection = sqlite3.connect(backend.DB_FILE)
@@ -596,16 +619,20 @@ def _messages(
                     "reply_to_message_id, batch_id, batch_index "
                     f"FROM messages WHERE protocol = ? "
                     f"AND contact_number IN ({placeholders}) "
-                    "ORDER BY timestamp, id",
-                    (protocol, *keys),
+                    f"{where_since}{order}",
+                    params,
                 ).fetchall()
             finally:
                 connection.close()
         except sqlite3.Error:
             return []
+        if limit is not None:
+            rows.reverse()
         if len(keys) > 1:
             rows = _cross_key_dedup_rows(rows, contact_id)
         rows = _dedup_intra_key_rows(rows)
+        if limit is not None:
+            rows = rows[-limit:]
 
     messages = []
     for row in rows:
@@ -2067,7 +2094,11 @@ def create_api_router() -> Any:
         proto: Literal["signal", "whatsapp", "telegram"],
         contact_id: str,
         refresh: bool = False,
+        limit: int | None = None,
+        since: int | None = None,
     ) -> list[dict[str, Any]]:
+        if limit is not None and not 1 <= limit <= _MAX_MESSAGES_LIMIT:
+            raise HTTPException(status_code=400, detail="Invalid limit")
         # Canonicalizza PRIMA del fetch remoto: una richiesta con l'id del ghost
         # (@c.us) apre lo storico sulla chat attiva (@lid), R-G.  La read-union
         # poi unisce comunque lo storico DB diviso fra le due chiavi.
@@ -2098,7 +2129,9 @@ def create_api_router() -> Any:
         extra_keys = (
             tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
         )
-        result = _messages(proto, contact_id, extra_keys=extra_keys)
+        result = _messages(
+            proto, contact_id, extra_keys=extra_keys, limit=limit, since=since
+        )
         _attach_media_versions(manager, proto, result)
         is_group = contact_id.endswith("@g.us")
         if not is_group:

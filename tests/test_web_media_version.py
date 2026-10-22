@@ -251,7 +251,7 @@ def test_thumbnail_invalidates_on_size_change_with_same_mtime(monkeypatch, tmp_p
 
 def test_index_html_bumps_app_js_version():
     index = Path("web/static/index.html").read_text(encoding="utf-8")
-    assert "app.js?v=130" in index
+    assert "app.js?v=131" in index
 
 
 # ── SPA ───────────────────────────────────────────────────────────────────────
@@ -325,6 +325,7 @@ const fire = () => observerCallback([{ target: observed, isIntersecting: true }]
 
   globalThis.setDotColor = () => {};
   globalThis.loadContacts = () => {};
+  globalThis.scheduleBackgroundSync = () => {};
   globalThis.COLOR_GREEN = "#00ff00";
   const wsStart = app.indexOf("  socket.onmessage = (event) => {");
   const wsEnd = app.indexOf("  socket.onerror = () => socket.close();", wsStart);

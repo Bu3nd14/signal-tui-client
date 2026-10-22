@@ -6,6 +6,18 @@ const STEALTH_KEY = "signal-tui-web-stealth";
 const SKIN_KEY = "signal-tui-web-skin";
 const LINK_PREVIEWS_KEY = "signal-tui-web-link-previews";
 const DRAFTS_KEY = "signal-tui-web-drafts";
+const CACHE_SIZE_KEY = "signal-tui-web-cache-size";
+const BACKGROUND_SYNC_KEY = "signal-tui-web-background-sync";
+const CACHE_SIZES = [100, 200, 500];
+const BACKGROUND_SYNC_OPTIONS = [0, 10, 25, 50];
+const BACKGROUND_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+const BACKGROUND_SYNC_DEBOUNCE_MS = 3000;
+
+function storedChoice(key, options, fallback) {
+  const raw = localStorage.getItem(key);
+  const value = Number(raw);
+  return raw !== null && options.includes(value) ? value : fallback;
+}
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 // Heartbeat watchdog: the server fans out a ``{"type":"heartbeat"}`` frame
 // every ~5s (web/ws.py).  If nothing at all arrives for this long, the socket
@@ -53,6 +65,13 @@ const state = {
   // Bozze del composer per chat ("proto:id" -> { text, attachments }): il testo
   // e gli allegati non inviati restano nella loro chat, mai in quella aperta dopo.
   drafts: new Map(),
+  // Cache messaggi per chat (web/static/message_cache.js): null se lo script
+  // non è caricato, e allora si torna al caricamento completo dal server.
+  messageCache: window.SignalTuiMessageCache?.openMessageCache() ?? null,
+  cacheSize: storedChoice(CACHE_SIZE_KEY, CACHE_SIZES, 200),
+  backgroundSyncChats: storedChoice(BACKGROUND_SYNC_KEY, BACKGROUND_SYNC_OPTIONS, 10),
+  backgroundSyncRunning: false,
+  backgroundSyncTimer: null,
   // True quando è stata pushata una history entry per il thread aperto
   // (mobile back/swipe-back): evita di accumulare una entry per ogni
   // cambio di contatto mentre il thread resta aperto.
@@ -121,6 +140,12 @@ const elements = {
   errorBanner: document.querySelector("#error-banner"),
   errorText: document.querySelector("#error-text"),
   linkDialog: document.querySelector("#link-dialog"),
+  settingsDialog: document.querySelector("#settings-dialog"),
+  mainMenu: document.querySelector("#main-menu"),
+  mainMenuButton: document.querySelector("#main-menu-button"),
+  cacheSizeSelect: document.querySelector("#cache-size-select"),
+  backgroundSyncSelect: document.querySelector("#background-sync-select"),
+  cacheStatus: document.querySelector("#cache-status"),
   linkStatusSignal: document.querySelector("#link-status-signal"),
   linkStatusWhatsapp: document.querySelector("#link-status-whatsapp"),
   linkStatusTelegram: document.querySelector("#link-status-telegram"),
@@ -755,6 +780,7 @@ async function loadContacts({ quiet = false } = {}) {
     }
     updateArchiveButton();
     renderContacts();
+    if (state.backgroundSyncTimer == null) scheduleBackgroundSync();
   } catch (error) {
     if (error.message !== "unauthorized") {
       elements.contactStatus.textContent = "Impossibile caricare le conversazioni.";
@@ -2011,25 +2037,107 @@ function setMessageTick(entry, status) {
   entry.tickEl.title = title;
 }
 
+// Scarica il delta di una chat e aggiorna la cache: solo la coda dei messaggi
+// (vedi message_cache.js), oppure l'intera finestra se la cache è vuota.
+async function syncChatMessages(contact, { refresh = false, signal } = {}) {
+  const cacheApi = window.SignalTuiMessageCache;
+  const cache = state.messageCache;
+  const limit = state.cacheSize;
+  const cached = cache ? await cache.load(contact.protocol, contact.id).catch(() => null) : null;
+  const since = cache ? cacheApi.deltaSince(cached) : null;
+  const query = new URLSearchParams({ proto: contact.protocol, contact_id: contact.id });
+  if (cache) query.set("limit", String(limit));
+  if (since != null) query.set("since", String(since));
+  if (refresh) query.set("refresh", "1");
+  const response = await apiFetch(`/api/messages?${query}`, { signal });
+  const fresh = await response.json();
+  if (!cache) return fresh;
+  const merged = cacheApi.mergeDelta(cached, fresh, since, limit);
+  await cache.save(contact.protocol, contact.id, merged).catch(() => {});
+  return merged;
+}
+
 async function loadMessages(refresh = false) {
   const active = state.active;
   if (!active) return;
   state.messageRequest?.abort();
   const controller = new AbortController();
   state.messageRequest = controller;
+  const isCurrent = () => !controller.signal.aborted
+    && state.active?.id === active.id && state.active?.protocol === active.protocol;
+  const show = (messages) => {
+    if (!isCurrent()) return;
+    state.messages = messages;
+    renderMessages(messages, active.protocol);
+  };
+  let shown = false;
   try {
-    const query = new URLSearchParams({ proto: active.protocol, contact_id: active.id, ...(refresh ? { refresh: "1" } : {}) });
-    const response = await apiFetch(`/api/messages?${query}`, { signal: controller.signal });
-    const messages = await response.json();
-    if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
-      state.messages = messages;
-      renderMessages(messages, active.protocol);
+    // Apertura chat (refresh): subito la cache locale, anche offline; poi il
+    // delta dal DB locale del server (veloce) e infine quello dopo il fetch
+    // remoto (WAHA/Telegram, lento), senza bloccare la lettura.
+    if (refresh && state.messageCache) {
+      const cached = await state.messageCache.load(active.protocol, active.id).catch(() => null);
+      if (cached?.length && isCurrent()) {
+        show(cached);
+        shown = true;
+      }
     }
+    // Telegram rifà sempre il fetch remoto lato server: un solo giro.
+    if (!(refresh && active.protocol === "telegram")) {
+      show(await syncChatMessages(active, { signal: controller.signal }));
+      shown = true;
+    }
+    if (refresh) show(await syncChatMessages(active, { refresh: true, signal: controller.signal }));
   } catch (error) {
-    if (error.name !== "AbortError" && error.message !== "unauthorized") showError("Errore di rete durante il caricamento dei messaggi.");
+    // Offline con la cache a schermo: niente banner, lo stato connessione basta.
+    if (error.name !== "AbortError" && error.message !== "unauthorized" && !shown) {
+      showError("Errore di rete durante il caricamento dei messaggi.");
+    }
   } finally {
     if (state.messageRequest === controller) state.messageRequest = null;
   }
+}
+
+// ── Download in background ───────────────────────────────────────────────────
+// Tiene in cache le chat più recenti (impostazione "Scarica chat in
+// background"): scarica solo quelle con messaggi più nuovi di quanto salvato.
+function backgroundSyncCandidates() {
+  return [...state.contacts]
+    .filter((contact) => !isArchived(contact))
+    .sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0))
+    .slice(0, state.backgroundSyncChats);
+}
+
+async function runBackgroundSync() {
+  if (state.backgroundSyncRunning || !state.messageCache || !state.backgroundSyncChats || !state.token) return;
+  state.backgroundSyncRunning = true;
+  try {
+    for (const contact of backgroundSyncCandidates()) {
+      if (!state.backgroundSyncChats || navigator.onLine === false) break;
+      if (state.active?.id === contact.id && state.active?.protocol === contact.protocol) continue;
+      const cached = await state.messageCache.load(contact.protocol, contact.id).catch(() => null);
+      const newest = cached?.length ? Number(cached[cached.length - 1].timestamp || 0) : -1;
+      if (newest >= Number(contact.last_message_ts || 0)) continue;
+      try {
+        await syncChatMessages(contact);
+      } catch (error) {
+        if (error.message === "unauthorized") break;
+      }
+    }
+    await state.messageCache.prune(Math.max(window.SignalTuiMessageCache.MAX_CACHED_CHATS, state.backgroundSyncChats));
+  } catch {
+    // Best-effort: il prossimo giro riprova.
+  } finally {
+    state.backgroundSyncRunning = false;
+  }
+}
+
+function scheduleBackgroundSync(delay = BACKGROUND_SYNC_DEBOUNCE_MS) {
+  window.clearTimeout(state.backgroundSyncTimer);
+  if (!state.backgroundSyncChats) return;
+  state.backgroundSyncTimer = window.setTimeout(() => {
+    runBackgroundSync().finally(() => scheduleBackgroundSync(BACKGROUND_SYNC_INTERVAL_MS));
+  }, delay);
 }
 
 function applyReceiptUpdates(payload) {
@@ -3528,6 +3636,7 @@ function connectSocket() {
     elements.connection.textContent = "live";
     if (state.active) loadMessages(true);
     flushOutbox();
+    scheduleBackgroundSync();
   };
   socket.onmessage = (event) => {
     state.lastWsActivity = Date.now();
@@ -3550,6 +3659,8 @@ function connectSocket() {
             if (!update.payload.is_mine && document.visibilityState === "visible") {
               markRead(state.active.protocol, state.active.id);
             }
+          } else {
+            scheduleBackgroundSync();
           }
           break;
         }
@@ -3629,7 +3740,54 @@ function connectSocket() {
 }
 
 document.querySelector("#refresh-contacts").addEventListener("click", () => loadContacts());
-document.querySelector("#open-token").addEventListener("click", () => requestToken());
+function closeMainMenu() {
+  if (elements.mainMenu.hidden) return;
+  elements.mainMenu.hidden = true;
+  elements.mainMenuButton.setAttribute("aria-expanded", "false");
+}
+elements.mainMenuButton.addEventListener("click", () => {
+  const willOpen = elements.mainMenu.hidden;
+  elements.mainMenu.hidden = !willOpen;
+  elements.mainMenuButton.setAttribute("aria-expanded", String(willOpen));
+});
+document.addEventListener("click", (event) => {
+  if (!event.target.closest("#main-menu, #main-menu-button")) closeMainMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeMainMenu();
+});
+document.querySelector("#open-token").addEventListener("click", () => {
+  closeMainMenu();
+  requestToken();
+});
+
+function updateCacheStatus() {
+  elements.cacheStatus.textContent = state.messageCache ? "" : "Non disponibile";
+}
+document.querySelector("#open-settings").addEventListener("click", () => {
+  closeMainMenu();
+  updateCacheStatus();
+  if (!elements.settingsDialog.open) elements.settingsDialog.showModal();
+});
+document.querySelector("#close-settings-dialog").addEventListener("click", () => elements.settingsDialog.close());
+elements.cacheSizeSelect.value = String(state.cacheSize);
+elements.cacheSizeSelect.addEventListener("change", () => {
+  state.cacheSize = Number(elements.cacheSizeSelect.value);
+  localStorage.setItem(CACHE_SIZE_KEY, String(state.cacheSize));
+  updateCacheStatus();
+});
+elements.backgroundSyncSelect.value = String(state.backgroundSyncChats);
+elements.backgroundSyncSelect.addEventListener("change", () => {
+  state.backgroundSyncChats = Number(elements.backgroundSyncSelect.value);
+  localStorage.setItem(BACKGROUND_SYNC_KEY, String(state.backgroundSyncChats));
+  scheduleBackgroundSync(0);
+});
+document.querySelector("#clear-message-cache").addEventListener("click", async () => {
+  if (!state.messageCache) return;
+  await state.messageCache.prune(0).catch(() => {});
+  elements.cacheStatus.textContent = "Cache svuotata";
+  scheduleBackgroundSync();
+});
 document.querySelector("#close-link-dialog").addEventListener("click", () => elements.linkDialog.close());
 elements.stealthToggle.checked = state.stealth;
 elements.stealthToggle.addEventListener("change", () => {
