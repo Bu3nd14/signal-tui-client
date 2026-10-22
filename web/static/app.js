@@ -4,6 +4,7 @@ const TOKEN_KEY = "signal-tui-web-token";
 const PROTOCOL_KEY = "signal-tui-web-proto";
 const STEALTH_KEY = "signal-tui-web-stealth";
 const SKIN_KEY = "signal-tui-web-skin";
+const LINK_PREVIEWS_KEY = "signal-tui-web-link-previews";
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 // Heartbeat watchdog: the server fans out a ``{"type":"heartbeat"}`` frame
 // every ~5s (web/ws.py).  If nothing at all arrives for this long, the socket
@@ -44,6 +45,8 @@ const state = {
   // richiesta a /api/contact-avatar parte mentre è attiva.
   stealth: localStorage.getItem(STEALTH_KEY) === "1",
   skin: localStorage.getItem(SKIN_KEY) === "teams",
+  // Anteprime link e mappe delle posizioni: attive salvo opt-out esplicito.
+  linkPreviewsEnabled: localStorage.getItem(LINK_PREVIEWS_KEY) !== "0",
   // True quando è stata pushata una history entry per il thread aperto
   // (mobile back/swipe-back): evita di accumulare una entry per ogni
   // cambio di contatto mentre il thread resta aperto.
@@ -123,6 +126,7 @@ const elements = {
   saveToken: document.querySelector("#save-token"),
   stealthToggle: document.querySelector("#stealth-toggle"),
   skinToggle: document.querySelector("#skin-toggle"),
+  linkPreviewsToggle: document.querySelector("#link-previews-toggle"),
   composer: document.querySelector("#composer"),
   composerShell: document.querySelector("#composer-shell"),
   messageInput: document.querySelector("#message-input"),
@@ -286,7 +290,8 @@ function loadLinkPreviewImage(url) {
 
 function renderLinkPreview(url, preview, stickToBottom) {
   const card = document.createElement("a");
-  card.className = "link-preview";
+  // Le miniature mappa WhatsApp sono piccole: layout compatto, non a tutta larghezza.
+  card.className = isLocationMapUrl(url) ? "link-preview link-preview-compact" : "link-preview";
   card.href = url;
   card.target = "_blank";
   card.rel = "noopener noreferrer";
@@ -328,11 +333,15 @@ function renderLinkPreview(url, preview, stickToBottom) {
   return card;
 }
 
+function isLocationMapUrl(url) {
+  return /^https:\/\/maps\.google\.com\/\?q=-?\d{1,3}\.\d{6},-?\d{1,3}\.\d{6}$/.test(url);
+}
+
 function linkPreviewSlot(text, stickToBottom) {
   // Anteprima solo per il primo link del messaggio, come WhatsApp.
   const match = String(text || "").match(/https?:\/\/[^\s<]+/);
   const url = match ? safeExternalUrl(trimUrlEnd(match[0])) : null;
-  if (!url) return null;
+  if (!url || !state.linkPreviewsEnabled) return null;
   const slot = document.createElement("div");
   slot.className = "link-preview-slot";
   const load = () => {
@@ -3464,6 +3473,16 @@ elements.stealthToggle.addEventListener("change", () => {
   localStorage.setItem(STEALTH_KEY, state.stealth ? "1" : "0");
   renderContacts();
   renderThreadAvatar(state.active);
+});
+elements.linkPreviewsToggle.checked = state.linkPreviewsEnabled;
+elements.linkPreviewsToggle.addEventListener("change", () => {
+  state.linkPreviewsEnabled = elements.linkPreviewsToggle.checked;
+  localStorage.setItem(LINK_PREVIEWS_KEY, state.linkPreviewsEnabled ? "1" : "0");
+  // Le bolle sono riusate per fingerprint: azzera i nodi per ricostruirle.
+  if (state.active) {
+    state.messageNodes = null;
+    renderMessages(state.messages, state.active.protocol);
+  }
 });
 elements.skinToggle.checked = state.skin;
 elements.skinToggle.addEventListener("change", () => {

@@ -1951,7 +1951,9 @@ def create_api_router() -> Any:
                 "title": preview["title"],
                 "description": preview["description"],
                 "site_name": preview["site_name"],
-                "has_image": bool(preview.get("image_url")),
+                "has_image": bool(
+                    preview.get("image_url") or preview.get("local_image")
+                ),
             },
             headers={"Cache-Control": "private, max-age=3600"},
         )

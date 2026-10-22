@@ -215,3 +215,25 @@ def test_endpoint_404_when_no_preview(monkeypatch):
         ).status_code
         == 404
     )
+
+
+def test_location_link_uses_stored_thumbnail_without_network(monkeypatch):
+    from protocols.location_thumbs import maps_url, save_thumbnail
+
+    jpeg = b"\xff\xd8\xff\xe0" + b"x" * 10
+
+    async def no_network(_url):
+        raise AssertionError("must not fetch")
+
+    monkeypatch.setattr(lp, "_fetch_preview_uncached", no_network)
+    url = maps_url(45.4642, 9.19)
+    assert asyncio.run(lp.get_preview(url)) is None  # no thumbnail yet
+    save_thumbnail(45.4642, 9.19, jpeg)
+    client = _client()
+    response = client.get("/api/link-preview", params={"url": url})
+    assert response.status_code == 200
+    assert response.json()["has_image"] is True
+    image = client.get("/api/link-preview/image", params={"url": url})
+    assert image.status_code == 200
+    assert image.content == jpeg
+    assert image.headers["content-type"] == "image/jpeg"

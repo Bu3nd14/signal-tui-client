@@ -79,3 +79,52 @@ def test_unknown_base64_body_is_not_shown_raw():
 
 def test_plain_text_untouched():
     assert _text(_base(type="chat", body="Ciao!")) == "Ciao!"
+
+
+def _jpeg_b64():
+    import base64
+
+    return base64.b64encode(b"\xff\xd8\xff\xe0" + b"map" * 20).decode()
+
+
+def test_location_thumbnail_saved_from_nested_jpeg():
+    from protocols.location_thumbs import load_thumbnail
+
+    raw = _base(
+        body="",
+        _data={
+            "message": {
+                "locationMessage": {
+                    "degreesLatitude": 45.4642,
+                    "degreesLongitude": 9.19,
+                    "jpegThumbnail": _jpeg_b64(),
+                }
+            }
+        },
+    )
+    _text(raw)
+    assert load_thumbnail(45.4642, 9.19).startswith(b"\xff\xd8\xff")
+
+
+def test_location_thumbnail_saved_from_webjs_body():
+    from protocols.location_thumbs import load_thumbnail
+
+    raw = _base(body=_jpeg_b64(), location={"latitude": "1.5", "longitude": "2.5"})
+    _text(raw)
+    assert load_thumbnail(1.5, 2.5) is not None
+
+
+def test_non_jpeg_thumbnail_is_ignored():
+    from protocols.location_thumbs import load_thumbnail
+
+    raw = _base(body="aGVsbG8=", location={"latitude": "3", "longitude": "4"})
+    _text(raw)
+    assert load_thumbnail(3, 4) is None
+
+
+def test_maps_url_round_trip():
+    from protocols.location_thumbs import maps_url, parse_maps_url
+
+    assert parse_maps_url(maps_url(-33.86, 151.2)) == (-33.86, 151.2)
+    assert parse_maps_url("https://maps.google.com/?q=1,2") is None
+    assert parse_maps_url("https://maps.google.com/?q=95.000000,2.000000") is None

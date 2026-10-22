@@ -24,6 +24,8 @@ from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
+from protocols.location_thumbs import load_thumbnail, parse_maps_url, thumbnail_path
+
 logger = logging.getLogger(__name__)
 
 PREVIEW_TTL_SECONDS = 6 * 3600
@@ -274,11 +276,32 @@ def _cache_put(url: str, value: dict[str, Any] | None) -> None:
         _CACHE.popitem(last=False)
 
 
+def _location_preview(url: str, coords: tuple[float, float]) -> dict[str, Any] | None:
+    """Card for a shared-location link, using WhatsApp's own map thumbnail.
+
+    Served from disk: no request to Google (whose EU consent wall would
+    replace the page anyway).  ``None`` when no thumbnail was received.
+    """
+    if not thumbnail_path(*coords).is_file():
+        return None
+    return {
+        "url": url,
+        "title": "Apri in Google Maps",
+        "description": "",
+        "site_name": "Google Maps",
+        "image_url": None,
+        "local_image": True,
+    }
+
+
 async def get_preview(url: str) -> dict[str, Any] | None:
     """Return the (cached) preview for *url*; ``None`` if there is none.
 
     Raises ``BlockedURLError`` for URLs that may not be fetched at all.
     """
+    coords = parse_maps_url(url)
+    if coords is not None:
+        return _location_preview(url, coords)
     validate_url(url)
     hit, value = _cache_get(url)
     if hit:
@@ -308,6 +331,10 @@ async def get_preview_image(url: str) -> tuple[bytes, str] | None:
     so this endpoint can't be used as a generic fetch proxy.
     """
     preview = await get_preview(url)
+    if preview and preview.get("local_image"):
+        coords = parse_maps_url(url)
+        data = load_thumbnail(*coords) if coords else None
+        return (data, "image/jpeg") if data else None
     image_url = (preview or {}).get("image_url")
     if not image_url:
         return None

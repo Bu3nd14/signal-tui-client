@@ -21,6 +21,7 @@ from models import (
     media_quote_placeholder,
     msg_type_for_media_kind,
 )
+from protocols.location_thumbs import decode_thumbnail, maps_url, save_thumbnail
 
 logger = logging.getLogger(__name__)
 
@@ -162,9 +163,24 @@ def _wa_location_text(loc: dict) -> str | None:
     lines.extend(seen[1:])
     url = loc.get("url")
     if not (isinstance(url, str) and url.startswith(("http://", "https://"))):
-        url = f"https://maps.google.com/?q={lat_f:.6f},{lng_f:.6f}"
+        url = maps_url(lat_f, lng_f)
     lines.append(url)
     return "\n".join(lines)
+
+
+def _wa_store_location_thumbnail(loc: dict, body: object) -> None:
+    """Save the map preview WhatsApp ships with a shared location."""
+    lat = loc.get("latitude", loc.get("degreesLatitude"))
+    lng = loc.get("longitude", loc.get("degreesLongitude"))
+    try:
+        lat_f, lng_f = float(lat), float(lng)
+    except (TypeError, ValueError):
+        return
+    for candidate in (loc.get("jpegThumbnail"), loc.get("thumbnail"), body):
+        data = decode_thumbnail(candidate)
+        if data:
+            save_thumbnail(lat_f, lng_f, data)
+            return
 
 
 def _wa_quote_media_type(quote: dict) -> str | None:
@@ -539,7 +555,9 @@ def _event_from_message(
     location = _wa_location(raw)
     location_text = _wa_location_text(location) if location else None
     if location_text:
-        # ``body`` carries the base64 map thumbnail: never show it as text.
+        # ``body`` carries the base64 map thumbnail: keep it on disk for the
+        # web card, never show it as text.
+        _wa_store_location_thumbnail(location, text)
         text = location_text
     elif _looks_like_embedded_media(text):
         text = embedded_media_quote_placeholder(text) or ""
