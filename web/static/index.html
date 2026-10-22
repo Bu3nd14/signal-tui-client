@@ -10,7 +10,7 @@
   <link rel="apple-touch-icon" href="/icon.svg">
   <meta name="theme-color" content="#101720">
   <script>try{document.documentElement.dataset.skin=localStorage.getItem("signal-tui-web-skin")||"";}catch(e){}</script>
-  <link rel="stylesheet" href="/style.css?v=70">
+  <link rel="stylesheet" href="/style.css?v=71">
   <link rel="stylesheet" href="/teams-skin.css?v=24">
 </head>
 <body>
@@ -47,6 +47,7 @@
             <p id="thread-meta">Seleziona una conversazione</p>
           </div>
         </div>
+        <button id="archive-button" class="icon-button archive-button" type="button" aria-label="Archivia chat" title="Archivia chat" hidden><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M10 13h4"/></svg></button>
         <span id="connection-state" class="connection-state offline">offline</span>
       </header>
       <div id="error-banner" class="error-banner" role="alert" hidden>
@@ -151,6 +152,6 @@
 
   <script src="/reconcile.js?v=7" defer></script>
   <script src="/outbox.js?v=1" defer></script>
-  <script src="/app.js?v=128" defer></script>
+  <script src="/app.js?v=129" defer></script>
 </body>
 </html>

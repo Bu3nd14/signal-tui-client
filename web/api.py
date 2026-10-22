@@ -2157,6 +2157,25 @@ def create_api_router() -> Any:
             )
         return {"status": "ok"}
 
+    @router.post("/chats/archive")
+    async def chats_archive(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, bool]:
+        proto = str(payload.get("protocol") or "").strip()
+        contact_id = str(payload.get("contact_id") or "").strip()
+        archived = payload.get("archived")
+        if proto != "whatsapp" or not contact_id or not isinstance(archived, bool):
+            raise HTTPException(status_code=400, detail="Invalid request")
+        backend = request.app.state.manager.get(proto)
+        if backend is None or not hasattr(backend, "set_chat_archived_sync"):
+            raise HTTPException(status_code=503, detail="Backend unavailable")
+        ok = await asyncio.to_thread(
+            backend.set_chat_archived_sync, contact_id, archived
+        )
+        if not ok:
+            raise HTTPException(status_code=502, detail="Archive failed")
+        return {"archived": archived}
+
     @router.post("/messages/edit")
     async def messages_edit(
         request: Request, payload: dict[str, Any]

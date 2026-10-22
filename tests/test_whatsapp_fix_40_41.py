@@ -309,6 +309,7 @@ class TestWebhookDesiredEvents:
             "message.ack.group",
             "presence.update",
             "message.reaction",
+            "chat.archive",
         ]
 
     def test_no_put_when_presence_update_already_subscribed(self):
@@ -332,6 +333,7 @@ class TestWebhookDesiredEvents:
                                     "message.ack.group",
                                     "presence.update",
                                     "message.reaction",
+                                    "chat.archive",
                                 ],
                             }
                         ]

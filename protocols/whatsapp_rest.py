@@ -302,6 +302,8 @@ class WhatsAppRESTClient:
             "isGroup": bool(chat.get("isGroup")),
             "last_ts": last_ts,
             "unread": int(chat.get("unreadCount") or 0),
+            # WEBJS/NOWEB espongono ``archived``; alcune build ``archive``.
+            "archived": bool(chat.get("archived") or chat.get("archive")),
         }
 
     def _fetch_chats_page(
@@ -668,6 +670,19 @@ class WhatsAppRESTClient:
             },
             log_level=logging.DEBUG,
         )
+
+    def set_chat_archived(self, chat_id: str, archived: bool) -> bool:
+        """WAHA ``POST /api/{session}/chats/{chatId}/archive|unarchive``."""
+        from urllib.parse import quote
+
+        action = "archive" if archived else "unarchive"
+        result = self._request(
+            "POST",
+            f"/api/{self.session_name}/chats/{quote(chat_id, safe='')}/{action}",
+            {},
+            timeout=10,
+        )
+        return result is not None
 
     def presence_subscribe(self, chat_id: str) -> dict | None:
         """Subscribe to presence updates for a chat (best-effort POST).

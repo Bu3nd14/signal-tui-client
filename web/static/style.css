@@ -153,6 +153,14 @@ h2 { font-size: 1.05rem; }
   cursor: pointer;
 }
 .contact:hover { background: var(--panel-raised); }
+.archived-row { grid-template-columns: 42px minmax(0, 1fr) auto; color: var(--muted); }
+.archived-row .contact-name { font-weight: 600; }
+.archived-back { color: var(--text); }
+.archived-icon { display: grid; place-items: center; background: var(--panel-raised); font-size: 1.1rem; }
+.archive-button { margin-left: auto; }
+.archive-button[hidden] { display: none; }
+.unread-badge.archived-badge { background: var(--panel-raised); color: var(--muted); }
+.archive-button.is-archived { color: var(--accent); }
 .contact.active { background: #1c2b40; }
 .avatar {
   display: grid;

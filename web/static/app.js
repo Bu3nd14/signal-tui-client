@@ -47,6 +47,8 @@ const state = {
   skin: localStorage.getItem(SKIN_KEY) === "teams",
   // Anteprime link e mappe delle posizioni: attive salvo opt-out esplicito.
   linkPreviewsEnabled: localStorage.getItem(LINK_PREVIEWS_KEY) !== "0",
+  // Vista "Archiviate" della lista chat WhatsApp (come nell'app).
+  showArchived: false,
   // True quando è stata pushata una history entry per il thread aperto
   // (mobile back/swipe-back): evita di accumulare una entry per ogni
   // cambio di contatto mentre il thread resta aperto.
@@ -108,6 +110,7 @@ const elements = {
   contactStatus: document.querySelector("#contact-status"),
   messages: document.querySelector("#message-list"),
   threadName: document.querySelector("#thread-name"),
+  archiveButton: document.querySelector("#archive-button"),
   threadMeta: document.querySelector("#thread-meta"),
   threadAvatar: document.querySelector("#thread-avatar"),
   connection: document.querySelector("#connection-state"),
@@ -604,8 +607,43 @@ function unreadOf(contact) {
   return Number.isFinite(unread) ? Math.max(0, unread) : 0;
 }
 
+function isArchived(contact) {
+  return Boolean(contact?.extras?.archived);
+}
+
+// Come WhatsApp: le chat archiviate non contano nei badge globali.
+function unreadOutsideArchive(contact) {
+  return isArchived(contact) ? 0 : unreadOf(contact);
+}
+
+function archivedRow(archived, back) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = back ? "contact archived-row archived-back" : "contact archived-row";
+  const icon = document.createElement("span");
+  icon.className = "avatar archived-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = back ? "‹" : "🗄";
+  const label = document.createElement("span");
+  label.className = "contact-name";
+  label.textContent = back ? "Archiviate" : `Archiviate (${archived.length})`;
+  button.append(icon, label);
+  const unread = archived.reduce((sum, contact) => sum + unreadOf(contact), 0);
+  if (!back && unread > 0) {
+    const badge = document.createElement("span");
+    badge.className = "unread-badge archived-badge";
+    badge.textContent = unread > 99 ? "99+" : String(unread);
+    button.append(badge);
+  }
+  button.addEventListener("click", () => {
+    state.showArchived = !back;
+    renderContacts();
+  });
+  return button;
+}
+
 function updateFavicon() {
-  const unreadTotal = state.contacts.reduce((sum, contact) => sum + unreadOf(contact), 0);
+  const unreadTotal = state.contacts.reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0);
   // Badge stile app nativa sull'icona Dock/taskbar quando installata come PWA
   // (manifest.json). Non supportato ovunque (es. Firefox): feature-detect,
   // nessun effetto dove manca l'API.
@@ -632,8 +670,15 @@ function renderContacts() {
   updateBackendStatuses();
   const base = state.searchResults ?? state.contacts;
   const sortedContacts = [...base].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
-  const contacts = sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
-  if (state.active && state.active.protocol === state.protocolFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
+  let contacts = sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
+  // La ricerca mostra tutto; altrimenti le archiviate stanno dietro la riga
+  // "Archiviate", come in WhatsApp.
+  const archived = state.searchResults ? [] : contacts.filter(isArchived);
+  if (!archived.length) state.showArchived = false;
+  if (!state.searchResults) {
+    contacts = contacts.filter((contact) => isArchived(contact) === state.showArchived);
+  }
+  if (state.active && (state.searchResults || isArchived(state.active) === state.showArchived) && state.active.protocol === state.protocolFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
     contacts.unshift(state.active);
   }
   for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
@@ -644,7 +689,7 @@ function renderContacts() {
     if (dot) {
       const total = state.contacts
         .filter((contact) => contact.protocol === tab.dataset.protocol)
-        .reduce((sum, contact) => sum + unreadOf(contact), 0);
+        .reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0);
       // Pallino solo sui backend NON selezionati con non letti (quello attivo
       // ha già i badge nella lista).
       dot.hidden = !(total > 0 && tab.dataset.protocol !== state.protocolFilter);
@@ -655,6 +700,7 @@ function renderContacts() {
     : state.contactQuery
       ? `Nessun risultato per «${state.contactQuery}».`
       : "Nessuna conversazione disponibile.";
+  if (archived.length) elements.contacts.append(archivedRow(archived, state.showArchived));
   for (const contact of contacts) {
     const button = document.createElement("button");
     button.type = "button";
@@ -703,6 +749,7 @@ async function loadContacts({ quiet = false } = {}) {
       const current = state.contacts.find((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol);
       if (current) state.active = current;
     }
+    updateArchiveButton();
     renderContacts();
   } catch (error) {
     if (error.message !== "unauthorized") {
@@ -2266,6 +2313,7 @@ function openThread(contact) {
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
   renderThreadAvatar(contact);
+  updateArchiveButton();
   elements.app.classList.add("thread-open");
   // Push una history entry SOLO al primo ingresso nel thread (lista →
   // thread): così il back/swipe-back del browser (mobile) la consuma
@@ -2291,6 +2339,45 @@ function openThread(contact) {
   elements.messages.append(loading);
   abortMediaRequests();
   loadMessages(true);
+}
+
+function updateArchiveButton() {
+  const button = elements.archiveButton;
+  if (!button) return;
+  const contact = state.active;
+  button.hidden = contact?.protocol !== "whatsapp";
+  if (button.hidden) return;
+  const label = isArchived(contact) ? "Rimuovi dall'archivio" : "Archivia chat";
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.classList.toggle("is-archived", isArchived(contact));
+}
+
+async function toggleActiveArchived() {
+  const contact = state.active;
+  if (contact?.protocol !== "whatsapp") return;
+  const archived = !isArchived(contact);
+  elements.archiveButton.disabled = true;
+  try {
+    await apiFetch("/api/chats/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ protocol: contact.protocol, contact_id: contact.id, archived }),
+    });
+    contact.extras = { ...(contact.extras || {}), archived };
+    for (const item of state.contacts) {
+      if (item.id === contact.id && item.protocol === contact.protocol) item.extras = contact.extras;
+    }
+    state.showArchived = archived;
+    updateArchiveButton();
+    renderContacts();
+  } catch (error) {
+    if (error.message !== "unauthorized") {
+      showError(archived ? "Impossibile archiviare la chat." : "Impossibile rimuovere la chat dall'archivio.");
+    }
+  } finally {
+    elements.archiveButton.disabled = false;
+  }
 }
 
 function normalizeEmojiSearch(value) {
@@ -3474,6 +3561,7 @@ elements.stealthToggle.addEventListener("change", () => {
   renderContacts();
   renderThreadAvatar(state.active);
 });
+elements.archiveButton.addEventListener("click", () => toggleActiveArchived());
 elements.linkPreviewsToggle.checked = state.linkPreviewsEnabled;
 elements.linkPreviewsToggle.addEventListener("change", () => {
   state.linkPreviewsEnabled = elements.linkPreviewsToggle.checked;
