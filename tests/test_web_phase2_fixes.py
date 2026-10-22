@@ -904,7 +904,11 @@ const mediaStart = app.indexOf("const MEDIA_CACHE_LIMIT");
 const mediaEnd = app.indexOf("\nfunction attachmentName", mediaStart);
 const renderStart = app.indexOf("function messageNodeKey(");
 const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
-globalThis.state = {
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(),
   mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(), objectUrls: new Set(["blob:preview"]), mediaCache: new Map(),
   optimistic: [{
     optimistic_id: "local-1", localPreviewUrl: "blob:preview", known_message_ids: [],
@@ -1007,7 +1011,11 @@ const mediaStart = app.indexOf("const MEDIA_CACHE_LIMIT");
 const mediaEnd = app.indexOf("\nfunction attachmentName", mediaStart);
 const renderStart = app.indexOf("function messageNodeKey(");
 const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
-globalThis.state = {
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(),
   mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(),
   objectUrls: new Set(), mediaCache: new Map(), optimistic: [],
   active: { protocol: "signal", id: "42" },
@@ -1097,7 +1105,11 @@ const submitStart = app.indexOf("async function submitMessage(");
 const submitEnd = app.indexOf("\nfunction encodeToken", submitStart);
 const controller = { aborted: false, abort() { this.aborted = true; } };
 const inflight = Promise.resolve();
-globalThis.state = {
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(),
   mediaRequests: new Set([controller]), mediaLoads: new Map([["old", inflight]]),
   active: null, messages: [], optimistic: [], optimisticSequence: 0,
   sending: false, stagedAttachments: [], replyTo: null,
