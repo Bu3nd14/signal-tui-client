@@ -1437,6 +1437,7 @@ class TestWhatsAppBackend:
             "phone": "393331234567",
             "source": "wa_chats",
             "is_chat_active": True,
+            "archived": False,
         }
 
     def test_send_message_sync_calls_rest(self):
@@ -4425,6 +4426,7 @@ class TestWhatsAppWebhookRegistration:
             "message.ack.group",
             "presence.update",
             "message.reaction",
+            "chat.archive",
         ]
 
     def test_configure_webhook_skips_when_already_registered(self):
@@ -4449,6 +4451,7 @@ class TestWhatsAppWebhookRegistration:
                                     "message.ack.group",
                                     "presence.update",
                                     "message.reaction",
+                                    "chat.archive",
                                 ],
                             }
                         ]
@@ -4490,6 +4493,7 @@ class TestWhatsAppWebhookRegistration:
             "message.ack.group",
             "presence.update",
             "message.reaction",
+            "chat.archive",
         ]
 
     def test_configure_webhook_never_raises_on_error(self):

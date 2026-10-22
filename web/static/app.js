@@ -4,6 +4,20 @@ const TOKEN_KEY = "signal-tui-web-token";
 const PROTOCOL_KEY = "signal-tui-web-proto";
 const STEALTH_KEY = "signal-tui-web-stealth";
 const SKIN_KEY = "signal-tui-web-skin";
+const LINK_PREVIEWS_KEY = "signal-tui-web-link-previews";
+const DRAFTS_KEY = "signal-tui-web-drafts";
+const CACHE_SIZE_KEY = "signal-tui-web-cache-size";
+const BACKGROUND_SYNC_KEY = "signal-tui-web-background-sync";
+const CACHE_SIZES = [100, 200, 500];
+const BACKGROUND_SYNC_OPTIONS = [0, 10, 25, 50];
+const BACKGROUND_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+const BACKGROUND_SYNC_DEBOUNCE_MS = 3000;
+
+function storedChoice(key, options, fallback) {
+  const raw = localStorage.getItem(key);
+  const value = Number(raw);
+  return raw !== null && options.includes(value) ? value : fallback;
+}
 const PROTOCOLS = ["signal", "whatsapp", "telegram"];
 // Heartbeat watchdog: the server fans out a ``{"type":"heartbeat"}`` frame
 // every ~5s (web/ws.py).  If nothing at all arrives for this long, the socket
@@ -44,6 +58,20 @@ const state = {
   // richiesta a /api/contact-avatar parte mentre è attiva.
   stealth: localStorage.getItem(STEALTH_KEY) === "1",
   skin: localStorage.getItem(SKIN_KEY) === "teams",
+  // Anteprime link e mappe delle posizioni: attive salvo opt-out esplicito.
+  linkPreviewsEnabled: localStorage.getItem(LINK_PREVIEWS_KEY) !== "0",
+  // Vista "Archiviate" della lista chat WhatsApp (come nell'app).
+  showArchived: false,
+  // Bozze del composer per chat ("proto:id" -> { text, attachments }): il testo
+  // e gli allegati non inviati restano nella loro chat, mai in quella aperta dopo.
+  drafts: new Map(),
+  // Cache messaggi per chat (web/static/message_cache.js): null se lo script
+  // non è caricato, e allora si torna al caricamento completo dal server.
+  messageCache: window.SignalTuiMessageCache?.openMessageCache() ?? null,
+  cacheSize: storedChoice(CACHE_SIZE_KEY, CACHE_SIZES, 200),
+  backgroundSyncChats: storedChoice(BACKGROUND_SYNC_KEY, BACKGROUND_SYNC_OPTIONS, 10),
+  backgroundSyncRunning: false,
+  backgroundSyncTimer: null,
   // True quando è stata pushata una history entry per il thread aperto
   // (mobile back/swipe-back): evita di accumulare una entry per ogni
   // cambio di contatto mentre il thread resta aperto.
@@ -61,6 +89,9 @@ const state = {
   objectUrls: new Set(),
   fileTabUrls: new Map(),
   pinnedUrls: new Set(),
+  // Anteprime link: Map<url, Promise<preview|null>> e Map<url, Promise<objectUrl|null>>.
+  linkPreviews: new Map(),
+  linkPreviewImages: new Map(),
   modalObjectUrl: null,
   // Map<attachmentId, { url, width, height }>. width/height sono null finché
   // non noti: vengono catturati da naturalWidth/Height al primo load reale.
@@ -102,12 +133,19 @@ const elements = {
   contactStatus: document.querySelector("#contact-status"),
   messages: document.querySelector("#message-list"),
   threadName: document.querySelector("#thread-name"),
+  archiveButton: document.querySelector("#archive-button"),
   threadMeta: document.querySelector("#thread-meta"),
   threadAvatar: document.querySelector("#thread-avatar"),
   connection: document.querySelector("#connection-state"),
   errorBanner: document.querySelector("#error-banner"),
   errorText: document.querySelector("#error-text"),
   linkDialog: document.querySelector("#link-dialog"),
+  settingsDialog: document.querySelector("#settings-dialog"),
+  mainMenu: document.querySelector("#main-menu"),
+  mainMenuButton: document.querySelector("#main-menu-button"),
+  cacheSizeSelect: document.querySelector("#cache-size-select"),
+  backgroundSyncSelect: document.querySelector("#background-sync-select"),
+  cacheStatus: document.querySelector("#cache-status"),
   linkStatusSignal: document.querySelector("#link-status-signal"),
   linkStatusWhatsapp: document.querySelector("#link-status-whatsapp"),
   linkStatusTelegram: document.querySelector("#link-status-telegram"),
@@ -120,6 +158,7 @@ const elements = {
   saveToken: document.querySelector("#save-token"),
   stealthToggle: document.querySelector("#stealth-toggle"),
   skinToggle: document.querySelector("#skin-toggle"),
+  linkPreviewsToggle: document.querySelector("#link-previews-toggle"),
   composer: document.querySelector("#composer"),
   composerShell: document.querySelector("#composer-shell"),
   messageInput: document.querySelector("#message-input"),
@@ -252,6 +291,106 @@ function safeExternalUrl(value) {
   } catch {
     return null;
   }
+}
+
+function loadLinkPreview(url) {
+  if (!state.linkPreviews.has(url)) {
+    const request = apiFetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
+      .then((response) => response.json())
+      .catch(() => null);
+    state.linkPreviews.set(url, request);
+  }
+  return state.linkPreviews.get(url);
+}
+
+function loadLinkPreviewImage(url) {
+  if (!state.linkPreviewImages.has(url)) {
+    // Blob PINNATO come le miniature quote: la LRU media non deve revocarlo.
+    const request = apiFetch(`/api/link-preview/image?url=${encodeURIComponent(url)}`)
+      .then((response) => response.blob())
+      .then((blob) => {
+        const objectUrl = URL.createObjectURL(blob);
+        state.objectUrls.add(objectUrl);
+        state.pinnedUrls.add(objectUrl);
+        return objectUrl;
+      })
+      .catch(() => null);
+    state.linkPreviewImages.set(url, request);
+  }
+  return state.linkPreviewImages.get(url);
+}
+
+function renderLinkPreview(url, preview, stickToBottom) {
+  const card = document.createElement("a");
+  // Le miniature mappa WhatsApp sono piccole: layout compatto, non a tutta larghezza.
+  card.className = isLocationMapUrl(url) ? "link-preview link-preview-compact" : "link-preview";
+  card.href = url;
+  card.target = "_blank";
+  card.rel = "noopener noreferrer";
+  if (preview.has_image) {
+    const image = document.createElement("img");
+    image.className = "link-preview-image";
+    image.alt = "";
+    image.hidden = true;
+    image.addEventListener("load", () => {
+      image.hidden = false;
+      stickToBottom?.();
+    }, { once: true });
+    image.addEventListener("error", () => image.remove(), { once: true });
+    loadLinkPreviewImage(url).then((objectUrl) => {
+      if (objectUrl) image.src = objectUrl;
+      else image.remove();
+    });
+    card.append(image);
+  }
+  const body = document.createElement("div");
+  body.className = "link-preview-body";
+  if (preview.site_name) {
+    const site = document.createElement("span");
+    site.className = "link-preview-site";
+    site.textContent = preview.site_name;
+    body.append(site);
+  }
+  const title = document.createElement("strong");
+  title.className = "link-preview-title";
+  title.textContent = preview.title;
+  body.append(title);
+  if (preview.description) {
+    const description = document.createElement("span");
+    description.className = "link-preview-description";
+    description.textContent = preview.description;
+    body.append(description);
+  }
+  card.append(body);
+  return card;
+}
+
+function isLocationMapUrl(url) {
+  return /^https:\/\/maps\.google\.com\/\?q=-?\d{1,3}\.\d{6},-?\d{1,3}\.\d{6}$/.test(url);
+}
+
+function linkPreviewSlot(text, stickToBottom) {
+  // Anteprima solo per il primo link del messaggio, come WhatsApp.
+  const match = String(text || "").match(/https?:\/\/[^\s<]+/);
+  const url = match ? safeExternalUrl(trimUrlEnd(match[0])) : null;
+  if (!url || !state.linkPreviewsEnabled) return null;
+  const slot = document.createElement("div");
+  slot.className = "link-preview-slot";
+  const load = () => {
+    loadLinkPreview(url).then((preview) => {
+      if (!preview?.title) return;
+      slot.replaceChildren(renderLinkPreview(url, preview, stickToBottom));
+      stickToBottom?.();
+    });
+  };
+  const observer = mediaObserver();
+  if (observer) {
+    slot._loadMedia = load;
+    observer.observe(slot);
+  } else {
+    load();
+  }
+  return slot;
 }
 
 function timestampMilliseconds(value) {
@@ -497,8 +636,43 @@ function unreadOf(contact) {
   return Number.isFinite(unread) ? Math.max(0, unread) : 0;
 }
 
+function isArchived(contact) {
+  return Boolean(contact?.extras?.archived);
+}
+
+// Come WhatsApp: le chat archiviate non contano nei badge globali.
+function unreadOutsideArchive(contact) {
+  return isArchived(contact) ? 0 : unreadOf(contact);
+}
+
+function archivedRow(archived, back) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = back ? "contact archived-row archived-back" : "contact archived-row";
+  const icon = document.createElement("span");
+  icon.className = "avatar archived-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.textContent = back ? "‹" : "🗄";
+  const label = document.createElement("span");
+  label.className = "contact-name";
+  label.textContent = back ? "Archiviate" : `Archiviate (${archived.length})`;
+  button.append(icon, label);
+  const unread = archived.reduce((sum, contact) => sum + unreadOf(contact), 0);
+  if (!back && unread > 0) {
+    const badge = document.createElement("span");
+    badge.className = "unread-badge archived-badge";
+    badge.textContent = unread > 99 ? "99+" : String(unread);
+    button.append(badge);
+  }
+  button.addEventListener("click", () => {
+    state.showArchived = !back;
+    renderContacts();
+  });
+  return button;
+}
+
 function updateFavicon() {
-  const unreadTotal = state.contacts.reduce((sum, contact) => sum + unreadOf(contact), 0);
+  const unreadTotal = state.contacts.reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0);
   // Badge stile app nativa sull'icona Dock/taskbar quando installata come PWA
   // (manifest.json). Non supportato ovunque (es. Firefox): feature-detect,
   // nessun effetto dove manca l'API.
@@ -525,8 +699,15 @@ function renderContacts() {
   updateBackendStatuses();
   const base = state.searchResults ?? state.contacts;
   const sortedContacts = [...base].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
-  const contacts = sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
-  if (state.active && state.active.protocol === state.protocolFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
+  let contacts = sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
+  // La ricerca mostra tutto; altrimenti le archiviate stanno dietro la riga
+  // "Archiviate", come in WhatsApp.
+  const archived = state.searchResults ? [] : contacts.filter(isArchived);
+  if (!archived.length) state.showArchived = false;
+  if (!state.searchResults) {
+    contacts = contacts.filter((contact) => isArchived(contact) === state.showArchived);
+  }
+  if (state.active && (state.searchResults || isArchived(state.active) === state.showArchived) && state.active.protocol === state.protocolFilter && !contacts.some((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol)) {
     contacts.unshift(state.active);
   }
   for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
@@ -537,7 +718,7 @@ function renderContacts() {
     if (dot) {
       const total = state.contacts
         .filter((contact) => contact.protocol === tab.dataset.protocol)
-        .reduce((sum, contact) => sum + unreadOf(contact), 0);
+        .reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0);
       // Pallino solo sui backend NON selezionati con non letti (quello attivo
       // ha già i badge nella lista).
       dot.hidden = !(total > 0 && tab.dataset.protocol !== state.protocolFilter);
@@ -548,6 +729,7 @@ function renderContacts() {
     : state.contactQuery
       ? `Nessun risultato per «${state.contactQuery}».`
       : "Nessuna conversazione disponibile.";
+  if (archived.length) elements.contacts.append(archivedRow(archived, state.showArchived));
   for (const contact of contacts) {
     const button = document.createElement("button");
     button.type = "button";
@@ -596,7 +778,9 @@ async function loadContacts({ quiet = false } = {}) {
       const current = state.contacts.find((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol);
       if (current) state.active = current;
     }
+    updateArchiveButton();
     renderContacts();
+    if (state.backgroundSyncTimer == null) scheduleBackgroundSync();
   } catch (error) {
     if (error.message !== "unauthorized") {
       elements.contactStatus.textContent = "Impossibile caricare le conversazioni.";
@@ -665,8 +849,12 @@ function pruneOrphanObjectUrls() {
     if (tab.closed) state.fileTabUrls.delete(url);
     else fileTabUrls.add(url);
   }
+  const draftUrls = new Set();
+  for (const draft of state.drafts.values()) {
+    for (const attachment of draft.attachments) if (attachment.previewUrl) draftUrls.add(attachment.previewUrl);
+  }
   for (const url of state.objectUrls) {
-    if (cachedUrls.has(url) || optimisticUrls.has(url) || fileTabUrls.has(url) || state.pinnedUrls.has(url) || url === state.modalObjectUrl) continue;
+    if (draftUrls.has(url) || cachedUrls.has(url) || optimisticUrls.has(url) || fileTabUrls.has(url) || state.pinnedUrls.has(url) || url === state.modalObjectUrl) continue;
     URL.revokeObjectURL(url);
     state.objectUrls.delete(url);
   }
@@ -1453,6 +1641,8 @@ function buildMessageNode(item, protocol, stickToBottom) {
     textEl.className = "message-text";
     textEl.replaceChildren(linkifyText(displayText));
     bubble.append(textEl);
+    const previewSlot = linkPreviewSlot(displayText, stickToBottom);
+    if (previewSlot) bubble.append(previewSlot);
   }
   const time = document.createElement("time");
   time.className = "message-time";
@@ -1847,25 +2037,107 @@ function setMessageTick(entry, status) {
   entry.tickEl.title = title;
 }
 
+// Scarica il delta di una chat e aggiorna la cache: solo la coda dei messaggi
+// (vedi message_cache.js), oppure l'intera finestra se la cache è vuota.
+async function syncChatMessages(contact, { refresh = false, signal } = {}) {
+  const cacheApi = window.SignalTuiMessageCache;
+  const cache = state.messageCache;
+  const limit = state.cacheSize;
+  const cached = cache ? await cache.load(contact.protocol, contact.id).catch(() => null) : null;
+  const since = cache ? cacheApi.deltaSince(cached) : null;
+  const query = new URLSearchParams({ proto: contact.protocol, contact_id: contact.id });
+  if (cache) query.set("limit", String(limit));
+  if (since != null) query.set("since", String(since));
+  if (refresh) query.set("refresh", "1");
+  const response = await apiFetch(`/api/messages?${query}`, { signal });
+  const fresh = await response.json();
+  if (!cache) return fresh;
+  const merged = cacheApi.mergeDelta(cached, fresh, since, limit);
+  await cache.save(contact.protocol, contact.id, merged).catch(() => {});
+  return merged;
+}
+
 async function loadMessages(refresh = false) {
   const active = state.active;
   if (!active) return;
   state.messageRequest?.abort();
   const controller = new AbortController();
   state.messageRequest = controller;
+  const isCurrent = () => !controller.signal.aborted
+    && state.active?.id === active.id && state.active?.protocol === active.protocol;
+  const show = (messages) => {
+    if (!isCurrent()) return;
+    state.messages = messages;
+    renderMessages(messages, active.protocol);
+  };
+  let shown = false;
   try {
-    const query = new URLSearchParams({ proto: active.protocol, contact_id: active.id, ...(refresh ? { refresh: "1" } : {}) });
-    const response = await apiFetch(`/api/messages?${query}`, { signal: controller.signal });
-    const messages = await response.json();
-    if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
-      state.messages = messages;
-      renderMessages(messages, active.protocol);
+    // Apertura chat (refresh): subito la cache locale, anche offline; poi il
+    // delta dal DB locale del server (veloce) e infine quello dopo il fetch
+    // remoto (WAHA/Telegram, lento), senza bloccare la lettura.
+    if (refresh && state.messageCache) {
+      const cached = await state.messageCache.load(active.protocol, active.id).catch(() => null);
+      if (cached?.length && isCurrent()) {
+        show(cached);
+        shown = true;
+      }
     }
+    // Telegram rifà sempre il fetch remoto lato server: un solo giro.
+    if (!(refresh && active.protocol === "telegram")) {
+      show(await syncChatMessages(active, { signal: controller.signal }));
+      shown = true;
+    }
+    if (refresh) show(await syncChatMessages(active, { refresh: true, signal: controller.signal }));
   } catch (error) {
-    if (error.name !== "AbortError" && error.message !== "unauthorized") showError("Errore di rete durante il caricamento dei messaggi.");
+    // Offline con la cache a schermo: niente banner, lo stato connessione basta.
+    if (error.name !== "AbortError" && error.message !== "unauthorized" && !shown) {
+      showError("Errore di rete durante il caricamento dei messaggi.");
+    }
   } finally {
     if (state.messageRequest === controller) state.messageRequest = null;
   }
+}
+
+// ── Download in background ───────────────────────────────────────────────────
+// Tiene in cache le chat più recenti (impostazione "Scarica chat in
+// background"): scarica solo quelle con messaggi più nuovi di quanto salvato.
+function backgroundSyncCandidates() {
+  return [...state.contacts]
+    .filter((contact) => !isArchived(contact))
+    .sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0))
+    .slice(0, state.backgroundSyncChats);
+}
+
+async function runBackgroundSync() {
+  if (state.backgroundSyncRunning || !state.messageCache || !state.backgroundSyncChats || !state.token) return;
+  state.backgroundSyncRunning = true;
+  try {
+    for (const contact of backgroundSyncCandidates()) {
+      if (!state.backgroundSyncChats || navigator.onLine === false) break;
+      if (state.active?.id === contact.id && state.active?.protocol === contact.protocol) continue;
+      const cached = await state.messageCache.load(contact.protocol, contact.id).catch(() => null);
+      const newest = cached?.length ? Number(cached[cached.length - 1].timestamp || 0) : -1;
+      if (newest >= Number(contact.last_message_ts || 0)) continue;
+      try {
+        await syncChatMessages(contact);
+      } catch (error) {
+        if (error.message === "unauthorized") break;
+      }
+    }
+    await state.messageCache.prune(Math.max(window.SignalTuiMessageCache.MAX_CACHED_CHATS, state.backgroundSyncChats));
+  } catch {
+    // Best-effort: il prossimo giro riprova.
+  } finally {
+    state.backgroundSyncRunning = false;
+  }
+}
+
+function scheduleBackgroundSync(delay = BACKGROUND_SYNC_DEBOUNCE_MS) {
+  window.clearTimeout(state.backgroundSyncTimer);
+  if (!state.backgroundSyncChats) return;
+  state.backgroundSyncTimer = window.setTimeout(() => {
+    runBackgroundSync().finally(() => scheduleBackgroundSync(BACKGROUND_SYNC_INTERVAL_MS));
+  }, delay);
 }
 
 function applyReceiptUpdates(payload) {
@@ -1904,8 +2176,9 @@ function ensureEditedMarker(entry) {
 }
 
 function cancelEdit() {
+  // Ripristina la bozza che c'era prima di entrare in modifica.
+  elements.messageInput.value = state.editing?.draftText ?? "";
   state.editing = null;
-  elements.messageInput.value = "";
   resizeComposer();
   updateReplyBanner();
   updateComposer();
@@ -1922,6 +2195,7 @@ function startEdit(item) {
     oldText: item.text,
     protocol: state.active.protocol,
     contactId: state.active.id,
+    draftText: elements.messageInput.value,
   };
   elements.messageInput.value = item.text;
   resizeComposer();
@@ -2150,13 +2424,16 @@ function openThread(contact) {
   cancelReply();
   if (typeof cancelVoiceRecording === "function") cancelVoiceRecording();
   if (state.editing) cancelEdit();
+  stashComposerDraft(state.active);
   state.active = contact;
+  restoreComposerDraft(contact);
   state.userScrolledUp = false;
   updateTelegramRefreshTimer();
   if (contact.protocol === "telegram") void loadTelegramReactions();
   elements.threadName.textContent = contact.display_name || contact.id;
   elements.threadMeta.innerHTML = `${protocolIcon(contact.protocol, 13)}<span class="thread-proto-name">${contact.protocol}</span>`;
   renderThreadAvatar(contact);
+  updateArchiveButton();
   elements.app.classList.add("thread-open");
   // Push una history entry SOLO al primo ingresso nel thread (lista →
   // thread): così il back/swipe-back del browser (mobile) la consuma
@@ -2182,6 +2459,45 @@ function openThread(contact) {
   elements.messages.append(loading);
   abortMediaRequests();
   loadMessages(true);
+}
+
+function updateArchiveButton() {
+  const button = elements.archiveButton;
+  if (!button) return;
+  const contact = state.active;
+  button.hidden = contact?.protocol !== "whatsapp";
+  if (button.hidden) return;
+  const label = isArchived(contact) ? "Rimuovi dall'archivio" : "Archivia chat";
+  button.setAttribute("aria-label", label);
+  button.title = label;
+  button.classList.toggle("is-archived", isArchived(contact));
+}
+
+async function toggleActiveArchived() {
+  const contact = state.active;
+  if (contact?.protocol !== "whatsapp") return;
+  const archived = !isArchived(contact);
+  elements.archiveButton.disabled = true;
+  try {
+    await apiFetch("/api/chats/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ protocol: contact.protocol, contact_id: contact.id, archived }),
+    });
+    contact.extras = { ...(contact.extras || {}), archived };
+    for (const item of state.contacts) {
+      if (item.id === contact.id && item.protocol === contact.protocol) item.extras = contact.extras;
+    }
+    state.showArchived = archived;
+    updateArchiveButton();
+    renderContacts();
+  } catch (error) {
+    if (error.message !== "unauthorized") {
+      showError(archived ? "Impossibile archiviare la chat." : "Impossibile rimuovere la chat dall'archivio.");
+    }
+  } finally {
+    elements.archiveButton.disabled = false;
+  }
 }
 
 function normalizeEmojiSearch(value) {
@@ -2379,6 +2695,67 @@ function mediaKindFromMime(mime) {
 // richiesta verrebbe respinta con 400 "Too many attachments".
 const MAX_STAGED_ATTACHMENTS = 10;
 
+function draftKey(contact) {
+  return `${contact.protocol}:${contact.id}`;
+}
+
+function loadStoredDrafts() {
+  try {
+    const drafts = JSON.parse(localStorage.getItem(DRAFTS_KEY) || "{}");
+    return drafts && typeof drafts === "object" ? drafts : {};
+  } catch {
+    return {};
+  }
+}
+
+// Solo il testo sopravvive al reload: gli allegati (File) restano in memoria.
+function storeDraftText(contact, text) {
+  try {
+    const drafts = loadStoredDrafts();
+    if (text.trim()) drafts[draftKey(contact)] = text;
+    else delete drafts[draftKey(contact)];
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+  } catch {
+    // Storage non disponibile: la bozza resta solo in memoria.
+  }
+}
+
+function stashComposerDraft(contact) {
+  if (!contact) return;
+  const key = draftKey(contact);
+  const text = elements.messageInput.value;
+  const attachments = state.stagedAttachments;
+  if (text || attachments.length) state.drafts.set(key, { text, attachments });
+  else state.drafts.delete(key);
+  storeDraftText(contact, text);
+  state.stagedAttachments = [];
+}
+
+function restoreComposerDraft(contact) {
+  const key = draftKey(contact);
+  const draft = state.drafts.get(key);
+  state.drafts.delete(key);
+  elements.messageInput.value = draft?.text ?? loadStoredDrafts()[key] ?? "";
+  state.stagedAttachments = draft?.attachments ?? [];
+  renderAttachmentsPreview();
+  resizeComposer();
+  updateComposer();
+}
+
+// Un invio con allegati può risolversi dopo un cambio chat: svuota lo staging
+// della chat di destinazione, non quello della chat ora aperta.
+function dropSentAttachments(contact, sent) {
+  if (state.active?.id === contact.id && state.active?.protocol === contact.protocol) {
+    clearStagedAttachments({ revoke: false });
+    return;
+  }
+  const key = draftKey(contact);
+  const draft = state.drafts.get(key);
+  if (!draft) return;
+  draft.attachments = draft.attachments.filter((attachment) => !sent.includes(attachment));
+  if (!draft.text && !draft.attachments.length) state.drafts.delete(key);
+}
+
 function clearStagedAttachments({ revoke = true } = {}) {
   // Nel path di invio (revoke:false) gli object URL NON si revocano: sono i
   // localPreviewUrl degli optimistic N e servono al primo paint; la revoca
@@ -2530,8 +2907,10 @@ async function stageOneAttachment(file) {
   // in cacheMedia. Calcolo e push sono nello stesso blocco sincrono, quindi
   // nemmeno stageAttachments concorrenti possono collidere. La chiave resta
   // memorizzata sull'item: remove, clear e invio non la ricalcolano mai.
+  // Anche le bozze delle altre chat: la mediaCache è condivisa fra le chat.
+  const allStaged = [...state.stagedAttachments, ...[...state.drafts.values()].flatMap((draft) => draft.attachments)];
   const usedIndexes = new Set(
-    state.stagedAttachments.map((item) => Number(item.attachmentId.slice(item.attachmentId.lastIndexOf("[") + 1, -1))),
+    allStaged.map((item) => Number(item.attachmentId.slice(item.attachmentId.lastIndexOf("[") + 1, -1))),
   );
   let attachmentIndex = 0;
   while (usedIndexes.has(attachmentIndex)) attachmentIndex += 1;
@@ -3075,6 +3454,7 @@ async function submitMessage() {
       // Composer svuotato solo DOPO l'accodamento persistente (§7.3).
       await outboxStore.enqueue(record);
       elements.messageInput.value = "";
+      storeDraftText(active, "");
       resizeComposer();
       updateComposer();
       if (state.active?.id === active.id && state.active?.protocol === active.protocol) {
@@ -3090,6 +3470,7 @@ async function submitMessage() {
   state.sending += 1;
   if (attachments.length) state.attachmentSending = true;
   elements.messageInput.value = "";
+  storeDraftText(active, "");
   resizeComposer();
   updateComposer();
   if (state.active?.id === active.id && state.active?.protocol === active.protocol) renderMessages(state.messages, active.protocol);
@@ -3126,7 +3507,7 @@ async function submitMessage() {
     for (const optimistic of optimisticItems) optimistic.optimisticStatus = "sent";
     // R2: lo staging viene svuotato solo a invio riuscito; su errore gli
     // allegati restano disponibili per il retry manuale.
-    if (attachments.length) clearStagedAttachments({ revoke: false });
+    if (attachments.length) dropSentAttachments(active, attachments);
   } catch (error) {
     for (const optimistic of optimisticItems) optimistic.optimisticStatus = "failed";
     if (error.message !== "unauthorized") showError("Impossibile inviare il messaggio.");
@@ -3255,6 +3636,7 @@ function connectSocket() {
     elements.connection.textContent = "live";
     if (state.active) loadMessages(true);
     flushOutbox();
+    scheduleBackgroundSync();
   };
   socket.onmessage = (event) => {
     state.lastWsActivity = Date.now();
@@ -3277,6 +3659,8 @@ function connectSocket() {
             if (!update.payload.is_mine && document.visibilityState === "visible") {
               markRead(state.active.protocol, state.active.id);
             }
+          } else {
+            scheduleBackgroundSync();
           }
           break;
         }
@@ -3356,7 +3740,54 @@ function connectSocket() {
 }
 
 document.querySelector("#refresh-contacts").addEventListener("click", () => loadContacts());
-document.querySelector("#open-token").addEventListener("click", () => requestToken());
+function closeMainMenu() {
+  if (elements.mainMenu.hidden) return;
+  elements.mainMenu.hidden = true;
+  elements.mainMenuButton.setAttribute("aria-expanded", "false");
+}
+elements.mainMenuButton.addEventListener("click", () => {
+  const willOpen = elements.mainMenu.hidden;
+  elements.mainMenu.hidden = !willOpen;
+  elements.mainMenuButton.setAttribute("aria-expanded", String(willOpen));
+});
+document.addEventListener("click", (event) => {
+  if (!event.target.closest("#main-menu, #main-menu-button")) closeMainMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeMainMenu();
+});
+document.querySelector("#open-token").addEventListener("click", () => {
+  closeMainMenu();
+  requestToken();
+});
+
+function updateCacheStatus() {
+  elements.cacheStatus.textContent = state.messageCache ? "" : "Non disponibile";
+}
+document.querySelector("#open-settings").addEventListener("click", () => {
+  closeMainMenu();
+  updateCacheStatus();
+  if (!elements.settingsDialog.open) elements.settingsDialog.showModal();
+});
+document.querySelector("#close-settings-dialog").addEventListener("click", () => elements.settingsDialog.close());
+elements.cacheSizeSelect.value = String(state.cacheSize);
+elements.cacheSizeSelect.addEventListener("change", () => {
+  state.cacheSize = Number(elements.cacheSizeSelect.value);
+  localStorage.setItem(CACHE_SIZE_KEY, String(state.cacheSize));
+  updateCacheStatus();
+});
+elements.backgroundSyncSelect.value = String(state.backgroundSyncChats);
+elements.backgroundSyncSelect.addEventListener("change", () => {
+  state.backgroundSyncChats = Number(elements.backgroundSyncSelect.value);
+  localStorage.setItem(BACKGROUND_SYNC_KEY, String(state.backgroundSyncChats));
+  scheduleBackgroundSync(0);
+});
+document.querySelector("#clear-message-cache").addEventListener("click", async () => {
+  if (!state.messageCache) return;
+  await state.messageCache.prune(0).catch(() => {});
+  elements.cacheStatus.textContent = "Cache svuotata";
+  scheduleBackgroundSync();
+});
 document.querySelector("#close-link-dialog").addEventListener("click", () => elements.linkDialog.close());
 elements.stealthToggle.checked = state.stealth;
 elements.stealthToggle.addEventListener("change", () => {
@@ -3364,6 +3795,17 @@ elements.stealthToggle.addEventListener("change", () => {
   localStorage.setItem(STEALTH_KEY, state.stealth ? "1" : "0");
   renderContacts();
   renderThreadAvatar(state.active);
+});
+elements.archiveButton.addEventListener("click", () => toggleActiveArchived());
+elements.linkPreviewsToggle.checked = state.linkPreviewsEnabled;
+elements.linkPreviewsToggle.addEventListener("change", () => {
+  state.linkPreviewsEnabled = elements.linkPreviewsToggle.checked;
+  localStorage.setItem(LINK_PREVIEWS_KEY, state.linkPreviewsEnabled ? "1" : "0");
+  // Le bolle sono riusate per fingerprint: azzera i nodi per ricostruirle.
+  if (state.active) {
+    state.messageNodes = null;
+    renderMessages(state.messages, state.active.protocol);
+  }
 });
 elements.skinToggle.checked = state.skin;
 elements.skinToggle.addEventListener("change", () => {
@@ -3519,6 +3961,7 @@ document.addEventListener("keydown", (event) => {
 elements.messageInput.addEventListener("input", () => {
   resizeComposer();
   updateComposer();
+  if (state.active && !state.editing) storeDraftText(state.active, elements.messageInput.value);
 });
 elements.messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.editing) {

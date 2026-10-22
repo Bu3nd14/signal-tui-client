@@ -263,7 +263,11 @@ const app = fs.readFileSync("./web/static/app.js", "utf8");
 const media = app.slice(app.indexOf("const MEDIA_CACHE_LIMIT"), app.indexOf("\nfunction attachmentName"));
 // Unico slice: mediaKindFromMime + MAX_STAGED_ATTACHMENTS + tutto lo staging.
 const stage = app.slice(app.indexOf("function mediaKindFromMime("), app.indexOf("\nasync function submitMessage"));
-globalThis.state = { stagedAttachments: [], mediaCache: new Map(), mediaFailures: new Set(), objectUrls: new Set() };
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(), stagedAttachments: [], mediaCache: new Map(), mediaFailures: new Set(), objectUrls: new Set() };
 const revoked = [];
 let urlSequence = 0;
 globalThis.URL = { createObjectURL: () => `blob:${urlSequence++}`, revokeObjectURL: (url) => revoked.push(url) };
@@ -363,7 +367,11 @@ const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const media = app.slice(app.indexOf("const MEDIA_CACHE_LIMIT"), app.indexOf("\nfunction attachmentName"));
 const stage = app.slice(app.indexOf("function mediaKindFromMime("), app.indexOf("\nasync function submitMessage"));
-globalThis.state = { stagedAttachments: [], mediaCache: new Map(), mediaFailures: new Set(), objectUrls: new Set() };
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(), stagedAttachments: [], mediaCache: new Map(), mediaFailures: new Set(), objectUrls: new Set() };
 const revoked = [];
 let urlSequence = 0;
 globalThis.URL = { createObjectURL: () => `blob:${urlSequence++}`, revokeObjectURL: (url) => revoked.push(url) };
@@ -445,7 +453,11 @@ const app = fs.readFileSync("./web/static/app.js", "utf8");
 const reconcile = fs.readFileSync("./web/static/reconcile.js", "utf8");
 const media = app.slice(app.indexOf("const MEDIA_CACHE_LIMIT"), app.indexOf("\nfunction attachmentName"));
 const render = app.slice(app.indexOf("function messageNodeKey("), app.indexOf("\nasync function loadMessages"));
-globalThis.state = {
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(),
   mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(),
   objectUrls: new Set(), mediaCache: new Map(),
   optimistic: [0, 1, 2].map((index) => ({
@@ -547,7 +559,11 @@ const app = fs.readFileSync("./web/static/app.js", "utf8");
 const reconcile = fs.readFileSync("./web/static/reconcile.js", "utf8");
 const media = app.slice(app.indexOf("const MEDIA_CACHE_LIMIT"), app.indexOf("\nfunction attachmentName"));
 const render = app.slice(app.indexOf("function messageNodeKey("), app.indexOf("\nasync function loadMessages"));
-globalThis.state = {
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(),
   mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(),
   objectUrls: new Set(), mediaCache: new Map(),
   optimistic: [{
