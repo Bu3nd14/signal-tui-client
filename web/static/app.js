@@ -1583,7 +1583,22 @@ function isLazyMediaItem(item) {
   return isImage || isVideo;
 }
 
+function buildSystemNoticeNode(item) {
+  const notice = document.createElement("div");
+  notice.className = "system-notice";
+  notice.setAttribute("data-mid", String(item.id));
+  notice.setAttribute("data-ts", String(item.timestamp));
+  const text = document.createElement("span");
+  text.className = "system-notice-text";
+  text.textContent = item.text || "";
+  notice.append(text);
+  return { el: notice, textEl: text, timeEl: null, tickEl: null, reactionsEl: null };
+}
+
 function buildMessageNode(item, protocol, stickToBottom) {
+  // Avvisi di servizio (es. "codice di sicurezza cambiato"): pillola centrata
+  // come nell'app ufficiale, senza mittente, orario né spunte.
+  if (item.system) return buildSystemNoticeNode(item);
   const message = document.createElement("article");
   message.className = `message ${item.direction === "out" ? "out" : "in"}`;
   message.setAttribute("data-mid", String(item.id));
@@ -2164,7 +2179,7 @@ function applyReceiptUpdates(payload) {
 }
 
 function ensureEditedMarker(entry) {
-  if (!entry) return null;
+  if (!entry?.timeEl) return null;
   const existing = entry.timeEl.querySelector?.(".message-edited");
   if (existing) return existing;
   const marker = document.createElement("span");
@@ -2231,7 +2246,7 @@ async function submitEdit() {
   const entry = messageEntryForEdit(editing);
   const item = storedMessageForEdit(editing);
   const wasEdited = Boolean(entry?.edited ?? item?.edited);
-  const previousMarker = entry?.timeEl.querySelector?.(".message-edited") || null;
+  const previousMarker = entry?.timeEl?.querySelector?.(".message-edited") || null;
   if (entry?.textEl) entry.textEl.replaceChildren(linkifyText(newText));
   if (entry) {
     ensureEditedMarker(entry);

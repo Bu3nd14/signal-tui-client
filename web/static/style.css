@@ -440,6 +440,7 @@ h2 { font-size: 1.05rem; }
 .message-quote span { overflow-wrap: anywhere; }
 .message-quote strong { color: #b8d0ff; }
 
+.system-notice { align-self: center; max-width: min(88%, 560px); margin: 4px auto; padding: 6px 12px; border-radius: 8px; background: var(--panel-raised); color: var(--muted); font-size: .78rem; line-height: 1.4; text-align: center; }
 .message-sender { display: block; margin-bottom: 2px; color: #daa520; font-size: .72rem; font-weight: 700; letter-spacing: .01em; }
 
 .composer-shell {
