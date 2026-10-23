@@ -69,7 +69,9 @@ Variabili in `.env` (stesso parsing di WAHA/Telegram):
 | Var | Default | Note |
 |-----|---------|------|
 | `GMAIL_ADDRESS` | — | obbligatoria (es. `user@gmail.com`) |
-| `GMAIL_APP_PASSWORD` | — | obbligatoria (App Password, non la password account) |
+| `GMAIL_APP_PASSWORD_FILE` | — | **preferita**: file con permessi `600` (es. `~/.config/signal-tui/gmail-app-password`) |
+| `GMAIL_APP_PASSWORD_CMD` | — | alternativa: comando che stampa il segreto (es. `gpg --decrypt`, keyring) |
+| `GMAIL_APP_PASSWORD` | — | fallback legacy in chiaro (sconsigliato; utile solo per test/CI) |
 | `GMAIL_IMAP_HOST` | `imap.gmail.com` | opzionale |
 | `GMAIL_IMAP_PORT` | `993` | opzionale |
 | `GMAIL_SMTP_HOST` | `smtp.gmail.com` | opzionale |
@@ -77,7 +79,21 @@ Variabili in `.env` (stesso parsing di WAHA/Telegram):
 | `GMAIL_FOLDER` | `INBOX` | opzionale, validata (charset sicuro) |
 | `GMAIL_TIMEOUT_S` | `30` | opzionale |
 
-- `gmail_enabled()` → `True` solo se `GMAIL_ADDRESS` **e** `GMAIL_APP_PASSWORD` non vuoti.
+- `gmail_enabled()` → `True` solo se `GMAIL_ADDRESS` e una delle fonti del segreto non sono vuote.
+- Precedenza del segreto: `GMAIL_APP_PASSWORD_FILE` → `GMAIL_APP_PASSWORD_CMD` → `GMAIL_APP_PASSWORD`. Il file `.env` va tenuto a `600`.
+
+### GPG (opzionale, per cifratura a riposo)
+
+- `scripts/gmail_gpg_init.sh` cifra il file segreto con GPG simmetrico AES-256, elimina il plaintext con `shred` e imposta `GMAIL_APP_PASSWORD_CMD`.
+- `scripts/gmail_gpg_unlock.sh` scalda la cache di `gpg-agent` dopo un reboot o alla scadenza della cache (default 10 minuti; aumentabile in `~/.gnupg/gpg-agent.conf`).
+- Con cache fredda e nessun TTY, `gpg` non può chiedere la passphrase: il comando fallisce e Gmail risulta non configurato finché non si esegue lo script di unlock.
+
+### TPM2 (Linux, automatico)
+
+- `scripts/gmail_tpm_init.sh` migra il segreto dal file GPG a una credenziale TPM2 (`systemd-creds encrypt --with-key=tpm2`), verifica il decrypt e aggiorna `.env` con `GMAIL_APP_PASSWORD_CMD=systemd-creds decrypt --name=gmail-app-password <file.cred> -`.
+- Prerequisito: `sudo usermod -aG tss $USER` e nuovo login (accesso a `/dev/tpmrm0`).
+- Nessuna passphrase e nessun prompt: il decrypt è automatico finché il TPM e lo stato di boot (PCR 7 di default) sono gli stessi. Dopo aggiornamenti di firmware/Secure Boot che cambiano PCR 7, va rigenerata la credenziale.
+- Il file GPG resta come backup cifrato; il plaintext non viene mai scritto su disco durante la migrazione (pipe GPG → `systemd-creds`).
 - Validazione **lazy** (alla prima richiesta) ma `status` riporta `configured` senza contattare la rete.
 - **Mai** esporre la password in risposte API/log; log di errore redattati (no traceback con credenziali).
 

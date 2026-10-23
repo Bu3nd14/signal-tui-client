@@ -41,11 +41,12 @@ Gli endpoint REST vivono sotto `/api` e richiedono l'header `Authorization: Bear
 # ─── Signal TUI Client: web reader + background via tmux ─────────────────
 # Web su 0.0.0.0:4242. Token Bearer: config.json (web.token) o SIGNAL_TUI_WEB_TOKEN.
 # web-signal-tui-bg stampa ed esporta il token (fast cycle: curl + login Web UI).
-SIGNAL_TUI_DIR="~/signal-tui-client"
+# Gmail TPM: la shell/TUI deve avere il gruppo tss (dopo usermod serve re-login).
+SIGNAL_TUI_DIR="$HOME/signal-tui-client"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 _signal_tui_web_bg() {
     if ! tmux has-session -t tui 2>/dev/null; then
-        tmux new-session -d -s tui "cd \"$SIGNAL_TUI_DIR\" && exec .venv/bin/python -m signal_tui" || return 1
+        tmux new-session -d -s tui "cd \"$SIGNAL_TUI_DIR\" && exec .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0" || return 1
     fi
     SIGNAL_TUI_WEB_TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["web"]["token"])' "$SIGNAL_TUI_DIR/config.json")" || return 1
     export SIGNAL_TUI_WEB_TOKEN
@@ -53,7 +54,9 @@ _signal_tui_web_bg() {
 }
 _signal_tui_web_stop() {
     if [ -f /tmp/signal-tui.lock ]; then
-        kill -INT "$(cat /tmp/signal-tui.lock)" 2>/dev/null || true
+        local pid
+        pid="$(cat /tmp/signal-tui.lock)"
+        [ -n "$pid" ] && kill -INT "$pid" 2>/dev/null || true
     fi
     for i in $(seq 1 12); do
         [ ! -f /tmp/signal-tui.lock ] && break
