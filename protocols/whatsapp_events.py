@@ -14,6 +14,7 @@ import re
 from collections.abc import Callable
 
 from models import (
+    MSG_TYPE_SYSTEM,
     PROTOCOL_WHATSAPP,
     ChatEvent,
     embedded_media_quote_placeholder,
@@ -479,6 +480,53 @@ def _resolve_text_mentions(
     return _MENTION_RE.sub(_replace, text)
 
 
+# A bare JID (``20508603076702@lid``, ``39333…@c.us``): WEBJS puts the
+# affected contact's JID in ``body`` of an ``e2e_notification``.
+_BARE_JID_RE = re.compile(r"^\d{5,20}@(?:lid|c\.us|s\.whatsapp\.net)$")
+
+
+def _wa_security_notice_text(
+    raw: dict,
+    contacts_by_jid: dict | None,
+    lid_lookup: Callable[[str], str | None] | None,
+    schedule_lid_resolve: Callable[[str], None] | None,
+) -> str | None:
+    """Text of a WEBJS ``e2e_notification``, or ``None`` to drop it.
+
+    ``subtype == "identity"`` is the "security code changed" notice: WEBJS
+    carries the affected contact's JID as ``body`` (never a real message
+    text), shown verbatim before this fix.  Other ``e2e_notification``
+    subtypes (the "messages are end-to-end encrypted" banner, …) carry no
+    information and are dropped, like the official app does mid-thread.
+    """
+    data = raw.get("_data") if isinstance(raw.get("_data"), dict) else {}
+    subtype = str(raw.get("subtype") or data.get("subtype") or "").lower()
+    body = str(raw.get("body") or data.get("body") or "").strip()
+    if subtype != "identity" and not (not subtype and _BARE_JID_RE.match(body)):
+        return None
+    jid = (
+        body
+        if _BARE_JID_RE.match(body)
+        else _jid_string(
+            data.get("author") or raw.get("participant") or raw.get("author")
+        )
+    )
+    name = None
+    if jid:
+        resolved = _resolve_sender_name(jid, contacts_by_jid)
+        if resolved != jid:
+            name = resolved
+        elif lid_lookup is not None and (phone := lid_lookup(jid)):
+            name = f"+{phone}"
+        elif jid.endswith("@c.us"):
+            name = "+" + jid.split("@", 1)[0]
+        elif schedule_lid_resolve is not None:
+            schedule_lid_resolve(jid)
+    if name:
+        return f"Il tuo codice di sicurezza con {name} è cambiato."
+    return "Il codice di sicurezza di un contatto è cambiato."
+
+
 def _event_from_message(
     raw: dict,
     contacts_by_jid: dict | None = None,
@@ -545,6 +593,18 @@ def _event_from_message(
     # messaggi di chat, li ignoriamo del tutto (niente ingestione in cache/DB).
     if "@broadcast" in chat_jid:
         return []
+
+    data_type = str(
+        raw.get("type") or (data.get("type") if isinstance(data, dict) else "") or ""
+    ).lower()
+    if data_type == "e2e_notification":
+        return _wa_system_event(
+            raw,
+            chat_jid,
+            _wa_security_notice_text(
+                raw, contacts_by_jid, lid_lookup, schedule_lid_resolve
+            ),
+        )
 
     text = (
         raw.get("text")
@@ -819,6 +879,46 @@ def _event_from_message(
                 "media_kind": None,
                 "content_type": None,
                 "ack": ack_val,
+                "contact": None,
+            },
+        )
+    ]
+
+
+def _wa_system_event(raw: dict, chat_jid: str, text: str | None) -> list[ChatEvent]:
+    """Wrap a service notice as a ``msg_type == "system"`` message event."""
+    if not text:
+        return []
+    ts = raw.get("timestamp")
+    ts_ms = 0
+    if isinstance(ts, (int, float)):
+        ts_ms = int(ts * 1000) if ts < 10**12 else int(ts)
+    elif isinstance(ts, str) and ts.isdigit():
+        t = int(ts)
+        ts_ms = t * 1000 if t < 10**12 else t
+    msg_id = raw.get("id") or (raw.get("key") or {}).get("id") or str(ts_ms)
+    return [
+        ChatEvent(
+            type="message",
+            protocol=PROTOCOL_WHATSAPP,
+            contact_id=chat_jid,
+            payload={
+                "id": msg_id,
+                "text": text,
+                "is_mine": False,
+                "sender": "",
+                "is_group": chat_jid.endswith("@g.us"),
+                "timestamp": ts_ms,
+                "quote_text": None,
+                "quote_timestamp": None,
+                "quote_author": None,
+                "reply_to_message_id": None,
+                "msg_type": MSG_TYPE_SYSTEM,
+                "attachment_info": None,
+                "attachment_id": None,
+                "media_kind": None,
+                "content_type": None,
+                "ack": None,
                 "contact": None,
             },
         )
