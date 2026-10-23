@@ -110,12 +110,14 @@ def create_gmail_router() -> Any:
         folder: str | None = None,
         offset: int = 0,
         limit: int = 50,
+        refresh: bool = False,
     ) -> dict[str, Any]:
         return await _run(
             gmail.fetch_message_list,
             folder=folder,
             offset=offset,
             limit=limit,
+            refresh=refresh,
         )
 
     @router.post("/messages/bulk-delete")

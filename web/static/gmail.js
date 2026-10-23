@@ -833,7 +833,7 @@
         { method: "DELETE" },
       );
       closeReader();
-      await loadMessages();
+      await loadMessages({ force: true });
     } catch (error) {
       if (error && error.name === "AbortError") return;
       const message = error.status === 404
@@ -871,7 +871,7 @@
       });
 
       state.selectedUids.clear();
-      await loadMessages();
+      await loadMessages({ force: true });
     } catch (error) {
       if (error && error.name === "AbortError") return;
       const status = error && error.status;
@@ -922,7 +922,7 @@
     }
   }
 
-  async function loadMessages() {
+  async function loadMessages({ force = false } = {}) {
     if (!state.configured || !state.open) return;
 
     state.selectedUids.clear();
@@ -939,6 +939,7 @@
       offset: "0",
       limit: String(FETCH_LIMIT),
     });
+    if (force) params.set("refresh", "1");
 
     try {
       const response = await request(`/api/gmail/messages?${params.toString()}`);
@@ -996,7 +997,7 @@
     }
   }
 
-  async function loadStatus() {
+  async function loadStatus({ force = false } = {}) {
     if (!state.open) return;
     hideError();
     state.listSeq += 1;
@@ -1040,7 +1041,7 @@
 
       elements.notConfigured.hidden = true;
       elements.messages.hidden = false;
-      await loadMessages();
+      await loadMessages({ force });
     } catch (error) {
       if (error && error.name === "AbortError") return;
       state.configured = false;
@@ -1265,7 +1266,7 @@
     state.selectionMode = false;
     syncRowSelection();
     updateSelectionActions();
-    void loadStatus();
+    void loadStatus({ force: true });
   });
   elements.composeNew.addEventListener("click", () => openCompose("new", null));
   elements.reply.addEventListener("click", () => {

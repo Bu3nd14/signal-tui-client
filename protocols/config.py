@@ -19,12 +19,15 @@ backend without affecting the Signal TUI client.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import shlex
 import socket
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -471,32 +474,147 @@ def _gmail_secret_path(raw: str) -> Path:
     return path if path.is_absolute() else PROJECT_DIR / path
 
 
+_GMAIL_SECRET_CACHE_TTL_S = 300
+_GMAIL_SECRET_CMD_LABEL = "gmail_secret_cmd"
+_GMAIL_SECRET_FILE_LABEL = "gmail_secret_file"
+
+# Only the output of ``GMAIL_APP_PASSWORD_CMD`` (TPM/GPG) is cached: file and
+# plaintext sources are sub-millisecond and must stay fresh on every call.
+_gmail_secret_cache: dict[str, tuple[float, str]] = {}
+_gmail_secret_cache_gen = 0
+_gmail_secret_cache_lock = threading.Lock()
+
+
+def _now() -> float:
+    """Indirection over ``time.monotonic`` so tests can freeze the clock."""
+    return time.monotonic()
+
+
+def _gmail_secret_cache_key(command: str) -> str:
+    """Return the opaque cache key for a credential command.
+
+    The raw command may contain a secret inline, so it never appears in the
+    cache or in logs.
+    """
+    return hashlib.sha256(command.encode("utf-8")).hexdigest()
+
+
+def _prune_gmail_secret_cache_locked(now: float) -> None:
+    expired = [
+        key
+        for key, (expires_at, _secret) in _gmail_secret_cache.items()
+        if expires_at <= now
+    ]
+    for key in expired:
+        del _gmail_secret_cache[key]
+
+
+def _gmail_secret_cache_get(key: str) -> str | None:
+    now = _now()
+    with _gmail_secret_cache_lock:
+        _prune_gmail_secret_cache_locked(now)
+        entry = _gmail_secret_cache.get(key)
+        return entry[1] if entry is not None else None
+
+
+def _gmail_secret_cache_put(key: str, secret: str, gen0: int) -> None:
+    now = _now()
+    with _gmail_secret_cache_lock:
+        _prune_gmail_secret_cache_locked(now)
+        if _gmail_secret_cache_gen != gen0:
+            return
+        _gmail_secret_cache[key] = (now + _GMAIL_SECRET_CACHE_TTL_S, secret)
+
+
+def clear_gmail_secret_cache() -> None:
+    """Drop the cached command secret and invalidate in-flight puts."""
+    global _gmail_secret_cache_gen
+    with _gmail_secret_cache_lock:
+        _gmail_secret_cache.clear()
+        _gmail_secret_cache_gen += 1
+
+
 def _gmail_secret_from_file(raw: str) -> str:
     try:
         return _gmail_secret_path(raw).read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError as exc:
+        logger.warning("%s: %s", _GMAIL_SECRET_FILE_LABEL, type(exc).__name__)
+        return ""
     except OSError as exc:
-        logger.warning("GMAIL_APP_PASSWORD_FILE non leggibile: %s", exc)
+        logger.warning(
+            "%s: %s errno=%s",
+            _GMAIL_SECRET_FILE_LABEL,
+            type(exc).__name__,
+            exc.errno,
+        )
         return ""
 
 
 def _gmail_secret_from_command(command: str) -> str:
     try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        logger.warning("%s: %s", _GMAIL_SECRET_CMD_LABEL, type(exc).__name__)
+        return ""
+    if not argv:
+        logger.warning("%s: <empty>", _GMAIL_SECRET_CMD_LABEL)
+        return ""
+
+    try:
         result = subprocess.run(
-            shlex.split(command),
+            argv,
             capture_output=True,
             text=True,
             timeout=10,
             check=False,
         )
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        logger.warning("GMAIL_APP_PASSWORD_CMD non eseguibile: %s", exc)
-        return ""
-    if result.returncode != 0:
+    except subprocess.TimeoutExpired as exc:
         logger.warning(
-            "GMAIL_APP_PASSWORD_CMD terminato con codice %s", result.returncode
+            "%s: %s timeout=%s",
+            _GMAIL_SECRET_CMD_LABEL,
+            type(exc).__name__,
+            exc.timeout,
         )
         return ""
-    return result.stdout.strip()
+    except OSError as exc:
+        logger.warning(
+            "%s: %s errno=%s",
+            _GMAIL_SECRET_CMD_LABEL,
+            type(exc).__name__,
+            exc.errno,
+        )
+        return ""
+    except UnicodeDecodeError as exc:
+        logger.warning("%s: %s", _GMAIL_SECRET_CMD_LABEL, type(exc).__name__)
+        return ""
+    except ValueError as exc:
+        logger.warning("%s: %s", _GMAIL_SECRET_CMD_LABEL, type(exc).__name__)
+        return ""
+
+    if result.returncode != 0:
+        logger.warning("%s: returncode=%s", _GMAIL_SECRET_CMD_LABEL, result.returncode)
+        return ""
+    secret = (result.stdout or "").strip()
+    if not secret:
+        logger.warning("%s: <empty output>", _GMAIL_SECRET_CMD_LABEL)
+        return ""
+    return secret
+
+
+def _cached_command_secret(command: str) -> str:
+    """Return the command output, caching only successful non-empty results."""
+    key = _gmail_secret_cache_key(command)
+    cached = _gmail_secret_cache_get(key)
+    if cached is not None:
+        return cached
+
+    with _gmail_secret_cache_lock:
+        gen0 = _gmail_secret_cache_gen
+
+    secret = _gmail_secret_from_command(command)
+    if secret:
+        _gmail_secret_cache_put(key, secret, gen0)
+    return secret
 
 
 def get_gmail_app_password() -> str:
@@ -514,7 +632,7 @@ def get_gmail_app_password() -> str:
             return secret
     command = _get_gmail("gmail_app_password_cmd", "GMAIL_APP_PASSWORD_CMD")
     if command:
-        secret = _gmail_secret_from_command(command)
+        secret = _cached_command_secret(command)
         if secret:
             return secret
     return _get_gmail("gmail_app_password", "GMAIL_APP_PASSWORD")
