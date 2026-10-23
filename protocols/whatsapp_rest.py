@@ -18,6 +18,7 @@ import urllib.request
 from pathlib import Path
 
 import protocols.whatsapp as _wa
+from protocols.config import WHATSAPP_WEBHOOK_EVENTS, get_whatsapp_webhook_url
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,42 @@ class WhatsAppRESTClient:
                 return result
         return self._request("POST", "/api/sessions/stop", {"name": self.session_name})
 
+    def configure_webhook(self) -> bool:
+        """Register the push webhook while the session is not yet WORKING."""
+        result = self.update_session_config(
+            {
+                "config": {
+                    "webhooks": [
+                        {
+                            "url": get_whatsapp_webhook_url(),
+                            "events": list(WHATSAPP_WEBHOOK_EVENTS),
+                        }
+                    ]
+                }
+            }
+        )
+        return result is not None and self.last_status in (200, 201, 204)
+
+    def wait_for_pairing_qr(
+        self,
+        *,
+        attempts: int = 60,
+        delay: float = 0.5,
+    ) -> str | bytes | None:
+        """Wait until the session is SCAN_QR_CODE and return its QR."""
+        for _ in range(max(1, attempts)):
+            status = self.get_session_status() or {}
+            state = str(status.get("status") or "").lower()
+            if state == "scan_qr_code":
+                qr = self.get_session_qr()
+                if qr:
+                    return qr
+            elif state in ("working", "connected", "authenticated", "ready", "open"):
+                return None
+            if delay > 0:
+                time.sleep(delay)
+        return None
+
     def get_fresh_pairing_qr(
         self,
         reset: bool = True,
@@ -239,19 +276,7 @@ class WhatsAppRESTClient:
         if reset:
             self.reset_session()
         self.start_session()
-        for _ in range(max(1, attempts)):
-            status = self.get_session_status() or {}
-            state = str(status.get("status") or "").lower()
-            if state == "scan_qr_code":
-                qr = self.get_session_qr()
-                if qr:
-                    return qr
-            elif state in ("working", "connected", "authenticated", "ready", "open"):
-                # Already linked: no QR to scan.
-                return None
-            if delay > 0:
-                time.sleep(delay)
-        return None
+        return self.wait_for_pairing_qr(attempts=attempts, delay=delay)
 
     def get_pairing_qr(self) -> str | bytes | None:
         """Return the current pairing QR, or ``None`` if not available.
