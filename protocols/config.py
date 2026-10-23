@@ -189,6 +189,17 @@ def get_whatsapp_webhook_port() -> int:
         return 8088
 
 
+WHATSAPP_WEBHOOK_EVENTS = (
+    "message",
+    "message.any",
+    "message.ack",
+    "message.ack.group",
+    "presence.update",
+    "message.reaction",
+    "chat.archive",
+)
+
+
 def get_whatsapp_webhook_url() -> str:
     """Return the URL WAHA must POST to for this client's webhook.
 

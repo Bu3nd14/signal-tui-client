@@ -26,6 +26,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
+from protocols.config import WHATSAPP_WEBHOOK_EVENTS, get_whatsapp_webhook_url
 from protocols.whatsapp import (
     WhatsAppBackend,
     WhatsAppRESTClient,
@@ -5796,3 +5797,71 @@ class TestIncomingAttachmentIdFirstDedup:
         with sqlite3.connect(backend_mod.DB_FILE) as conn:
             count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         assert count == 1
+
+
+class TestWhatsAppWebhookConfig:
+    """Never update the WAHA webhook config while the session is WORKING."""
+
+    def test_configure_webhook_skips_put_while_working(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.get_session_status.return_value = {
+            "status": "WORKING",
+            "config": {"webhooks": []},
+        }
+
+        backend._configure_webhook()
+
+        backend._rest.update_session_config.assert_not_called()
+
+    def test_configure_webhook_updates_while_starting(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.get_session_status.return_value = {
+            "status": "STARTING",
+            "config": {"webhooks": []},
+        }
+
+        backend._configure_webhook()
+
+        backend._rest.update_session_config.assert_called_once()
+        payload = backend._rest.update_session_config.call_args.args[0]
+        webhook = payload["config"]["webhooks"][0]
+        assert webhook["url"] == get_whatsapp_webhook_url()
+        assert webhook["events"] == list(WHATSAPP_WEBHOOK_EVENTS)
+
+    def test_configure_webhook_noop_when_working_and_matching(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.get_session_status.return_value = {
+            "status": "WORKING",
+            "config": {
+                "webhooks": [
+                    {
+                        "url": get_whatsapp_webhook_url(),
+                        "events": list(WHATSAPP_WEBHOOK_EVENTS),
+                    }
+                ]
+            },
+        }
+
+        backend._configure_webhook()
+
+        backend._rest.update_session_config.assert_not_called()
+
+    def test_client_configure_webhook_payload(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch.object(client, "update_session_config", return_value={}) as update:
+            client.last_status = 200
+            assert client.configure_webhook() is True
+
+        payload = update.call_args.args[0]
+        webhook = payload["config"]["webhooks"][0]
+        assert webhook["url"] == get_whatsapp_webhook_url()
+        assert webhook["events"] == list(WHATSAPP_WEBHOOK_EVENTS)
+
+    def test_client_configure_webhook_failure(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch.object(client, "update_session_config", return_value=None):
+            client.last_status = 500
+            assert client.configure_webhook() is False
