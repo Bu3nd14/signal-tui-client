@@ -46,6 +46,9 @@ def normalize_password(value: str) -> str:
 def write_secret(path: Path, password: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
+    # lgtm[py/clear-text-storage-sensitive-data] - intentional fallback: the
+    # file is created with 600 permissions, never committed, and can be
+    # upgraded to GPG/TPM with the helper scripts.
     path.write_text(password + "\n", encoding="utf-8")
     path.chmod(0o600)
 
@@ -64,6 +67,8 @@ def update_env(env_path: Path, address: str, secret_path: Path) -> None:
     out = [line for line in lines if not line.startswith(prefixes)]
     out.append(f"GMAIL_ADDRESS={address}")
     out.append(f"GMAIL_APP_PASSWORD_FILE={secret_path}")
+    # lgtm[py/clear-text-storage-sensitive-data] - only the secret file *path*
+    # is written to .env here, not the App Password itself.
     env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
     env_path.chmod(0o600)
 
@@ -196,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     print("Gmail configurato.")
-    print(f"  Segreto: {SECRET_FILE} (600)")
+    print("  Segreto salvato in un file con permessi 600.")
     print(f"  Config:  {ENV_FILE} (600)")
     print()
     print(
