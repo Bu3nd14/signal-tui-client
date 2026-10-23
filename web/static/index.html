@@ -131,10 +131,10 @@
           </div>
           <div id="gmail-not-configured" class="gmail-config-hint" hidden>
             <h3>Gmail non configurato</h3>
-            <p>Aggiungi le credenziali al file <code>.env</code> del progetto:</p>
-            <pre><code>GMAIL_ADDRESS=tuo.indirizzo@gmail.com
-GMAIL_APP_PASSWORD=la-tua-app-password</code></pre>
-            <p>Usa una App Password Google, non la password dell'account. Poi riavvia il server web.</p>
+            <p>Dalla directory del progetto esegui:</p>
+            <pre><code>python3 scripts/gmail_setup.py</code></pre>
+            <p>oppure <code>./install.sh --gmail</code>.</p>
+            <p>La App Password viene inserita nel terminale, non nel browser. Al termine premi <strong>Ricarica</strong>.</p>
           </div>
           <div id="gmail-messages" class="gmail-list-scroll" role="list" aria-label="Messaggi inbox"></div>
           <div id="gmail-pager" class="gmail-pager" hidden>

@@ -52,6 +52,7 @@ DO_UPDATE=0
 DO_WHATSAPP=0
 DO_CHECK_WHATSAPP=0
 DO_ALIASES_ONLY=0
+DO_GMAIL=0
 DO_WEB=1
 DO_DOCKER_LIMITS=1
 SPECIFIC_VERSION=""
@@ -73,6 +74,7 @@ Opzioni:
   --check-whatsapp     Verifica i prerequisiti WhatsApp (Docker, porte, firewall)
   --no-web            Non installare le dipendenze opzionali della Web UI (requirements-web.txt)
   --aliases            Installa solo gli alias shell della Web UI
+  --gmail              Configura solo Gmail (App Password, IMAP/SMTP, .env)
   --no-docker-limits   Avvia WAHA senza i cap CPU/RAM (default: applicati via
                        docker-compose.resources.yml; disattiva se il tuo host
                        non delega il controller cgroup memory, es. LXC senza
@@ -87,6 +89,7 @@ Esempi:
   ./install.sh --whatsapp               # avvia WAHA (WhatsApp HTTP API)
   ./install.sh --whatsapp --no-docker-limits  # avvia WAHA senza cap CPU/RAM
   ./install.sh --aliases                # installa solo gli alias della Web UI
+  ./install.sh --gmail                  # configura Gmail (dopo un git pull, senza reinstallare)
 EOF
 }
 
@@ -633,6 +636,21 @@ install_python_deps() {
     fi
 }
 
+setup_gmail() {
+    local py="$PROJECT_DIR/.venv/bin/python"
+    [ -x "$py" ] || py="python3"
+    "$py" "$PROJECT_DIR/scripts/gmail_setup.py"
+}
+
+if [ "$DO_GMAIL" -eq 1 ]; then
+    info "Configurazione Gmail…"
+    ensure_web_config || die "Configurazione Web non riuscita."
+    ensure_env_permissions
+    chmod +x "$PROJECT_DIR"/scripts/gmail_*.sh "$PROJECT_DIR"/scripts/gmail_setup.py 2>/dev/null || true
+    setup_gmail
+    exit $?
+fi
+
 if [ "$DO_ALIASES_ONLY" -eq 1 ]; then
     info "Aggiunta alias web…"
     ensure_web_config || die "Configurazione Web non riuscita."
@@ -722,7 +740,7 @@ install_aliases || warn "Installazione degli alias shell non riuscita; l'install
 # 5.7 Permessi .env e controlli sui segreti opzionali (Gmail)
 ensure_env_permissions
 check_optional_secrets
-chmod +x "$PROJECT_DIR"/scripts/gmail_*.sh 2>/dev/null || true
+chmod +x "$PROJECT_DIR"/scripts/gmail_*.sh "$PROJECT_DIR"/scripts/gmail_setup.py 2>/dev/null || true
 
 # 6. Riepilogo finale
 echo
@@ -759,7 +777,7 @@ echo "       python3 signal_tui.py"
 if [ "$DO_WEB" -eq 1 ]; then
     echo "       Web UI: http://127.0.0.1:4242"
     echo "       Token:  config.json → web.token"
-    echo "       Gmail (opzionale): vedi GMAIL_* in .env.example (file/CMD, GPG o TPM)"
+    echo "       Gmail (opzionale): ./install.sh --gmail  (oppure python3 scripts/gmail_setup.py)"
 fi
 echo
 if [ "$DO_WHATSAPP" -eq 0 ] && [ "$DO_CHECK_WHATSAPP" -eq 0 ]; then

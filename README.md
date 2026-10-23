@@ -114,6 +114,7 @@ Supported options:
 ./install.sh --check-whatsapp     # check WhatsApp prerequisites (Docker, ports, firewall)
 ./install.sh --no-web             # skip Web UI dependencies and configuration
 ./install.sh --aliases            # configure the Web UI and install only its shell aliases
+./install.sh --gmail              # configure only the optional Gmail tab (safe after git pull)
 ./install.sh --help               # show usage
 ```
 
@@ -699,6 +700,24 @@ default; pass `--apply` to apply the cleanup).
 ![Web UI — contact list](assets/screenshots/web-contacts.png)
 
 ![Web UI — conversation](assets/screenshots/web-chat.png)
+
+### Gmail (optional)
+
+The Gmail tab is configured from a terminal, so the App Password never passes through the browser:
+
+```bash
+./install.sh --gmail
+# or, on an existing/forked checkout after `git pull`:
+python3 scripts/gmail_setup.py
+```
+
+The script asks for the Gmail address and a Google **App Password** (hidden input), verifies IMAP and
+SMTP login, stores the secret in `~/.config/signal-tui/gmail-app-password` with `600` permissions and
+updates `.env`. Then reload the Gmail tab in the Web UI.
+
+Optional at-rest encryption: `bash scripts/gmail_gpg_init.sh` (GPG passphrase) or
+`bash scripts/gmail_tpm_init.sh` (Linux TPM2; requires the `tss` group and a re-login). See
+[docs/DESIGN_GMAIL_POC.md](docs/DESIGN_GMAIL_POC.md) and [.env.example](.env.example).
 
 ### Installing the aliases
 
