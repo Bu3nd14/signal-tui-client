@@ -4097,9 +4097,11 @@ if (elements.protocolTabs) {
     localStorage.setItem(PROTOCOL_KEY, protocol);
     if (state.active?.protocol !== protocol) {
       // Primo contatto come appare nella lista (ordinata per last_message_ts),
-      // non il primo nell'ordine di inserimento dell'array.
+      // non il primo nell'ordine di inserimento dell'array. Le archiviate
+      // stanno dietro la riga "Archiviate", quindi si parte dalle altre.
+      state.showArchived = false;
       const candidates = state.contacts
-        .filter((contact) => contact.protocol === protocol)
+        .filter((contact) => contact.protocol === protocol && !isArchived(contact))
         .sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
       const firstContact = candidates[0];
       if (firstContact) {
