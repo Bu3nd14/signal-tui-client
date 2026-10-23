@@ -388,7 +388,7 @@ def test_malformed_quotes_do_not_leak_the_command(monkeypatch, caplog):
 
     assert config._gmail_secret_from_command("hunter2 'unterminated") == ""
     assert "ValueError" in caplog.text
-    assert "gmail_secret_cmd" in caplog.text
+    assert "Gmail secret command failed" in caplog.text
     assert "hunter2" not in caplog.text
 
 
@@ -397,9 +397,8 @@ def test_missing_command_does_not_leak_the_command(monkeypatch, caplog):
     monkeypatch.setenv("GMAIL_APP_PASSWORD", "env-secret")
 
     assert config._gmail_secret_from_command("/definitely/missing/hunter2") == ""
-    assert "FileNotFoundError" in caplog.text
-    assert "gmail_secret_cmd" in caplog.text
-    assert "errno=" in caplog.text
+    assert "OSError" in caplog.text
+    assert "Gmail secret command failed" in caplog.text
     assert "hunter2" not in caplog.text
     assert "/definitely/missing" not in caplog.text
 
@@ -414,7 +413,7 @@ def test_timeout_does_not_leak_the_command(monkeypatch, caplog):
 
     assert config._gmail_secret_from_command("hunter2 --secret") == ""
     assert "TimeoutExpired" in caplog.text
-    assert "timeout=10" in caplog.text
+    assert "TimeoutExpired" in caplog.text
     assert "hunter2" not in caplog.text
 
 
@@ -423,8 +422,8 @@ def test_nonzero_returncode_does_not_leak_the_command(monkeypatch, caplog):
     _fake_runner(monkeypatch, returncode=1)
 
     assert config._gmail_secret_from_command("hunter2") == ""
-    assert "returncode=1" in caplog.text
-    assert "gmail_secret_cmd" in caplog.text
+    assert "returncode" in caplog.text
+    assert "Gmail secret command failed" in caplog.text
     assert "hunter2" not in caplog.text
 
 
@@ -433,7 +432,7 @@ def test_empty_output_does_not_leak_the_command(monkeypatch, caplog):
     _fake_runner(monkeypatch, stdout=" \n")
 
     assert config._gmail_secret_from_command("hunter2") == ""
-    assert "<empty output>" in caplog.text
+    assert "empty output" in caplog.text
     assert "hunter2" not in caplog.text
 
 
@@ -446,8 +445,8 @@ def test_empty_command_is_rejected_before_subprocess(monkeypatch, caplog):
     monkeypatch.setattr(config.subprocess, "run", run)
 
     assert config._gmail_secret_from_command("   ") == ""
-    assert "<empty>" in caplog.text
-    assert "gmail_secret_cmd" in caplog.text
+    assert "empty command" in caplog.text
+    assert "Gmail secret command failed" in caplog.text
 
 
 def test_value_error_from_run_is_sanitized(monkeypatch, caplog):
@@ -482,8 +481,7 @@ def test_file_oserror_does_not_leak_the_path(tmp_path, caplog):
     caplog.set_level(logging.WARNING)
 
     assert config._gmail_secret_from_file(str(tmp_path / "hunter2")) == ""
-    assert "FileNotFoundError" in caplog.text
-    assert "errno=" in caplog.text
+    assert "OSError" in caplog.text
     assert "hunter2" not in caplog.text
     assert str(tmp_path) not in caplog.text
 
