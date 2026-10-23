@@ -48,9 +48,8 @@ def write_secret(path: Path, password: str) -> None:
     path.parent.chmod(0o700)
     # Intentional fallback: the file is created with 600 permissions, never
     # committed, and can be upgraded to GPG/TPM with the helper scripts.
-    path.write_text(  # codeql[py/clear-text-storage-sensitive-data]
-        password + "\n", encoding="utf-8"
-    )
+    # codeql[py/clear-text-storage-sensitive-data]
+    path.write_text(password + "\n", encoding="utf-8")
     path.chmod(0o600)
 
 
@@ -69,9 +68,8 @@ def update_env(env_path: Path, address: str, secret_path: Path) -> None:
     out.append(f"GMAIL_ADDRESS={address}")
     out.append(f"GMAIL_APP_PASSWORD_FILE={secret_path}")
     # Only the secret file *path* is written to .env, not the App Password.
-    env_path.write_text(  # codeql[py/clear-text-storage-sensitive-data]
-        "\n".join(out) + "\n", encoding="utf-8"
-    )
+    # codeql[py/clear-text-storage-sensitive-data]
+    env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
     env_path.chmod(0o600)
 
 
