@@ -20,11 +20,15 @@ backend without affecting the Signal TUI client.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shlex
 import socket
+import subprocess
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 
 
 def _load_dotenv() -> dict:
@@ -450,8 +454,58 @@ def get_gmail_address() -> str:
     return _get_gmail("gmail_address", "GMAIL_ADDRESS")
 
 
+def _gmail_secret_path(raw: str) -> Path:
+    """Resolve a secret file path, relative paths live under the project."""
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else PROJECT_DIR / path
+
+
+def _gmail_secret_from_file(raw: str) -> str:
+    try:
+        return _gmail_secret_path(raw).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        logger.warning("GMAIL_APP_PASSWORD_FILE non leggibile: %s", exc)
+        return ""
+
+
+def _gmail_secret_from_command(command: str) -> str:
+    try:
+        result = subprocess.run(
+            shlex.split(command),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        logger.warning("GMAIL_APP_PASSWORD_CMD non eseguibile: %s", exc)
+        return ""
+    if result.returncode != 0:
+        logger.warning(
+            "GMAIL_APP_PASSWORD_CMD terminato con codice %s", result.returncode
+        )
+        return ""
+    return result.stdout.strip()
+
+
 def get_gmail_app_password() -> str:
-    """Return the Gmail App Password (never exposed in API responses/logs)."""
+    """Return the Gmail App Password (never exposed in API responses/logs).
+
+    Preferred sources, in order: ``GMAIL_APP_PASSWORD_FILE`` (a ``600`` file,
+    e.g. outside the repo), ``GMAIL_APP_PASSWORD_CMD`` (credential helper such
+    as ``gpg --decrypt`` or a keyring lookup), then the legacy plaintext
+    ``GMAIL_APP_PASSWORD`` env/config entry.
+    """
+    file_path = _get_gmail("gmail_app_password_file", "GMAIL_APP_PASSWORD_FILE")
+    if file_path:
+        secret = _gmail_secret_from_file(file_path)
+        if secret:
+            return secret
+    command = _get_gmail("gmail_app_password_cmd", "GMAIL_APP_PASSWORD_CMD")
+    if command:
+        secret = _gmail_secret_from_command(command)
+        if secret:
+            return secret
     return _get_gmail("gmail_app_password", "GMAIL_APP_PASSWORD")
 
 

@@ -209,11 +209,12 @@ install_aliases() {
 # ─── Signal TUI Client: web reader + background via tmux ─────────────────
 # Web su 0.0.0.0:4242. Token Bearer: config.json (web.token) o SIGNAL_TUI_WEB_TOKEN.
 # web-signal-tui-bg stampa ed esporta il token (fast cycle: curl + login Web UI).
+# Gmail TPM: la shell/TUI deve avere il gruppo tss (dopo usermod serve re-login).
 SIGNAL_TUI_DIR="__PROJECT_DIR__"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 _signal_tui_web_bg() {
     if ! tmux has-session -t tui 2>/dev/null; then
-        tmux new-session -d -s tui "cd \"$SIGNAL_TUI_DIR\" && exec .venv/bin/python -m signal_tui" || return 1
+        tmux new-session -d -s tui "cd \"$SIGNAL_TUI_DIR\" && exec .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0" || return 1
     fi
     SIGNAL_TUI_WEB_TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["web"]["token"])' "$SIGNAL_TUI_DIR/config.json")" || return 1
     export SIGNAL_TUI_WEB_TOKEN
@@ -221,7 +222,9 @@ _signal_tui_web_bg() {
 }
 _signal_tui_web_stop() {
     if [ -f /tmp/signal-tui.lock ]; then
-        kill -INT "$(cat /tmp/signal-tui.lock)" 2>/dev/null || true
+        local pid
+        pid="$(cat /tmp/signal-tui.lock)"
+        [ -n "$pid" ] && kill -INT "$pid" 2>/dev/null || true
     fi
     for i in $(seq 1 12); do
         [ ! -f /tmp/signal-tui.lock ] && break
@@ -402,6 +405,33 @@ PY
         ok "Credenziali WAHA verificate in $env_file"
     else
         ok "Credenziali WAHA generate in $env_file (permessi 0600)"
+    fi
+}
+
+ensure_env_permissions() {
+    local env_file="$PROJECT_DIR/.env"
+    if [ -f "$env_file" ]; then
+        if chmod 600 "$env_file" 2>/dev/null; then
+            ok ".env: permessi 600 verificati"
+        else
+            warn "Impossibile impostare .env a 600 (owner/permessi da verificare)."
+        fi
+    fi
+}
+
+check_optional_secrets() {
+    local env_file="$PROJECT_DIR/.env"
+    [ -f "$env_file" ] || return 0
+    if grep -q '^GMAIL_APP_PASSWORD=' "$env_file"; then
+        warn "Gmail: App Password in chiaro in .env; usa GMAIL_APP_PASSWORD_FILE/CMD (vedi .env.example)."
+    fi
+    if grep -q 'systemd-creds' "$env_file"; then
+        if ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx tss; then
+            warn "Gmail TPM: utente non nel gruppo tss; esegui 'sudo usermod -aG tss $USER' e rifai login."
+        fi
+    fi
+    if grep -q 'GMAIL_APP_PASSWORD_CMD=.*gpg' "$env_file" && ! command -v gpg >/dev/null 2>&1; then
+        warn "Gmail GPG: comando configurato ma gpg non è installato."
     fi
 }
 
@@ -606,6 +636,8 @@ install_python_deps() {
 if [ "$DO_ALIASES_ONLY" -eq 1 ]; then
     info "Aggiunta alias web…"
     ensure_web_config || die "Configurazione Web non riuscita."
+    ensure_env_permissions
+    check_optional_secrets
     install_aliases
     exit $?
 fi
@@ -687,6 +719,11 @@ fi
 # 5.6 Alias shell della Web UI
 install_aliases || warn "Installazione degli alias shell non riuscita; l'installazione continua."
 
+# 5.7 Permessi .env e controlli sui segreti opzionali (Gmail)
+ensure_env_permissions
+check_optional_secrets
+chmod +x "$PROJECT_DIR"/scripts/gmail_*.sh 2>/dev/null || true
+
 # 6. Riepilogo finale
 echo
 echo "${C_GREEN}${C_BOLD}=== Installazione completata! ===${C_RESET}"
@@ -722,6 +759,7 @@ echo "       python3 signal_tui.py"
 if [ "$DO_WEB" -eq 1 ]; then
     echo "       Web UI: http://127.0.0.1:4242"
     echo "       Token:  config.json → web.token"
+    echo "       Gmail (opzionale): vedi GMAIL_* in .env.example (file/CMD, GPG o TPM)"
 fi
 echo
 if [ "$DO_WHATSAPP" -eq 0 ] && [ "$DO_CHECK_WHATSAPP" -eq 0 ]; then

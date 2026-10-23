@@ -11,6 +11,8 @@ from protocols import config
 _ENV_VARS = (
     "GMAIL_ADDRESS",
     "GMAIL_APP_PASSWORD",
+    "GMAIL_APP_PASSWORD_FILE",
+    "GMAIL_APP_PASSWORD_CMD",
     "GMAIL_IMAP_HOST",
     "GMAIL_IMAP_PORT",
     "GMAIL_SMTP_HOST",
@@ -61,6 +63,54 @@ def test_env_precedence(monkeypatch, tmp_path):
     assert config.get_gmail_app_password() == "env-secret"
     assert config.get_gmail_folder() == "Sent"
     assert config.gmail_enabled() is True
+
+
+def test_app_password_file_preferred(monkeypatch, tmp_path):
+    secret = tmp_path / "gmail-secret"
+    secret.write_text("file-secret\n")
+    secret.chmod(0o600)
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_FILE", str(secret))
+    monkeypatch.setenv("GMAIL_APP_PASSWORD", "env-secret")
+
+    assert config.get_gmail_app_password() == "file-secret"
+
+
+def test_app_password_file_relative_to_project(monkeypatch, tmp_path):
+    (tmp_path / "secrets").mkdir()
+    secret = tmp_path / "secrets" / "gmail"
+    secret.write_text("relative-secret")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_FILE", "secrets/gmail")
+
+    assert config.get_gmail_app_password() == "relative-secret"
+
+
+def test_app_password_file_missing_falls_back(monkeypatch, tmp_path):
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_FILE", str(tmp_path / "missing"))
+    monkeypatch.setenv("GMAIL_APP_PASSWORD", "env-secret")
+
+    assert config.get_gmail_app_password() == "env-secret"
+
+
+def test_app_password_command(monkeypatch):
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_CMD", "/bin/echo cmd-secret")
+
+    assert config.get_gmail_app_password() == "cmd-secret"
+
+
+def test_app_password_command_failure_falls_back(monkeypatch):
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_CMD", "/bin/false")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD", "env-secret")
+
+    assert config.get_gmail_app_password() == "env-secret"
+
+
+def test_app_password_file_precedes_command(monkeypatch, tmp_path):
+    secret = tmp_path / "gmail-secret"
+    secret.write_text("file-secret")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_FILE", str(secret))
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_CMD", "/bin/echo cmd-secret")
+
+    assert config.get_gmail_app_password() == "file-secret"
 
 
 def test_config_json_fallback(tmp_path):
