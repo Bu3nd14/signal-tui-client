@@ -74,6 +74,15 @@ def main() -> None:
     print(f"✅ Session: {session_name}")
     print()
 
+    # Non abbattere una sessione già funzionante: un rilancio del link
+    # scollegherebbe il dispositivo appena associato.
+    current = client.get_session_status() or {}
+    current_status = str(current.get("status") or "").lower()
+    if current_status in ("working", "connected", "authenticated", "ready", "open"):
+        print("✅ Sessione WhatsApp già collegata: nessun reset necessario.")
+        print("   Per ri-associare un dispositivo, esegui prima un logout esplicito.")
+        return
+
     print("⏳ Creating a fresh session / requesting a valid QR...")
     # Sempre un QR nuovo e valido: abbatte la vecchia sessione (un QR scaduto è il
     # motivo più comune del "non puoi collegare nuovi dispositivi") e ne chiede uno

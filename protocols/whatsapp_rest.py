@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -218,17 +219,39 @@ class WhatsAppRESTClient:
                 return result
         return self._request("POST", "/api/sessions/stop", {"name": self.session_name})
 
-    def get_fresh_pairing_qr(self, reset: bool = True) -> str | bytes | None:
+    def get_fresh_pairing_qr(
+        self,
+        reset: bool = True,
+        *,
+        attempts: int = 60,
+        delay: float = 0.5,
+    ) -> str | bytes | None:
         """Return a freshly-generated, valid pairing QR for immediate scanning.
 
         Always tears down any existing session first (so the QR is brand-new and
-        not a stale/expired token) then asks WAHA to start a new session and
-        returns its current QR (PNG bytes or text).  Returns ``None`` on failure.
+        not a stale/expired token), then asks WAHA to start a new session and
+        waits for it to reach ``SCAN_QR_CODE`` before requesting the QR.
+
+        WAHA needs several seconds (Chromium/WhatsApp Web bootstrap) between
+        ``POST /api/sessions/start`` and a usable QR; asking immediately returns
+        404 and used to make ``link_whatsapp.py`` fail on every retry.
         """
         if reset:
             self.reset_session()
         self.start_session()
-        return self.get_session_qr()
+        for _ in range(max(1, attempts)):
+            status = self.get_session_status() or {}
+            state = str(status.get("status") or "").lower()
+            if state == "scan_qr_code":
+                qr = self.get_session_qr()
+                if qr:
+                    return qr
+            elif state in ("working", "connected", "authenticated", "ready", "open"):
+                # Already linked: no QR to scan.
+                return None
+            if delay > 0:
+                time.sleep(delay)
+        return None
 
     def get_pairing_qr(self) -> str | bytes | None:
         """Return the current pairing QR, or ``None`` if not available.
