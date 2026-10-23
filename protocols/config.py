@@ -534,18 +534,34 @@ def clear_gmail_secret_cache() -> None:
         _gmail_secret_cache_gen += 1
 
 
+def _log_gmail_secret_failure(
+    label: str,
+    exc_type: str = "",
+    *,
+    errno: int | None = None,
+    timeout: float | None = None,
+    returncode: int | None = None,
+) -> None:
+    """Log only non-sensitive metadata from a secret resolver failure."""
+    if returncode is not None:
+        logger.warning("%s: returncode=%s", label, returncode)
+    elif errno is not None:
+        logger.warning("%s: %s errno=%s", label, exc_type, errno)
+    elif timeout is not None:
+        logger.warning("%s: %s timeout=%s", label, exc_type, timeout)
+    else:
+        logger.warning("%s: %s", label, exc_type)
+
+
 def _gmail_secret_from_file(raw: str) -> str:
     try:
         return _gmail_secret_path(raw).read_text(encoding="utf-8").strip()
     except UnicodeDecodeError as exc:
-        logger.warning("%s: %s", _GMAIL_SECRET_FILE_LABEL, type(exc).__name__)
+        _log_gmail_secret_failure(_GMAIL_SECRET_FILE_LABEL, type(exc).__name__)
         return ""
     except OSError as exc:
-        logger.warning(
-            "%s: %s errno=%s",
-            _GMAIL_SECRET_FILE_LABEL,
-            type(exc).__name__,
-            exc.errno,
+        _log_gmail_secret_failure(
+            _GMAIL_SECRET_FILE_LABEL, type(exc).__name__, errno=exc.errno
         )
         return ""
 
@@ -554,10 +570,10 @@ def _gmail_secret_from_command(command: str) -> str:
     try:
         argv = shlex.split(command)
     except ValueError as exc:
-        logger.warning("%s: %s", _GMAIL_SECRET_CMD_LABEL, type(exc).__name__)
+        _log_gmail_secret_failure(_GMAIL_SECRET_CMD_LABEL, type(exc).__name__)
         return ""
     if not argv:
-        logger.warning("%s: <empty>", _GMAIL_SECRET_CMD_LABEL)
+        _log_gmail_secret_failure(_GMAIL_SECRET_CMD_LABEL, "<empty>")
         return ""
 
     try:
@@ -569,34 +585,28 @@ def _gmail_secret_from_command(command: str) -> str:
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        logger.warning(
-            "%s: %s timeout=%s",
-            _GMAIL_SECRET_CMD_LABEL,
-            type(exc).__name__,
-            exc.timeout,
+        _log_gmail_secret_failure(
+            _GMAIL_SECRET_CMD_LABEL, type(exc).__name__, timeout=exc.timeout
         )
         return ""
     except OSError as exc:
-        logger.warning(
-            "%s: %s errno=%s",
-            _GMAIL_SECRET_CMD_LABEL,
-            type(exc).__name__,
-            exc.errno,
+        _log_gmail_secret_failure(
+            _GMAIL_SECRET_CMD_LABEL, type(exc).__name__, errno=exc.errno
         )
         return ""
     except UnicodeDecodeError as exc:
-        logger.warning("%s: %s", _GMAIL_SECRET_CMD_LABEL, type(exc).__name__)
+        _log_gmail_secret_failure(_GMAIL_SECRET_CMD_LABEL, type(exc).__name__)
         return ""
     except ValueError as exc:
-        logger.warning("%s: %s", _GMAIL_SECRET_CMD_LABEL, type(exc).__name__)
+        _log_gmail_secret_failure(_GMAIL_SECRET_CMD_LABEL, type(exc).__name__)
         return ""
 
     if result.returncode != 0:
-        logger.warning("%s: returncode=%s", _GMAIL_SECRET_CMD_LABEL, result.returncode)
+        _log_gmail_secret_failure(_GMAIL_SECRET_CMD_LABEL, returncode=result.returncode)
         return ""
     secret = (result.stdout or "").strip()
     if not secret:
-        logger.warning("%s: <empty output>", _GMAIL_SECRET_CMD_LABEL)
+        _log_gmail_secret_failure(_GMAIL_SECRET_CMD_LABEL, "<empty output>")
         return ""
     return secret
 
