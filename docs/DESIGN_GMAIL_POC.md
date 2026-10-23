@@ -82,6 +82,13 @@ Variabili in `.env` (stesso parsing di WAHA/Telegram):
 - `gmail_enabled()` → `True` solo se `GMAIL_ADDRESS` e una delle fonti del segreto non sono vuote.
 - Precedenza del segreto: `GMAIL_APP_PASSWORD_FILE` → `GMAIL_APP_PASSWORD_CMD` → `GMAIL_APP_PASSWORD`. Il file `.env` va tenuto a `600`.
 
+### Onboarding
+
+- `python3 scripts/gmail_setup.py` (o `./install.sh --gmail`) chiede email + App Password, verifica IMAP/SMTP, scrive il segreto in `~/.config/signal-tui/gmail-app-password` (600) e aggiorna `.env`.
+- Funziona anche su un checkout esistente/forkato dopo `git pull`, senza reinstallare.
+- La tab Gmail "non configurato" mostra il comando da eseguire; la password non passa dal browser.
+- Dopo il setup si può cifrare con `scripts/gmail_gpg_init.sh` o passare a TPM con `scripts/gmail_tpm_init.sh`.
+
 ### GPG (opzionale, per cifratura a riposo)
 
 - `scripts/gmail_gpg_init.sh` cifra il file segreto con GPG simmetrico AES-256, elimina il plaintext con `shred` e imposta `GMAIL_APP_PASSWORD_CMD`.

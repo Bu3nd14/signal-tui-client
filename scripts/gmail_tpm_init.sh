@@ -12,6 +12,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/signal-tui"
 GPG_FILE="$CONFIG_DIR/gmail-app-password.gpg"
+PLAIN_FILE="$CONFIG_DIR/gmail-app-password"
 CRED_FILE="$CONFIG_DIR/gmail-app-password.cred"
 ENV_FILE="$PROJECT_DIR/.env"
 
@@ -27,15 +28,22 @@ if ! systemd-creds has-tpm2 >/dev/null; then
     exit 1
 fi
 
-if [[ ! -s "$GPG_FILE" ]]; then
-    echo "File GPG non trovato: $GPG_FILE" >&2
+if [[ -s "$GPG_FILE" ]]; then
+    read_secret() { gpg --quiet --decrypt "$GPG_FILE"; }
+    source_kind="GPG"
+elif [[ -s "$PLAIN_FILE" ]]; then
+    read_secret() { cat "$PLAIN_FILE"; }
+    source_kind="plaintext"
+else
+    echo "Nessun segreto Gmail trovato in $CONFIG_DIR." >&2
+    echo "Esegui prima: python3 scripts/gmail_setup.py" >&2
     exit 1
 fi
 
 umask 077
 
-# Decrypt GPG straight into systemd-creds: no plaintext file on disk.
-if ! gpg --quiet --decrypt "$GPG_FILE" \
+# Feed the secret straight into systemd-creds: no plaintext file created here.
+if ! read_secret \
     | systemd-creds encrypt --with-key=tpm2 --name=gmail-app-password - "$CRED_FILE"; then
     echo "Cifratura TPM fallita." >&2
     rm -f "$CRED_FILE"
@@ -77,7 +85,12 @@ env_path.write_text("\n".join(out) + "\n")
 env_path.chmod(0o600)
 PY
 
+if [[ "$source_kind" == "plaintext" ]]; then
+    shred -u "$PLAIN_FILE" || rm -f "$PLAIN_FILE"
+    echo "Plaintext eliminato: $PLAIN_FILE"
+else
+    echo "File GPG mantenuto come backup: $GPG_FILE"
+fi
 echo "Fatto: credenziale TPM in $CRED_FILE"
-echo "Il file GPG è rimasto come backup: $GPG_FILE"
 echo ".env ora usa GMAIL_APP_PASSWORD_CMD con systemd-creds."
 echo "Riavvia la TUI (in una sessione con il gruppo tss) per applicare il cambio."
