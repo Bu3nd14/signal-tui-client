@@ -16,7 +16,7 @@ _SPEC.loader.exec_module(gmail_setup)
 
 
 def test_normalize_password_strips_display_spaces():
-    assert gmail_setup.normalize_password("bcmi ieth occw hvye\n") == "bcmiiethoccwhvye"
+    assert gmail_setup.normalize_password("abcd efgh ijkl mnop\n") == "abcdefghijklmnop"
 
 
 def test_write_secret_uses_private_permissions(tmp_path):
@@ -77,13 +77,13 @@ def test_main_saves_secret_and_updates_env(monkeypatch, tmp_path):
     monkeypatch.setattr(gmail_setup, "SECRET_FILE", secret)
     monkeypatch.setattr(gmail_setup.config, "get_gmail_address", lambda: "")
     monkeypatch.setattr(
-        gmail_setup.getpass, "getpass", lambda prompt: "bcmi ieth occw hvye"
+        gmail_setup.getpass, "getpass", lambda prompt: "abcd efgh ijkl mnop"
     )
     monkeypatch.setattr(gmail_setup, "test_credentials", lambda address, password: True)
 
     assert gmail_setup.main(["--address", "user@example.com", "--force"]) == 0
 
-    assert secret.read_text() == "bcmiiethoccwhvye\n"
+    assert secret.read_text() == "abcdefghijklmnop\n"
     content = env.read_text()
     assert "GMAIL_ADDRESS=user@example.com" in content
     assert f"GMAIL_APP_PASSWORD_FILE={secret}" in content
