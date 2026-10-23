@@ -639,6 +639,11 @@ install_python_deps() {
 setup_gmail() {
     local py="$PROJECT_DIR/.venv/bin/python"
     [ -x "$py" ] || py="python3"
+    if ! "$py" -c "import nh3" >/dev/null 2>&1; then
+        info "Installo nh3 (sanitizzazione HTML del reader Gmail)…"
+        "$py" -m pip install --quiet "nh3>=0.3.7,<0.4" \
+            || warn "nh3 non installato: il reader userà solo il testo. Riprova: $py -m pip install -r requirements-web.txt"
+    fi
     "$py" "$PROJECT_DIR/scripts/gmail_setup.py"
 }
 

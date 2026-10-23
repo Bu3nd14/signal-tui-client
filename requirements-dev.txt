@@ -21,6 +21,8 @@ coverage>=7.15,<8
 ruff==0.16.1
 
 # --- Type checking ---
+# Usato dal reader Gmail (import lazy in web/gmail.py); serve a basedpyright.
+nh3>=0.3.7,<0.4
 # PINNATO: gli aggiornamenti di basedpyright possono introdurre nuove diagnostiche;
 # la versione va bloccata per non far "muovere" il gate di type checking.
 basedpyright==1.39.10
