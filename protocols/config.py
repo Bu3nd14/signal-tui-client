@@ -413,3 +413,82 @@ def web_token() -> str:
         return env_token
     value = _web_config().get("token", "")
     return str(value) if value is not None else ""
+
+
+# ─── Gmail configuration ───────────────────────────────────────────────────
+
+
+def _get_gmail(key: str, env_name: str, default: str = "") -> str:
+    """Resolve a Gmail setting: environment, config.json, then ``.env``.
+
+    Whitespace-only values are treated as unset so an empty ``GMAIL_ADDRESS``
+    line in ``.env`` does not shadow a value from another source.
+    """
+    env = os.environ.get(env_name)
+    if env is not None and env.strip():
+        return env.strip()
+    cfg = _load_config().get(key)
+    if cfg is not None and str(cfg).strip():
+        return str(cfg).strip()
+    dotenv = _load_dotenv().get(env_name)
+    if dotenv is not None and dotenv.strip():
+        return dotenv.strip()
+    return default
+
+
+def _get_gmail_int(key: str, env_name: str, default: int) -> int:
+    """Return an integer Gmail setting, falling back to *default* if invalid."""
+    raw = _get_gmail(key, env_name, str(default))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_gmail_address() -> str:
+    """Return the Gmail address used as SMTP ``From`` and IMAP login."""
+    return _get_gmail("gmail_address", "GMAIL_ADDRESS")
+
+
+def get_gmail_app_password() -> str:
+    """Return the Gmail App Password (never exposed in API responses/logs)."""
+    return _get_gmail("gmail_app_password", "GMAIL_APP_PASSWORD")
+
+
+def get_gmail_imap_host() -> str:
+    """Return the IMAP host (default ``imap.gmail.com``)."""
+    return _get_gmail("gmail_imap_host", "GMAIL_IMAP_HOST", "imap.gmail.com")
+
+
+def get_gmail_imap_port() -> int:
+    """Return the IMAP SSL port (default ``993``)."""
+    port = _get_gmail_int("gmail_imap_port", "GMAIL_IMAP_PORT", 993)
+    return port if 1 <= port <= 65535 else 993
+
+
+def get_gmail_smtp_host() -> str:
+    """Return the SMTP host (default ``smtp.gmail.com``)."""
+    return _get_gmail("gmail_smtp_host", "GMAIL_SMTP_HOST", "smtp.gmail.com")
+
+
+def get_gmail_smtp_port() -> int:
+    """Return the SMTP STARTTLS port (default ``587``)."""
+    port = _get_gmail_int("gmail_smtp_port", "GMAIL_SMTP_PORT", 587)
+    return port if 1 <= port <= 65535 else 587
+
+
+def get_gmail_folder() -> str:
+    """Return the default mailbox folder (default ``INBOX``)."""
+    folder = _get_gmail("gmail_folder", "GMAIL_FOLDER", "INBOX")
+    return folder or "INBOX"
+
+
+def get_gmail_timeout_s() -> int:
+    """Return the IMAP/SMTP socket timeout in seconds (default ``30``)."""
+    timeout = _get_gmail_int("gmail_timeout_s", "GMAIL_TIMEOUT_S", 30)
+    return timeout if timeout > 0 else 30
+
+
+def gmail_enabled() -> bool:
+    """Return True when both the address and the App Password are configured."""
+    return bool(get_gmail_address() and get_gmail_app_password())
