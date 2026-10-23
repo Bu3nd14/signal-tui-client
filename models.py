@@ -23,6 +23,10 @@ PROTOCOL_SIGNAL = "signal"
 PROTOCOL_WHATSAPP = "whatsapp"
 PROTOCOL_TELEGRAM = "telegram"
 
+#: ``msg_type`` of a service notice rendered centred, outside any bubble
+#: (e.g. WhatsApp "your security code with X changed").
+MSG_TYPE_SYSTEM = "system"
+
 #: Human-friendly emoji shown next to a contact of a given protocol.
 PROTOCOL_EMOJI: dict[str, str] = {
     PROTOCOL_SIGNAL: "📱",

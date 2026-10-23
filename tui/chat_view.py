@@ -10,6 +10,7 @@ from textual.widgets import Button, Static
 
 from models import (
     MERGE_FILL_FIELDS,
+    MSG_TYPE_SYSTEM,
     PROTOCOL_SIGNAL,
     PROTOCOL_WHATSAPP,
     _prefer_display_sender,
@@ -500,7 +501,9 @@ class ChatViewMixin:
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
 
-        if msg_type != "text":
+        # Gli avvisi di servizio (msg_type "system") non hanno caption: il
+        # testo è già nella bolla principale.
+        if msg_type not in ("text", MSG_TYPE_SYSTEM):
             caption = _non_image_media_caption(
                 text, attachment_info, attachment_id, protocol
             )
@@ -1655,7 +1658,7 @@ class ChatViewMixin:
             caption = _non_image_media_caption(
                 text, attachment_info, attachment_id, protocol
             )
-            if msg_type != "text" and caption:
+            if msg_type not in ("text", MSG_TYPE_SYSTEM) and caption:
                 widgets.append(
                     self._make_message_widget(
                         text=caption,
