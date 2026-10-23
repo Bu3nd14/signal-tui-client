@@ -146,4 +146,5 @@ def test_image_proxy_token_roundtrip_and_tamper():
     token = parse_qs(urlsplit(path).query)["token"][0]
 
     assert gmail.verify_image_token(token) == url
-    assert gmail.verify_image_token(token[:-1] + "0") == ""
+    replacement = "1" if token[-1] != "1" else "2"
+    assert gmail.verify_image_token(token[:-1] + replacement) == ""

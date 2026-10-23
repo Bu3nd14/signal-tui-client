@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import imaplib
 import logging
+import re
+import threading
 from email.message import EmailMessage
 from typing import ClassVar
 
@@ -18,6 +20,8 @@ from web.gmail_api import create_gmail_router
 _ENV_VARS = (
     "GMAIL_ADDRESS",
     "GMAIL_APP_PASSWORD",
+    "GMAIL_APP_PASSWORD_FILE",
+    "GMAIL_APP_PASSWORD_CMD",
     "GMAIL_IMAP_HOST",
     "GMAIL_IMAP_PORT",
     "GMAIL_SMTP_HOST",
@@ -32,6 +36,11 @@ def isolate_gmail_config(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "PROJECT_DIR", tmp_path)
     for name in _ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    config.clear_gmail_secret_cache()
+    gmail.clear_inbox_cache()
+    yield
+    config.clear_gmail_secret_cache()
+    gmail.clear_inbox_cache()
 
 
 @pytest.fixture
@@ -39,6 +48,43 @@ def client():
     app = FastAPI()
     app.include_router(create_gmail_router())
     return TestClient(app)
+
+
+_HEADER_FIELDS_RE = re.compile(r"HEADER\.FIELDS \(([^)]*)\)")
+
+
+def _header_block(raw: bytes) -> tuple[bytes, bytes]:
+    for separator in (b"\r\n\r\n", b"\n\n"):
+        if separator in raw:
+            return raw.split(separator, 1)[0], separator
+    return raw, b"\r\n\r\n"
+
+
+def _filter_header_fields(raw: bytes, fetch_item: str) -> bytes:
+    """Emulate a real IMAP ``HEADER.FIELDS`` response."""
+    match = _HEADER_FIELDS_RE.search(fetch_item)
+    if match is None:
+        return raw
+    wanted = {name.upper().encode("ascii") for name in match.group(1).split()}
+    header, _separator = _header_block(raw)
+    output: list[bytes] = []
+    keep = False
+    for line in re.split(rb"\r\n|\n", header):
+        if line[:1] in (b" ", b"\t"):
+            if keep:
+                output.append(line)
+            continue
+        name = line.split(b":", 1)[0].strip().upper()
+        keep = name in wanted
+        if keep:
+            output.append(line)
+    return b"\r\n".join(output) + b"\r\n\r\n"
+
+
+def _add_escape_headers(message: EmailMessage) -> None:
+    message["Received"] = "from escape.example.com by mx.example.com"
+    message["DKIM-Signature"] = "v=1; d=escape.example.com"
+    message["List-Id"] = "<escape.example.com>"
 
 
 def _build_messages() -> dict[int, bytes]:
@@ -51,6 +97,7 @@ def _build_messages() -> dict[int, bytes]:
     reply["Date"] = "Fri, 23 Oct 2026 10:00:00 +0000"
     reply["Message-ID"] = "<orig@example.com>"
     reply["References"] = "<root@example.com>"
+    _add_escape_headers(reply)
     reply.set_content("original line\nsecond line")
     reply.add_attachment(
         b"%PDF-1.4\npdf",
@@ -72,6 +119,7 @@ def _build_messages() -> dict[int, bytes]:
     html["Subject"] = "HTML only"
     html["Date"] = "Thu, 22 Oct 2026 10:00:00 +0000"
     html["Message-ID"] = "<html@example.com>"
+    _add_escape_headers(html)
     html.set_content("<p>HTML body</p>", subtype="html")
     messages[2] = html.as_bytes()
 
@@ -82,6 +130,7 @@ def _build_messages() -> dict[int, bytes]:
         message["Subject"] = subject
         message["Date"] = f"Wed, 21 Oct 2026 1{uid}:00:00 +0000"
         message["Message-ID"] = f"<msg-{uid}@example.com>"
+        _add_escape_headers(message)
         message.set_content(f"{subject.lower()} body")
         messages[uid] = message.as_bytes()
 
@@ -90,6 +139,7 @@ def _build_messages() -> dict[int, bytes]:
     no_date["To"] = "me@example.com"
     no_date["Subject"] = "No date"
     no_date["Message-ID"] = "<no-date@example.com>"
+    _add_escape_headers(no_date)
     no_date.set_content("no date body")
     messages[5] = no_date.as_bytes()
 
@@ -99,6 +149,7 @@ def _build_messages() -> dict[int, bytes]:
 class FakeIMAP:
     instances: ClassVar[list[FakeIMAP]] = []
     messages: ClassVar[dict[int, bytes]] = {}
+    seen_uids: ClassVar[set[int]] = set()
     uidvalidity: bytes = b"777"
     search_all: bytes = b"1 2 3 4 5"
     search_unseen: bytes = b"2 4"
@@ -115,6 +166,7 @@ class FakeIMAP:
         self.selected: tuple[str, bool] | None = None
         self.logged_out = False
         self.expunged = False
+        self.fetched_headers: dict[int, bytes] = {}
         self.messages = type(self).messages
         FakeIMAP.instances.append(self)
 
@@ -158,9 +210,21 @@ class FakeIMAP:
                 raw = self.messages.get(uid)
                 if raw is None:
                     continue
-                flags = "\\Seen" if uid == 1 else ""
-                if "BODY.PEEK[HEADER]" in fetch_item:
-                    raw = raw.split(b"\r\n\r\n", 1)[0] + b"\r\n\r\n"
+                seen = uid in type(self).seen_uids or uid == 1
+                flags = "\\Seen" if seen else ""
+                if uid == 4:
+                    flags = "\\Flagged \\Seen \\Flagged"
+                if "HEADER.FIELDS" in fetch_item:
+                    raw = _filter_header_fields(raw, fetch_item)
+                    self.fetched_headers[uid] = raw
+                    meta = (
+                        f"{uid} (UID {uid} FLAGS ({flags}) "
+                        f"BODY[HEADER.FIELDS] {{{len(raw)}}}"
+                    ).encode()
+                    payload.extend([(meta, raw), b")"])
+                elif "BODY.PEEK[HEADER]" in fetch_item:
+                    header, _separator = _header_block(raw)
+                    raw = header + b"\r\n\r\n"
                     meta = (
                         f"{uid} (UID {uid} FLAGS ({flags}) BODY[HEADER] {{{len(raw)}}}"
                     ).encode()
@@ -174,7 +238,12 @@ class FakeIMAP:
                     # imaplib returns bytes (no tuple/literal) for FLAGS-only.
                     payload.append(f"{uid} (UID {uid} FLAGS ({flags}))".encode())
             return "OK", payload
-        if command in {"STORE", "COPY"}:
+        if command == "STORE":
+            if len(args) >= 3 and args[1] == "+FLAGS" and "\\Seen" in str(args[2]):
+                for value in str(args[0]).split(","):
+                    type(self).seen_uids.add(int(value))
+            return "OK", [b"1"]
+        if command == "COPY":
             return "OK", [b"1"]
         return "BAD", []
 
@@ -220,6 +289,7 @@ class FakeSMTP:
 def fake_imap(monkeypatch):
     FakeIMAP.instances = []
     FakeIMAP.messages = _build_messages()
+    FakeIMAP.seen_uids = set()
     FakeIMAP.list_data = [
         b'(\\HasNoChildren \\Inbox) "/" "INBOX"',
         b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"',
@@ -233,6 +303,15 @@ def fake_smtp(monkeypatch):
     FakeSMTP.instances = []
     monkeypatch.setattr(gmail.smtplib, "SMTP", FakeSMTP)
     return FakeSMTP
+
+
+def _search_count(fake_imap) -> int:
+    return sum(
+        1
+        for instance in fake_imap.instances
+        for command, _args in instance.calls
+        if command == "SEARCH"
+    )
 
 
 @pytest.fixture
@@ -287,16 +366,32 @@ def test_list_is_date_descending_and_reports_window(client, fake_imap, configure
     assert first["has_attachments"] is True
     assert first["seen"] is True
     assert first["flags"] == ["\\Seen"]
+    by_uid = {message["uid"]: message for message in body["messages"]}
+    assert by_uid[4]["flags"] == ["\\Flagged", "\\Seen"]
+    assert by_uid[4]["seen"] is True
     # The list fetches headers only: no body, no attachments, no snippet.
     assert first["snippet"] == ""
     assert fake_imap.instances[0].selected == ('"INBOX"', True)
     calls = fake_imap.instances[0].calls
     assert ("SEARCH", (None, "ALL")) in calls
     assert not any(command == "SEARCH" and "UNSEEN" in args for command, args in calls)
-    fetch_calls = [str(args) for command, args in calls if command == "FETCH"]
-    assert fetch_calls
-    assert all("BODY.PEEK[HEADER]" in call for call in fetch_calls)
-    assert all("BODY.PEEK[]" not in call for call in fetch_calls)
+    fetch_calls = [args for command, args in calls if command == "FETCH"]
+    assert fetch_calls == [
+        (
+            "5,4,3,2,1",
+            (
+                "(FLAGS BODY.PEEK[HEADER.FIELDS "
+                "(FROM TO SUBJECT DATE CONTENT-TYPE CONTENT-DISPOSITION)])"
+            ),
+        )
+    ]
+    fetched_headers = fake_imap.instances[0].fetched_headers
+    assert set(fetched_headers) == {1, 2, 3, 4, 5}
+    for raw in fetched_headers.values():
+        assert b"Received:" not in raw
+        assert b"DKIM-Signature:" not in raw
+        assert b"List-Id:" not in raw
+        assert b"Subject:" in raw
 
 
 def test_list_offset_limit_and_has_more(client, fake_imap, configured):
@@ -340,6 +435,406 @@ def test_list_rejects_unsafe_folder(client, fake_imap, configured):
     response = client.get("/api/gmail/messages", params={"folder": "INBOX*"})
 
     assert response.status_code == 400
+
+
+def test_filtered_headers_remove_unrequested_headers():
+    raw = _build_messages()[1]
+    filtered = _filter_header_fields(raw, gmail._LIST_FETCH_ITEM)
+
+    assert b"Received:" not in filtered
+    assert b"DKIM-Signature:" not in filtered
+    assert b"List-Id:" not in filtered
+    assert b"Subject:" in filtered
+    assert b"Content-Type:" in filtered
+
+
+@pytest.mark.parametrize("uid", [1, 2, 3, 4, 5])
+def test_filtered_headers_parse_like_the_full_message(uid):
+    raw = _build_messages()[uid]
+    filtered = _filter_header_fields(raw, gmail._LIST_FETCH_ITEM)
+
+    assert gmail.parse_summary(filtered) == gmail.parse_summary(raw)
+
+
+def test_single_part_content_disposition_attachment_is_detected():
+    raw = (
+        b"From: sender@example.com\r\n"
+        b"Content-Type: text/plain\r\n"
+        b"Content-Disposition: attachment\r\n"
+        b"\r\n"
+        b"body\r\n"
+    )
+
+    summary = gmail.parse_summary(_filter_header_fields(raw, gmail._LIST_FETCH_ITEM))
+
+    assert summary["has_attachments"] is True
+
+
+def test_content_type_name_is_detected_as_attachment():
+    raw = (
+        b"From: sender@example.com\r\n"
+        b'Content-Type: application/pdf; name="report.pdf"\r\n'
+        b"\r\n"
+        b"body\r\n"
+    )
+
+    summary = gmail.parse_summary(_filter_header_fields(raw, gmail._LIST_FETCH_ITEM))
+
+    assert summary["has_attachments"] is True
+
+
+def test_missing_headers_are_tolerated():
+    raw = b"From: sender@example.com\r\n\r\nbody\r\n"
+
+    summary = gmail.parse_summary(_filter_header_fields(raw, gmail._LIST_FETCH_ITEM))
+
+    assert summary["from"] == "sender@example.com"
+    assert summary["subject"] == ""
+    assert summary["date_ts"] is None
+    assert summary["has_attachments"] is False
+
+
+def test_folded_and_duplicate_headers_match_the_full_message():
+    raw = (
+        b"From: sender@example.com\r\n"
+        b"Subject: Hello\r\n"
+        b" world\r\n"
+        b"Subject: Second\r\n"
+        b"Date: Fri, 23 Oct 2026 10:00:00 +0000\r\n"
+        b"\r\n"
+        b"body\r\n"
+    )
+
+    filtered = _filter_header_fields(raw, gmail._LIST_FETCH_ITEM)
+
+    assert gmail.parse_summary(filtered) == gmail.parse_summary(raw)
+
+
+def test_empty_filtered_literal_does_not_crash():
+    raw = (
+        b"Received: by mx.example.com\r\n"
+        b"DKIM-Signature: v=1; d=example.com\r\n"
+        b"List-Id: <list.example.com>\r\n"
+        b"\r\n"
+        b"body\r\n"
+    )
+
+    filtered = _filter_header_fields(raw, gmail._LIST_FETCH_ITEM)
+    assert filtered == b"\r\n\r\n"
+
+    summary = gmail.parse_summary(filtered)
+    assert summary["from"] == ""
+    assert summary["to"] == ""
+    assert summary["subject"] == ""
+    assert summary["date_ts"] is None
+    assert summary["has_attachments"] is False
+
+
+def test_second_list_is_a_cache_hit(client, fake_imap, configured):
+    first = client.get("/api/gmail/messages")
+    assert first.status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    second = client.get("/api/gmail/messages")
+
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    assert _search_count(fake_imap) == 1
+    assert len(fake_imap.instances) == 1
+
+
+def test_cached_list_paginates_with_the_same_contract(client, fake_imap, configured):
+    first_page = client.get("/api/gmail/messages?limit=2").json()
+    second_page = client.get("/api/gmail/messages?offset=2&limit=2").json()
+
+    assert [item["uid"] for item in first_page["messages"]] == [1, 2]
+    assert [item["uid"] for item in second_page["messages"]] == [4, 3]
+    assert second_page["offset"] == 2
+    assert second_page["limit"] == 2
+    assert second_page["total"] == 5
+    assert second_page["has_more"] is True
+    assert second_page["window"] == 200
+    assert second_page["folder"] == "INBOX"
+    assert _search_count(fake_imap) == 1
+
+
+def test_mutating_a_hit_does_not_corrupt_the_cache(client, fake_imap, configured):
+    first = client.get("/api/gmail/messages").json()
+    first["messages"][0]["flags"].append("\\Draft")
+    first["messages"][0]["subject"] = "Hacked"
+
+    second = client.get("/api/gmail/messages").json()
+
+    assert second["messages"][0]["flags"] == ["\\Seen"]
+    assert second["messages"][0]["subject"] == "Hello"
+    assert _search_count(fake_imap) == 1
+
+
+def test_account_address_change_is_a_cache_miss(
+    client, fake_imap, configured, monkeypatch
+):
+    assert client.get("/api/gmail/messages").status_code == 200
+    monkeypatch.setenv("GMAIL_ADDRESS", "other@example.com")
+
+    response = client.get("/api/gmail/messages")
+
+    assert response.status_code == 200
+    assert _search_count(fake_imap) == 2
+    assert fake_imap.instances[-1].credentials[0] == "other@example.com"
+
+
+def test_account_host_change_is_a_cache_miss(
+    client, fake_imap, configured, monkeypatch
+):
+    assert client.get("/api/gmail/messages").status_code == 200
+    monkeypatch.setenv("GMAIL_IMAP_HOST", "imap.example.com")
+
+    assert client.get("/api/gmail/messages").status_code == 200
+
+    assert _search_count(fake_imap) == 2
+    assert fake_imap.instances[-1].host == "imap.example.com"
+
+
+def test_account_port_change_is_a_cache_miss(
+    client, fake_imap, configured, monkeypatch
+):
+    assert client.get("/api/gmail/messages").status_code == 200
+    monkeypatch.setenv("GMAIL_IMAP_PORT", "1993")
+
+    assert client.get("/api/gmail/messages").status_code == 200
+
+    assert _search_count(fake_imap) == 2
+    assert fake_imap.instances[-1].port == 1993
+
+
+def test_delete_invalidates_every_cached_folder(client, fake_imap, configured):
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    assert client.delete("/api/gmail/messages/3").status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 2
+
+
+def test_bulk_delete_invalidates_every_cached_folder(client, fake_imap, configured):
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    response = client.post("/api/gmail/messages/bulk-delete", json={"uids": [1, 3]})
+    assert response.status_code == 200
+
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 2
+
+
+def test_delete_in_another_folder_invalidates_the_cached_folder(
+    client, fake_imap, configured
+):
+    assert client.get("/api/gmail/messages?folder=INBOX").status_code == 200
+    assert client.get("/api/gmail/messages?folder=Archive").status_code == 200
+    assert _search_count(fake_imap) == 2
+
+    assert (
+        client.delete("/api/gmail/messages/3", params={"folder": "Archive"}).status_code
+        == 200
+    )
+
+    assert client.get("/api/gmail/messages?folder=INBOX").status_code == 200
+    assert _search_count(fake_imap) == 3
+
+
+@pytest.mark.parametrize("failed_command", ["COPY", "STORE", "EXPUNGE"])
+def test_partial_delete_failure_still_invalidates(
+    client, fake_imap, configured, monkeypatch, failed_command
+):
+    class FailingIMAP(FakeIMAP):
+        def uid(self, command, *args):
+            if command == failed_command:
+                self.calls.append((command, args))
+                return "NO", []
+            return super().uid(command, *args)
+
+        def expunge(self):
+            if failed_command == "EXPUNGE":
+                self.calls.append(("EXPUNGE", ()))
+                return "NO", []
+            return super().expunge()
+
+    monkeypatch.setattr(gmail.imaplib, "IMAP4_SSL", FailingIMAP)
+
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    assert client.delete("/api/gmail/messages/3").status_code == 502
+
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 2
+
+
+def test_send_invalidates_the_cached_list(client, fake_imap, fake_smtp, configured):
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    response = client.post(
+        "/api/gmail/send",
+        data={"to": "dest@example.com", "subject": "Ciao", "text": "Corpo"},
+    )
+    assert response.status_code == 200
+
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 2
+
+
+def test_mark_read_updates_the_entry_in_place(client, fake_imap, configured):
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    assert client.post("/api/gmail/messages/3/read").status_code == 200
+    assert len(fake_imap.instances) == 2
+
+    body = client.get("/api/gmail/messages").json()
+
+    assert len(fake_imap.instances) == 2
+    assert _search_count(fake_imap) == 1
+    target = next(message for message in body["messages"] if message["uid"] == 3)
+    assert target["seen"] is True
+    assert target["flags"] == ["\\Seen"]
+
+
+def test_mark_read_on_already_seen_message_keeps_the_entry(
+    client, fake_imap, configured
+):
+    assert client.get("/api/gmail/messages").status_code == 200
+
+    assert client.post("/api/gmail/messages/1/read").status_code == 200
+    body = client.get("/api/gmail/messages").json()
+
+    assert _search_count(fake_imap) == 1
+    assert body["messages"][0]["uid"] == 1
+    assert body["messages"][0]["seen"] is True
+
+
+def test_mark_read_outside_the_window_keeps_the_entry(client, fake_imap, configured):
+    assert client.get("/api/gmail/messages").status_code == 200
+
+    assert client.post("/api/gmail/messages/99/read").status_code == 200
+    assert client.get("/api/gmail/messages").status_code == 200
+
+    assert _search_count(fake_imap) == 1
+
+
+def test_mark_read_does_not_touch_another_folder_entry(client, fake_imap, configured):
+    assert client.get("/api/gmail/messages?folder=INBOX").status_code == 200
+    assert client.get("/api/gmail/messages?folder=Archive").status_code == 200
+
+    assert (
+        client.post(
+            "/api/gmail/messages/3/read", params={"folder": "INBOX"}
+        ).status_code
+        == 200
+    )
+
+    archive = client.get("/api/gmail/messages?folder=Archive").json()
+
+    assert len(fake_imap.instances) == 3
+    assert _search_count(fake_imap) == 2
+    target = next(message for message in archive["messages"] if message["uid"] == 3)
+    assert target["seen"] is False
+
+
+def test_mark_read_with_empty_cache_discards_the_in_flight_put(
+    fake_imap, configured, monkeypatch
+):
+    class BlockingIMAP(FakeIMAP):
+        search_started = threading.Event()
+        release_search = threading.Event()
+
+        def uid(self, command, *args):
+            if command == "SEARCH":
+                type(self).search_started.set()
+                if not type(self).release_search.wait(5):
+                    raise AssertionError("SEARCH was not released")
+            return super().uid(command, *args)
+
+    monkeypatch.setattr(gmail.imaplib, "IMAP4_SSL", BlockingIMAP)
+    result: dict[str, dict] = {}
+
+    def fetch():
+        result["response"] = gmail.fetch_message_list()
+
+    thread = threading.Thread(target=fetch)
+    thread.start()
+    assert BlockingIMAP.search_started.wait(5)
+
+    gmail.mark_read(3)
+    BlockingIMAP.release_search.set()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert "response" in result
+
+    body = gmail.fetch_message_list()
+
+    assert _search_count(fake_imap) == 2
+    target = next(message for message in body["messages"] if message["uid"] == 3)
+    assert target["seen"] is True
+
+
+@pytest.mark.parametrize("value", ["1", "true"])
+def test_refresh_forces_a_miss(client, fake_imap, configured, value):
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    response = client.get("/api/gmail/messages", params={"refresh": value})
+
+    assert response.status_code == 200
+    assert _search_count(fake_imap) == 2
+
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 2
+
+
+def test_refresh_zero_keeps_the_cache_hit(client, fake_imap, configured):
+    assert client.get("/api/gmail/messages").status_code == 200
+
+    assert client.get("/api/gmail/messages?refresh=0").status_code == 200
+
+    assert _search_count(fake_imap) == 1
+
+
+@pytest.mark.parametrize("value", ["2", "banana"])
+def test_refresh_rejects_non_boolean_values(client, fake_imap, configured, value):
+    response = client.get("/api/gmail/messages", params={"refresh": value})
+
+    assert response.status_code == 422
+    assert fake_imap.instances == []
+
+
+def test_list_cache_expires_after_the_fixed_ttl(
+    client, fake_imap, configured, monkeypatch
+):
+    clock = {"value": 1000.0}
+    monkeypatch.setattr(gmail, "_now", lambda: clock["value"])
+
+    assert client.get("/api/gmail/messages").status_code == 200
+    clock["value"] += 14
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    clock["value"] += 2
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 2
+
+
+def test_clear_inbox_cache_forces_a_miss(client, fake_imap, configured):
+    assert client.get("/api/gmail/messages").status_code == 200
+    gmail.clear_inbox_cache()
+
+    assert client.get("/api/gmail/messages").status_code == 200
+
+    assert _search_count(fake_imap) == 2
 
 
 def test_detail_prefers_plain_text_and_hides_payload(client, fake_imap, configured):
@@ -662,6 +1157,57 @@ def test_send_with_attachment_sanitizes_filename(client, fake_smtp, configured):
     assert len(attachments) == 1
     assert attachments[0].get_filename() == "evil_.txt"
     assert attachments[0].get_payload(decode=True) == b"hello"
+
+
+def test_scenario_a_missing_secret_never_serves_a_warm_list(
+    client, fake_imap, configured, monkeypatch, caplog
+):
+    caplog.set_level(logging.DEBUG)
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    monkeypatch.delenv("GMAIL_APP_PASSWORD")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_CMD", "/bin/false")
+    config.clear_gmail_secret_cache()
+
+    status = client.get("/api/gmail/status")
+    assert status.status_code == 200
+    assert status.json()["configured"] is False
+
+    response = client.get("/api/gmail/messages")
+    assert response.status_code == 503
+    assert _search_count(fake_imap) == 1
+    assert "app-secret" not in caplog.text
+
+
+def test_scenario_b_wrong_secret_serves_stale_then_502(
+    client, fake_imap, configured, monkeypatch, caplog
+):
+    class AuthFailingIMAP(FakeIMAP):
+        def login(self, user, password):
+            if password != "app-secret":
+                raise imaplib.IMAP4.error("AUTHENTICATIONFAILED wrong-secret")
+            super().login(user, password)
+
+    monkeypatch.setattr(gmail.imaplib, "IMAP4_SSL", AuthFailingIMAP)
+    caplog.set_level(logging.DEBUG)
+
+    assert client.get("/api/gmail/messages").status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    monkeypatch.setenv("GMAIL_APP_PASSWORD", "wrong-secret")
+
+    stale = client.get("/api/gmail/messages")
+    assert stale.status_code == 200
+    assert _search_count(fake_imap) == 1
+
+    gmail.clear_inbox_cache()
+    failed = client.get("/api/gmail/messages")
+
+    assert failed.status_code == 502
+    assert _search_count(fake_imap) == 1
+    assert "wrong-secret" not in caplog.text
+    assert "app-secret" not in caplog.text
 
 
 def test_not_configured_returns_503(client):

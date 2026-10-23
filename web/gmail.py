@@ -8,6 +8,7 @@ Every public function opens its own connection and closes it in ``finally``.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import hmac
 import imaplib
@@ -16,9 +17,12 @@ import mimetypes
 import re
 import secrets
 import smtplib
+import threading
+import time
+from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC
 from email import message_from_bytes
 from email.header import decode_header, make_header
@@ -42,6 +46,12 @@ _MAX_LIMIT = 200
 _MAX_BULK_DELETE = 200
 _LIST_WINDOW = 200
 _MAX_HTML_CHARS = 1_000_000
+_GMAIL_LIST_CACHE_TTL_S = 15
+_INBOX_CACHE_MAX_ENTRIES = 16
+_LIST_FETCH_ITEM = (
+    "(FLAGS BODY.PEEK[HEADER.FIELDS "
+    "(FROM TO SUBJECT DATE CONTENT-TYPE CONTENT-DISPOSITION)])"
+)
 
 # Conservative allow-list for rendered email HTML.  Remote images are not
 # allowed (tracking pixels), CSS/classes are stripped, and only safe URL
@@ -186,6 +196,151 @@ class AttachmentDownload:
     filename: str
     content_type: str
     data: bytes
+
+
+@dataclass(frozen=True)
+class _InboxCacheEntry:
+    uidvalidity: int
+    messages: tuple[dict[str, Any], ...]
+    expires_at: float
+
+
+_InboxCacheKey = tuple[str, str]
+
+_inbox_cache: OrderedDict[_InboxCacheKey, _InboxCacheEntry] = OrderedDict()
+_inbox_epoch = 0
+_inbox_cache_lock = threading.Lock()
+
+
+def _now() -> float:
+    """Indirection over ``time.monotonic`` so tests can freeze the clock."""
+    return time.monotonic()
+
+
+def _account_fingerprint(settings: GmailSettings) -> str:
+    """Return an opaque account key: never log the address or the host."""
+    raw = f"{settings.address}\0{settings.imap_host}\0{settings.imap_port}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _canonical_flags(flags: Iterable[str]) -> tuple[str, ...]:
+    return tuple(sorted(set(flags)))
+
+
+def _freeze_message(message: dict[str, Any]) -> dict[str, Any]:
+    # deepcopy also protects future nested summary fields from sharing state
+    # between the cache and the response.
+    frozen = copy.deepcopy(dict(message))
+    frozen["flags"] = _canonical_flags(message.get("flags", ()))
+    return frozen
+
+
+def _thaw_message(message: dict[str, Any]) -> dict[str, Any]:
+    thawed = copy.deepcopy(dict(message))
+    thawed["flags"] = list(message.get("flags", ()))
+    return thawed
+
+
+def _add_flag(flags: Iterable[str], flag: str) -> list[str]:
+    """Add *flag* case-insensitively, keeping the existing order stable."""
+    current = list(flags)
+    lowered = flag.lower()
+    if any(existing.lower() == lowered for existing in current):
+        return current
+    index = 0
+    while index < len(current) and current[index] <= flag:
+        index += 1
+    current.insert(index, flag)
+    return current
+
+
+def _mark_read_cached(folder_value: str, account_fingerprint: str, uid: int) -> None:
+    """Advance the epoch and patch the current folder entry in place."""
+    global _inbox_epoch
+    key = (folder_value, account_fingerprint)
+    with _inbox_cache_lock:
+        _inbox_epoch += 1
+        entry = _inbox_cache.get(key)
+        if entry is None:
+            return
+        updated: list[dict[str, Any]] = []
+        changed = False
+        for message in entry.messages:
+            if message.get("uid") == uid and not message.get("seen"):
+                replacement = dict(message)
+                replacement["flags"] = _canonical_flags(
+                    _add_flag(message.get("flags", ()), "\\Seen")
+                )
+                replacement["seen"] = True
+                updated.append(replacement)
+                changed = True
+            else:
+                updated.append(message)
+        if changed:
+            _inbox_cache[key] = replace(entry, messages=tuple(updated))
+
+
+def _inbox_cache_get_locked(key: _InboxCacheKey, now: float) -> _InboxCacheEntry | None:
+    entry = _inbox_cache.get(key)
+    if entry is None:
+        return None
+    if entry.expires_at <= now:
+        del _inbox_cache[key]
+        return None
+    _inbox_cache.move_to_end(key)
+    return entry
+
+
+def _inbox_cache_put_locked(
+    key: _InboxCacheKey, entry: _InboxCacheEntry, epoch0: int
+) -> bool:
+    if _inbox_epoch != epoch0:
+        return False
+    _inbox_cache[key] = entry
+    _inbox_cache.move_to_end(key)
+    while len(_inbox_cache) > _INBOX_CACHE_MAX_ENTRIES:
+        _inbox_cache.popitem(last=False)
+    return True
+
+
+def _invalidate_inbox_all() -> None:
+    global _inbox_epoch
+    with _inbox_cache_lock:
+        _inbox_epoch += 1
+        _inbox_cache.clear()
+
+
+def clear_inbox_cache() -> None:
+    """Drop every cached inbox window (tests, teardown, explicit refresh)."""
+    _invalidate_inbox_all()
+
+
+def _invalidate_inbox(folder_value: str, account_fingerprint: str) -> None:
+    """Drop one folder window and invalidate every in-flight list fetch."""
+    global _inbox_epoch
+    with _inbox_cache_lock:
+        _inbox_epoch += 1
+        _inbox_cache.pop((folder_value, account_fingerprint), None)
+
+
+def _list_response(
+    entry: _InboxCacheEntry,
+    folder_value: str,
+    start: int,
+    page_size: int,
+) -> dict[str, Any]:
+    messages = [_thaw_message(message) for message in entry.messages]
+    total = len(messages)
+    return {
+        "uidvalidity": entry.uidvalidity,
+        "folder": folder_value,
+        "offset": start,
+        "limit": page_size,
+        "window": _LIST_WINDOW,
+        "total": total,
+        "has_more": start + page_size < total,
+        "messages": messages[start : start + page_size],
+    }
 
 
 def load_settings() -> GmailSettings:
@@ -874,6 +1029,7 @@ def fetch_message_list(
     folder: str | None = None,
     offset: int = 0,
     limit: int | None = None,
+    refresh: bool = False,
 ) -> dict[str, Any]:
     """Return a date-descending page of message summaries.
 
@@ -883,11 +1039,28 @@ def fetch_message_list(
     tie-breaker; messages with a missing or invalid ``Date`` go last.  The
     offset/limit page is applied after that ordering.  ``total`` counts only
     the messages in the window, not the entire mailbox.
+
+    The ordered window is cached per ``(folder, account fingerprint)`` for
+    :data:`_GMAIL_LIST_CACHE_TTL_S` seconds.  ``refresh=True`` drops the entry
+    and bypasses the read, then stores the fresh result.
     """
     settings = load_settings()
     folder_value = validate_folder(folder or settings.folder)
     page_size = _validate_limit(limit)
     start = _validate_offset(offset)
+    fingerprint = _account_fingerprint(settings)
+    cache_key = (folder_value, fingerprint)
+
+    if refresh:
+        _invalidate_inbox(folder_value, fingerprint)
+        with _inbox_cache_lock:
+            epoch0 = _inbox_epoch
+    else:
+        with _inbox_cache_lock:
+            cached = _inbox_cache_get_locked(cache_key, _now())
+            if cached is not None:
+                return _list_response(cached, folder_value, start, page_size)
+            epoch0 = _inbox_epoch
 
     with imap_connect(settings) as connection:
         status, _ = connection.select(_mailbox(folder_value), readonly=True)
@@ -910,16 +1083,15 @@ def fetch_message_list(
         window = sorted(set(uids), reverse=True)[:_LIST_WINDOW]
 
         if not window:
-            total = 0
             messages: list[dict[str, Any]] = []
         else:
-            # Headers only: full ``BODY.PEEK[]`` would transfer the body and
-            # every attachment of the window.  On a 25k-message mailbox that
-            # made the first inbox load take seconds and hammer the GIL.
+            # Headers only, restricted to the fields used by ``parse_summary``:
+            # full ``BODY.PEEK[HEADER]`` would transfer every Received/DKIM/
+            # List-* header of the window (1.1 MB on a 200-message mailbox).
             status, data = connection.uid(
                 "FETCH",
                 ",".join(str(uid) for uid in window),
-                "(FLAGS BODY.PEEK[HEADER])",
+                _LIST_FETCH_ITEM,
             )
             if status != "OK":
                 raise GmailUpstreamError("Lettura messaggi fallita")
@@ -933,7 +1105,7 @@ def fetch_message_list(
                 if record is None:
                     continue
                 parsed = parse_summary(record["raw"])
-                flags = sorted(record["flags"])
+                flags = list(_canonical_flags(record["flags"]))
                 lower_flags = {flag.lower() for flag in flags}
                 messages.append(
                     {
@@ -949,18 +1121,15 @@ def fetch_message_list(
                     }
                 )
             messages.sort(key=_summary_sort_key, reverse=True)
-            total = len(messages)
 
-    return {
-        "uidvalidity": uidvalidity,
-        "folder": folder_value,
-        "offset": start,
-        "limit": page_size,
-        "window": _LIST_WINDOW,
-        "total": total,
-        "has_more": start + page_size < total,
-        "messages": messages[start : start + page_size],
-    }
+    entry = _InboxCacheEntry(
+        uidvalidity=uidvalidity,
+        messages=tuple(_freeze_message(message) for message in messages),
+        expires_at=_now() + _GMAIL_LIST_CACHE_TTL_S,
+    )
+    with _inbox_cache_lock:
+        _inbox_cache_put_locked(cache_key, entry, epoch0)
+    return _list_response(entry, folder_value, start, page_size)
 
 
 def fetch_message(uid: int | str, folder: str | None = None) -> dict[str, Any]:
@@ -1023,6 +1192,8 @@ def mark_read(uid: int | str, folder: str | None = None) -> None:
         if status != "OK":
             raise GmailUpstreamError("Aggiornamento flag fallito")
 
+    _mark_read_cached(folder_value, _account_fingerprint(settings), uid_value)
+
 
 def delete_messages(uids: object, folder: str | None = None) -> dict[str, Any]:
     """Move several messages to Gmail's Trash in a single IMAP connection.
@@ -1037,32 +1208,37 @@ def delete_messages(uids: object, folder: str | None = None) -> dict[str, Any]:
     settings = load_settings()
     uid_values = _validate_uids(uids)
     folder_value = validate_folder(folder or settings.folder)
-    with imap_connect(settings) as connection:
-        status, _ = connection.select(_mailbox(folder_value), readonly=False)
-        if status != "OK":
-            raise GmailUpstreamError("Cartella non disponibile")
-        status, data = connection.uid(
-            "FETCH", ",".join(str(uid) for uid in uid_values), "(FLAGS)"
-        )
-        if status != "OK":
-            raise GmailUpstreamError("Lettura messaggi fallita")
-        existing = {record["uid"] for record in _parse_fetch_data(list(data or []))}
-        existing_uids = [uid for uid in uid_values if uid in existing]
-        missing = [uid for uid in uid_values if uid not in existing]
-        if not existing_uids:
-            return {"ok": True, "trashed": 0, "missing": missing}
+    try:
+        with imap_connect(settings) as connection:
+            status, _ = connection.select(_mailbox(folder_value), readonly=False)
+            if status != "OK":
+                raise GmailUpstreamError("Cartella non disponibile")
+            status, data = connection.uid(
+                "FETCH", ",".join(str(uid) for uid in uid_values), "(FLAGS)"
+            )
+            if status != "OK":
+                raise GmailUpstreamError("Lettura messaggi fallita")
+            existing = {record["uid"] for record in _parse_fetch_data(list(data or []))}
+            existing_uids = [uid for uid in uid_values if uid in existing]
+            missing = [uid for uid in uid_values if uid not in existing]
+            if not existing_uids:
+                return {"ok": True, "trashed": 0, "missing": missing}
 
-        sequence = ",".join(str(uid) for uid in existing_uids)
-        trash = _find_trash_mailbox(connection)
-        status, _ = connection.uid("COPY", sequence, _mailbox(trash))
-        if status != "OK":
-            raise GmailUpstreamError("Spostamento nel Cestino fallito")
-        status, _ = connection.uid("STORE", sequence, "+FLAGS", "(\\Deleted)")
-        if status != "OK":
-            raise GmailUpstreamError("Aggiornamento flag fallito")
-        status, _ = connection.expunge()
-        if status != "OK":
-            raise GmailUpstreamError("Espulsione messaggio fallita")
+            sequence = ",".join(str(uid) for uid in existing_uids)
+            trash = _find_trash_mailbox(connection)
+            status, _ = connection.uid("COPY", sequence, _mailbox(trash))
+            if status != "OK":
+                raise GmailUpstreamError("Spostamento nel Cestino fallito")
+            status, _ = connection.uid("STORE", sequence, "+FLAGS", "(\\Deleted)")
+            if status != "OK":
+                raise GmailUpstreamError("Aggiornamento flag fallito")
+            status, _ = connection.expunge()
+            if status != "OK":
+                raise GmailUpstreamError("Espulsione messaggio fallita")
+    finally:
+        # A delete changes membership/order, and COPY/STORE/EXPUNGE may have
+        # completed partially: always invalidate every cached folder.
+        _invalidate_inbox_all()
     return {"ok": True, "trashed": len(existing_uids), "missing": missing}
 
 
@@ -1169,6 +1345,9 @@ def send_email(
 
     with smtp_connect(settings) as smtp:
         smtp.send_message(message)
+    # The sent copy lands in Sent/archive: we do not know which cached folder
+    # changed, so drop every window.
+    _invalidate_inbox_all()
     return message_id
 
 
