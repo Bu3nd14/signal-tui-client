@@ -368,7 +368,7 @@ body.gmail-active #gmail-view { display: flex; }
   gap: 8px;
   margin-bottom: 8px;
 }
-.gmail-reader-action-group { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.gmail-reader-action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
 #gmail-reader-back { display: none; }
 #gmail-reader-subject {
   margin: 0;
@@ -400,6 +400,7 @@ body.gmail-active #gmail-view { display: flex; }
   flex: 1;
   min-height: 0;
   padding: 18px clamp(14px, 3vw, 30px);
+  overflow-x: auto;
   overflow-y: auto;
   overflow-wrap: anywhere;
   font-size: .9rem;
@@ -407,6 +408,103 @@ body.gmail-active #gmail-view { display: flex; }
   white-space: pre-wrap;
 }
 .gmail-reader-body.is-empty { color: var(--muted); font-style: italic; }
+.gmail-reader-body.is-html { white-space: normal; }
+.gmail-html-content {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+}
+.gmail-reader-body.is-html p,
+.gmail-reader-body.is-html ul,
+.gmail-reader-body.is-html ol,
+.gmail-reader-body.is-html blockquote,
+.gmail-reader-body.is-html pre,
+.gmail-reader-body.is-html h1,
+.gmail-reader-body.is-html h2,
+.gmail-reader-body.is-html h3,
+.gmail-reader-body.is-html h4,
+.gmail-reader-body.is-html h5,
+.gmail-reader-body.is-html h6 { max-width: 78ch; }
+.gmail-reader-body.is-html p { margin: 0 0 .85em; }
+.gmail-reader-body.is-html h1,
+.gmail-reader-body.is-html h2,
+.gmail-reader-body.is-html h3,
+.gmail-reader-body.is-html h4,
+.gmail-reader-body.is-html h5,
+.gmail-reader-body.is-html h6 { margin: 1.1em 0 .5em; line-height: 1.25; }
+.gmail-reader-body.is-html ul,
+.gmail-reader-body.is-html ol { margin: 0 0 .85em; padding-left: 1.4em; }
+.gmail-reader-body.is-html li { margin: .2em 0; }
+.gmail-reader-body.is-html blockquote {
+  margin: .85em 0;
+  padding: .1em 0 .1em 12px;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+.gmail-reader-body.is-html a { color: var(--accent); text-decoration: underline; }
+.gmail-reader-body.is-html a:hover { text-decoration: none; }
+.gmail-reader-body.is-html table {
+  margin: .85em 0;
+  max-width: 100%;
+  border-collapse: collapse;
+  font-size: .82rem;
+}
+/* Layout tables (the vast majority of marketing emails) stay borderless.
+   Borders are reserved for tables with a real <thead>; marketing emails often
+   use <th> as layout cells, so <th> alone is not a reliable signal. */
+.gmail-reader-body.is-html th,
+.gmail-reader-body.is-html td {
+  padding: 0;
+  border: 0;
+  text-align: left;
+  vertical-align: top;
+}
+.gmail-reader-body.is-html table:has(> thead) > thead > tr > th,
+.gmail-reader-body.is-html table:has(> thead) > thead > tr > td,
+.gmail-reader-body.is-html table:has(> thead) > tbody > tr > th,
+.gmail-reader-body.is-html table:has(> thead) > tbody > tr > td {
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+}
+.gmail-reader-body.is-html table:has(> thead) > thead > tr > th,
+.gmail-reader-body.is-html table:has(> thead) > tbody > tr > th {
+  background: var(--panel-raised);
+  font-weight: 600;
+}
+.gmail-reader-body.is-html img {
+  max-width: 100%;
+  height: auto;
+  vertical-align: middle;
+}
+.gmail-reader-body.is-html img[data-src]:not([src]) {
+  display: inline-block;
+  min-height: 1em;
+  background: var(--panel-raised);
+}
+.gmail-reader-body.is-html img.is-failed {
+  outline: 1px dashed var(--danger);
+  opacity: .65;
+}
+.gmail-reader-body.is-html pre {
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  white-space: pre;
+}
+.gmail-reader-body.is-html code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--panel-raised);
+  font-size: .86em;
+}
+.gmail-reader-body.is-html pre code { padding: 0; background: transparent; }
+.gmail-reader-body.is-html hr {
+  margin: 1em 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
 
 .gmail-attachments {
   flex: none;

@@ -350,6 +350,7 @@ def test_detail_prefers_plain_text_and_hides_payload(client, fake_imap, configur
     assert body["uid"] == 1
     assert body["subject"] == "Hello"
     assert body["text"] == "original line\nsecond line"
+    assert body["html"] == ""
     assert body["message_id"] == "<orig@example.com>"
     assert body["references"] == "<root@example.com>"
     assert [attachment["index"] for attachment in body["attachments"]] == [0, 1]
@@ -358,12 +359,14 @@ def test_detail_prefers_plain_text_and_hides_payload(client, fake_imap, configur
     assert "data" not in body["attachments"][0]
 
 
-def test_detail_html_only_is_text(client, fake_imap, configured):
+def test_detail_html_only_is_text_and_sanitized_html(client, fake_imap, configured):
     response = client.get("/api/gmail/messages/2")
 
     assert response.status_code == 200
-    assert response.json()["text"] == "HTML body"
-    assert "<p>" not in response.json()["text"]
+    body = response.json()
+    assert body["text"] == "HTML body"
+    assert "<p>" not in body["text"]
+    assert body["html"].strip() == "<p>HTML body</p>"
 
 
 def test_detail_missing_uid_is_404(client, fake_imap, configured):

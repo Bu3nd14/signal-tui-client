@@ -713,7 +713,13 @@ python3 scripts/gmail_setup.py
 
 The script asks for the Gmail address and a Google **App Password** (hidden input), verifies IMAP and
 SMTP login, stores the secret in `~/.config/signal-tui/gmail-app-password` with `600` permissions and
-updates `.env`. Then reload the Gmail tab in the Web UI.
+updates `.env`. Then reload the Gmail tab in the Web UI. Email HTML is sanitized server-side (scripts/styles stripped) and can be toggled between HTML and
+plain text in the reader. Remote images are not loaded automatically; use **Mostra immagini** to
+fetch them on demand (this reveals your IP to the sender).
+
+> After pulling a version that adds the HTML reader, install the new web dependency once:
+> `.venv/bin/pip install -r requirements-web.txt` (or re-run `./install.sh`). `./install.sh --gmail`
+> installs `nh3` automatically if it is missing.
 
 Optional at-rest encryption: `bash scripts/gmail_gpg_init.sh` (GPG passphrase) or
 `bash scripts/gmail_tpm_init.sh` (Linux TPM2; requires the `tss` group and a re-login). See

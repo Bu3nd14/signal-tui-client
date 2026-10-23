@@ -11,7 +11,7 @@ Data: 2026-10-23 · Stato: proposta da implementare · Ambito: POC single-user, 
 2. Lettura inbox, apertura email, invio nuova email, risposta (reply), download e upload allegati.
 3. Nuova tab "Gmail" nella web UI, senza rompere le tre tab esistenti.
 4. Integrazione diretta nel progetto (non plugin), single-account, config da `.env`.
-5. Zero nuove dipendenze runtime (solo stdlib `imaplib`/`smtplib`/`email`/`mimetypes` + FastAPI), zero DB/migrations.
+5. Zero DB/migrations. Unica dipendenza aggiuntiva: `nh3` (sanitizzazione HTML), installata da `requirements-web.txt`.
 
 **Non-obiettivi (esclusi esplicitamente)**
 Threading avanzato, ricerca server-side, label/cartelle multiple, notifiche/push, sincronizzazione bidirezionale, multi-account, OAuth/refresh-token, bozze, firma HTML, calendario. La cartella è fissa `INBOX` (parametrizzabile ma non gestita come UI).
@@ -50,7 +50,7 @@ Threading avanzato, ricerca server-side, label/cartelle multiple, notifiche/push
 | D4 | Tutte le chiamate bloccanti via **`asyncio.to_thread`** (Python 3.12, verificato disponibile) | Non blocca l'event loop uvicorn (stesso pattern già usato in `api.py`/`uploads.py`). |
 | D5 | **Timeout** via `socket.setdefaulttimeout`/`timeout=` sui costruttori (30s default, override env) | Evita richieste appese. |
 | D6 | **TLS obbligatorio**: IMAP `IMAP4_SSL` (993), SMTP `starttls()` (587). Nessun fallback plaintext | Sicurezza: credenziali mai in chiaro. |
-| D7 | **HTML email: plain-text preferito**. Se esiste una parte `text/plain` la uso; altrimenti strip di `text/html` → testo via `html.parser` stdlib (no immagini remote, no link prefetch, no iframe). Mai restituire HTML grezzo al client. | Anti-XSS senza dipendenze. |
+| D7 | **HTML email sanitizzato server-side con `nh3`**, più `text` come fallback. Allow-list di tag/attributi, niente script/style/iframe/event handler, soli link `http`/`https`/`mailto` con `rel="noopener noreferrer"` e URL relativi scartati. Le immagini vengono rinviate (`data-src`, niente `src`) e caricate solo dal bottone **Mostra immagini**. Il client può commutare HTML/Testo. | Rendering fedele senza XSS/tracking automatico: l'HTML è controllato dal mittente e il Bearer token sta in `localStorage`. |
 | D8 | **Identificazione messaggi: `UID` + `UIDVALIDITY` + `folder`**. Il client passa `uid` e `folder`; la risposta porta `uidvalidity` (il client la confronta, la usa per invalidare stato locale). | UID è la chiave stabile IMAP; UIDVALIDITY rileva i reset di folder. |
 | D9 | **Reply/threading**: `In-Reply-To` + `References` dal `Message-ID` dell'originale; **quoting** plain-text con prefisso `> `. | Threading corretto senza DB. |
 | D10 | **Nessuna persistenza/cache** (IMAP è la fonte). | POC: niente DB, niente migrations. |
@@ -114,7 +114,7 @@ Tutti gli endpoint sono **già protetti** dal middleware Bearer (path `/api/*`).
 |--------|------|---------|----------------------|
 | GET | `/api/gmail/status` | — | `{configured, address, folder, connected, limits}` (password mai inclusa) |
 | GET | `/api/gmail/messages` | query `folder`, `offset` (def. 0), `limit` (def. 50, max 200) | `{uidvalidity, folder, offset, limit, window, total, has_more, messages:[{uid, from, to, subject, date_ts, snippet, has_attachments, seen, flags}]}` — ordinati per data desc; `snippet` è `""`; `total`/`has_more` sulla finestra di 200 |
-| GET | `/api/gmail/messages/{uid}` | query `folder` | `{uid, from, to, cc, subject, date_ts, message_id, in_reply_to, references, text, attachments:[{index, filename, content_type, size, content_id}]}` |
+| GET | `/api/gmail/messages/{uid}` | query `folder` | `{uid, from, to, cc, subject, date_ts, message_id, in_reply_to, references, text, html, attachments:[{index, filename, content_type, size, content_id}]}` — `html` è già sanitizzato |
 | GET | `/api/gmail/messages/{uid}/attachments/{index}` | query `folder` | `FileResponse` (content-type corretto, `Content-Disposition: attachment; filename*=UTF-8''<sanitized>`) |
 | POST | `/api/gmail/messages/{uid}/read` | query `folder` | `{ok:true}` (imposta flag `\Seen`) |
 | DELETE | `/api/gmail/messages/{uid}` | query `folder` | `{ok:true, trashed:true}` (sposta nel Cestino Gmail) |
@@ -145,7 +145,7 @@ Tutti gli endpoint sono **già protetti** dal middleware Bearer (path `/api/*`).
 ### 5.2 Componenti UI (`#gmail-view`)
 - **Toolbar**: titolo + stato (`configurato`/`non configurato`/`errore`), bottone "Ricarica", "Scrivi".
 - **Lista messaggi** (colonna sinistra, responsive): righe con mittente, oggetto, data, badge allegati e **distinzione letto/non letto** (grassetto + badge "Non letto"; conteggio "N non letti" nel riepilogo), **senza filtro** unread. **Paginazione locale** su una finestra di 200 messaggi ordinati per data (50 per pagina).
-- **Lettore** (pannello destro): header (From/To/Date/Oggetto), corpo plain-text (renderizzato come `textContent`, mai `innerHTML`), elenco allegati con download.
+- **Lettore** (pannello destro): header (From/To/Date/Oggetto), corpo **HTML sanitizzato** (toggle **Testo**), **Mostra immagini** on-demand (le immagini remote non vengono caricate automaticamente), link aperti in nuova tab con `noopener noreferrer`, elenco allegati con download.
 - **Compose/Reply**: form (To/CC/BCC/Oggetto/Corpo), allegati (file picker), modalità reply (riempie To+Oggetto `Re:`; il quote lo aggiunge il backend). Invio multipart. Pulsante **Elimina** con conferma → Cestino.
 - **Selezione multipla**: bottone "Seleziona" a destra del riepilogo; solo allora compaiono le checkbox di riga e il bottone "Elimina" accanto ad "Annulla" (nessuna barra separata). "Annulla" esce dalla modalità selezione e svuota la selezione. Il delete bulk usa un unico endpoint e un solo `EXPUNGE`.
 - **Stati**: loading (spinner), errore (banner con messaggio redattato), non configurato (istruzioni `.env`).
@@ -163,7 +163,8 @@ Tutti gli endpoint sono **già protetti** dal middleware Bearer (path `/api/*`).
 | `web/static/gmail.js` | Controller/vista dedicata (stato separato, render lista/lettore/compose, allegati, stati). |
 | `web/static/gmail.css` | Stili `#gmail-view`, `.gmail-active`, responsive. |
 | `tests/test_gmail_config.py` | Getter config, `gmail_enabled()` (env/`.env`/config.json). |
-| `tests/test_gmail_parse.py` | Parsing MIME (plain-text preferito, HTML→text, header injection, sanitize filename, quoting). |
+| `tests/test_gmail_parse.py` | Parsing MIME (plain-text, HTML→text, header injection, sanitize filename, quoting). |
+| `tests/test_gmail_html.py` | Sanitizzazione HTML: script/event handler/style/iframe/immagini remote rimossi, link sicuri, tabelle, cap dimensione. |
 | `tests/test_gmail_api.py` | Endpoint con `monkeypatch` di `imaplib.IMAP4_SSL`/`smtplib.SMTP` + `TestClient` (httpx2 già presente). |
 
 **Modificare**
@@ -192,7 +193,7 @@ Tutti gli endpoint sono **già protetti** dal middleware Bearer (path `/api/*`).
 | Rischio | Mitigazione |
 |---------|-------------|
 | **Header injection** (To/Subject) | Validazione esplicita `\r`/`\n` rifiutati; `From` fisso server-side; test dedicati. |
-| **XSS via HTML email** | Mai HTML grezzo al client: plain-text preferito, strip HTML a testo, render solo `textContent`, immagini remote mai caricate. |
+| **XSS via HTML email** | Sanitizzazione server-side con `nh3` (allow-list, no script/style/iframe/event handler, URL scheme limitati, URL relativi negati); il client parsea l'output già sanitizzato in modo inerte (`DOMParser`). Immagini remote solo su click (tracking esplicito). Toggle Testo disponibile. |
 | **Path traversal allegati** | Download per `uid`+`index` (mai path/filename forniti dal client); nome file `sanitize_filename`; niente scrittura su disco da input utente per il download. |
 | **Blocco event loop** (IMAP/SMTP bloccanti) | Tutto in `asyncio.to_thread` + timeout socket; connessione-per-richiesta. |
 | **Leak credenziali / errori IMAP** | Password mai in risposta/log; errori mappati a 502/503 generici senza traceback con segreti. |
@@ -205,7 +206,7 @@ Tutti gli endpoint sono **già protetti** dal middleware Bearer (path `/api/*`).
 
 **Automatici (fast track)**
 - `ruff check` e `ruff format --check` passano sui file nuovi/modificati.
-- `pytest tests/test_gmail_config.py tests/test_gmail_parse.py tests/test_gmail_api.py` verde.
+- `pytest tests/test_gmail_config.py tests/test_gmail_parse.py tests/test_gmail_html.py tests/test_gmail_api.py` verde.
 - `python -c "import web.gmail_api"` non fallisce e **non** importa FastAPI a livello di `web/gmail.py`.
 
 **Manuali (con App Password reale, account Gmail dedicato)**

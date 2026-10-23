@@ -53,6 +53,46 @@ async def _run(function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         raise HTTPException(status_code=502, detail="Errore Gmail") from None
 
 
+_IMAGE_PROXY_MAX_BYTES = 8 * 1024 * 1024
+
+
+def create_gmail_image_router() -> Any:
+    """Same-origin image proxy for email HTML.
+
+    The URL is carried by an HMAC-signed token, so this endpoint is safe to
+    mount outside the Bearer-protected ``/api`` namespace (``<img src>`` cannot
+    send an Authorization header).  Fetching reuses the SSRF-safe resolver and
+    raster sniffing from ``web.link_preview``.
+    """
+    from fastapi import APIRouter, HTTPException
+    from fastapi.responses import Response
+
+    from web.link_preview import fetch_external_image
+
+    router = APIRouter()
+
+    @router.get("/gmail-image")
+    async def image(token: str) -> Response:
+        url = gmail.verify_image_token(token)
+        if not url:
+            raise HTTPException(status_code=404, detail="Immagine non trovata")
+        result = await fetch_external_image(url, max_bytes=_IMAGE_PROXY_MAX_BYTES)
+        if not result:
+            raise HTTPException(status_code=502, detail="Immagine non disponibile")
+        data, content_type = result
+        return Response(
+            content=data,
+            media_type=content_type,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Security-Policy": "default-src 'none'",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    return router
+
+
 def create_gmail_router() -> Any:
     """Build the Gmail router without importing FastAPI at module import time."""
     from fastapi import APIRouter, HTTPException, Request

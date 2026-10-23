@@ -12,7 +12,7 @@
   <script>try{document.documentElement.dataset.skin=localStorage.getItem("signal-tui-web-skin")||"";}catch(e){}</script>
   <link rel="stylesheet" href="/style.css?v=72">
   <link rel="stylesheet" href="/teams-skin.css?v=24">
-  <link rel="stylesheet" href="/gmail.css?v=10">
+  <link rel="stylesheet" href="/gmail.css?v=17">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -154,6 +154,8 @@
               <div class="gmail-reader-actions">
                 <button id="gmail-reader-back" class="gmail-icon-button" type="button" aria-label="Torna alla lista">‹</button>
                 <div class="gmail-reader-action-group">
+                  <button id="gmail-images-toggle" class="gmail-button" type="button" hidden>Mostra immagini</button>
+                  <button id="gmail-render-toggle" class="gmail-button" type="button" hidden>Testo</button>
                   <button id="gmail-reply" class="gmail-button" type="button">Rispondi</button>
                   <button id="gmail-delete" class="gmail-button gmail-danger" type="button">Elimina</button>
                 </div>
@@ -315,6 +317,6 @@
   <script src="/outbox.js?v=1" defer></script>
   <script src="/message_cache.js?v=1" defer></script>
   <script src="/app.js?v=131" defer></script>
-  <script src="/gmail.js?v=10" defer></script>
+  <script src="/gmail.js?v=16" defer></script>
 </body>
 </html>

@@ -212,7 +212,14 @@ async def _get(
             length = response.content_length
             if length is not None and length > max_bytes:
                 raise BlockedURLError("response too large")
-            body = await response.content.read(max_bytes)
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise BlockedURLError("response too large")
+                chunks.append(chunk)
+            body = b"".join(chunks)
             return current, response.content_type or "", body, response.charset
     raise BlockedURLError("too many redirects")
 
@@ -347,6 +354,25 @@ async def get_preview_image(url: str) -> tuple[bytes, str] | None:
         logger.debug("link preview image failed for %s: %s", image_url, exc)
         return None
     # Trust the magic bytes, not the header: only raster formats (no SVG).
+    sniffed = _sniff_raster(body)
+    return (body, sniffed) if sniffed else None
+
+
+async def fetch_external_image(
+    url: str, max_bytes: int = _MAX_IMAGE_BYTES
+) -> tuple[bytes, str] | None:
+    """Fetch a public raster image through the SSRF-safe preview session.
+
+    Used by the Gmail image proxy: redirects and DNS answers are validated by
+    the same public-only resolver as link previews; SVG and non-image bodies
+    are rejected by magic-byte sniffing.
+    """
+    try:
+        async with _session() as session:
+            _final, _type, body, _charset = await _get(session, url, max_bytes)
+    except Exception as exc:  # noqa: BLE001 — proxy is best-effort
+        logger.debug("external image failed for %s: %s", url, exc)
+        return None
     sniffed = _sniff_raster(body)
     return (body, sniffed) if sniffed else None
 

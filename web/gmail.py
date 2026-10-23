@@ -7,10 +7,14 @@ Every public function opens its own connection and closes it in ``finally``.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import imaplib
 import logging
 import mimetypes
 import re
+import secrets
 import smtplib
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -37,8 +41,106 @@ _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 200
 _MAX_BULK_DELETE = 200
 _LIST_WINDOW = 200
+_MAX_HTML_CHARS = 1_000_000
+
+# Conservative allow-list for rendered email HTML.  Remote images are not
+# allowed (tracking pixels), CSS/classes are stripped, and only safe URL
+# schemes survive; nh3 removes scripts and event handlers.
+_ALLOWED_HTML_TAGS = frozenset(
+    {
+        "a",
+        "abbr",
+        "b",
+        "blockquote",
+        "br",
+        "caption",
+        "center",
+        "cite",
+        "code",
+        "col",
+        "colgroup",
+        "dd",
+        "del",
+        "div",
+        "dl",
+        "dt",
+        "em",
+        "figcaption",
+        "figure",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "i",
+        "img",
+        "ins",
+        "li",
+        "mark",
+        "ol",
+        "p",
+        "pre",
+        "q",
+        "s",
+        "small",
+        "span",
+        "strike",
+        "strong",
+        "sub",
+        "sup",
+        "table",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "tr",
+        "u",
+        "ul",
+    }
+)
+_ALLOWED_HTML_ATTRIBUTES = {
+    "a": {"href", "title"},
+    "col": {"span"},
+    "colgroup": {"span"},
+    "img": {"alt", "data-src", "height", "width"},
+    "li": {"value"},
+    "ol": {"start"},
+    "table": {"align", "width"},
+    "td": {"align", "colspan", "rowspan", "valign", "width"},
+    "th": {"align", "colspan", "rowspan", "scope", "valign", "width"},
+}
+_CLEAN_CONTENT_TAGS = {
+    "base",
+    "embed",
+    "form",
+    "head",
+    "iframe",
+    "link",
+    "math",
+    "meta",
+    "noscript",
+    "object",
+    "script",
+    "style",
+    "svg",
+    "template",
+    "title",
+}
 
 _FOLDER_RE = re.compile(r"^[A-Za-z0-9._/\- ]+$")
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE | re.DOTALL)
+_IMG_SRC_RE = re.compile(
+    r"""\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>`=]+))""",
+    re.IGNORECASE,
+)
+_SAFE_IMAGE_DATA_RE = re.compile(
+    r"^data:image/(?:png|jpe?g|gif|webp);base64,", re.IGNORECASE
+)
+_IMAGE_PROXY_KEY = config.web_token().encode("utf-8") or secrets.token_bytes(32)
+_IMAGE_PROXY_VERSION = 2
 _UID_RE = re.compile(rb"\bUID\s+(\d+)")
 _FLAGS_RE = re.compile(rb"FLAGS\s+\(([^)]*)\)")
 
@@ -383,6 +485,119 @@ def _is_attachment_part(part: Message) -> bool:
     return bool(part.get_filename()) or part.get_content_disposition() == "attachment"
 
 
+def _b64url_encode(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> str:
+    padded = value + "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(padded).decode("utf-8")
+
+
+def sign_image_url(url: str) -> str:
+    """Return an opaque, signed same-origin path for a remote image."""
+    payload = _b64url_encode(url)
+    signature = hmac.new(
+        _IMAGE_PROXY_KEY, payload.encode("ascii"), hashlib.sha256
+    ).hexdigest()[:32]
+    return f"/gmail-image?token={payload}.{signature}&v={_IMAGE_PROXY_VERSION}"
+
+
+def verify_image_token(token: str) -> str:
+    """Return the signed image URL, or ``""`` when the token is invalid."""
+    if not token or len(token) > 8192:
+        return ""
+    payload, separator, signature = token.partition(".")
+    if not separator:
+        return ""
+    expected = hmac.new(
+        _IMAGE_PROXY_KEY, payload.encode("ascii"), hashlib.sha256
+    ).hexdigest()[:32]
+    if not hmac.compare_digest(signature, expected):
+        return ""
+    try:
+        return _b64url_decode(payload)
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def _defer_image_sources(html: str) -> str:
+    """Move ``img src`` to ``data-src`` so images load only on user action."""
+
+    def replace_tag(match: re.Match[str]) -> str:
+        tag = match.group(0)
+
+        def replace_src(src: re.Match[str]) -> str:
+            value = src.group(1) or src.group(2) or src.group(3) or ""
+            value = value.replace('"', "&quot;")
+            return f'data-src="{value}"'
+
+        return _IMG_SRC_RE.sub(replace_src, tag)
+
+    return _IMG_TAG_RE.sub(replace_tag, html)
+
+
+def _safe_image_source(value: str) -> bool:
+    value = value.strip()
+    return value.startswith(("http://", "https://")) or bool(
+        _SAFE_IMAGE_DATA_RE.match(value)
+    )
+
+
+def _html_attribute_filter(tag: str, attribute: str, value: str) -> str | None:
+    if tag != "img" or attribute != "data-src":
+        return value
+    value = value.strip()
+    if _SAFE_IMAGE_DATA_RE.match(value):
+        return value
+    if _safe_image_source(value):
+        return sign_image_url(value)
+    return None
+
+
+def sanitize_html(raw: str) -> str:
+    """Return a conservative, script-free HTML fragment for the reader.
+
+    Email HTML is fully attacker-controlled.  Rendering it with ``innerHTML``
+    without sanitizing would allow event handlers or scripts to steal the web
+    UI Bearer token from ``localStorage``.  ``nh3`` removes disallowed tags,
+    attributes, URL schemes and CSS; remote images are dropped on purpose to
+    avoid tracking pixels.
+    """
+    if not raw or len(raw) > _MAX_HTML_CHARS:
+        return ""
+    try:
+        import nh3
+    except ImportError:
+        logger.warning("nh3 non installato: rendering HTML disabilitato")
+        return ""
+    try:
+        return nh3.clean(
+            _defer_image_sources(raw),
+            tags=set(_ALLOWED_HTML_TAGS),
+            clean_content_tags=set(_CLEAN_CONTENT_TAGS),
+            attributes=_ALLOWED_HTML_ATTRIBUTES,
+            attribute_filter=_html_attribute_filter,
+            url_schemes={"http", "https", "mailto"},
+            url_relative="deny",
+            link_rel="noopener noreferrer",
+            strip_comments=True,
+        )
+    except Exception:
+        logger.warning("Sanitizzazione HTML fallita", exc_info=True)
+        return ""
+
+
+def _extract_html(message: Message) -> str:
+    parts: list[str] = []
+    for part in message.walk():
+        if part.is_multipart() or _is_attachment_part(part):
+            continue
+        if part.get_content_type() == "text/html":
+            parts.append(_payload_text(part))
+    return sanitize_html("\n".join(parts))
+
+
 def _extract_text(message: Message) -> str:
     plain: list[str] = []
     html: list[str] = []
@@ -449,6 +664,7 @@ def parse_message(raw: bytes) -> dict[str, Any]:
         "in_reply_to": decode_mime_header(message.get("In-Reply-To")).strip(),
         "references": decode_mime_header(message.get("References")).strip(),
         "text": _extract_text(message),
+        "html": _extract_html(message),
         "attachments": _extract_attachments(message),
     }
 
@@ -762,6 +978,7 @@ def fetch_message(uid: int | str, folder: str | None = None) -> dict[str, Any]:
         "in_reply_to": parsed["in_reply_to"],
         "references": parsed["references"],
         "text": parsed["text"],
+        "html": parsed["html"],
         "attachments": public_attachments(parsed["attachments"]),
     }
 
