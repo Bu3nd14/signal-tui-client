@@ -2,12 +2,13 @@
 
 This module deliberately does not import the web framework: it is a plain
 transport layer used from ``web.gmail_api`` through ``asyncio.to_thread``.
-Every public function opens its own connection and closes it in ``finally``.
+IMAP connections are pooled; SMTP opens one connection per send.
 """
 
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import copy
 import hashlib
 import hmac
@@ -17,10 +18,12 @@ import mimetypes
 import re
 import secrets
 import smtplib
+import socket
 import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC
@@ -30,6 +33,7 @@ from email.message import EmailMessage, Message
 from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datetime
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import unquote_to_bytes
 
 from filename_utils import sanitize_filename
 from protocols import config
@@ -52,6 +56,22 @@ _LIST_FETCH_ITEM = (
     "(FLAGS BODY.PEEK[HEADER.FIELDS "
     "(FROM TO SUBJECT DATE CONTENT-TYPE CONTENT-DISPOSITION)])"
 )
+_PARTIAL_FETCH_ENABLED = True
+_MAX_RENDER_PARTS = 8
+_STRUCTURE_FETCH_ITEM = (
+    "(BODYSTRUCTURE FLAGS BODY.PEEK[HEADER.FIELDS "
+    "(FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES)])"
+)
+
+_IMAP_POOL_MAX_CONNECTIONS = 4
+_IMAP_POOL_ACQUIRE_TIMEOUT_S = 2.0
+_IMAP_POOL_MAX_IDLE_S = 600
+_IMAP_POOL_NOOP_IDLE_S = 30
+_IMAP_POOL_NOOP_TIMEOUT_S = 1.0
+_IMAP_POOL_CLOSE_TIMEOUT_S = 0.5
+_IMAP_POOL_CLOSE_TOTAL_S = 1.0
+_IMAP_POOL_ENABLED = True
+_POOL_FP_KEY = secrets.token_bytes(32)
 
 # Conservative allow-list for rendered email HTML.  Remote images are not
 # allowed (tracking pixels), CSS/classes are stripped, and only safe URL
@@ -153,6 +173,16 @@ _IMAGE_PROXY_KEY = config.web_token().encode("utf-8") or secrets.token_bytes(32)
 _IMAGE_PROXY_VERSION = 2
 _UID_RE = re.compile(rb"\bUID\s+(\d+)")
 _FLAGS_RE = re.compile(rb"FLAGS\s+\(([^)]*)\)")
+_BODY_SECTION_RE = re.compile(rb"BODY\[([^\]]*)\]", re.IGNORECASE)
+_PART_NUMBER_RE = re.compile(r"^[1-9][0-9]*(\.[1-9][0-9]*)*$")
+_RFC2231_RE = re.compile(r"^([^']*)'([^']*)'(.*)$", re.DOTALL)
+_RFC2231_CONT_RE = re.compile(r"^(.*)\*(\d+)(\*)?$", re.DOTALL)
+_CHARSET_RE = re.compile(r"^[A-Za-z0-9._\-]+$")
+_MIME_TOKEN_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+\-.^_`{|}~]+$")
+_MAX_BODYSTRUCTURE_BYTES = 1024 * 1024
+_MAX_BODYSTRUCTURE_DEPTH = 64
+_MAX_BODYSTRUCTURE_TOKENS = 10_000
+_MAX_BODYSTRUCTURE_TOKEN_BYTES = 64 * 1024
 
 
 class GmailError(Exception):
@@ -221,6 +251,335 @@ def _account_fingerprint(settings: GmailSettings) -> str:
     """Return an opaque account key: never log the address or the host."""
     raw = f"{settings.address}\0{settings.imap_host}\0{settings.imap_port}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+@dataclass
+class _PooledConn:
+    conn_id: int
+    conn: imaplib.IMAP4 | None
+    fingerprint: str = field(repr=False)
+    generation: int
+    created_at: float
+    last_used_at: float
+    idle: bool
+    discarded: bool
+
+
+_pool_cond = threading.Condition(threading.Lock())
+_pool_current_fingerprint: str | None = None
+_pool_generation = 0
+_pool_idle: list[_PooledConn] = []
+_pool_active: dict[int, _PooledConn] = {}
+_pool_conn_seq = 0
+
+
+def _pool_fingerprint(settings: GmailSettings) -> str:
+    raw = (
+        f"{settings.address}\0{settings.imap_host}\0{settings.imap_port}\0"
+        f"{settings.timeout_s}\0{settings.password}"
+    )
+    return hmac.new(_POOL_FP_KEY, raw.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _next_conn_id_locked() -> int:
+    global _pool_conn_seq
+    _pool_conn_seq += 1
+    return _pool_conn_seq
+
+
+def _conn_socket(conn: imaplib.IMAP4 | None) -> socket.socket | None:
+    if conn is None:
+        return None
+    try:
+        return conn.sock
+    except Exception:  # noqa: BLE001 - imaplib may raise on a dead socket
+        return None
+
+
+def _close_conn(conn: imaplib.IMAP4 | None) -> None:
+    if conn is None:
+        return
+    sock = _conn_socket(conn)
+    try:
+        if sock is not None:
+            try:
+                sock.settimeout(_IMAP_POOL_CLOSE_TIMEOUT_S)
+            except Exception:  # noqa: BLE001, S110 - best effort
+                pass
+        try:
+            conn.logout()
+        except Exception:  # noqa: BLE001 - best effort
+            try:
+                conn.shutdown()
+            except Exception:  # noqa: BLE001, S110 - best effort
+                pass
+    finally:
+        if sock is None:
+            sock = _conn_socket(conn)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:  # noqa: BLE001, S110 - best effort
+                pass
+            try:
+                sock.close()
+            except Exception:  # noqa: BLE001, S110 - best effort
+                pass
+
+
+def _close_many(conns: Iterable[imaplib.IMAP4 | None]) -> None:
+    pending = [conn for conn in conns if conn is not None]
+    if not pending:
+        return
+    executor = ThreadPoolExecutor(max_workers=min(len(pending), 8))
+    try:
+        futures = [executor.submit(_close_conn, conn) for conn in pending]
+        try:
+            for _future in as_completed(futures, timeout=_IMAP_POOL_CLOSE_TOTAL_S):
+                pass
+        except (TimeoutError, concurrent.futures.TimeoutError):
+            logger.debug("imap pool close reached deadline; abandoning sockets")
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _ensure_fingerprint_locked(fingerprint: str) -> list[imaplib.IMAP4]:
+    global _pool_current_fingerprint, _pool_generation
+
+    if _pool_current_fingerprint == fingerprint:
+        return []
+    to_close = list(_pool_idle)
+    _pool_idle.clear()
+    for pc in to_close:
+        pc.idle = False
+        pc.discarded = True
+    for pc in _pool_active.values():
+        pc.discarded = True
+    _pool_generation += 1
+    _pool_current_fingerprint = fingerprint
+    _pool_cond.notify_all()
+    return [pc.conn for pc in to_close if pc.conn is not None]
+
+
+def _reap_idle_locked(now: float) -> list[imaplib.IMAP4]:
+    if not _pool_idle:
+        return []
+    stale: list[_PooledConn] = []
+    keep: list[_PooledConn] = []
+    for pc in _pool_idle:
+        if pc.discarded or now - pc.last_used_at > _IMAP_POOL_MAX_IDLE_S:
+            pc.idle = False
+            pc.discarded = True
+            stale.append(pc)
+        else:
+            keep.append(pc)
+    if not stale:
+        return []
+    _pool_idle[:] = keep
+    return [pc.conn for pc in stale if pc.conn is not None]
+
+
+def _teardown_locked() -> list[imaplib.IMAP4]:
+    global _pool_current_fingerprint, _pool_generation
+
+    to_close = list(_pool_idle)
+    _pool_idle.clear()
+    for pc in to_close:
+        pc.idle = False
+        pc.discarded = True
+    for pc in _pool_active.values():
+        pc.discarded = True
+    _pool_generation += 1
+    _pool_current_fingerprint = None
+    _pool_cond.notify_all()
+    return [pc.conn for pc in to_close if pc.conn is not None]
+
+
+def _reset_imap_pool() -> None:
+    with _pool_cond:
+        to_close = _teardown_locked()
+    _close_many(to_close)
+
+
+def clear_imap_pool() -> None:
+    """Close every idle pooled connection and invalidate active ones."""
+    _reset_imap_pool()
+
+
+def close_imap_pool() -> None:
+    """Shut the IMAP pool down; safe to call more than once."""
+    _reset_imap_pool()
+
+
+def _create_and_login(pc: _PooledConn, settings: GmailSettings) -> None:
+    conn: imaplib.IMAP4 | None = None
+    try:
+        conn = imaplib.IMAP4_SSL(
+            settings.imap_host,
+            settings.imap_port,
+            timeout=settings.timeout_s,
+        )
+        conn.login(settings.address, settings.password)
+    except BaseException:
+        with _pool_cond:
+            _pool_active.pop(pc.conn_id, None)
+            pc.idle = False
+            pc.discarded = True
+            _pool_cond.notify_all()
+        _close_conn(conn)
+        raise
+    pc.conn = conn
+    pc.last_used_at = _now()
+
+
+def _needs_noop(pc: _PooledConn) -> bool:
+    return _now() - pc.last_used_at > _IMAP_POOL_NOOP_IDLE_S
+
+
+def _noop_or_reconnect(pc: _PooledConn, settings: GmailSettings) -> _PooledConn:
+    conn = pc.conn
+    sock = _conn_socket(conn)
+    previous_timeout: float | None = None
+    healthy = False
+    try:
+        if sock is not None:
+            try:
+                previous_timeout = sock.gettimeout()
+                sock.settimeout(_IMAP_POOL_NOOP_TIMEOUT_S)
+            except OSError:
+                sock = None
+        if conn is not None:
+            status, _ = conn.noop()
+            healthy = status == "OK"
+    except Exception:  # noqa: BLE001 - any NOOP failure discards the connection
+        healthy = False
+    finally:
+        if sock is not None:
+            try:
+                sock.settimeout(previous_timeout)
+            except OSError:
+                pass
+    if healthy:
+        pc.last_used_at = _now()
+        return pc
+    with _pool_cond:
+        _pool_active.pop(pc.conn_id, None)
+        pc.idle = False
+        pc.discarded = True
+        stale_conn = pc.conn
+        pc.conn = None
+        _pool_cond.notify_all()
+    _close_conn(stale_conn)
+    return _acquire_fresh(settings)
+
+
+def _acquire_fresh(settings: GmailSettings) -> _PooledConn:
+    fingerprint = _pool_fingerprint(settings)
+    to_close: list[imaplib.IMAP4] = []
+    try:
+        with _pool_cond:
+            to_close.extend(_ensure_fingerprint_locked(fingerprint))
+            deadline = _now() + _IMAP_POOL_ACQUIRE_TIMEOUT_S
+            while True:
+                to_close.extend(_reap_idle_locked(_now()))
+                if len(_pool_active) < _IMAP_POOL_MAX_CONNECTIONS:
+                    now = _now()
+                    pc = _PooledConn(
+                        conn_id=_next_conn_id_locked(),
+                        conn=None,
+                        fingerprint=fingerprint,
+                        generation=_pool_generation,
+                        created_at=now,
+                        last_used_at=now,
+                        idle=False,
+                        discarded=False,
+                    )
+                    _pool_active[pc.conn_id] = pc
+                    break
+                remaining = deadline - _now()
+                if remaining <= 0:
+                    raise GmailUpstreamError("busy")
+                _pool_cond.wait(remaining)
+        _close_many(to_close)
+        to_close = []
+        _create_and_login(pc, settings)
+        return pc
+    finally:
+        _close_many(to_close)
+
+
+def _imap_acquire(settings: GmailSettings) -> _PooledConn:
+    fingerprint = _pool_fingerprint(settings)
+    to_close: list[imaplib.IMAP4] = []
+    try:
+        with _pool_cond:
+            to_close.extend(_ensure_fingerprint_locked(fingerprint))
+            deadline = _now() + _IMAP_POOL_ACQUIRE_TIMEOUT_S
+            while True:
+                to_close.extend(_reap_idle_locked(_now()))
+                if _pool_idle:
+                    pc = _pool_idle.pop()
+                    pc.idle = False
+                    _pool_active[pc.conn_id] = pc
+                    break
+                if len(_pool_active) < _IMAP_POOL_MAX_CONNECTIONS:
+                    now = _now()
+                    pc = _PooledConn(
+                        conn_id=_next_conn_id_locked(),
+                        conn=None,
+                        fingerprint=fingerprint,
+                        generation=_pool_generation,
+                        created_at=now,
+                        last_used_at=now,
+                        idle=False,
+                        discarded=False,
+                    )
+                    _pool_active[pc.conn_id] = pc
+                    break
+                remaining = deadline - _now()
+                if remaining <= 0:
+                    raise GmailUpstreamError("busy")
+                _pool_cond.wait(remaining)
+        _close_many(to_close)
+        to_close = []
+        if pc.conn is None:
+            _create_and_login(pc, settings)
+        elif _needs_noop(pc):
+            pc = _noop_or_reconnect(pc, settings)
+        return pc
+    finally:
+        _close_many(to_close)
+
+
+def _is_keep_exception(exc: BaseException) -> bool:
+    return isinstance(exc, (GmailNotFound, GmailValidationError, GmailNotConfigured))
+
+
+def _imap_release(pc: _PooledConn, discard: bool) -> None:
+    conn: imaplib.IMAP4 | None = None
+    reusable = False
+    with _pool_cond:
+        if (
+            not discard
+            and not pc.discarded
+            and pc.conn is not None
+            and pc.fingerprint == _pool_current_fingerprint
+            and pc.generation == _pool_generation
+        ):
+            reusable = True
+        _pool_active.pop(pc.conn_id, None)
+        if reusable:
+            pc.idle = True
+            pc.last_used_at = _now()
+            _pool_idle.append(pc)
+        else:
+            pc.idle = False
+            pc.discarded = True
+            conn = pc.conn
+            pc.conn = None
+        _pool_cond.notify_all()
+    if not reusable:
+        _close_conn(conn)
 
 
 def _canonical_flags(flags: Iterable[str]) -> tuple[str, ...]:
@@ -640,6 +999,474 @@ def _is_attachment_part(part: Message) -> bool:
     return bool(part.get_filename()) or part.get_content_disposition() == "attachment"
 
 
+@dataclass(frozen=True)
+class _Bodystructure:
+    maintype: str
+    subtype: str
+    params: tuple[tuple[str, str | None], ...] = ()
+    content_id: str | None = None
+    encoding: str | None = None
+    octets: int | None = None
+    children: tuple[_Bodystructure, ...] = ()
+    disposition: str | None = None
+    disposition_params: tuple[tuple[str, str | None], ...] = ()
+
+
+@dataclass(frozen=True)
+class _MimePart:
+    walk_index: str
+    maintype: str
+    subtype: str
+    params: tuple[tuple[str, str | None], ...]
+    disposition: str | None
+    disposition_params: tuple[tuple[str, str | None], ...]
+    content_id: str | None
+    encoding: str | None
+    octets: int | None
+    filename: str | None
+    attachment_index: int | None = None
+    has_content_id: bool = False
+
+    @property
+    def part_number(self) -> str:
+        return self.walk_index
+
+    @property
+    def content_type(self) -> str:
+        return f"{self.maintype}/{self.subtype}"
+
+
+@dataclass(frozen=True)
+class _PartMap:
+    parts: tuple[_MimePart, ...]
+    render_parts: tuple[_MimePart, ...]
+    attachments: tuple[_MimePart, ...]
+
+
+@dataclass(frozen=True)
+class _StructureRecord:
+    uid: int
+    headers: bytes
+    index: _PartMap
+
+
+class _BodystructureParseError(Exception):
+    """Internal tokenizer failure; always converted to a fallback."""
+
+
+class _PartFetchError(Exception):
+    """A logically completed partial fetch that must fall back to full."""
+
+
+def _extract_bodystructure(meta: bytes) -> bytes | None:
+    """Return the balanced ``BODYSTRUCTURE`` block, or ``None``.
+
+    IMAP literals are deliberately rejected: a structure carrying ``{N}``
+    cannot be parsed safely from the FETCH metadata, so callers fall back to
+    the legacy full fetch.
+    """
+    if not isinstance(meta, (bytes, bytearray)):
+        return None
+    data = bytes(meta)
+    if len(data) > _MAX_BODYSTRUCTURE_BYTES:
+        return None
+    match = re.search(rb"\bBODYSTRUCTURE\b", data, re.IGNORECASE)
+    if match is None:
+        return None
+    start = match.end()
+    while start < len(data) and data[start : start + 1].isspace():
+        start += 1
+    if start >= len(data) or data[start] != 0x28:
+        return None
+    depth = 0
+    in_quote = False
+    escaped = False
+    for index in range(start, len(data)):
+        char = data[index]
+        if in_quote:
+            if escaped:
+                escaped = False
+            elif char == 0x5C:
+                escaped = True
+            elif char == 0x22:
+                in_quote = False
+            continue
+        if char == 0x22:
+            in_quote = True
+        elif char == 0x7B:
+            end = index + 1
+            while end < len(data) and 0x30 <= data[end] <= 0x39:
+                end += 1
+            if end > index + 1 and end < len(data) and data[end] == 0x7D:
+                return None
+        elif char == 0x28:
+            depth += 1
+        elif char == 0x29:
+            depth -= 1
+            if depth == 0:
+                return data[start : index + 1]
+            if depth < 0:
+                return None
+    return None
+
+
+def _bodystructure_tokens(data: bytes) -> list[Any]:
+    if not isinstance(data, (bytes, bytearray)):
+        raise _BodystructureParseError
+    data = bytes(data)
+    if len(data) > _MAX_BODYSTRUCTURE_BYTES:
+        raise _BodystructureParseError
+    index = 0
+    tokens = 0
+
+    def skip_space() -> None:
+        nonlocal index
+        while index < len(data) and data[index] in b" \t\r\n":
+            index += 1
+
+    def parse_value(depth: int) -> Any:
+        nonlocal index, tokens
+        skip_space()
+        if index >= len(data):
+            raise _BodystructureParseError
+        char = data[index]
+        if char == 0x28:
+            if depth >= _MAX_BODYSTRUCTURE_DEPTH:
+                raise _BodystructureParseError
+            index += 1
+            result: list[Any] = []
+            while True:
+                skip_space()
+                if index >= len(data):
+                    raise _BodystructureParseError
+                if data[index] == 0x29:
+                    index += 1
+                    return result
+                result.append(parse_value(depth + 1))
+        if char == 0x22:
+            index += 1
+            buffer = bytearray()
+            while index < len(data):
+                current = data[index]
+                if current == 0x5C:
+                    index += 1
+                    if index >= len(data):
+                        raise _BodystructureParseError
+                    buffer.append(data[index])
+                    index += 1
+                elif current == 0x22:
+                    index += 1
+                    break
+                else:
+                    buffer.append(current)
+                    index += 1
+            else:
+                raise _BodystructureParseError
+            if len(buffer) > _MAX_BODYSTRUCTURE_TOKEN_BYTES:
+                raise _BodystructureParseError
+            tokens += 1
+            if tokens > _MAX_BODYSTRUCTURE_TOKENS:
+                raise _BodystructureParseError
+            return buffer.decode("latin-1")
+        if char == 0x7B:
+            end = index + 1
+            while end < len(data) and 0x30 <= data[end] <= 0x39:
+                end += 1
+            if end > index + 1 and end < len(data) and data[end] == 0x7D:
+                raise _BodystructureParseError
+        start = index
+        while index < len(data) and data[index] not in b' \t\r\n()"':
+            index += 1
+        if start == index:
+            raise _BodystructureParseError
+        raw = data[start:index]
+        if len(raw) > _MAX_BODYSTRUCTURE_TOKEN_BYTES:
+            raise _BodystructureParseError
+        tokens += 1
+        if tokens > _MAX_BODYSTRUCTURE_TOKENS:
+            raise _BodystructureParseError
+        if raw.upper() == b"NIL":
+            return None
+        return raw.decode("latin-1")
+
+    value = parse_value(0)
+    skip_space()
+    if index != len(data) or not isinstance(value, list) or not value:
+        raise _BodystructureParseError
+    return value
+
+
+def _parse_pairs(value: Any) -> tuple[tuple[str, str | None], ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) % 2:
+        raise _BodystructureParseError
+    pairs: list[tuple[str, str | None]] = []
+    for index in range(0, len(value), 2):
+        key = value[index]
+        item = value[index + 1]
+        if not isinstance(key, str) or (item is not None and not isinstance(item, str)):
+            raise _BodystructureParseError
+        pairs.append((key, item))
+    return tuple(pairs)
+
+
+def _parse_disposition(
+    value: Any,
+) -> tuple[str | None, tuple[tuple[str, str | None], ...]]:
+    if value is None:
+        return None, ()
+    if not isinstance(value, list) or not value or not isinstance(value[0], str):
+        raise _BodystructureParseError
+    params = _parse_pairs(value[1]) if len(value) > 1 else ()
+    return value[0].lower(), params
+
+
+def _parse_octets(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    raise _BodystructureParseError
+
+
+def _bodystructure_node(value: Any) -> _Bodystructure:
+    if not isinstance(value, list) or not value:
+        raise _BodystructureParseError
+    first = value[0]
+    if isinstance(first, list):
+        children: list[_Bodystructure] = []
+        index = 0
+        while index < len(value) and isinstance(value[index], list):
+            children.append(_bodystructure_node(value[index]))
+            index += 1
+        if not children or index >= len(value) or not isinstance(value[index], str):
+            raise _BodystructureParseError
+        subtype = value[index].lower()
+        index += 1
+        params = _parse_pairs(value[index]) if index < len(value) else ()
+        index += 1
+        disposition, disposition_params = (None, ())
+        if index < len(value):
+            disposition, disposition_params = _parse_disposition(value[index])
+        return _Bodystructure(
+            maintype="multipart",
+            subtype=subtype,
+            params=params,
+            children=tuple(children),
+            disposition=disposition,
+            disposition_params=disposition_params,
+        )
+
+    if not isinstance(first, str) or len(value) < 7:
+        raise _BodystructureParseError
+    if not isinstance(value[1], str):
+        raise _BodystructureParseError
+    maintype = first.lower()
+    subtype = value[1].lower()
+    params = _parse_pairs(value[2])
+    content_id = value[3] if isinstance(value[3], str) else None
+    encoding = value[5].lower() if isinstance(value[5], str) else None
+    octets = _parse_octets(value[6])
+
+    children: tuple[_Bodystructure, ...] = ()
+    if maintype == "message" and subtype == "rfc822":
+        if len(value) < 9:
+            raise _BodystructureParseError
+        children = (_bodystructure_node(value[8]),)
+        extension = 10
+    elif maintype == "text":
+        extension = 8
+    else:
+        extension = 7
+
+    disposition, disposition_params = (None, ())
+    if extension + 1 < len(value):
+        disposition, disposition_params = _parse_disposition(value[extension + 1])
+    return _Bodystructure(
+        maintype=maintype,
+        subtype=subtype,
+        params=params,
+        content_id=content_id,
+        encoding=encoding,
+        octets=octets,
+        children=children,
+        disposition=disposition,
+        disposition_params=disposition_params,
+    )
+
+
+def parse_bodystructure(blk: bytes) -> _Bodystructure | None:
+    """Parse an IMAP BODYSTRUCTURE block without ``eval`` or recursion abuse."""
+    try:
+        return _bodystructure_node(_bodystructure_tokens(blk))
+    except (_BodystructureParseError, ValueError, LookupError, RecursionError):
+        return None
+
+
+def _decode_param(value: str | None, *, encoded: bool = False) -> str:
+    """Decode one RFC 2231 parameter value, then any RFC 2047 words.
+
+    RFC 2231 syntax is only valid for starred parameters: a plain filename
+    such as ``O'Brien's report.pdf`` must be preserved verbatim.
+    """
+    if not value:
+        return ""
+    text = value
+    if encoded:
+        charset: str | None = None
+        match = _RFC2231_RE.match(text)
+        if match is not None:
+            charset = match.group(1) or None
+            text = match.group(3)
+        try:
+            raw = unquote_to_bytes(text)
+        except (UnicodeEncodeError, ValueError):
+            return decode_mime_header(text)
+        try:
+            text = raw.decode(charset or "utf-8", errors="replace")
+        except LookupError:
+            text = raw.decode("utf-8", errors="replace")
+    return decode_mime_header(text)
+
+
+def _params_get(params: tuple[tuple[str, str | None], ...], name: str) -> str:
+    """Return a parameter, combining RFC 2231 continuations when present."""
+    lowered = name.lower()
+    mapping = {key.lower(): value for key, value in params}
+    numbered: list[tuple[int, bool, str | None]] = []
+    for key, value in mapping.items():
+        match = _RFC2231_CONT_RE.match(key)
+        if match is not None and match.group(1) == lowered:
+            numbered.append((int(match.group(2)), bool(match.group(3)), value))
+    if numbered:
+        numbered.sort()
+        charset: str | None = None
+        chunks = bytearray()
+        for offset, (_, encoded, value) in enumerate(numbered):
+            text = value or ""
+            if offset == 0 and encoded:
+                match = _RFC2231_RE.match(text)
+                if match is not None:
+                    charset = match.group(1) or None
+                    text = match.group(3)
+            if encoded:
+                chunks.extend(unquote_to_bytes(text))
+            else:
+                chunks.extend(text.encode("latin-1", errors="replace"))
+        try:
+            decoded = bytes(chunks).decode(charset or "utf-8", errors="replace")
+        except LookupError:
+            decoded = bytes(chunks).decode("utf-8", errors="replace")
+        return decode_mime_header(decoded)
+    star_key = f"{lowered}*"
+    if star_key in mapping:
+        return _decode_param(mapping[star_key], encoded=True)
+    return _decode_param(mapping.get(lowered))
+
+
+def _part_filename(node: _Bodystructure) -> str | None:
+    value = _params_get(node.disposition_params, "filename")
+    if not value:
+        value = _params_get(node.params, "name")
+    return value or None
+
+
+def _mime_part(node: _Bodystructure, walk_index: str) -> _MimePart:
+    content_id = decode_mime_header(node.content_id).strip().strip("<>")
+    return _MimePart(
+        walk_index=walk_index,
+        maintype=node.maintype,
+        subtype=node.subtype,
+        params=node.params,
+        disposition=node.disposition,
+        disposition_params=node.disposition_params,
+        content_id=content_id or None,
+        encoding=node.encoding,
+        octets=node.octets,
+        filename=_part_filename(node),
+        has_content_id=bool(node.content_id),
+    )
+
+
+def _part_is_attachment(part: _MimePart) -> bool:
+    return (
+        bool(part.filename)
+        or part.disposition == "attachment"
+        or (part.has_content_id and part.maintype != "text")
+    )
+
+
+def _index_bodystructure(root: _Bodystructure) -> _PartMap:
+    parts: list[_MimePart] = []
+    render: list[_MimePart] = []
+    attachments: list[_MimePart] = []
+
+    def descend(node: _Bodystructure, walk_index: str) -> None:
+        if node.maintype == "multipart":
+            for position, child in enumerate(node.children, 1):
+                descend(child, f"{walk_index}.{position}")
+            return
+        if node.maintype == "message" and node.subtype == "rfc822" and node.children:
+            child = node.children[0]
+            if child.maintype == "multipart":
+                for position, nested in enumerate(child.children, 1):
+                    descend(nested, f"{walk_index}.{position}")
+            else:
+                descend(child, f"{walk_index}.1")
+            return
+        part = _mime_part(node, walk_index)
+        if _part_is_attachment(part):
+            part = replace(part, attachment_index=len(attachments))
+            attachments.append(part)
+        elif part.maintype == "text" and part.subtype in {"plain", "html"}:
+            render.append(part)
+        parts.append(part)
+
+    if root.maintype == "multipart":
+        for position, child in enumerate(root.children, 1):
+            descend(child, str(position))
+    elif root.maintype == "message" and root.subtype == "rfc822" and root.children:
+        child = root.children[0]
+        if child.maintype == "multipart":
+            for position, nested in enumerate(child.children, 1):
+                descend(nested, f"1.{position}")
+        else:
+            descend(child, "1.1")
+    else:
+        descend(root, "1")
+    return _PartMap(
+        parts=tuple(parts),
+        render_parts=tuple(render),
+        attachments=tuple(attachments),
+    )
+
+
+def _encoded_size(part: Message) -> int | None:
+    """Return the transfer-encoded wire size, or ``None`` when not decidable."""
+    cte = (part.get("Content-Transfer-Encoding") or "").strip().lower()
+    if cte in ("base64", "quoted-printable"):
+        raw = part.get_payload(decode=False)
+        if isinstance(raw, bytes):
+            encoded = raw
+        elif isinstance(raw, str):
+            try:
+                encoded = raw.encode("ascii")
+            except UnicodeEncodeError:
+                return None
+        else:
+            return None
+        return len(encoded) + encoded.count(b"\n") - encoded.count(b"\r\n")
+    if cte in ("", "7bit", "8bit", "binary"):
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            return None
+        if isinstance(payload, str):
+            return len(payload.encode("utf-8", errors="replace"))
+        return len(payload)
+    return None
+
+
 def _b64url_encode(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
 
@@ -772,8 +1599,11 @@ def _extract_text(message: Message) -> str:
     )
 
 
-def _extract_attachments(message: Message) -> list[dict[str, Any]]:
+def _extract_attachments(
+    message: Message, part_map: _PartMap | None = None
+) -> list[dict[str, Any]]:
     attachments: list[dict[str, Any]] = []
+    mapped = part_map.attachments if part_map is not None else ()
     for part in message.walk():
         if part.is_multipart():
             continue
@@ -789,12 +1619,16 @@ def _extract_attachments(message: Message) -> list[dict[str, Any]]:
         safe_name = sanitize_filename(decoded_name) or f"attachment-{len(attachments)}"
         payload = part.get_payload(decode=True) or b""
         content_id = decode_mime_header(part.get("Content-ID")).strip().strip("<>")
+        if part_map is not None and len(attachments) < len(mapped):
+            size = mapped[len(attachments)].octets
+        else:
+            size = _encoded_size(part)
         attachments.append(
             {
                 "index": len(attachments),
                 "filename": safe_name,
                 "content_type": part.get_content_type(),
-                "size": len(payload),
+                "size": size,
                 "content_id": content_id or None,
                 "data": payload,
             }
@@ -802,12 +1636,7 @@ def _extract_attachments(message: Message) -> list[dict[str, Any]]:
     return attachments
 
 
-def parse_message(raw: bytes) -> dict[str, Any]:
-    """Parse a raw RFC 822 message into the API-neutral detail shape.
-
-    Attachment indices are assigned by walking the MIME tree once, so the
-    detail listing and the download endpoint always agree on ``index``.
-    """
+def _parse_full(raw: bytes, part_map: _PartMap | None = None) -> dict[str, Any]:
     message = message_from_bytes(raw)
     return {
         "from": decode_mime_header(message.get("From")),
@@ -820,8 +1649,17 @@ def parse_message(raw: bytes) -> dict[str, Any]:
         "references": decode_mime_header(message.get("References")).strip(),
         "text": _extract_text(message),
         "html": _extract_html(message),
-        "attachments": _extract_attachments(message),
+        "attachments": _extract_attachments(message, part_map),
     }
+
+
+def parse_message(raw: bytes) -> dict[str, Any]:
+    """Parse a raw RFC 822 message into the API-neutral detail shape.
+
+    Attachment indices are assigned by walking the MIME tree once, so the
+    detail listing and the download endpoint always agree on ``index``.
+    """
+    return _parse_full(raw)
 
 
 def _has_attachment_hint(message: Message) -> bool:
@@ -1001,21 +1839,243 @@ def _parse_fetch_data(data: list[Any]) -> list[dict[str, Any]]:
     return records
 
 
-def _fetch_one(uid: int | str, folder: str | None) -> dict[str, Any]:
-    settings = load_settings()
-    uid_value = _validate_uid(uid)
-    folder_value = validate_folder(folder or settings.folder)
-    with imap_connect(settings) as connection:
-        status, _ = connection.select(_mailbox(folder_value), readonly=True)
-        if status != "OK":
-            raise GmailUpstreamError("Cartella non disponibile")
-        status, data = connection.uid("FETCH", str(uid_value), "(FLAGS BODY.PEEK[])")
-        if status != "OK":
-            raise GmailUpstreamError("Lettura messaggio fallita")
-        records = _parse_fetch_data(list(data or []))
-        if not records:
-            raise GmailNotFound("Messaggio non trovato")
-        return records[0]
+def _fetch_full_on(connection: imaplib.IMAP4, uid: int) -> dict[str, Any]:
+    status, data = connection.uid("FETCH", str(uid), "(FLAGS BODY.PEEK[])")
+    if status != "OK":
+        raise GmailUpstreamError("Lettura messaggio fallita")
+    records = _parse_fetch_data(list(data or []))
+    if not records:
+        raise GmailNotFound("Messaggio non trovato")
+    return records[0]
+
+
+def _structure_uid(meta: bytes) -> int | None:
+    match = _UID_RE.search(meta)
+    return int(match.group(1)) if match is not None else None
+
+
+def _parse_structure_fetch(
+    data: list[Any], expected_uid: int
+) -> _StructureRecord | None:
+    uid_seen: int | None = None
+    block: bytes | None = None
+    headers = bytearray()
+    have_headers = False
+    for item in data:
+        if isinstance(item, tuple) and len(item) >= 2:
+            meta, literal = item[0], item[1]
+            if not isinstance(meta, (bytes, bytearray)):
+                return None
+            meta = bytes(meta)
+            uid = _structure_uid(meta)
+            if uid is not None:
+                if uid_seen is not None and uid_seen != uid:
+                    return None
+                uid_seen = uid
+            if block is None:
+                block = _extract_bodystructure(meta)
+            if b"BODY[HEADER" in meta.upper() and isinstance(
+                literal, (bytes, bytearray)
+            ):
+                headers.extend(literal)
+                have_headers = True
+        elif isinstance(item, (bytes, bytearray)):
+            meta = bytes(item)
+            uid = _structure_uid(meta)
+            if uid is not None:
+                if uid_seen is not None and uid_seen != uid:
+                    return None
+                uid_seen = uid
+            if block is None:
+                block = _extract_bodystructure(meta)
+        else:
+            return None
+    if uid_seen != expected_uid or block is None or not have_headers:
+        return None
+    try:
+        root = parse_bodystructure(block)
+        if root is None:
+            return None
+        index = _index_bodystructure(root)
+    except Exception:  # noqa: BLE001 - malformed structure means fallback
+        return None
+    return _StructureRecord(uid=expected_uid, headers=bytes(headers), index=index)
+
+
+def _fetch_structure(connection: imaplib.IMAP4, uid: int) -> _StructureRecord | None:
+    status, data = connection.uid("FETCH", str(uid), _STRUCTURE_FETCH_ITEM)
+    if status != "OK":
+        return None
+    return _parse_structure_fetch(list(data or []), uid)
+
+
+def _parse_part_fetch(
+    data: list[Any], expected_uid: int, expected_parts: Iterable[str]
+) -> dict[str, bytes]:
+    expected = set(expected_parts)
+    if not expected or any(
+        _PART_NUMBER_RE.fullmatch(part) is None for part in expected
+    ):
+        raise _PartFetchError
+    uid_seen: int | None = None
+    sections: dict[str, bytes] = {}
+    for item in data:
+        if isinstance(item, tuple) and len(item) >= 2:
+            meta, literal = item[0], item[1]
+            if not isinstance(meta, (bytes, bytearray)):
+                raise _PartFetchError
+            meta = bytes(meta)
+            uid = _structure_uid(meta)
+            if uid is not None:
+                if uid_seen is not None and uid_seen != uid:
+                    raise _PartFetchError
+                uid_seen = uid
+            labels = _BODY_SECTION_RE.findall(meta)
+            if len(labels) != 1:
+                raise _PartFetchError
+            try:
+                label = labels[0].decode("ascii")
+            except UnicodeDecodeError:
+                raise _PartFetchError from None
+            if _PART_NUMBER_RE.fullmatch(label) is None or label not in expected:
+                raise _PartFetchError
+            if label in sections or not isinstance(literal, (bytes, bytearray)):
+                raise _PartFetchError
+            sections[label] = bytes(literal)
+        elif isinstance(item, (bytes, bytearray)):
+            meta = bytes(item)
+            uid = _structure_uid(meta)
+            if uid is not None:
+                if uid_seen is not None and uid_seen != uid:
+                    raise _PartFetchError
+                uid_seen = uid
+            if _BODY_SECTION_RE.search(meta):
+                raise _PartFetchError
+        else:
+            raise _PartFetchError
+    if uid_seen != expected_uid or set(sections) != expected:
+        raise _PartFetchError
+    return sections
+
+
+def _fetch_part_payloads(
+    connection: imaplib.IMAP4, uid: int, parts: Iterable[str]
+) -> dict[str, bytes]:
+    selected = list(parts)
+    if not selected:
+        return {}
+    if any(_PART_NUMBER_RE.fullmatch(part) is None for part in selected):
+        raise _PartFetchError
+    item = "(" + " ".join(f"BODY.PEEK[{part}]" for part in selected) + ")"
+    status, data = connection.uid("FETCH", str(uid), item)
+    if status != "OK":
+        raise _PartFetchError
+    return _parse_part_fetch(list(data or []), uid, selected)
+
+
+def _fetch_render_parts(
+    connection: imaplib.IMAP4, uid: int, index: _PartMap
+) -> dict[str, bytes]:
+    selected = [part.walk_index for part in index.render_parts]
+    if len(selected) > _MAX_RENDER_PARTS:
+        raise _PartFetchError
+    return _fetch_part_payloads(connection, uid, selected)
+
+
+def _mini_part_message(part: _MimePart, payload: bytes) -> EmailMessage:
+    if (
+        _MIME_TOKEN_RE.fullmatch(part.maintype) is None
+        or _MIME_TOKEN_RE.fullmatch(part.subtype) is None
+    ):
+        raise _PartFetchError
+    mini = EmailMessage()
+    mini["Content-Type"] = part.content_type
+    charset = _params_get(part.params, "charset").strip()
+    if charset and _CHARSET_RE.fullmatch(charset):
+        mini.set_param("charset", charset)
+    encoding = (part.encoding or "").strip().lower()
+    if encoding:
+        if _MIME_TOKEN_RE.fullmatch(encoding) is None:
+            raise _PartFetchError
+        mini["Content-Transfer-Encoding"] = encoding
+    mini.set_payload(payload)
+    return mini
+
+
+def _decode_fetched_text(part: _MimePart, payload: bytes) -> str:
+    try:
+        return _payload_text(_mini_part_message(part, payload))
+    except _PartFetchError:
+        raise
+    except Exception as exc:
+        raise _PartFetchError from exc
+
+
+def _decode_fetched_bytes(part: _MimePart, payload: bytes) -> bytes:
+    try:
+        mini = _mini_part_message(part, payload)
+        data = mini.get_payload(decode=True)
+    except _PartFetchError:
+        raise
+    except Exception as exc:
+        raise _PartFetchError from exc
+    if data is None:
+        return payload
+    if isinstance(data, str):
+        return data.encode("utf-8", errors="replace")
+    return bytes(data)
+
+
+def _safe_part_filename(part: _MimePart, index: int) -> str:
+    return sanitize_filename(part.filename or "") or f"attachment-{index}"
+
+
+def _assemble_detail(
+    uid: int, record: _StructureRecord, payloads: dict[str, bytes]
+) -> dict[str, Any]:
+    headers = message_from_bytes(record.headers)
+    plain: list[str] = []
+    html: list[str] = []
+    for part in record.index.render_parts:
+        payload = payloads.get(part.walk_index)
+        if payload is None:
+            continue
+        text = _decode_fetched_text(part, payload)
+        if part.subtype == "plain":
+            plain.append(text.strip())
+        else:
+            html.append(text)
+    text = "\n".join(part for part in plain if part)
+    if not text:
+        text = "\n".join(
+            converted
+            for converted in (html_to_text(part) for part in html)
+            if converted
+        )
+    attachments = [
+        {
+            "index": index,
+            "filename": _safe_part_filename(part, index),
+            "content_type": part.content_type,
+            "size": part.octets,
+            "content_id": part.content_id,
+        }
+        for index, part in enumerate(record.index.attachments)
+    ]
+    return {
+        "uid": uid,
+        "from": decode_mime_header(headers.get("From")),
+        "to": decode_mime_header(headers.get("To")),
+        "cc": decode_mime_header(headers.get("Cc")),
+        "subject": decode_mime_header(headers.get("Subject")),
+        "date_ts": _date_to_ts(headers.get("Date")),
+        "message_id": decode_mime_header(headers.get("Message-ID")).strip(),
+        "in_reply_to": decode_mime_header(headers.get("In-Reply-To")).strip(),
+        "references": decode_mime_header(headers.get("References")).strip(),
+        "text": text,
+        "html": sanitize_html("\n".join(html)),
+        "attachments": attachments,
+    }
 
 
 def _summary_sort_key(message: dict[str, Any]) -> tuple[bool, int, int]:
@@ -1134,22 +2194,41 @@ def fetch_message_list(
 
 def fetch_message(uid: int | str, folder: str | None = None) -> dict[str, Any]:
     """Return the full, rendered-as-text detail for one message."""
-    record = _fetch_one(uid, folder)
-    parsed = parse_message(record["raw"])
-    return {
-        "uid": record["uid"],
-        "from": parsed["from"],
-        "to": parsed["to"],
-        "cc": parsed["cc"],
-        "subject": parsed["subject"],
-        "date_ts": parsed["date_ts"],
-        "message_id": parsed["message_id"],
-        "in_reply_to": parsed["in_reply_to"],
-        "references": parsed["references"],
-        "text": parsed["text"],
-        "html": parsed["html"],
-        "attachments": public_attachments(parsed["attachments"]),
-    }
+    settings = load_settings()
+    uid_value = _validate_uid(uid)
+    folder_value = validate_folder(folder or settings.folder)
+    with imap_connect(settings) as connection:
+        status, _ = connection.select(_mailbox(folder_value), readonly=True)
+        if status != "OK":
+            raise GmailUpstreamError("Cartella non disponibile")
+
+        part_map: _PartMap | None = None
+        if _PARTIAL_FETCH_ENABLED:
+            structure = _fetch_structure(connection, uid_value)
+            if structure is not None:
+                part_map = structure.index
+                try:
+                    payloads = _fetch_render_parts(connection, uid_value, part_map)
+                    return _assemble_detail(uid_value, structure, payloads)
+                except _PartFetchError:
+                    pass
+
+        record = _fetch_full_on(connection, uid_value)
+        parsed = _parse_full(record["raw"], part_map)
+        return {
+            "uid": record["uid"],
+            "from": parsed["from"],
+            "to": parsed["to"],
+            "cc": parsed["cc"],
+            "subject": parsed["subject"],
+            "date_ts": parsed["date_ts"],
+            "message_id": parsed["message_id"],
+            "in_reply_to": parsed["in_reply_to"],
+            "references": parsed["references"],
+            "text": parsed["text"],
+            "html": parsed["html"],
+            "attachments": public_attachments(parsed["attachments"]),
+        }
 
 
 def fetch_attachment(
@@ -1163,20 +2242,67 @@ def fetch_attachment(
     if attachment_index < 0:
         raise GmailValidationError("Indice allegato non valido")
 
-    record = _fetch_one(uid, folder)
-    parsed = parse_message(record["raw"])
-    attachments = parsed["attachments"]
-    if attachment_index >= len(attachments):
-        raise GmailNotFound("Allegato non trovato")
-    attachment = attachments[attachment_index]
-    data = attachment["data"]
-    if len(data) > _MAX_DOWNLOAD_BYTES:
-        raise GmailValidationError("Allegato troppo grande", status_code=413)
-    return AttachmentDownload(
-        filename=attachment["filename"],
-        content_type=attachment["content_type"],
-        data=data,
-    )
+    settings = load_settings()
+    uid_value = _validate_uid(uid)
+    folder_value = validate_folder(folder or settings.folder)
+    with imap_connect(settings) as connection:
+        status, _ = connection.select(_mailbox(folder_value), readonly=True)
+        if status != "OK":
+            raise GmailUpstreamError("Cartella non disponibile")
+
+        part_map: _PartMap | None = None
+        if _PARTIAL_FETCH_ENABLED:
+            structure = _fetch_structure(connection, uid_value)
+            if structure is not None:
+                part_map = structure.index
+                if attachment_index >= len(part_map.attachments):
+                    raise GmailNotFound("Allegato non trovato")
+                part = part_map.attachments[attachment_index]
+                if (
+                    part.encoding in ("7bit", "8bit", "binary")
+                    and part.octets is not None
+                    and part.octets > _MAX_DOWNLOAD_BYTES
+                ):
+                    raise GmailValidationError(
+                        "Allegato troppo grande", status_code=413
+                    )
+                payload: bytes | None = None
+                try:
+                    payload = _fetch_part_payloads(
+                        connection, uid_value, [part.walk_index]
+                    ).get(part.walk_index)
+                except _PartFetchError:
+                    payload = None
+                if payload is not None:
+                    try:
+                        data = _decode_fetched_bytes(part, payload)
+                    except _PartFetchError:
+                        pass
+                    else:
+                        if len(data) > _MAX_DOWNLOAD_BYTES:
+                            raise GmailValidationError(
+                                "Allegato troppo grande", status_code=413
+                            )
+                        return AttachmentDownload(
+                            filename=_safe_part_filename(part, attachment_index),
+                            content_type=part.content_type,
+                            data=data,
+                        )
+
+        record = _fetch_full_on(connection, uid_value)
+        parsed = _parse_full(record["raw"], part_map)
+        attachments = parsed["attachments"]
+        if attachment_index >= len(attachments):
+            raise GmailNotFound("Allegato non trovato")
+        attachment = attachments[attachment_index]
+        data = attachment["data"]
+        if len(data) > _MAX_DOWNLOAD_BYTES:
+            raise GmailValidationError("Allegato troppo grande", status_code=413)
+        return AttachmentDownload(
+            filename=attachment["filename"],
+            content_type=attachment["content_type"],
+            data=data,
+        )
 
 
 def mark_read(uid: int | str, folder: str | None = None) -> None:
@@ -1353,21 +2479,30 @@ def send_email(
 
 @contextmanager
 def imap_connect(settings: GmailSettings | None = None) -> Iterator[imaplib.IMAP4]:
-    """Open an authenticated IMAP4 SSL connection and always close it."""
+    """Yield an authenticated IMAP connection, pooled unless the flag is off."""
     settings = settings or load_settings()
-    connection = imaplib.IMAP4_SSL(
-        settings.imap_host,
-        settings.imap_port,
-        timeout=settings.timeout_s,
-    )
-    try:
-        connection.login(settings.address, settings.password)
-        yield connection
-    finally:
+    if not _IMAP_POOL_ENABLED:
+        connection: imaplib.IMAP4 | None = None
         try:
-            connection.logout()
-        except (imaplib.IMAP4.error, OSError):
-            pass
+            connection = imaplib.IMAP4_SSL(
+                settings.imap_host,
+                settings.imap_port,
+                timeout=settings.timeout_s,
+            )
+            connection.login(settings.address, settings.password)
+            yield connection
+        finally:
+            _close_conn(connection)
+        return
+
+    pc = _imap_acquire(settings)
+    try:
+        yield pc.conn
+    except BaseException as exc:
+        _imap_release(pc, not _is_keep_exception(exc))
+        raise
+    else:
+        _imap_release(pc, False)
 
 
 @contextmanager

@@ -12,6 +12,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_SHARED_SESSION_CLOSE_TIMEOUT_S = 2.0
+
 
 @dataclass
 class WebServerHandle:
@@ -218,6 +220,28 @@ def start_web_server(
                         monitor.cancel()
                         loop.run_until_complete(
                             asyncio.gather(monitor, return_exceptions=True)
+                        )
+                    try:
+                        from web.link_preview import close_shared_session
+
+                        loop.run_until_complete(
+                            asyncio.wait_for(
+                                close_shared_session(),
+                                timeout=_SHARED_SESSION_CLOSE_TIMEOUT_S,
+                            )
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Shared HTTP session close failed at shutdown",
+                            exc_info=True,
+                        )
+                    try:
+                        from web.gmail import close_imap_pool
+
+                        close_imap_pool()
+                    except Exception:
+                        logger.debug(
+                            "IMAP pool close failed at shutdown", exc_info=True
                         )
                     loop.run_until_complete(loop.shutdown_asyncgens())
                 finally:

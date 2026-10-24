@@ -136,7 +136,13 @@ def _serve_and_run(monkeypatch, coro_factory):
         try:
             return await coro_factory(f"http://127.0.0.1:{port}")
         finally:
-            await runner.cleanup()
+            # The shared HTTP session belongs to this loop: close it here,
+            # before ``asyncio.run`` tears the loop down, or aiohttp emits
+            # ``ResourceWarning: Unclosed client session/connector``.
+            try:
+                await lp.close_shared_session()
+            finally:
+                await runner.cleanup()
 
     return asyncio.run(main())
 
