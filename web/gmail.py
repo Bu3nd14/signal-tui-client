@@ -31,6 +31,7 @@ from email import message_from_bytes
 from email.header import decode_header, make_header
 from email.message import EmailMessage, Message
 from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datetime
+from functools import lru_cache
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import unquote_to_bytes
@@ -273,12 +274,28 @@ _pool_active: dict[int, _PooledConn] = {}
 _pool_conn_seq = 0
 
 
+@lru_cache(maxsize=4)
+def _pool_fingerprint_cached(
+    address: str, host: str, port: int, timeout_s: float, password: str
+) -> str:
+    """Derive an opaque pool key with a password-appropriate KDF.
+
+    This is not credential storage: the digest only separates pools when the
+    account, endpoint, timeout, or credential changes.  PBKDF2 is used so the
+    key derivation stays expensive even though the result is cached.
+    """
+    raw = f"{address}\0{host}\0{port}\0{timeout_s}\0{password}".encode()
+    return hashlib.pbkdf2_hmac("sha256", raw, _POOL_FP_KEY, 120_000).hex()
+
+
 def _pool_fingerprint(settings: GmailSettings) -> str:
-    raw = (
-        f"{settings.address}\0{settings.imap_host}\0{settings.imap_port}\0"
-        f"{settings.timeout_s}\0{settings.password}"
+    return _pool_fingerprint_cached(
+        settings.address,
+        settings.imap_host,
+        settings.imap_port,
+        settings.timeout_s,
+        settings.password,
     )
-    return hmac.new(_POOL_FP_KEY, raw.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _next_conn_id_locked() -> int:
@@ -402,6 +419,7 @@ def _reset_imap_pool() -> None:
 
 
 def clear_imap_pool() -> None:
+    _pool_fingerprint_cached.cache_clear()
     """Close every idle pooled connection and invalidate active ones."""
     _reset_imap_pool()
 
