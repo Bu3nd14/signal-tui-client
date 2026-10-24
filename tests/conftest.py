@@ -14,6 +14,24 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def isolate_gmail_imap_pool():
+    """Reset the process-wide IMAP pool around every test.
+
+    The pool lives at module level in :mod:`web.gmail`, so a connection left
+    idle by one test would otherwise be reused by the next one, bypassing its
+    freshly patched ``IMAP4_SSL`` fake.  Clearing before *and* after every test
+    keeps the Gmail/link-preview suites isolated from module-level state.
+    """
+    from web import gmail
+
+    gmail.clear_imap_pool()
+    try:
+        yield
+    finally:
+        gmail.clear_imap_pool()
+
+
+@pytest.fixture(autouse=True)
 def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate every test from the user's persistent cache and database."""
     import protocols.db as backend
