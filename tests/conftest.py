@@ -5,12 +5,56 @@ All tests use in-memory / tmp_path to avoid touching real files or daemons.
 
 from __future__ import annotations
 
+import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def fail_on_unclosed_sqlite(monkeypatch: pytest.MonkeyPatch):
+    """Fail any test that leaves a SQLite connection open.
+
+    ``ResourceWarning: unclosed database`` is only emitted when the garbage
+    collector finalises a leaked connection, i.e. inside an unrelated later
+    test, so ``-W error`` cannot attribute or reliably fail it. Instead every
+    connection opened through ``sqlite3.connect`` during the test is recorded
+    (with strong references, so none is finalised early) and checked at
+    teardown. ``with closing(sqlite3.connect(...)) as conn, conn`` does not close: use
+    ``contextlib.closing`` or an explicit ``close()``.
+    """
+    real_connect = sqlite3.connect
+    opened: list[tuple[sqlite3.Connection, str]] = []
+
+    def recording_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        frame = sys._getframe(1)
+        site = f"{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}"
+        opened.append((conn, site))
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    yield
+    leaked = []
+    for conn, site in opened:
+        try:
+            conn.execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            continue  # closed
+        except sqlite3.Error:
+            pass  # open but unusable: still a leak
+        leaked.append(site)
+        conn.close()
+    if leaked:
+        pytest.fail(
+            "SQLite connection(s) left open (use contextlib.closing / close()):\n  "
+            + "\n  ".join(leaked),
+            pytrace=False,
+        )
 
 
 @pytest.fixture(autouse=True)

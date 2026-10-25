@@ -5,6 +5,7 @@ import sqlite3
 import stat
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -293,7 +294,7 @@ def test_image_caption_race_always_persists_caption(protocol, order):
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["text"] == ""
     assert backend.cache["42"][0]["attachment_info"] == "caption from echo"
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         rows = conn.execute(
             "SELECT attachment_info FROM messages WHERE protocol = ? AND contact_number = ?",
             (protocol, "42"),
@@ -566,7 +567,7 @@ def _echo_payload(attachment_id: str) -> dict:
 def _batch_rows():
     from protocols import db
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         return connection.execute(
             "SELECT msg_id, attachment_id, batch_id, batch_index FROM messages "
             "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
@@ -852,7 +853,7 @@ def test_signal_multi_attachment_echo_upgrades_each_mirror_row(tmp_path, monkeyp
 
     from protocols import db
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT batch_index, attachment_id FROM messages "
             "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
@@ -890,7 +891,7 @@ def test_signal_same_filename_attachments_keep_unambiguous_association(
     ]
     from protocols import db
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT batch_index, attachment_id FROM messages "
             "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
@@ -930,7 +931,7 @@ def test_signal_multi_attachment_echo_without_full_mirror_never_duplicates(
     ]
     from protocols import db
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM messages WHERE protocol = 'signal' "
@@ -994,7 +995,7 @@ def test_signal_send_attachments_barrier_rollback_cleans_partial_rows(
 
     from protocols import db
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT msg_id, attachment_id FROM messages "
             "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
@@ -1174,7 +1175,7 @@ def test_whatsapp_manager_batch_mirrors_n_events_with_batch_index(
             "39333@c.us", event.payload, event.payload["timestamp"]
         )
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT msg_id, batch_id, batch_index FROM messages "
             "WHERE protocol = 'whatsapp' AND contact_number = '39333@c.us' "
@@ -1460,7 +1461,7 @@ def test_telegram_manager_batch_mirrors_n_events_with_batch_index(
 
     for event in events:
         assert backend.ingest_message("42", event.payload, event.payload["timestamp"])
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT msg_id, batch_id, batch_index FROM messages "
             "WHERE protocol = 'telegram' AND contact_number = '42' "
@@ -1520,7 +1521,7 @@ def test_telegram_batch_slot_fuses_on_echo_mirror_dedup(order):
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["batch_id"] == "batch-2"
     assert backend.cache["42"][0]["batch_index"] == 0
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT batch_id, batch_index FROM messages "
             "WHERE protocol = 'telegram' AND contact_number = '42'"
@@ -1543,7 +1544,7 @@ def test_telegram_batch_slots_fuse_per_message():
     assert len(backend.cache["42"]) == 2
     assert {message["batch_id"] for message in backend.cache["42"]} == {"batch-2"}
     assert sorted(message["batch_index"] for message in backend.cache["42"]) == [0, 1]
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT msg_id, batch_id, batch_index FROM messages "
             "WHERE protocol = 'telegram' AND contact_number = '42' ORDER BY msg_id"
@@ -1564,7 +1565,7 @@ def test_telegram_batch_slot_fuses_onto_optimistic_row():
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["batch_id"] == "batch-1"
     assert backend.cache["42"][0]["batch_index"] == 0
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         assert connection.execute(
             "SELECT batch_id, batch_index FROM messages "
             "WHERE protocol = 'telegram' AND contact_number = '42'"
@@ -1606,7 +1607,7 @@ def test_whatsapp_batch_slot_fuses_on_echo_mirror_dedup(order, tmp_path, monkeyp
     assert len(backend.cache[contact]) == 1
     assert backend.cache[contact][0]["batch_id"] == "batch-9"
     assert backend.cache[contact][0]["batch_index"] == 1
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT batch_id, batch_index FROM messages "
             "WHERE protocol = 'whatsapp' AND contact_number = ?",
@@ -1632,7 +1633,7 @@ def test_whatsapp_batch_slot_fuses_onto_optimistic_row(tmp_path, monkeypatch):
 
     assert len(backend.cache[contact]) == 1
     assert backend.cache[contact][0]["batch_id"] == "batch-9"
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         assert connection.execute(
             "SELECT batch_id, batch_index FROM messages "
             "WHERE protocol = 'whatsapp' AND contact_number = ?",

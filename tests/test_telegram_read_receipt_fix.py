@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import queue
 import sys
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -430,7 +431,7 @@ class TestDedupById:
             msg_id="7",
             status="read",
         )
-        with sqlite3.connect(tmp_db) as conn:
+        with closing(sqlite3.connect(tmp_db)) as conn, conn:
             conn.execute(
                 "UPDATE messages SET edited = 1 WHERE timestamp = 1000 AND msg_id = '7'"
             )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -56,7 +57,7 @@ def _insert_message(
     msg_type="text",
     status="sent",
 ):
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_id, msg_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",

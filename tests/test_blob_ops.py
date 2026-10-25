@@ -7,6 +7,7 @@ out; attachment paths never leave the protocol's media root.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -193,7 +194,7 @@ def test_quote_media_route_equals_operation(media, monkeypatch):
     thumbs.mkdir(parents=True)
     quote = _png(thumbs / "q.png", (40, 40))
     outside = _png(media.tmp / "outside.png", (40, 40))
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "CREATE TABLE messages (id INTEGER PRIMARY KEY, protocol TEXT, "
             "quote_attachment_path TEXT)"
@@ -285,7 +286,7 @@ def test_signal_avatar_blob_is_a_content_addressed_file(media, monkeypatch):
 
 def test_quoted_attachment_lookup(media):
     db_file = Path(backend.DB_FILE)
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "CREATE TABLE messages (id INTEGER PRIMARY KEY, protocol TEXT, "
             "contact_number TEXT, timestamp INTEGER, attachment_id TEXT, "

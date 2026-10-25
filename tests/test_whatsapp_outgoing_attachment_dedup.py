@@ -25,6 +25,7 @@ import asyncio
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -130,7 +131,7 @@ def _url_and_mirror(
 
 
 def _all_rows() -> list[tuple]:
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         return conn.execute(
             "SELECT attachment_id, text, status, attachment_info, batch_id, "
             "batch_index, quote_text, quote_author, quote_timestamp, "
@@ -141,7 +142,7 @@ def _all_rows() -> list[tuple]:
 
 
 def _count() -> int:
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         return conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 
 
@@ -253,7 +254,7 @@ def test_boot_dedup_null_status_does_not_downgrade():
         ts=TS_URL,
         status="delivered",
     )
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         conn.execute(
             "UPDATE messages SET status = NULL WHERE attachment_id = ?", (SENT_ID,)
         )
@@ -372,7 +373,7 @@ def test_boot_dedup_preserves_batch_quote_and_edited():
         quote_attachment_path="/tmp/q.png",
         quote_content_type="image/png",
     )
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         conn.execute(
             "UPDATE messages SET edited = 1 WHERE attachment_id = ?", (SENT_ID,)
         )

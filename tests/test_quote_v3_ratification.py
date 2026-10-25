@@ -6,6 +6,7 @@ Ogni test è nominato ``test_rN_*`` e mappa 1:1 la condizione di ratifica.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 
 from event_harness import EventApp, feed, legacy_frames
 
@@ -59,7 +60,7 @@ def _db_row(msg_id: str = "in-1") -> dict:
 
 
 def _db_row_count() -> int:
-    with sqlite3.connect(db_mod.DB_FILE) as conn:
+    with closing(sqlite3.connect(db_mod.DB_FILE)) as conn, conn:
         return conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 
 

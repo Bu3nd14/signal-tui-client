@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 
 import migrate_reactions_cleanup as migration
 import protocols.db as backend
@@ -41,7 +42,7 @@ def _insert_message(
 
 def _prepare_db() -> tuple[set[int], set[int]]:
     backend._init_db()
-    with sqlite3.connect(backend.DB_FILE) as connection:
+    with closing(sqlite3.connect(backend.DB_FILE)) as connection, connection:
         candidates = {
             _insert_message(connection, protocol="signal"),
             _insert_message(connection, protocol="signal", text=None),
@@ -62,7 +63,7 @@ def _prepare_db() -> tuple[set[int], set[int]]:
 
 
 def _message_ids() -> set[int]:
-    with sqlite3.connect(backend.DB_FILE) as connection:
+    with closing(sqlite3.connect(backend.DB_FILE)) as connection, connection:
         return {row[0] for row in connection.execute("SELECT id FROM messages")}
 
 

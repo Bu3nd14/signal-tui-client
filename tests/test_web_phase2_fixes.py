@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -123,7 +124,7 @@ def test_telegram_attachment_upgrade_works_in_both_event_orders(monkeypatch, tmp
         assert result == ("changed" if first.startswith("tgref:") else False)
         assert len(backend.cache["42"]) == 1
         assert backend.cache["42"][0]["attachment_id"] == str(mirrored)
-        with sqlite3.connect(db_file) as connection:
+        with closing(sqlite3.connect(db_file)) as connection, connection:
             assert connection.execute(
                 "SELECT attachment_id FROM messages"
             ).fetchone() == (str(mirrored),)
@@ -155,7 +156,7 @@ def test_signal_unresolved_echo_is_upgraded_to_sent_attachment(monkeypatch, tmp_
     assert backend.ingest_message("42", _media_data(mirrored.name), 1001) == "changed"
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["attachment_id"] == mirrored.name
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (
             mirrored.name,
         )
@@ -179,7 +180,7 @@ def test_signal_echo_never_adds_row_and_keeps_mirrored_file(monkeypatch, tmp_pat
     assert backend.ingest_message("42", echo, echo_ts) is False
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["attachment_id"] == mirrored.name
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute(
             "SELECT COUNT(*), attachment_id FROM messages"
         ).fetchone() == (1, mirrored.name)
@@ -195,7 +196,7 @@ def test_signal_outgoing_attachment_is_resolvable_or_null(monkeypatch, tmp_path)
 
     assert backend.ingest_message("42", unresolved, 77)
     assert backend.cache["42"][0]["attachment_id"] is None
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (
             None,
         )
@@ -205,7 +206,7 @@ def test_signal_outgoing_attachment_is_resolvable_or_null(monkeypatch, tmp_path)
 
 
 def _table_columns(db_file: Path) -> set[str]:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         return {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
 
 
@@ -214,7 +215,7 @@ def test_batch_columns_added_to_modern_versioned_db(monkeypatch, tmp_path):
     comunque le colonne batch: la migrazione è incondizionata (stile
     ``edited``/``content_type``), non gated dall'early-return."""
     db_file = _db(monkeypatch, tmp_path)
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             """CREATE TABLE messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -239,7 +240,7 @@ def test_batch_columns_added_to_modern_versioned_db(monkeypatch, tmp_path):
 
     columns = _table_columns(db_file)
     assert {"batch_id", "batch_index"} <= columns
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == (
             backend_mod._SCHEMA_VERSION
         )
@@ -413,13 +414,13 @@ def test_telegram_persists_content_type_and_api_marks_tgref_as_image(
     data = {**_media_data("tgref:42:77"), "content_type": "image/png"}
 
     assert backend.ingest_message("42", data, 1_000)
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute("SELECT content_type FROM messages").fetchone() == (
             "image/png",
         )
     assert _messages("telegram", "42")[0]["attachment"]["type"] == "image/png"
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute("UPDATE messages SET content_type = NULL")
         connection.commit()
     assert _messages("telegram", "42")[0]["attachment"]["type"] == "image/*"
@@ -653,7 +654,7 @@ def test_whatsapp_echo_first_is_upgraded_to_sent_attachment(monkeypatch, tmp_pat
     assert backend.ingest_message("42", _media_data("waha-media-id"), 1000)
     assert backend.ingest_message("42", _media_data(mirrored.name), 1001) == "changed"
     assert backend.cache["42"][0]["attachment_id"] == mirrored.name
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (
             mirrored.name,
         )
@@ -705,7 +706,7 @@ def test_whatsapp_dedup_fills_missing_quote_fields(monkeypatch, tmp_path):
     assert backend.ingest_message("42", ack, 2000)
     assert not backend.ingest_message("42", mirrored, 3000)
     assert backend.cache["42"][0]["quote_timestamp"] == 123000
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute(
             "SELECT quote_text, quote_timestamp, quote_author, reply_to_message_id "
             "FROM messages"

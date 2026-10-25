@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import closing
 
 from event_harness import EventApp, feed, legacy_frames
 
@@ -61,7 +62,7 @@ def _wa_backend(tmp_path, monkeypatch) -> WhatsAppBackend:
 
 
 def _db_rows(protocol: str, contact: str) -> list[tuple]:
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         return connection.execute(
             "SELECT msg_id, batch_id, batch_index FROM messages "
             "WHERE protocol = ? AND contact_number = ? ORDER BY msg_id",

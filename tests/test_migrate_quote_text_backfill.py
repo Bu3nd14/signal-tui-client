@@ -7,6 +7,7 @@ segnaposto derivato per identità sintetiche, e le note red-team N1/N2/N3.
 
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -69,7 +70,7 @@ def _add_quoted_pair(
 def _quote_text(reply_ts=REPLY_TS):
     import sqlite3
 
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         row = conn.execute(
             "SELECT quote_text FROM messages WHERE timestamp = ? AND is_mine = 1",
             (reply_ts,),

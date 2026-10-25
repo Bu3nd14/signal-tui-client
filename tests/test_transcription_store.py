@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,7 @@ def test_set_upserts_existing_key_without_duplicate(transcription_db: Path):
     store.set("telegram", "audio-2", status="failed", error="boom", model="whisper-1")
 
     record = store.get("telegram", "audio-2")
-    with sqlite3.connect(transcription_db) as connection:
+    with closing(sqlite3.connect(transcription_db)) as connection, connection:
         count = connection.execute(
             "SELECT COUNT(*) FROM transcriptions "
             "WHERE protocol = ? AND attachment_id = ?",
@@ -56,7 +57,7 @@ def test_set_upserts_existing_key_without_duplicate(transcription_db: Path):
 def test_init_db_creates_transcriptions_table_at_schema_v5(transcription_db: Path):
     backend._init_db()
 
-    with sqlite3.connect(transcription_db) as connection:
+    with closing(sqlite3.connect(transcription_db)) as connection, connection:
         table = connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='transcriptions'"
         ).fetchone()

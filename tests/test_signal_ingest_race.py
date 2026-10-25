@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,7 +39,7 @@ def _data() -> dict:
 
 
 def _row_count(db_file: Path) -> int:
-    with sqlite3.connect(db_file) as conn:
+    with closing(sqlite3.connect(db_file)) as conn, conn:
         return conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 
 

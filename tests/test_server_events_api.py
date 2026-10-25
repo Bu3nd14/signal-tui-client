@@ -88,6 +88,7 @@ def test_jsonable_coerces_non_json_values():
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     row = db.execute("select 1 as a, 'x' as b").fetchone()
+    db.close()
     value = {1: (1, 2), "s": {3, 1}, "p": Path("a/b"), "r": row, "n": None}
     out = jsonable(value)
     assert out == {

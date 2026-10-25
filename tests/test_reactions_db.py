@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 
 import protocols.db as backend
 
@@ -17,7 +18,7 @@ def _add_message(protocol: str, contact: str, timestamp: int, msg_id: str | None
         protocol=protocol,
         msg_id=msg_id,
     )
-    with sqlite3.connect(backend.DB_FILE) as conn:
+    with closing(sqlite3.connect(backend.DB_FILE)) as conn, conn:
         return conn.execute(
             "SELECT id FROM messages WHERE protocol = ? AND contact_number = ? "
             "AND timestamp = ?",
@@ -55,7 +56,7 @@ def test_init_db_creates_reactions_schema_idempotently():
     backend._init_db()
     backend._init_db()
 
-    with sqlite3.connect(backend.DB_FILE) as conn:
+    with closing(sqlite3.connect(backend.DB_FILE)) as conn, conn:
         table = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='reactions'"
         ).fetchone()
@@ -171,7 +172,7 @@ def test_prune_orphan_reactions_keeps_existing_targets():
     _delta(target_msg_id="1002", target_ts=1002, author_key="idless")
     _delta(target_msg_id="1003", target_ts=1003, author_key="deleted-idless")
 
-    with sqlite3.connect(backend.DB_FILE) as conn:
+    with closing(sqlite3.connect(backend.DB_FILE)) as conn, conn:
         conn.execute("DELETE FROM messages WHERE msg_id = '1000'")
         conn.execute("DELETE FROM messages WHERE timestamp = 1003")
 

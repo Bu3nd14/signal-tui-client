@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from base64 import b64decode
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1953,7 +1954,7 @@ def test_contacts_schema_order_and_unread_count(web_client):
         ChatContact("second", "Second", "whatsapp", {"last_message_ts": 10}),
         ChatContact("first", "First", "signal", {"last_message_ts": 20}),
     ]
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.executemany(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, timestamp, read) VALUES (?, ?, ?, ?, ?, ?)",
             [
@@ -2019,7 +2020,7 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.executemany(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, timestamp, attachment_id, attachment_info, content_type, msg_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -2085,7 +2086,7 @@ def test_messages_exposes_delivery_and_edit_state(web_client):
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.executemany(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_id, msg_type, status, read, edited) "
@@ -2134,7 +2135,7 @@ def test_messages_edit_id_rules(
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_id, msg_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2155,7 +2156,7 @@ def test_messages_exposes_persisted_quote_fields(web_client):
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, quote_text, quote_timestamp, quote_author) "
@@ -2185,7 +2186,7 @@ def test_messages_never_serializes_image_placeholder_text(web_client, protocol):
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_type, attachment_id, attachment_info, content_type) "
@@ -2232,7 +2233,7 @@ def test_messages_distinguishes_video_placeholders_from_captions(
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_type, attachment_id, attachment_info, content_type, "
@@ -2272,7 +2273,7 @@ def test_messages_preserves_image_caption_cleanup(web_client, text, expected_tex
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_type, attachment_id, attachment_info, content_type, "
@@ -2323,7 +2324,7 @@ def test_messages_attachment_info_exposes_only_real_image_captions(
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_type, attachment_id, attachment_info, content_type) "
@@ -2380,7 +2381,7 @@ def test_messages_infers_missing_image_content_type(web_client):
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.executemany(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, timestamp, attachment_id, attachment_info, content_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -2484,7 +2485,7 @@ def test_whatsapp_messages_filter_only_synthetic_media_text(
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_type, attachment_id, attachment_info, content_type) "

@@ -18,6 +18,7 @@ Each test maps to a design point (1..12 in the approved plan).
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 
 from models import attachment_display_name
 from protocols import db
@@ -83,7 +84,7 @@ def _add(
 
 
 def _all_rows() -> list[dict]:
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT id, text, sender, status, edited, timestamp, attachment_info, "
@@ -96,7 +97,7 @@ def _all_rows() -> list[dict]:
 
 
 def _count() -> int:
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         return conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 
 
@@ -256,7 +257,7 @@ def test_boot_dedup_merges_quote_fields_and_edited():
         quote_attachment_path="/tmp/q.png",
         quote_content_type="image/png",
     )
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         conn.execute("UPDATE messages SET edited = 1 WHERE text = ''")
 
     assert db._dedup_incoming_attachment_mirrors() == 1
@@ -767,7 +768,7 @@ def test_web_intra_key_caption_transfer_keeps_survivor_identity():
         batch_id="b9",
         batch_index=1,
     )
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         connection.execute("UPDATE messages SET read = 0 WHERE text = 'caption reale'")
         connection.execute(
             "UPDATE messages SET read = 1 WHERE attachment_id IS NOT NULL"

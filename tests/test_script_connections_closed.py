@@ -1,6 +1,6 @@
 """One-shot maintenance scripts must close every SQLite connection they open.
 
-``with sqlite3.connect(...) as conn`` only commits/rolls back; it does not
+``with closing(sqlite3.connect(...)) as conn, conn`` only commits/rolls back; it does not
 close. These tests record each connection opened by a script and assert it is
 closed once the script's entry point returns.
 """

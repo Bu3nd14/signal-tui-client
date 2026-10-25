@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import urllib.error
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -2172,7 +2173,7 @@ class TestWhatsAppBackend:
         assert len(backend.cache[cid]) == 1
         assert backend.cache[cid][0]["attachment_id"] == url
         assert backend.cache[cid][0]["msg_type"] == "image"
-        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+        with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
             row = conn.execute(
                 "SELECT attachment_id, msg_type FROM messages"
             ).fetchone()
@@ -2224,7 +2225,7 @@ class TestWhatsAppBackend:
         cached = backend.cache["391234567890@c.us"][0]
         assert cached["attachment_id"].startswith("sent-")
         assert cached["attachment_info"] == "Round3 relazione.pdf"
-        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+        with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
             rows = conn.execute(
                 "SELECT attachment_id, attachment_info FROM messages"
             ).fetchall()
@@ -2779,7 +2780,7 @@ class TestWhatsAppMediaIdentityUpdate:
             "image",
         )
 
-        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+        with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
             row = conn.execute(
                 "SELECT attachment_id, msg_type FROM messages WHERE msg_id = ?",
                 ("media-existing",),
@@ -2813,7 +2814,7 @@ class TestWhatsAppMediaIdentityUpdate:
             "image",
         )
 
-        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+        with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
             row = conn.execute(
                 "SELECT attachment_id, msg_type FROM messages WHERE msg_id = ?",
                 (msg_id,),
@@ -3689,7 +3690,7 @@ class TestSeedCacheFromDB:
 
         monkeypatch.setattr(backend_mod, "DB_FILE", tmp_path / "messages.db")
         backend_mod._init_db()
-        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+        with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
             before = (
                 conn.execute("PRAGMA table_info(messages)").fetchall(),
                 conn.execute("PRAGMA index_list(messages)").fetchall(),
@@ -3729,7 +3730,7 @@ class TestSeedCacheFromDB:
             )
         assert len(restarted.cache["1@c.us"]) == 2
 
-        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+        with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
             after = (
                 conn.execute("PRAGMA table_info(messages)").fetchall(),
                 conn.execute("PRAGMA index_list(messages)").fetchall(),
@@ -3788,7 +3789,7 @@ class TestSeedCacheFromDB:
         assert backend.poll_once() == []
         assert len(backend.cache["1@c.us"]) == 1
 
-        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+        with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
             assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
 
         restarted = _make_backend()
@@ -5724,7 +5725,7 @@ class TestIncomingAttachmentIdFirstDedup:
         # re-ingest è un duplicato (nessuna nuova riga né in cache né in SQLite).
         assert backend.ingest_message(cid, second, 2_000) is False
         assert len(backend.cache[cid]) == 1
-        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+        with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
             count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         assert count == 1
 
@@ -5746,6 +5747,6 @@ class TestIncomingAttachmentIdFirstDedup:
         assert backend.ingest_message(cid, first, 1_000) is True
         assert backend.ingest_message(cid, second, 1_500) is False
         assert len(backend.cache[cid]) == 1
-        with sqlite3.connect(backend_mod.DB_FILE) as conn:
+        with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
             count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         assert count == 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -49,7 +50,7 @@ def _insert_message(db_file: Path, **values) -> int:
     }
     columns = ", ".join(fields)
     placeholders = ", ".join("?" for _ in fields)
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         cursor = connection.execute(
             f"INSERT INTO messages ({columns}) VALUES ({placeholders})",
             tuple(fields.values()),

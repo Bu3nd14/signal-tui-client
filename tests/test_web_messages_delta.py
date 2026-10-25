@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,7 +23,7 @@ def client(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(backend, "DB_FILE", db_file)
     monkeypatch.setattr(backend, "CACHE_DIR", tmp_path)
     _init_db()
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         for ts in range(1, 11):
             connection.execute(
                 "INSERT INTO messages (protocol, contact_number, text, is_mine, "

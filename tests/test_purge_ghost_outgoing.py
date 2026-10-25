@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -49,7 +50,7 @@ def _add_pair(
 
 
 def _rows(db_file: Path) -> list[tuple]:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         return connection.execute(
             "SELECT id, msg_id, text, status FROM messages ORDER BY id"
         ).fetchall()

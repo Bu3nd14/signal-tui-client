@@ -8,6 +8,7 @@ published ``/ws`` frame is the legacy one.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -54,7 +55,7 @@ def env(monkeypatch, tmp_path):
     db_file = tmp_path / "messages.db"
     monkeypatch.setattr(db, "DB_FILE", db_file)
     _init_db()
-    with sqlite3.connect(db_file) as con:
+    with closing(sqlite3.connect(db_file)) as con, con:
         con.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_id, msg_type, status) "
@@ -139,7 +140,7 @@ def test_edit_not_found_and_not_editable(env):
         client, api, "/api/messages/edit", "messages.edit", _edit(message_id="zz")
     )
     assert (err.code, err.message) == ("not_found", "Not Found")
-    with sqlite3.connect(db_file) as con:
+    with closing(sqlite3.connect(db_file)) as con, con:
         con.execute("UPDATE messages SET is_mine = 0")
     err = _assert_same_failure(
         client, api, "/api/messages/edit", "messages.edit", _edit()
@@ -189,7 +190,7 @@ def test_edit_success_matches_operation_and_frame(env):
         },
     }
     assert len(frames) == 2  # route call, then the direct operation call
-    with sqlite3.connect(db_file) as con:
+    with closing(sqlite3.connect(db_file)) as con, con:
         assert con.execute("SELECT text, edited FROM messages").fetchone() == (
             "Dopo",
             1,
