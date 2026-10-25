@@ -103,8 +103,11 @@ and response go through the models so non-serializable values are caught.
 
 ### 4.2 Unix socket (TUI)
 
-Implemented by `server/socket_adapter.py` (imports only `server.*`), started
-by `megachat serve` unless `--no-socket`. Everything below is the wire
+Implemented by `server/socket_adapter.py` (imports only `server.*`:
+`api`, `bus`, `models_api`, `uploads`, `version`), started by `megachat serve`
+unless `--no-socket` (`--socket PATH` overrides the location; `--no-web`
+leaves the socket as the only adapter). `ChatCore.shutdown` stops the socket
+adapter (before the web adapter), which removes the socket and runtime file. Everything below is the wire
 contract the `SocketClient` (P2.2) implements.
 
 #### Location, permissions, runtime file
@@ -147,7 +150,12 @@ writes with `ensure_ascii` (no raw U+2028 etc. in lines). A line longer than
 and the connection is closed (the stream cannot be resynchronised). A line
 that is not valid UTF-8/JSON is answered with `-32700` (id `null`) and the
 connection stays open. Blank lines are ignored. A connection that does not
-drain its writes for 30 s is dropped. At most 32 concurrent connections.
+drain its writes for 30 s is dropped. At most 32 concurrent connections (the
+33rd gets `-32031` with id `null`, then is closed). A client may half-close
+after sending: requests already received are still answered, then the server
+closes. When the server closes after a protocol error with unread input
+pending, the peer may see `ECONNRESET` after the error line: read what was
+delivered first.
 
 #### Requests and responses
 
@@ -188,7 +196,7 @@ Protocol-level errors: `-32700` parse error, `-32600` invalid request
 (envelope), `-32601` unknown method (`data.code` `"method_not_found"`),
 `-32602` invalid params, `-32603` internal error (unexpected exception,
 details only in the server log), `-32020` timeout, `-32030` too many requests
-in flight. Everything else (`-320xx`) maps from `ApiError` as above.
+in flight, `-32031` too many connections. Everything else (`-320xx`) maps from `ApiError` as above.
 
 #### Methods
 

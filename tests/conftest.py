@@ -47,6 +47,15 @@ def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     return cache_dir
 
 
+@pytest.fixture(autouse=True)
+def isolate_server_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """No test may bind (or probe) the user's real server socket: ``megachat
+    serve`` and the socket adapter resolve their default path from this."""
+    path = tmp_path / "megachat-run" / "server.sock"
+    monkeypatch.setenv("MEGACHAT_SOCKET", str(path))
+    return path
+
+
 @pytest.fixture
 def open_media_root(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let ``media.*`` operations hand out any path a test's fake manager returns.

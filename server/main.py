@@ -1,9 +1,11 @@
-"""Headless server mode: the chat core plus the web adapter, no TUI.
+"""Headless server mode: the chat core plus its adapters, no TUI.
 
 ``megachat serve`` replaces the "run the TUI inside tmux to keep the web UI
-alive" workaround.  Until the TUI becomes a client of the server (Phase 2)
-the TUI and the server each run their own in-process core, so both take the
-same single-instance lock and are mutually exclusive.
+alive" workaround.  It starts the Unix-socket adapter (the transport of the
+TUI client, design §4.2; ``--no-socket`` / ``--socket PATH``) and the web
+adapter (``--no-web``).  Until the TUI becomes a client of the server
+(Phase 2) the TUI and the server each run their own in-process core, so both
+take the same single-instance lock and are mutually exclusive.
 
 This module must never import Textual or ``tui``.  ``web`` is imported lazily
 (only when the web adapter is enabled).
@@ -16,8 +18,10 @@ import logging
 import signal
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
+from server import socket_adapter
 from server.bus import EventBus
 from server.core import ChatCore
 from server.lock import LOCK_FILE, _acquire_lock, _release_lock
@@ -49,11 +53,28 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-web",
         action="store_true",
-        help="do not start the web adapter (no client can connect yet)",
+        help="do not start the web adapter (clients can still use the socket)",
+    )
+    parser.add_argument(
+        "--no-socket",
+        action="store_true",
+        help="do not start the Unix-socket adapter",
+    )
+    parser.add_argument(
+        "--socket",
+        type=str,
+        metavar="PATH",
+        help=(
+            "Unix socket path (default: $MEGACHAT_SOCKET, else "
+            "$XDG_RUNTIME_DIR/megachat/server.sock, else "
+            "~/.local/state/megachat/server.sock)"
+        ),
     )
     args = parser.parse_args(argv)
     if args.web_port is not None and not 1 <= args.web_port <= 65535:
         parser.error("--web-port must be between 1 and 65535")
+    if args.no_socket and args.socket:
+        parser.error("--socket and --no-socket are mutually exclusive")
     return args
 
 
@@ -67,19 +88,24 @@ def _configure_logging(debug: bool) -> None:
     logger.setLevel(logging.DEBUG if debug else logging.INFO)
 
 
-def _shutdown(core: ChatCore, web_handle: Any) -> None:
-    """Stop the core, then the web adapter, then disconnect and prune.
+def _shutdown(core: ChatCore, web_handle: Any, socket_handle: Any = None) -> None:
+    """Stop the core, then the adapters (socket first, then web), then
+    disconnect and prune.
 
     The order lives in :meth:`ChatCore.shutdown`, shared with the TUI exit
-    paths; this only supplies the web adapter stop.
+    paths; this only supplies the adapter stops.
     """
     stop_adapters = None
-    if web_handle is not None:
+    if web_handle is not None or socket_handle is not None:
 
         def stop_adapters() -> None:
-            from web.server import stop_web_server
+            try:
+                socket_adapter.stop(socket_handle)
+            finally:
+                if web_handle is not None:
+                    from web.server import stop_web_server
 
-            stop_web_server(web_handle)
+                    stop_web_server(web_handle)
 
     core.shutdown(stop_adapters)
 
@@ -110,6 +136,7 @@ def serve(
     stop = stop_event if stop_event is not None else threading.Event()
     core: ChatCore | None = None
     web_handle: Any = None
+    socket_handle: Any = None
     previous_handlers: dict[int, Any] = {}
     exit_code = 0
     try:
@@ -117,16 +144,40 @@ def serve(
         core = ChatCore(bus)
         core.start()
 
-        if args.no_web:
-            logger.warning(
-                "Serving without the web adapter: no client can connect until "
-                "the socket adapter exists"
-            )
-            print(
-                "⚠️  Running without the web adapter (--no-web): no client can connect.",
-                file=sys.stderr,
-            )
-        else:
+        if not args.no_socket:
+            try:
+                socket_handle = socket_adapter.start(
+                    core.api,
+                    bus,
+                    Path(args.socket).expanduser() if args.socket else None,
+                )
+            except socket_adapter.SocketAdapterError as exc:
+                logger.error("Socket adapter failed to start: %s", exc)
+                print(f"❌ Socket adapter failed to start: {exc}", file=sys.stderr)
+                exit_code = 1
+            else:
+                line = f"🔌 Socket: {socket_handle.path}"
+                logger.info(line)
+                print(line, flush=True)
+
+        if exit_code == 0 and args.no_web:
+            if socket_handle is None:
+                logger.warning(
+                    "Serving without the web and socket adapters: no client can connect"
+                )
+                print(
+                    "⚠️  Running without the web and socket adapters: no client "
+                    "can connect.",
+                    file=sys.stderr,
+                )
+            else:
+                logger.info("Serving without the web adapter (--no-web)")
+                print(
+                    "ℹ️  Running without the web adapter (--no-web): clients "
+                    f"connect through the socket {socket_handle.path}.",
+                    file=sys.stderr,
+                )
+        elif exit_code == 0:
             from protocols.config import web_host, web_port, web_token
             from web.server import start_web_server
 
@@ -175,6 +226,6 @@ def serve(
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)
         if core is not None:
-            _shutdown(core, web_handle)
+            _shutdown(core, web_handle, socket_handle)
         _release_lock()
     return exit_code
