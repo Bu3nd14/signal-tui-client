@@ -15,7 +15,7 @@ from models import (
     PROTOCOL_WHATSAPP,
     is_media_quote_placeholder,
 )
-from protocols.rpc import get_attachment_path
+from tui.blobs import resolve_attachment_path
 from ui_components import MessageTextArea
 
 logger = logging.getLogger(__name__)
@@ -329,7 +329,9 @@ class SendMixin:
             if content_type:
                 attachment_id = reply_data.get("attachment_id")
                 preview_path = (
-                    get_attachment_path(attachment_id) if attachment_id else None
+                    resolve_attachment_path(self.client, PROTOCOL_SIGNAL, attachment_id)
+                    if attachment_id
+                    else None
                 )
                 if preview_path is not None:
                     # signal-cli parses ``quoteAttachments`` with the regex

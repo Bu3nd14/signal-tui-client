@@ -20,6 +20,8 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import pytest
+
 from models import PROTOCOL_SIGNAL
 from tui.app import SignalTUI
 from tui.chat_view import (
@@ -30,6 +32,8 @@ from tui.chat_view import (
 from tui.images.detect import ImageSupport
 from tui.images.kitty_renderer import KittyRenderer
 from ui_components import ImageWidget, MessageWidget
+
+pytestmark = pytest.mark.usefixtures("open_media_root")
 
 
 def _make_png_bytes(width: int = 16, height: int = 32) -> bytes:
@@ -377,6 +381,7 @@ class TestMediaKindRendering:
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
         app._open_media_path = MagicMock()
         path = tmp_path / "manual.pdf"
+        path.write_bytes(b"%PDF-1.4")  # the operation only serves existing files
         app.manager.get_attachment_path.return_value = path
         widget = MessageWidget(
             "📎 manual.pdf", attachment_ref=("doc-1", PROTOCOL_SIGNAL)

@@ -13,6 +13,7 @@ from models import (
     PROTOCOL_SIGNAL,
 )
 from protocols.download import serve_text_as_file
+from tui.blobs import resolve_attachment_path
 from tui.images.detect import ImageSupport
 from ui_components import (
     DownloadLinkWidget,
@@ -109,7 +110,7 @@ class DownloadModeMixin:
         widget: MessageWidget,
     ) -> None:
         """Resolve non-image media for HTTP serving without blocking the UI."""
-        path = self.manager.get_attachment_path(protocol, attachment_id)
+        path = resolve_attachment_path(self.client, protocol, attachment_id)
         self.call_from_thread(
             self._finish_media_download_path_resolve,
             protocol,
@@ -187,8 +188,8 @@ class DownloadModeMixin:
         if attachment_id:
             resolved = attachment_path
             if resolved is None:
-                resolved = self.manager.get_attachment_path(
-                    protocol or PROTOCOL_SIGNAL, attachment_id
+                resolved = resolve_attachment_path(
+                    self.client, protocol or PROTOCOL_SIGNAL, attachment_id
                 )
             if resolved is not None and resolved.is_file():
                 url = _serve_file_path(resolved)
@@ -228,7 +229,7 @@ class DownloadModeMixin:
         """Handle ``ImageClicked`` from an ``ImageWidget``.
 
         If the path is not yet resolved, does a lazy lookup via the
-        ``BackendManager`` (works for both Signal and WhatsApp).  In download
+        ``media.attachment`` operation (works for both Signal and WhatsApp).  In download
         mode the file is served via HTTP; otherwise a fullscreen
         ``ImageModalScreen`` renders it via ``catimg``.
         """
@@ -239,8 +240,8 @@ class DownloadModeMixin:
         if att_path is None and event.attachment_id:
             protocol = self.selected_contact.protocol if self.selected_contact else None
             if protocol:
-                att_path = self.manager.get_attachment_path(
-                    protocol, event.attachment_id
+                att_path = resolve_attachment_path(
+                    self.client, protocol, event.attachment_id
                 )
                 if event.widget is not None:
                     event.widget.attachment_path = att_path

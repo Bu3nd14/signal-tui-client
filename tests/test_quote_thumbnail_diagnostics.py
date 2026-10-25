@@ -22,6 +22,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
+pytestmark = pytest.mark.usefixtures("open_media_root")
+
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 

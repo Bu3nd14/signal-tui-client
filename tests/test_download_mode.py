@@ -11,8 +11,13 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import pytest
+from client_harness import client_for
+
 from tui.download import DownloadModeMixin
 from ui_components import DownloadLinkWidget, ImageWidget, MessageWidget
+
+pytestmark = pytest.mark.usefixtures("open_media_root")
 
 
 def _bar_app(download_mode: bool = False, reply_to=None):
@@ -129,6 +134,7 @@ class TestDownloadMode:
         manager.get_attachment_path.return_value = attachment
         app = SimpleNamespace(
             manager=manager,
+            client=client_for(manager),
             chat_log=chat_log,
             _download_mode=True,
             _status=MagicMock(),
@@ -150,6 +156,7 @@ class TestDownloadMode:
         manager = MagicMock()
         app = SimpleNamespace(
             manager=manager,
+            client=client_for(manager),
             chat_log=MagicMock(),
             _download_mode=True,
             _status=MagicMock(),
@@ -179,6 +186,7 @@ class TestDownloadMode:
         event = widget._make_media_open_requested()
         app = DownloadModeMixin()
         app.manager = manager
+        app.client = client_for(manager)
         app._download_mode = True
         app._start_download = MagicMock()
         app.call_from_thread = MagicMock(side_effect=lambda fn, *args: fn(*args))
@@ -200,6 +208,7 @@ class TestDownloadMode:
         manager.get_attachment_path.return_value = None
         app = SimpleNamespace(
             manager=manager,
+            client=client_for(manager),
             chat_log=MagicMock(),
             _download_mode=True,
             _status=MagicMock(),
@@ -229,6 +238,7 @@ class TestDownloadMode:
         manager.get_attachment_path.return_value = attachment
         app = SimpleNamespace(
             manager=manager,
+            client=client_for(manager),
             selected_contact=SimpleNamespace(protocol="signal"),
             _download_mode=True,
             _start_download=MagicMock(),

@@ -26,6 +26,8 @@ from protocols import (
     WhatsAppBackend,
 )
 from protocols.config import thumbnail_max_cols, thumbnail_max_lines
+from server.client import ApiError
+from tui.blobs import resolve_attachment_path
 from tui.images.detect import ImageSupport
 from ui_components import (
     ImageWidget,
@@ -688,7 +690,7 @@ class ChatViewMixin:
         widget: MessageWidget,
     ) -> None:
         """Resolve non-image media without decoding it, then request opening."""
-        path = self.manager.get_attachment_path(protocol, attachment_id)
+        path = resolve_attachment_path(self.client, protocol, attachment_id)
         self.call_from_thread(self._finish_media_path_resolve, widget, path)
 
     def _finish_media_path_resolve(
@@ -727,7 +729,7 @@ class ChatViewMixin:
         window load.
         """
         with self._image_resolve_semaphore:
-            path = self.manager.get_attachment_path(protocol, attachment_id)
+            path = resolve_attachment_path(self.client, protocol, attachment_id)
             if path is None:
                 self.call_from_thread(
                     self._finish_attachment_resolve,
@@ -861,7 +863,7 @@ class ChatViewMixin:
 
         Uscita: an already-resolved ``attachment_path`` drives the thumbnail.
         Ingresso: a backend-produced ``attachment_id`` (+ ``protocol``) is
-        resolved lazily via ``get_attachment_path`` in the worker (best-effort).
+        resolved lazily via ``media.attachment`` in the worker (best-effort).
 
         Falls back silently to the text-only bubble otherwise (degrado): no
         path nor resolvable id, non-kitty, renderer gone, or an
@@ -929,7 +931,7 @@ class ChatViewMixin:
                     attachment_id = resolved_id
                     protocol = widget.protocol
                 try:
-                    path = self.manager.get_attachment_path(protocol, attachment_id)
+                    path = resolve_attachment_path(self.client, protocol, attachment_id)
                 except Exception as _e:
                     logger.warning(
                         "Quote attachment resolve raised (protocol=%s id=%r)",
@@ -957,177 +959,30 @@ class ChatViewMixin:
             self.call_from_thread(self._finish_quote_thumbnail, widget, png)
 
     def _quoted_attachment_id_from_chat(self, widget: QuoteWidget) -> str | None:
-        """Attachment id dell'immagine quotata (stessa chat).
+        """Attachment id of the quoted image (same chat), via the server.
 
-        Match PRIMA esatto sul timestamp: evita falsi positivi quando messaggi
-        vicini (±2s) convivono (es. un'immagine appena inviata e la reply).
-        La finestra ±2s solo se il timestamp esatto non esiste affatto (drift).
+        ``media.quoted_attachment`` matches the exact timestamp first (no false
+        positives from nearby messages), then the quoted message id, then the
+        file name found in the quote text.  Runs in a worker thread.
         """
         if not (widget.contact_key and widget.protocol):
             return None
-        import sqlite3
-
-        import protocols.db as backend
-        from protocols.db import _DB_LOCK
-
-        ts = widget.quote_timestamp
-        if not ts:
-            # Quote senza timestamp quotato: fallback per id messaggio quotato
-            # (Telegram/WhatsApp) o per nome file (es. Signal).
-            if widget.reply_to_message_id:
-                resolved = self._quoted_attachment_id_from_message_id(widget)
-                if resolved:
-                    return resolved
-            return self._quoted_attachment_id_from_filename(widget)
-        image_clause = (
-            "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-            "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-            "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
-        )
         try:
-            with _DB_LOCK:
-                connection = sqlite3.connect(backend.DB_FILE)
-                try:
-                    row = connection.execute(
-                        "SELECT attachment_id FROM messages "
-                        "WHERE protocol = ? AND contact_number = ? "
-                        "AND timestamp = ? AND attachment_id IS NOT NULL "
-                        + image_clause
-                        + " LIMIT 1",
-                        (widget.protocol, widget.contact_key, ts),
-                    ).fetchone()
-                    if row is None:
-                        exists = connection.execute(
-                            "SELECT 1 FROM messages WHERE protocol = ? AND contact_number = ? "
-                            "AND timestamp = ? LIMIT 1",
-                            (widget.protocol, widget.contact_key, ts),
-                        ).fetchone()
-                        if exists:
-                            # Il messaggio quotato esiste ma non è un'immagine:
-                            # niente miniatura (mai prendere messaggi vicini).
-                            return None
-                        row = connection.execute(
-                            "SELECT attachment_id FROM messages "
-                            "WHERE protocol = ? AND contact_number = ? "
-                            "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
-                            + image_clause
-                            + " ORDER BY ABS(timestamp - ?) LIMIT 1",
-                            (widget.protocol, widget.contact_key, ts, ts),
-                        ).fetchone()
-                finally:
-                    connection.close()
-        except (sqlite3.Error, OSError):
+            result = self.client.call(
+                "media.quoted_attachment",
+                {
+                    "protocol": widget.protocol,
+                    "contact_key": widget.contact_key,
+                    "quote_timestamp": widget.quote_timestamp or None,
+                    "reply_to_message_id": widget.reply_to_message_id or None,
+                    "quote_text": str(getattr(widget, "_quote_text_raw", "") or ""),
+                    "content_type": str(widget.content_type or "") or None,
+                },
+            )
+        except ApiError:
+            logger.debug("Quoted attachment lookup failed", exc_info=True)
             return None
-        if row is None or not row[0]:
-            # Nessun match per timestamp: per le quote a immagine senza
-            # metadati, prova a risolvere per nome file.
-            return self._quoted_attachment_id_from_filename(widget)
-        return str(row[0])
-
-    def _quoted_attachment_id_from_message_id(
-        self,
-        widget: QuoteWidget,
-    ) -> str | None:
-        """Risolve l'immagine quotata per ``msg_id`` (Telegram/WhatsApp).
-
-        Il backend persiste ``reply_to_message_id`` (= msg_id del target) ma
-        non sempre il timestamp quotato né l'allegato: il match per id è
-        preciso e copre anche i target non in cache all'arrivo.
-        """
-        if not (widget.reply_to_message_id and widget.contact_key and widget.protocol):
-            return None
-        image_clause = (
-            "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-            "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-            "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
-        )
-        try:
-            import sqlite3
-
-            import protocols.db as backend
-            from protocols.db import _DB_LOCK
-
-            with _DB_LOCK:
-                connection = sqlite3.connect(backend.DB_FILE)
-                try:
-                    row = connection.execute(
-                        "SELECT attachment_id FROM messages "
-                        "WHERE protocol = ? AND contact_number = ? "
-                        "AND attachment_id IS NOT NULL "
-                        "AND (msg_id = ? OR msg_id LIKE '%_' || ?) "
-                        + image_clause
-                        + " LIMIT 1",
-                        (
-                            widget.protocol,
-                            widget.contact_key,
-                            widget.reply_to_message_id,
-                            widget.reply_to_message_id,
-                        ),
-                    ).fetchone()
-                finally:
-                    connection.close()
-        except (sqlite3.Error, OSError):
-            return None
-        if row is None or not row[0]:
-            return None
-        return str(row[0])
-
-    def _quoted_attachment_id_from_filename(
-        self,
-        widget: QuoteWidget,
-    ) -> str | None:
-        """Risolve l'immagine quotata per nome file (quote senza metadati).
-
-        Es. quote Signal a un'immagine: quote_text = "IMG_1303.jpg — 🖼️
-        Immagine" e nessun ``quote_timestamp``/``quote_attachment_id``. Il nome
-        file compare in ``attachment_info`` del messaggio quotato.
-        """
-        if not str(widget.content_type or "").lower().startswith("image/"):
-            return None
-        quote_text = str(getattr(widget, "_quote_text_raw", "") or "")
-        match = re.search(
-            r"([A-Za-z0-9][\w.\- ]*\.(?:jpe?g|png|gif|webp))\b",
-            quote_text,
-            re.IGNORECASE,
-        )
-        if not match:
-            return None
-        filename = match.group(1).strip()
-        image_clause = (
-            "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-            "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-            "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
-        )
-        try:
-            import sqlite3
-
-            import protocols.db as backend
-            from protocols.db import _DB_LOCK
-
-            with _DB_LOCK:
-                connection = sqlite3.connect(backend.DB_FILE)
-                try:
-                    row = connection.execute(
-                        "SELECT attachment_id FROM messages "
-                        "WHERE protocol = ? AND contact_number = ? "
-                        "AND attachment_id IS NOT NULL "
-                        "AND (attachment_info LIKE ? OR attachment_id LIKE ?) "
-                        + image_clause
-                        + " LIMIT 1",
-                        (
-                            widget.protocol,
-                            widget.contact_key,
-                            f"%{filename}%",
-                            f"%{filename}%",
-                        ),
-                    ).fetchone()
-                finally:
-                    connection.close()
-        except (sqlite3.Error, OSError):
-            return None
-        if row is None or not row[0]:
-            return None
-        return str(row[0])
+        return result["attachment_id"]
 
     def _finish_quote_thumbnail(self, widget: QuoteWidget, png: bytes) -> None:
         """UI thread: transmit the quote thumbnail once and register the widget.

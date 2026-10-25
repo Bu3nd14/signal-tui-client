@@ -311,3 +311,51 @@ def test_quoted_attachment_lookup(media):
         "attachment_id": "img.png"
     }
     assert lookup() == {"attachment_id": None}
+
+
+# -- TUI call sites go through the client -------------------------------------
+
+
+def test_tui_resolves_attachments_through_the_client(tmp_path, monkeypatch):
+    from client_harness import client_for
+
+    from tui.blobs import resolve_attachment_path
+
+    root = tmp_path / "media"
+    root.mkdir()
+    monkeypatch.setattr(signal_rpc, "SIGNAL_CLI_ATTACHMENTS_DIR", root)
+    photo = _png(root / "photo.png", (8, 8))
+    outside = tmp_path / "outside.png"
+    _png(outside, (8, 8))
+    paths = {"photo.png": photo, "outside": outside}
+    calls: list[tuple[str, str]] = []
+
+    def get_attachment_path(proto, attachment_id):
+        calls.append((proto, attachment_id))
+        return paths.get(attachment_id)
+
+    client = client_for(SimpleNamespace(get_attachment_path=get_attachment_path))
+
+    assert resolve_attachment_path(client, "signal", "photo.png") == photo.resolve()
+    assert calls == [("signal", "photo.png")]
+    # not_found (missing, outside the root, unknown protocol) is None, like the
+    # old backend lookup.
+    assert resolve_attachment_path(client, "signal", "missing") is None
+    assert resolve_attachment_path(client, "signal", "outside") is None
+    assert resolve_attachment_path(client, "irc", "photo.png") is None
+
+
+def test_adapters_do_not_resolve_attachment_files_themselves():
+    root = Path(__file__).resolve().parent.parent
+    for name in (
+        "tui/chat_view.py",
+        "tui/download.py",
+        "tui/send.py",
+        "web/api.py",
+    ):
+        source = (root / name).read_text(encoding="utf-8")
+        assert "get_attachment_path" not in source, name
+        assert "get_attachment_chunk" not in source, name
+        assert "sqlite3" not in source or name == "tui/send.py", name
+    for name in ("tui/chat_view.py", "tui/download.py", "web/api.py"):
+        assert "avatar_cache" not in (root / name).read_text(encoding="utf-8")

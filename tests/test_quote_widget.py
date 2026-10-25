@@ -21,10 +21,14 @@ from textual.widgets import Static
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import pytest
+
 from tui.app import SignalTUI
 from tui.images.detect import ImageSupport
 from tui.images.kitty_renderer import KittyRenderer
 from ui_components import ImageWidget, QuoteWidget
+
+pytestmark = pytest.mark.usefixtures("open_media_root")
 
 
 def _make_png(width: int = 16, height: int = 32) -> bytes:

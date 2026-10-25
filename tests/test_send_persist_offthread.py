@@ -683,7 +683,7 @@ class TestMediaReplySend:
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
         preview = Path("/tmp/att-1.png")
 
-        with patch("tui.send.get_attachment_path", return_value=preview):
+        with patch("tui.send.resolve_attachment_path", return_value=preview):
             _send_text(app, "risposta")
             _run_workers(app)
 
@@ -709,7 +709,7 @@ class TestMediaReplySend:
         }
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/a.jpg")):
+        with patch("tui.send.resolve_attachment_path", return_value=Path("/tmp/a.jpg")):
             _send_text(app, "risposta")
             _run_workers(app)
 
@@ -754,7 +754,7 @@ class TestMediaReplySend:
         }
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        with patch("tui.send.get_attachment_path", return_value=None):
+        with patch("tui.send.resolve_attachment_path", return_value=None):
             _send_text(app, "risposta")
             _run_workers(app)
 
@@ -782,7 +782,9 @@ class TestMediaReplySend:
             side_effect=RuntimeError("offline")
         )
 
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.png")):
+        with patch(
+            "tui.send.resolve_attachment_path", return_value=Path("/tmp/att-1.png")
+        ):
             _send_text(app, "risposta")
             _run_workers(app)
 
@@ -794,7 +796,9 @@ class TestMediaReplySend:
         app.signal_backend.send_message_sync = MagicMock(return_value="ok")
         ts = app._cache[contact.cache_key][0]["timestamp"]
         app.run_worker.reset_mock()
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.png")):
+        with patch(
+            "tui.send.resolve_attachment_path", return_value=Path("/tmp/att-1.png")
+        ):
             app._retry_failed_message(ts, "risposta")
             _run_workers(app)
 
@@ -831,7 +835,9 @@ class TestMediaReplySend:
             side_effect=RuntimeError("offline")
         )
 
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.jpg")):
+        with patch(
+            "tui.send.resolve_attachment_path", return_value=Path("/tmp/att-1.jpg")
+        ):
             _send_text(app, "risposta")
             _run_workers(app)
 
@@ -844,7 +850,9 @@ class TestMediaReplySend:
         app.signal_backend.send_message_sync = MagicMock(return_value="ok")
         ts = app._cache[contact.cache_key][0]["timestamp"]
         app.run_worker.reset_mock()
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.jpg")):
+        with patch(
+            "tui.send.resolve_attachment_path", return_value=Path("/tmp/att-1.jpg")
+        ):
             app._retry_failed_message(ts, "risposta")
             _run_workers(app)
 
@@ -875,7 +883,7 @@ class TestMediaReplySend:
         }
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/x")):
+        with patch("tui.send.resolve_attachment_path", return_value=Path("/tmp/x")):
             _send_text(app, "risposta")
             _run_workers(app)
 
