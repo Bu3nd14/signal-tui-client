@@ -295,6 +295,7 @@ SOCKET_ADAPTER_SERVER_ALLOWLIST = {
     "server.api",
     "server.bus",
     "server.models_api",
+    "server.paths",
     "server.uploads",
     "server.version",
 }

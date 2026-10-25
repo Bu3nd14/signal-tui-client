@@ -41,6 +41,11 @@ from pydantic import TypeAdapter, ValidationError
 from server.api import ApiError, ChatAPI, Operation
 from server.bus import EventBus, Subscription
 from server.models_api import AttachmentIn
+from server.paths import (  # noqa: F401 - re-exported for callers of the adapter
+    SOCKET_ENV,
+    default_socket_path,
+    runtime_file_path,
+)
 from server.uploads import (
     MAX_STAGED_TOTAL_BYTES,
     UploadValidationError,
@@ -70,8 +75,6 @@ AUX_WORKERS = 16
 _INLINE_PARSE_BYTES = 256 * 1024
 #: ``sun_path`` is 108 bytes on Linux, 104 on BSD/macOS (NUL included).
 _MAX_SOCKET_PATH_BYTES = 103
-
-SOCKET_ENV = "MEGACHAT_SOCKET"
 
 # -- JSON-RPC error codes -------------------------------------------------------
 
@@ -112,28 +115,6 @@ IGNORED_ATTACHMENT_OPERATIONS = frozenset({"messages.send.check"})
 
 class SocketAdapterError(RuntimeError):
     """The socket adapter could not start."""
-
-
-# -- locations --------------------------------------------------------------------
-
-
-def default_socket_path(env: dict[str, str] | None = None) -> Path:
-    """Where the server listens: ``$MEGACHAT_SOCKET``, else
-    ``$XDG_RUNTIME_DIR/megachat/server.sock``, else
-    ``~/.local/state/megachat/server.sock``."""
-    env = os.environ if env is None else env
-    override = env.get(SOCKET_ENV)
-    if override:
-        return Path(override).expanduser()
-    runtime = env.get("XDG_RUNTIME_DIR")
-    if runtime and os.path.isabs(runtime):
-        return Path(runtime) / "megachat" / "server.sock"
-    return Path.home() / ".local" / "state" / "megachat" / "server.sock"
-
-
-def runtime_file_path(socket_path: Path) -> Path:
-    """The runtime file next to a socket (``server.sock`` -> ``server.json``)."""
-    return socket_path.with_suffix(".json")
 
 
 # -- encoding ---------------------------------------------------------------------
