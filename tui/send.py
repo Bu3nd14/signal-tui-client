@@ -3,7 +3,8 @@
 import logging
 import sys
 import time
-from pathlib import Path
+import uuid
+from typing import Any
 
 from textual.widgets import Input
 
@@ -15,7 +16,7 @@ from models import (
     PROTOCOL_WHATSAPP,
     is_media_quote_placeholder,
 )
-from tui.blobs import resolve_attachment_path
+from server.api import ApiError
 from ui_components import MessageTextArea
 
 logger = logging.getLogger(__name__)
@@ -122,49 +123,22 @@ class SendMixin:
             )
             return
 
-        # Save to SQLite (incremental INSERT), protocol-aware.
-        data = {
-            "text": message,
-            "is_mine": True,
-            "sender": "You",
-            "timestamp": ts,
-            "quote_text": quote_text,
-            "msg_type": "text",
-            "attachment_info": None,
-            "attachment_id": reply_data.get("attachment_id") if reply_data else None,
-            "content_type": reply_data.get("content_type") if reply_data else None,
-            "status": "pending",
-            "protocol": protocol,
-            "quote_timestamp": reply_data.get("timestamp") if reply_data else None,
-            "quote_author": contact_id if reply_data else None,
-            "reply_to_message_id": reply_to_message_id,
-            # Quoted-media thumbnail metadata (display-only; wire #37 unchanged).
-            "quote_attachment_id": (
-                reply_data.get("quote_attachment_id") if reply_data else None
-            ),
-            "quote_attachment_path": (
-                reply_data.get("quote_attachment_path") if reply_data else None
-            ),
-            "quote_content_type": (
-                reply_data.get("quote_content_type") if reply_data else None
-            ),
-        }
-        # Ingerisci l'ottimista nel backend CORRETTO del contatto (non hardcoded
-        # su signal_backend): per WhatsApp deve finire nel WhatsAppBackend.cache,
-        # altrimenti il polling dei messaggi non lo riconosce e ri-accoderebbe
-        # l'echo -> messaggio mostrato DOPPIO (che si sistemava solo rientrando).
-        ingest_backend = self.manager.get(protocol)
-        if ingest_backend is None:
-            ingest_backend = self.signal_backend
-        added = ingest_backend.ingest_message(contact_id, data, ts, persist=False)
-        logger.debug(
-            "optimistic ingest: added=%s protocol=%s contact=%r ts=%s text=%r",
-            added,
-            protocol,
-            contact_id,
-            ts,
-            message[:60],
+        # The core seeds, persists and sends the row (``messages.send`` in
+        # its optimistic flavour) from the worker; here only the view's own
+        # copy of the bubble is created, instantly.
+        quote_attachment_id = (
+            reply_data.get("quote_attachment_id") if reply_data else None
         )
+        quote_attachment_path = (
+            reply_data.get("quote_attachment_path") if reply_data else None
+        )
+        quote_content_type = (
+            reply_data.get("quote_content_type") if reply_data else None
+        )
+        attachment_id = reply_data.get("attachment_id") if reply_data else None
+        content_type = reply_data.get("content_type") if reply_data else None
+        quote_timestamp = reply_data.get("timestamp") if reply_data else None
+        quote_author = contact_id if reply_data else None
 
         # Update in-memory cache for UI
         if cache_key not in self._cache:
@@ -178,16 +152,16 @@ class SendMixin:
                 "quote_text": quote_text,
                 "msg_type": "text",
                 "attachment_info": None,
-                "attachment_id": data["attachment_id"],
-                "content_type": data["content_type"],
+                "attachment_id": attachment_id,
+                "content_type": content_type,
                 "read": True,
                 "status": "pending",
-                "quote_timestamp": data["quote_timestamp"],
-                "quote_author": data["quote_author"],
+                "quote_timestamp": quote_timestamp,
+                "quote_author": quote_author,
                 "reply_to_message_id": reply_to_message_id,
-                "quote_attachment_id": data["quote_attachment_id"],
-                "quote_attachment_path": data["quote_attachment_path"],
-                "quote_content_type": data["quote_content_type"],
+                "quote_attachment_id": quote_attachment_id,
+                "quote_attachment_path": quote_attachment_path,
+                "quote_content_type": quote_content_type,
             }
         )
 
@@ -199,15 +173,9 @@ class SendMixin:
             message,
             is_mine=True,
             quote_text=quote_text,
-            quote_attachment_id=(
-                reply_data.get("quote_attachment_id") if reply_data else None
-            ),
-            quote_attachment_path=(
-                reply_data.get("quote_attachment_path") if reply_data else None
-            ),
-            quote_content_type=(
-                reply_data.get("quote_content_type") if reply_data else None
-            ),
+            quote_attachment_id=quote_attachment_id,
+            quote_attachment_path=quote_attachment_path,
+            quote_content_type=quote_content_type,
             timestamp=ts,
             sender="You",
             status="pending",
@@ -222,12 +190,11 @@ class SendMixin:
         self._cancel_reply()
 
         self.run_worker(
-            lambda msg=message, ts=ts, rdata=reply_data, persist=((ingest_backend, contact_id, data, ts) if added else None), protocol=protocol, contact_id=contact_id: (
+            lambda msg=message, ts=ts, rdata=reply_data, protocol=protocol, contact_id=contact_id: (
                 self._send_message_worker(
                     msg,
                     ts,
                     rdata,
-                    persist=persist,
                     protocol=protocol,
                     contact_id=contact_id,
                 )
@@ -242,217 +209,167 @@ class SendMixin:
             return
         self.on_message_text_area_submitted(event)  # type: ignore[arg-type]
 
+    def _build_send_request(
+        self,
+        message: str,
+        timestamp: int,
+        reply_data: dict | None,
+        *,
+        protocol: str,
+        contact_id: str,
+        resend: bool,
+    ) -> dict[str, Any]:
+        """The ``messages.send`` request of one optimistic send (JSON data)."""
+
+        def _text(value: Any) -> str | None:
+            return None if value is None else str(value)
+
+        quote_message = reply_data.get("text") if reply_data else None
+        reply_to_message_id = reply_data.get("message_id") if reply_data else None
+        request: dict[str, Any] = {
+            "protocol": protocol,
+            "contact_id": contact_id,
+            "text": message,
+            "client_msg_id": uuid.uuid4().hex,
+            # The user retries a failed bubble by clicking it: one attempt.
+            "retry": False,
+            # quote_author MUST be a contact id, not a display name: the
+            # contact we were chatting with when the reply was submitted.
+            "quote_timestamp": (
+                int(reply_data["timestamp"])
+                if reply_data and reply_data.get("timestamp") is not None
+                else None
+            ),
+            "quote_author": contact_id if reply_data else None,
+            "reply_to_message_id": _text(reply_to_message_id),
+            "optimistic": {
+                "timestamp": timestamp,
+                "resend": resend,
+                "quote_text": _text(quote_message),
+                "attachment_id": _text(
+                    reply_data.get("attachment_id") if reply_data else None
+                ),
+                "content_type": _text(
+                    reply_data.get("content_type") if reply_data else None
+                ),
+                # Quoted-media thumbnail metadata (display-only).
+                "quote_attachment_id": _text(
+                    reply_data.get("quote_attachment_id") if reply_data else None
+                ),
+                "quote_attachment_path": _text(
+                    reply_data.get("quote_attachment_path") if reply_data else None
+                ),
+                "quote_content_type": _text(
+                    reply_data.get("quote_content_type") if reply_data else None
+                ),
+            },
+        }
+        # Wire-faithful quote body (R1/R2): a media reply carries the explicit
+        # ``quote_wire_body`` key (real caption or None), so the Signal quote on
+        # the wire uses that body (caption or "") — never the display
+        # placeholder and never omitted.  Text replies never set the key, so
+        # their text is used unchanged.  WA/TG ignore ``quote_message`` anyway.
+        is_signal_media_reply = (
+            reply_data is not None
+            and "quote_wire_body" in reply_data
+            and protocol == PROTOCOL_SIGNAL
+        )
+        if is_signal_media_reply:
+            assert reply_data is not None
+            quote_message = reply_data["quote_wire_body"] or ""
+        request["quote_message"] = _text(quote_message)
+        # Signal media reply: the core builds the ``quoteAttachments``
+        # descriptor from the quoted attachment so the recipient renders the
+        # thumbnail (bug #37, piano B); without a mime type (legacy rows) the
+        # quote stays typed-less and thumbnail-less (V2 behaviour).
+        if is_signal_media_reply:
+            assert reply_data is not None
+            content_type = _quote_content_type(reply_data)
+            if content_type:
+                request["quote_content_type"] = content_type
+                request["quote_attachment_id"] = _text(reply_data.get("attachment_id"))
+        return request
+
     def _send_message_worker(
         self,
         message: str,
         timestamp: int,
         reply_data: dict | None = None,
-        persist: tuple | None = None,
         *,
         protocol: str,
         contact_id: str,
+        resend: bool = False,
     ):
-        """Send a message via the active backend's send path.
+        """Send one optimistic message through ``messages.send`` (worker thread).
+
+        The core seeds and persists the pending row, sends it and moves it to
+        ``sent`` / ``failed`` (see ``OptimisticSend``); this method applies the
+        outcome to the view's own copies (UI cache, bubble).
 
         Parameters
         ----------
         message:
             The message text to send.
         timestamp:
-            The client-generated timestamp (ms) used as the message ID.
-            Passed to the backend so that receipt timestamps match.
+            The client-generated timestamp (ms): the row's identity until the
+            echo arrives, so receipt timestamps match.
         reply_data:
             If provided, the message is sent as a quote/reply.
-        persist:
-            Optional ``(backend, contact_id, data, ts)`` payload.  When given,
-            the optimistic row is persisted to SQLite here (worker thread),
-            BEFORE the network send, so the echo always finds the row to
-            upgrade via ``_update_message_id``.
-        protocol:
-            The protocol selected when the message was submitted.
-        contact_id:
-            The contact ID selected when the message was submitted.
+        protocol, contact_id:
+            The conversation selected when the message was submitted.
+        resend:
+            Re-send a ``failed`` row instead of seeding a new one.
         """
-        if persist is not None:
-            persist_backend, persist_contact_id, data, ts = persist
-            persist_backend._persist_message(persist_contact_id, data, ts)
-            if getattr(self, "_web_enabled", False):
-                # Legacy web frame, forwarded verbatim by the WebSocket.
-                self.bus.publish(
-                    "web_push",
-                    {
-                        "event": {
-                            "type": "message",
-                            "payload": {
-                                "id": data.get("id"),
-                                "protocol": protocol,
-                                "contact_id": persist_contact_id,
-                                "timestamp": ts,
-                                "is_mine": True,
-                            },
-                        }
-                    },
-                )
-
-        # Extract quote parameters from reply_data
-        # quote_author MUST be a contact id, not a display name.
-        # Use the contact selected at submission because we are replying to
-        # the person we were chatting with.
-        quote_timestamp = reply_data.get("timestamp") if reply_data else None
-        quote_author = contact_id if reply_data else None
-        quote_message = reply_data.get("text") if reply_data else None
-        reply_to_message_id = reply_data.get("message_id") if reply_data else None
-
-        # Wire-faithful quote body (R1/R2): a media reply carries the explicit
-        # ``quote_wire_body`` key (real caption or None), so the Signal quote on
-        # the wire uses that body (caption or "") — never the display placeholder
-        # and never omitted.  Text replies never set the key, so their text is
-        # used unchanged.  WA/TG ignore ``quote_message`` anyway.
-        if (
-            reply_data is not None
-            and "quote_wire_body" in reply_data
-            and protocol == PROTOCOL_SIGNAL
-        ):
-            quote_message = reply_data["quote_wire_body"] or ""
-
-        # Signal media reply → build the ``quoteAttachments`` descriptor so the
-        # recipient renders the quoted thumbnail (bug #37, piano B).  Only for
-        # Signal (WA/TG quote natively via ``reply_to``) and only for media
-        # replies (the ``quote_wire_body`` key is present only there).
-        quote_attachments: list[str] | None = None
-        if (
-            reply_data is not None
-            and "quote_wire_body" in reply_data
-            and protocol == PROTOCOL_SIGNAL
-        ):
-            content_type = _quote_content_type(reply_data)
-            if content_type:
-                attachment_id = reply_data.get("attachment_id")
-                preview_path = (
-                    resolve_attachment_path(self.client, PROTOCOL_SIGNAL, attachment_id)
-                    if attachment_id
-                    else None
-                )
-                if preview_path is not None:
-                    # signal-cli parses ``quoteAttachments`` with the regex
-                    # ``([^:]+)(:([^:]+)(:(.+))?)?`` (G1=contentType,
-                    # G3=filename, G5=previewFile): the filename is REQUIRED
-                    # when the second block is present, so ``contentType::file``
-                    # is invalid.  Use ``contentType:filename:previewFile`` with
-                    # the basename of the local attachment as the (cosmetic)
-                    # filename.
-                    filename = Path(preview_path).name
-                    quote_attachments = [f"{content_type}:{filename}:{preview_path}"]
-                else:
-                    # No local file → quoted attachment without thumbnail:
-                    # ``contentType`` alone is a valid descriptor.
-                    quote_attachments = [content_type]
-
-        # Send synchronously through the submission contact's backend. This is
-        # a sync call running in a worker thread; it is NOT an async coroutine
-        # that needs awaiting, which would otherwise be silently dropped.
-        backend = self.manager.get(protocol)
-        if backend is None:
-            self._transition_outgoing_status(
+        request = self._build_send_request(
+            message,
+            timestamp,
+            reply_data,
+            protocol=protocol,
+            contact_id=contact_id,
+            resend=resend,
+        )
+        logger.debug(
+            "worker send start: resend=%s protocol=%s contact=%r ts=%s text=%r",
+            resend,
+            protocol,
+            contact_id,
+            timestamp,
+            message[:60],
+        )
+        try:
+            result = self.client.call("messages.send", request)
+        except Exception as e:
+            # The cause goes to the log and the (permanent) status bar.
+            logger.exception(
+                "messages.send failed (protocol=%r contact=%r ts=%s text=%r)",
+                protocol,
+                contact_id,
+                timestamp,
+                message[:60],
+            )
+            # Whatever the core managed to store, the bubble must not stay
+            # pending (nor, after a refused re-send, look like it is retrying).
+            self._apply_outgoing_status(
                 protocol, contact_id, timestamp, message, "failed", ("pending",)
             )
-            self.call_from_thread(
-                self._status, f"❌ No backend for protocol: {protocol}", 0
-            )
+            details = e.details if isinstance(e, ApiError) else None
+            error = details.get("error") if isinstance(details, dict) else None
+            self.call_from_thread(self._status, f"❌ Send error: {error or e}", 0)
             return
 
-        try:
-            send_kwargs = {
-                "quote_timestamp": quote_timestamp,
-                "quote_author": quote_author,
-                "quote_message": quote_message,
-            }
-            if reply_to_message_id is not None:
-                send_kwargs["reply_to_message_id"] = reply_to_message_id
-            if quote_attachments is not None:
-                send_kwargs["quote_attachments"] = quote_attachments
-            # Instrumentation: la durata di send_message_sync è il tempo in cui
-            # la bolla resta "grigia" (pending).  Log a debug; loggato a warning
-            # oltre la soglia (1000ms) per individuare backoff/degrado del backend.
-            logger.debug(
-                "worker send start: persist=%s protocol=%s contact=%r ts=%s text=%r",
-                persist is not None,
-                protocol,
-                contact_id,
-                timestamp,
-                message[:60],
-            )
-            _t0 = time.perf_counter()
-            result = backend.send_message_sync(contact_id, message, **send_kwargs)
-            _elapsed_ms = (time.perf_counter() - _t0) * 1000.0
-            if _elapsed_ms >= 1000.0:
-                logger.warning(
-                    "send_message_sync slow: protocol=%s contact=%s %.0f ms",
-                    protocol,
-                    contact_id,
-                    _elapsed_ms,
-                )
-            else:
-                logger.debug(
-                    "send_message_sync took %.1f ms (protocol=%s)",
-                    _elapsed_ms,
-                    protocol,
-                )
-            self._transition_outgoing_status(
+        if result.get("status_applied"):
+            self._apply_outgoing_status(
                 protocol, contact_id, timestamp, message, "sent", ("pending",)
             )
-            # For Telegram, WhatsApp and Signal, ingest the real server message
-            # id to upgrade the optimistic entry (so the echo matches by id and
-            # never rewrites the timestamp).  Signal's ingest has an upgrade
-            # branch that attaches the id without touching the timestamp.
-            if (
-                protocol in (PROTOCOL_TELEGRAM, PROTOCOL_WHATSAPP, PROTOCOL_SIGNAL)
-                and result
-            ):
-                ingest_backend = self.manager.get(protocol)
-                if ingest_backend is not None:
-                    ingest_backend.ingest_message(
-                        contact_id,
-                        {
-                            "id": result,
-                            "text": message,
-                            "is_mine": True,
-                            "sender": "You",
-                            "timestamp": timestamp,
-                            "quote_text": quote_message,
-                            "quote_timestamp": quote_timestamp,
-                            "quote_author": quote_author,
-                            "reply_to_message_id": reply_to_message_id,
-                        },
-                        timestamp,
-                    )
-                    self._update_outgoing_message_id(
-                        protocol, contact_id, timestamp, message, str(result)
-                    )
-        except Exception as e:
-            # Strumentazione: l'eccezione del send va SOLO su _status (barra di
-            # stato, che resta "permanente"); senza log è impossibile capire il
-            # motivo del fallimento.  Loggiamo la causa e l'esito del passaggio
-            # a failed.
-            logger.exception(
-                "send_message_sync raised (protocol=%r contact=%r ts=%s text=%r)",
-                protocol,
-                contact_id,
-                timestamp,
-                message[:60],
+        # The core attached the real server id to its row so the echo matches
+        # by id and never rewrites the timestamp: mirror it into the view.
+        message_id = result.get("message_id")
+        if message_id:
+            self._update_outgoing_message_id(
+                protocol, contact_id, timestamp, message, str(message_id)
             )
-            _failed_ok = self._transition_outgoing_status(
-                protocol, contact_id, timestamp, message, "failed", ("pending",)
-            )
-            logger.warning(
-                "send failed: transition to 'failed' ok=%s (protocol=%r contact=%r)",
-                _failed_ok,
-                protocol,
-                contact_id,
-            )
-            self.call_from_thread(self._status, f"❌ Send error: {e}", 0)
 
-    def _transition_outgoing_status(
+    def _apply_outgoing_status(
         self,
         protocol: str,
         contact_id: str,
@@ -460,79 +377,15 @@ class SendMixin:
         text: str,
         status: str,
         expected_statuses: tuple[str, ...],
-    ) -> bool:
-        """Atomically advance one optimistic message across every cache layer."""
+    ) -> None:
+        """Advance one optimistic message in the view: UI cache and bubble.
+
+        The core has already moved its own row (SQLite + chat cache, rank
+        guard included); ``expected_statuses`` keeps a receipt that arrived
+        first from being overwritten here.
+        """
         from models import contact_cache_key
-        from protocols.db import _update_message_status, _update_message_status_by_text
 
-        if not _update_message_status(
-            timestamp,
-            status,
-            protocol,
-            contact_id,
-            text=text,
-            expected_statuses=expected_statuses,
-        ):
-            # Fallback: l'echo (spesso più veloce del worker) può aver sostituito
-            # il timestamp ottimistico del client con quello del server, quindi il
-            # match per timestamp fallisce.  Riprova sul testo (riga outgoing più
-            # recente), con lo stesso expected-status e rank guard.
-            updated = _update_message_status_by_text(
-                text,
-                status,
-                protocol,
-                contact_id,
-                expected_statuses=expected_statuses,
-            )
-            if not updated:
-                # Diagnosi: al momento del fallimento, quante righe corrispondono
-                # per testo / per timestamp (is_mine) — capisce se la riga non è
-                # ancora stata persistita (persist saltato / race con l'echo).
-                rows_text = rows_ts = -1
-                try:
-                    import sqlite3
-
-                    from protocols.db import DB_FILE
-
-                    conn = sqlite3.connect(DB_FILE)
-                    try:
-                        rows_text = conn.execute(
-                            "SELECT COUNT(*) FROM messages WHERE protocol=? "
-                            "AND contact_number=? AND text=? AND is_mine=1",
-                            (protocol, contact_id, text),
-                        ).fetchone()[0]
-                        rows_ts = conn.execute(
-                            "SELECT COUNT(*) FROM messages WHERE protocol=? "
-                            "AND contact_number=? AND timestamp=? AND is_mine=1",
-                            (protocol, contact_id, timestamp),
-                        ).fetchone()[0]
-                    finally:
-                        conn.close()
-                except Exception as _dbg:
-                    logger.debug("diagnostic row count failed", exc_info=_dbg)
-                logger.warning(
-                    "Outgoing status transition failed "
-                    "(protocol=%r, contact_id=%r, ts=%r, text=%r, status=%r, "
-                    "rows_by_text=%s, rows_by_ts=%s)",
-                    protocol,
-                    contact_id,
-                    timestamp,
-                    text[:80],
-                    status,
-                    rows_text,
-                    rows_ts,
-                )
-                return False
-        backend = self.manager.get(protocol)
-        if backend is None:
-            backend = self.signal_backend
-        for msg in getattr(backend, "cache", {}).get(contact_id, []):
-            if (
-                msg.get("is_mine")
-                and msg.get("text") == text
-                and msg.get("status") in expected_statuses
-            ):
-                msg["status"] = status
         for msg in self._cache.get(contact_cache_key(protocol, contact_id), []):
             if (
                 msg.get("is_mine")
@@ -544,7 +397,6 @@ class SendMixin:
             self._update_message_widgets_status,
             [{"timestamp": timestamp, "text": text, "status": status}],
         )
-        return True
 
     def _update_outgoing_message_id(
         self,
@@ -556,10 +408,9 @@ class SendMixin:
     ) -> None:
         """Synchronize the real server id into the UI cache and widget.
 
-        Used for Telegram and WhatsApp: their send paths return the
-        server-assigned message id, which must be mirrored into the UI cache so
-        a later receipt/echo can be matched by id (and never rewrite the
-        optimistic timestamp).
+        The send result carries the server-assigned message id, which must be
+        mirrored into the UI cache so a later receipt/echo can be matched by id
+        (and never rewrite the optimistic timestamp).
         """
         from models import contact_cache_key
 
@@ -644,18 +495,11 @@ class SendMixin:
                 0,
             )
             return
-        if not self._transition_outgoing_status(
+        # Bubble back to pending at once; the core re-arms its own row (and
+        # refuses when that row is no longer failed) as part of the send.
+        self._apply_outgoing_status(
             contact.protocol, contact.id, timestamp, text, "pending", ("failed",)
-        ):
-            logger.warning(
-                "retry aborted: transition failed→pending rejected "
-                "(protocol=%r contact=%r ts=%s text=%r)",
-                contact.protocol,
-                contact.id,
-                timestamp,
-                text[:40],
-            )
-            return
+        )
         logger.debug(
             "retry started: protocol=%r contact=%r ts=%s text=%r",
             contact.protocol,
@@ -704,6 +548,7 @@ class SendMixin:
                 reply_data,
                 protocol=contact.protocol,
                 contact_id=contact.id,
+                resend=True,
             ),
             exclusive=False,
             thread=True,

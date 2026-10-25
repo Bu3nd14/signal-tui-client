@@ -139,7 +139,10 @@ def _prepare(
         quote_content_type = quote_content_type.strip() or None
     if isinstance(quote_attachment_id, str):
         quote_attachment_id = quote_attachment_id.strip() or None
-    if isinstance(quote_message, str):
+    # The optimistic caller mirrors the wire exactly (a media reply's empty
+    # body must reach the quote as "", not be omitted); only the web's
+    # free-form field is normalised.
+    if isinstance(quote_message, str) and req.optimistic is None:
         stripped_quote_message = quote_message.strip()
         quote_message = (
             stripped_quote_message
@@ -224,7 +227,11 @@ def _prepare(
     }
     if protocol == "signal" and quote_attachments is not None:
         kwargs["quote_attachments"] = quote_attachments
-    if protocol in {"whatsapp", "telegram"} and reply_to_message_id is not None:
+    # Signal ignores the id; the optimistic caller keeps passing it on, as the
+    # TUI always did.
+    if (
+        protocol in {"whatsapp", "telegram"} or req.optimistic is not None
+    ) and reply_to_message_id is not None:
         kwargs["reply_to_message_id"] = reply_to_message_id
 
     return _Prepared(

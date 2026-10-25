@@ -318,7 +318,7 @@ class TestSendPropagatesIdToUi:
             def __init__(self):
                 self._cache = {}
                 self._status = MagicMock()
-                self._transition_outgoing_status = MagicMock(return_value=True)
+                self._update_message_widgets_status = MagicMock()
                 self.run_worker = MagicMock()
                 self.call_from_thread = MagicMock(
                     side_effect=lambda cb, *a, **k: cb(*a, **k)
@@ -342,17 +342,20 @@ class TestSendPropagatesIdToUi:
         backend = MagicMock()
         backend.send_message_sync.return_value = "BAYES-9"
         backend.ingest_message = MagicMock(return_value=False)
+        backend.contacts = []
         handler.manager = SimpleNamespace(get=MagicMock(return_value=backend))
+        handler.client = client_for(handler.manager)
 
-        handler._send_message_worker(
-            text,
-            timestamp,
-            None,
-            protocol=PROTOCOL_WHATSAPP,
-            contact_id=contact.id,
-        )
+        with patch("server.ops.send.transition_outgoing_status", return_value=True):
+            handler._send_message_worker(
+                text,
+                timestamp,
+                None,
+                protocol=PROTOCOL_WHATSAPP,
+                contact_id=contact.id,
+            )
 
-        # ingest_message riceve l'id reale...
+        # il core ingerisce l'id reale...
         assert backend.ingest_message.call_args[0][1]["id"] == "BAYES-9"
         # ...la UI cache viene aggiornata con l'id...
         assert handler._cache[contact.cache_key][0]["id"] == "BAYES-9"

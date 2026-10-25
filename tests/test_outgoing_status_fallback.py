@@ -4,7 +4,7 @@ Caso reale (chat "Tartufi Bolliti", 21/08/2026): l'echo di WAHA può sostituire
 il timestamp ottimistico del client con quello del server PRIMA che il worker
 esegua la transizione → il match per ``timestamp`` di ``_update_message_status``
 fallisce e la bolla resta "grigia".  Il fallback per testo
-(``_update_message_status_by_text`` + ``_transition_outgoing_status``) deve
+(``_update_message_status_by_text`` + ``transition_outgoing_status``) deve
 aggiornare comunque la riga.
 """
 
@@ -21,12 +21,13 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import PROTOCOL_WHATSAPP
+from models import PROTOCOL_WHATSAPP, contact_cache_key
 from protocols.db import (
     _add_message_to_cache,
     _update_message_status,
     _update_message_status_by_text,
 )
+from server.outgoing import transition_outgoing_status
 from tui.send import SendMixin
 
 
@@ -154,18 +155,9 @@ class TestUpdateMessageStatusByText:
 
 
 class TestTransitionOutgoingStatusFallback:
-    """La transizione usa il fallback per testo quando il timestamp non combacia."""
+    """La transizione del core usa il fallback per testo se il ts non combacia."""
 
-    def _handler(self, backend):
-        handler = SimpleNamespace()
-        handler.manager = SimpleNamespace(get=MagicMock(return_value=backend))
-        handler.signal_backend = SimpleNamespace(cache={})
-        handler._cache = {}
-        handler.call_from_thread = MagicMock(side_effect=lambda fn, *args: fn(*args))
-        handler._update_message_widgets_status = MagicMock()
-        return handler
-
-    def test_fallback_updates_db_cache_and_widgets(self, tmp_db):
+    def test_fallback_updates_db_and_backend_cache(self, tmp_db):
         contact = "123@g.us"
         text = "hai finito col calcolo?"
         ts_client = 1787342685618
@@ -192,15 +184,13 @@ class TestTransitionOutgoingStatusFallback:
                 ]
             }
         )
-        handler = self._handler(backend)
 
-        ok = SendMixin._transition_outgoing_status(
-            handler, PROTOCOL_WHATSAPP, contact, ts_client, text, "sent", ("pending",)
+        ok = transition_outgoing_status(
+            backend, PROTOCOL_WHATSAPP, contact, ts_client, text, "sent", ("pending",)
         )
         assert ok is True
         assert _row_status(tmp_db, contact, text) == "sent"
         assert backend.cache[contact][0]["status"] == "sent"
-        handler._update_message_widgets_status.assert_called_once()
 
     def test_no_downgrade_when_echo_advanced_first(self, tmp_db):
         contact = "123@g.us"
@@ -218,11 +208,50 @@ class TestTransitionOutgoingStatusFallback:
                 ]
             }
         )
-        handler = self._handler(backend)
-        ok = SendMixin._transition_outgoing_status(
-            handler, PROTOCOL_WHATSAPP, contact, 1000, text, "sent", ("pending",)
+        ok = transition_outgoing_status(
+            backend, PROTOCOL_WHATSAPP, contact, 1000, text, "sent", ("pending",)
         )
         # La riga non è più pending: né il match per ts né il fallback procedono,
-        # e il rank guard impedisce il downgrade → transizione rifiutata.
+        # e il rank guard impedisce il downgrade → transizione rifiutata, cache
+        # del backend intatta.
         assert ok is False
         assert _row_status(tmp_db, contact, text) == "read"
+        assert backend.cache[contact][0]["status"] == "read"
+
+
+class TestViewStatusTransition:
+    """La vista aggiorna solo cache UI e bolla, e non sovrascrive una ricevuta."""
+
+    def _handler(self, cache):
+        handler = SimpleNamespace()
+        handler._cache = cache
+        handler.call_from_thread = MagicMock(side_effect=lambda fn, *args: fn(*args))
+        handler._update_message_widgets_status = MagicMock()
+        return handler
+
+    def test_updates_ui_cache_and_widget(self):
+        key = contact_cache_key(PROTOCOL_WHATSAPP, "123@g.us")
+        handler = self._handler(
+            {key: [{"is_mine": True, "text": "ciao", "status": "pending"}]}
+        )
+
+        SendMixin._apply_outgoing_status(
+            handler, PROTOCOL_WHATSAPP, "123@g.us", 5, "ciao", "sent", ("pending",)
+        )
+
+        assert handler._cache[key][0]["status"] == "sent"
+        handler._update_message_widgets_status.assert_called_once_with(
+            [{"timestamp": 5, "text": "ciao", "status": "sent"}]
+        )
+
+    def test_does_not_overwrite_a_receipt_that_arrived_first(self):
+        key = contact_cache_key(PROTOCOL_WHATSAPP, "123@g.us")
+        handler = self._handler(
+            {key: [{"is_mine": True, "text": "ciao", "status": "read"}]}
+        )
+
+        SendMixin._apply_outgoing_status(
+            handler, PROTOCOL_WHATSAPP, "123@g.us", 5, "ciao", "sent", ("pending",)
+        )
+
+        assert handler._cache[key][0]["status"] == "read"

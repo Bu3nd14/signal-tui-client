@@ -146,31 +146,21 @@ class TestAddressBook:
         )
 
 
-# -- contacts.touch / recency ---------------------------------------------------
+# -- recency ---------------------------------------------------
 
 
 class TestRecency:
-    def test_touch_raises_but_never_lowers_the_backend_contact(self):
+    def test_bump_recency_raises_but_never_lowers_the_backend_contact(self):
         anna = _contact(last_message_ts=10)
-        client = client_for(_manager(signal=SimpleNamespace(contacts=[anna])))
+        backend = SimpleNamespace(contacts=[anna])
 
-        client.call(
-            "contacts.touch",
-            {"protocol": "signal", "contact_id": "+1", "timestamp": 20},
-        )
+        assert bump_recency(backend, anna.cache_key, 20)
         assert anna.last_message_ts == 20
-        client.call(
-            "contacts.touch", {"protocol": "signal", "contact_id": "+1", "timestamp": 3}
-        )
+        assert bump_recency(backend, anna.cache_key, 3)
         assert anna.last_message_ts == 20
 
-    def test_touch_unknown_backend_or_contact_is_a_noop(self):
-        client = client_for(_manager(signal=SimpleNamespace(contacts=[])))
-        for proto in ("signal", "whatsapp"):
-            assert client.call(
-                "contacts.touch",
-                {"protocol": proto, "contact_id": "x", "timestamp": 1},
-            ) == {"ok": True}
+    def test_bump_recency_unknown_contact_is_a_noop(self):
+        assert not bump_recency(SimpleNamespace(contacts=[]), "signal:x", 1)
 
     def test_bump_recency_ignores_non_int(self):
         anna = _contact()

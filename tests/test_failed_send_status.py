@@ -1,9 +1,10 @@
 """Regression tests for failed optimistic-message status handling."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+from client_harness import client_for
 
 from models import PROTOCOL_TELEGRAM
 from tui.events import EventHandlingMixin
@@ -125,6 +126,26 @@ class TestFailedMessageClick:
         handler.input.focus.assert_called_once_with()
 
 
+def _core_backend(send_result=None, **attrs):
+    """A backend stand-in for the core operation behind ``client_for``."""
+    backend = MagicMock()
+    backend.send_message_sync.return_value = send_result
+    backend.ingest_message.return_value = False
+    backend.contacts = []
+    for key, value in attrs.items():
+        setattr(backend, key, value)
+    return backend
+
+
+@pytest.fixture
+def core_status():
+    """The core's SQLite/cache transition, pretending the row accepts it."""
+    with patch(
+        "server.ops.send.transition_outgoing_status", return_value=True
+    ) as transition:
+        yield transition
+
+
 class _SendHandler(SendMixin):
     def __init__(self, selected_contact=None, messages=()):
         self.selected_contact = selected_contact
@@ -132,7 +153,8 @@ class _SendHandler(SendMixin):
             {selected_contact.cache_key: list(messages)} if selected_contact else {}
         )
         self._status = MagicMock()
-        self._transition_outgoing_status = MagicMock(return_value=True)
+        self._apply_outgoing_status = MagicMock()
+        self._update_message_widgets_status = MagicMock()
         self.run_worker = MagicMock()
         self.call_from_thread = MagicMock(
             side_effect=lambda fn, *a, **kw: fn(*a, **kw) if callable(fn) else None
@@ -145,7 +167,7 @@ class TestRetryGuards:
 
         handler._retry_failed_message(1234, "retry me")
 
-        handler._transition_outgoing_status.assert_not_called()
+        handler._apply_outgoing_status.assert_not_called()
         handler.run_worker.assert_not_called()
 
     def test_retry_rejects_reloaded_reply_without_quote_timestamp(self):
@@ -170,7 +192,7 @@ class TestRetryGuards:
         handler._status.assert_called_once_with(
             "❌ Cannot retry a reply after reload; quote metadata is unavailable", 0
         )
-        handler._transition_outgoing_status.assert_not_called()
+        handler._apply_outgoing_status.assert_not_called()
         handler.run_worker.assert_not_called()
 
     def test_retry_keeps_legacy_telegram_reply_failed_without_message_id(self):
@@ -195,11 +217,13 @@ class TestRetryGuards:
         handler._status.assert_called_once_with(
             "❌ Cannot retry a Telegram reply; original message ID is unavailable", 0
         )
-        handler._transition_outgoing_status.assert_not_called()
+        handler._apply_outgoing_status.assert_not_called()
         handler.run_worker.assert_not_called()
         assert handler._cache[contact.cache_key][0]["status"] == "failed"
 
-    def test_retry_telegram_reply_forwards_persisted_message_id_to_backend(self):
+    def test_retry_telegram_reply_forwards_persisted_message_id_to_backend(
+        self, core_status
+    ):
         contact = SimpleNamespace(
             cache_key="telegram:42", protocol=PROTOCOL_TELEGRAM, id="42"
         )
@@ -217,9 +241,10 @@ class TestRetryGuards:
                 }
             ],
         )
-        backend = MagicMock()
-        backend.send_message_sync.return_value = None
-        handler.manager = SimpleNamespace(get=MagicMock(return_value=backend))
+        backend = _core_backend()
+        handler.client = client_for(
+            SimpleNamespace(get=MagicMock(return_value=backend))
+        )
 
         handler._retry_failed_message(1234, "retry me")
         worker = handler.run_worker.call_args.args[0]
@@ -252,10 +277,12 @@ class TestRetryGuards:
 
         handler._retry_failed_message(1234, "retry me")
 
-        handler._transition_outgoing_status.assert_not_called()
+        handler._apply_outgoing_status.assert_not_called()
         handler.run_worker.assert_not_called()
 
-    def test_retry_keeps_failed_message_when_status_transition_is_rejected(self):
+    def test_retry_that_the_core_refuses_leaves_the_bubble_failed(self):
+        """The row is no longer failed in the core: nothing is sent and the
+        bubble goes back to failed (it was flipped to pending for the retry)."""
         contact = SimpleNamespace(
             cache_key="signal:Mario", protocol="signal", id="Mario"
         )
@@ -270,14 +297,31 @@ class TestRetryGuards:
                 }
             ],
         )
-        handler._transition_outgoing_status.return_value = False
+        backend = _core_backend()
+        handler.client = client_for(
+            SimpleNamespace(get=MagicMock(return_value=backend))
+        )
 
         handler._retry_failed_message(1234, "retry me")
+        with patch(
+            "server.ops.send.transition_outgoing_status", return_value=False
+        ) as transition:
+            handler.run_worker.call_args.args[0]()
 
-        handler._transition_outgoing_status.assert_called_once_with(
-            "signal", "Mario", 1234, "retry me", "pending", ("failed",)
+        transition.assert_called_once()
+        assert transition.call_args.args[1:] == (
+            "signal",
+            "Mario",
+            1234,
+            "retry me",
+            "pending",
+            ("failed",),
         )
-        handler.run_worker.assert_not_called()
+        backend.send_message_sync.assert_not_called()
+        assert [c.args for c in handler._apply_outgoing_status.call_args_list] == [
+            ("signal", "Mario", 1234, "retry me", "pending", ("failed",)),
+            ("signal", "Mario", 1234, "retry me", "failed", ("pending",)),
+        ]
 
     def test_retry_preserves_quote_metadata_for_send_worker(self):
         contact = SimpleNamespace(
@@ -299,6 +343,9 @@ class TestRetryGuards:
 
         handler._retry_failed_message(1234, "retry me")
 
+        handler._apply_outgoing_status.assert_called_once_with(
+            "signal", "Mario", 1234, "retry me", "pending", ("failed",)
+        )
         handler.run_worker.assert_called_once()
         worker = handler.run_worker.call_args.args[0]
         handler._send_message_worker = MagicMock()
@@ -309,10 +356,13 @@ class TestRetryGuards:
             {"text": "original message", "timestamp": 1000},
             protocol="signal",
             contact_id="Mario",
+            resend=True,
         )
 
 
-def test_telegram_send_result_updates_cache_and_optimistic_widget_message_id():
+def test_telegram_send_result_updates_cache_and_optimistic_widget_message_id(
+    core_status,
+):
     contact = SimpleNamespace(
         cache_key="telegram:42", protocol=PROTOCOL_TELEGRAM, id="42"
     )
@@ -323,9 +373,8 @@ def test_telegram_send_result_updates_cache_and_optimistic_widget_message_id():
         contact,
         [{"is_mine": True, "timestamp": timestamp, "text": text, "id": None}],
     )
-    backend = MagicMock()
-    backend.send_message_sync.return_value = "77"
-    handler.manager = SimpleNamespace(get=MagicMock(return_value=backend))
+    backend = _core_backend(send_result="77")
+    handler.client = client_for(SimpleNamespace(get=MagicMock(return_value=backend)))
     handler.chat_log = SimpleNamespace(children=[bubble])
     handler.call_from_thread = MagicMock(
         side_effect=lambda callback, *args: callback(*args)
@@ -342,11 +391,18 @@ def test_telegram_send_result_updates_cache_and_optimistic_widget_message_id():
         contact_id=contact.id,
     )
 
-    backend.ingest_message.assert_called_once()
+    # The core attached the id to its own row ...
+    assert any(
+        c.args[1].get("id") == "77" for c in backend.ingest_message.call_args_list
+    )
+    # ... and the view mirrors it into its cache and the bubble.
     assert handler._cache[contact.cache_key][0]["id"] == "77"
     assert bubble._message_id == "77"
     update_message_id.assert_called_once_with(
         PROTOCOL_TELEGRAM, contact.id, timestamp, text, "77"
+    )
+    handler._apply_outgoing_status.assert_called_once_with(
+        PROTOCOL_TELEGRAM, contact.id, timestamp, text, "sent", ("pending",)
     )
 
 
@@ -371,7 +427,7 @@ def test_telegram_message_id_update_keeps_cache_when_optimistic_widget_is_gone()
 
 def test_send_without_backend_marks_optimistic_message_as_failed():
     handler = _SendHandler()
-    handler.manager = SimpleNamespace(get=MagicMock(return_value=None))
+    handler.client = client_for(SimpleNamespace(get=MagicMock(return_value=None)))
     handler.call_from_thread = MagicMock(
         side_effect=lambda callback, *args: callback(*args)
     )
@@ -380,7 +436,28 @@ def test_send_without_backend_marks_optimistic_message_as_failed():
         "offline", 4321, None, protocol="whatsapp", contact_id="Mario"
     )
 
-    handler._transition_outgoing_status.assert_called_once_with(
+    handler._apply_outgoing_status.assert_called_once_with(
         "whatsapp", "Mario", 4321, "offline", "failed", ("pending",)
     )
-    handler._status.assert_called_once_with("❌ No backend for protocol: whatsapp", 0)
+    handler._status.assert_called_once_with("❌ Send error: Not Found", 0)
+
+
+def test_failed_send_shows_the_backend_error_and_fails_the_bubble(core_status):
+    contact = SimpleNamespace(cache_key="signal:Mario", protocol="signal", id="Mario")
+    handler = _SendHandler(contact)
+    backend = _core_backend()
+    backend.send_message_sync.side_effect = RuntimeError("signal-cli offline")
+    handler.client = client_for(SimpleNamespace(get=MagicMock(return_value=backend)))
+    handler.call_from_thread = MagicMock(
+        side_effect=lambda callback, *args: callback(*args)
+    )
+
+    handler._send_message_worker(
+        "hi", 4321, None, protocol="signal", contact_id="Mario"
+    )
+
+    assert backend.send_message_sync.call_count == 1  # the user retries by clicking
+    handler._apply_outgoing_status.assert_called_once_with(
+        "signal", "Mario", 4321, "hi", "failed", ("pending",)
+    )
+    handler._status.assert_called_once_with("❌ Send error: signal-cli offline", 0)

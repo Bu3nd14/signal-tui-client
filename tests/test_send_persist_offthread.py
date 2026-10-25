@@ -23,6 +23,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -55,6 +56,11 @@ def _db_rows(db_file: Path) -> list[dict]:
     return rows
 
 
+def _my_rows(db_file: Path) -> list[dict]:
+    """Our own (outgoing) rows, leaving out seeded incoming ones."""
+    return [r for r in _db_rows(db_file) if r["is_mine"]]
+
+
 def _signal_app() -> SignalTUI:
     """App with a real manager + Signal backend (no real backends/network)."""
     app = SignalTUI()
@@ -78,6 +84,37 @@ def _prepare_send(app: SignalTUI) -> None:
     app.run_worker = MagicMock()
     app._reply_to = None
     app._cache = {}
+    # The core resolves the contact in its backend (as it is in production,
+    # where the TUI list comes from the backends).
+    contact = app.selected_contact
+    if contact is not None:
+        backend = app.manager.get(contact.protocol)
+        if backend is not None:
+            backend.register_contact(contact)
+
+
+@contextmanager
+def _preview(app: SignalTUI, contact: ChatContact, attachment_id: str, path):
+    """The quoted media exists in the chat (SQLite) and resolves to *path*.
+
+    The core only trusts a quoted attachment that belongs to the chat, and
+    resolves its preview file itself.
+    """
+    backend_mod._add_message_to_cache(
+        contact.id,
+        "",
+        False,
+        "Mario",
+        1000,
+        msg_type="image",
+        attachment_id=attachment_id,
+        content_type="image/png",
+        protocol=PROTOCOL_SIGNAL,
+    )
+    with patch.object(
+        app.manager, "get_attachment_path", return_value=path
+    ) as resolver:
+        yield resolver
 
 
 def _send_text(app: SignalTUI, text: str) -> None:
@@ -319,7 +356,9 @@ class TestSendPersistOffthread:
         )
         app.selected_contact = contact
         _prepare_send(app)
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        # The first send is still in flight (no server id yet) when the second
+        # row is seeded: the id-less optimistic twin absorbs it.
+        app.signal_backend.send_message_sync = MagicMock(return_value=None)
 
         _send_text(app, "ciao")
         time.sleep(0.002)
@@ -419,10 +458,11 @@ class TestSendPersistOffthread:
         }
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        _send_text(app, "risposta")
-        _run_workers(app)
+        with _preview(app, contact, "att-1", None):
+            _send_text(app, "risposta")
+            _run_workers(app)
 
-        rows = _db_rows(tmp_db)
+        rows = [r for r in _db_rows(tmp_db) if r["is_mine"]]
         assert len(rows) == 1
         assert rows[0]["quote_attachment_id"] == "att-1"
         assert rows[0]["quote_attachment_path"] == "/tmp/quote-thumbs/abc123.png"
@@ -683,7 +723,7 @@ class TestMediaReplySend:
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
         preview = Path("/tmp/att-1.png")
 
-        with patch("tui.send.resolve_attachment_path", return_value=preview):
+        with _preview(app, contact, "att-1", preview):
             _send_text(app, "risposta")
             _run_workers(app)
 
@@ -709,7 +749,7 @@ class TestMediaReplySend:
         }
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        with patch("tui.send.resolve_attachment_path", return_value=Path("/tmp/a.jpg")):
+        with _preview(app, contact, "att-1", Path("/tmp/a.jpg")):
             _send_text(app, "risposta")
             _run_workers(app)
 
@@ -754,7 +794,7 @@ class TestMediaReplySend:
         }
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        with patch("tui.send.resolve_attachment_path", return_value=None):
+        with _preview(app, contact, "att-missing", None):
             _send_text(app, "risposta")
             _run_workers(app)
 
@@ -782,23 +822,19 @@ class TestMediaReplySend:
             side_effect=RuntimeError("offline")
         )
 
-        with patch(
-            "tui.send.resolve_attachment_path", return_value=Path("/tmp/att-1.png")
-        ):
+        with _preview(app, contact, "att-1", Path("/tmp/att-1.png")):
             _send_text(app, "risposta")
             _run_workers(app)
 
         assert app._cache[contact.cache_key][0]["status"] == "failed"
-        row = _db_rows(tmp_db)[0]
+        row = _my_rows(tmp_db)[0]
         assert row["content_type"] == "image/png"
         assert row["attachment_id"] == "att-1"
 
         app.signal_backend.send_message_sync = MagicMock(return_value="ok")
         ts = app._cache[contact.cache_key][0]["timestamp"]
         app.run_worker.reset_mock()
-        with patch(
-            "tui.send.resolve_attachment_path", return_value=Path("/tmp/att-1.png")
-        ):
+        with _preview(app, contact, "att-1", Path("/tmp/att-1.png")):
             app._retry_failed_message(ts, "risposta")
             _run_workers(app)
 
@@ -835,14 +871,12 @@ class TestMediaReplySend:
             side_effect=RuntimeError("offline")
         )
 
-        with patch(
-            "tui.send.resolve_attachment_path", return_value=Path("/tmp/att-1.jpg")
-        ):
+        with _preview(app, contact, "att-1", Path("/tmp/att-1.jpg")):
             _send_text(app, "risposta")
             _run_workers(app)
 
         assert app._cache[contact.cache_key][0]["status"] == "failed"
-        row = _db_rows(tmp_db)[0]
+        row = _my_rows(tmp_db)[0]
         assert row["quote_text"] == "Che bella!"
         assert row["content_type"] == "image/jpeg"
         assert row["attachment_id"] == "att-1"
@@ -850,9 +884,7 @@ class TestMediaReplySend:
         app.signal_backend.send_message_sync = MagicMock(return_value="ok")
         ts = app._cache[contact.cache_key][0]["timestamp"]
         app.run_worker.reset_mock()
-        with patch(
-            "tui.send.resolve_attachment_path", return_value=Path("/tmp/att-1.jpg")
-        ):
+        with _preview(app, contact, "att-1", Path("/tmp/att-1.jpg")):
             app._retry_failed_message(ts, "risposta")
             _run_workers(app)
 
@@ -883,9 +915,8 @@ class TestMediaReplySend:
         }
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        with patch("tui.send.resolve_attachment_path", return_value=Path("/tmp/x")):
-            _send_text(app, "risposta")
-            _run_workers(app)
+        _send_text(app, "risposta")
+        _run_workers(app)
 
         kwargs = app.signal_backend.send_message_sync.call_args.kwargs
         assert "quote_attachments" not in kwargs

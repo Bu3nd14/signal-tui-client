@@ -109,12 +109,6 @@ class ContactsCheckNumberOut(BaseModel):
     exists: bool | None
 
 
-class ContactsTouchRequest(BaseModel):
-    protocol: Stripped
-    contact_id: Stripped
-    timestamp: int
-
-
 # -- chats --------------------------------------------------------------------
 
 

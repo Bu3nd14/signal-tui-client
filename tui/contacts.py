@@ -72,17 +72,9 @@ class ContactListMixin:
         if timestamp <= contact.last_message_ts:
             return
 
+        # The TUI contact is a view copy: the backend-owned one (web, other
+        # frontends) is advanced by ``messages.send`` itself.
         contact.last_message_ts = timestamp
-        # The TUI contact is a copy: the backend-owned one (web, other
-        # frontends) is advanced by the core.
-        self._client_call_background(
-            "contacts.touch",
-            {
-                "protocol": contact.protocol,
-                "contact_id": contact.id,
-                "timestamp": int(timestamp),
-            },
-        )
         self._sort_contacts()
         if self._is_mounted:
             self._render_contact_list(list(self.contacts))

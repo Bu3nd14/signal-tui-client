@@ -356,6 +356,6 @@ def test_adapters_do_not_resolve_attachment_files_themselves():
         source = (root / name).read_text(encoding="utf-8")
         assert "get_attachment_path" not in source, name
         assert "get_attachment_chunk" not in source, name
-        assert "sqlite3" not in source or name == "tui/send.py", name
+        assert "sqlite3" not in source, name
     for name in ("tui/chat_view.py", "tui/download.py", "web/api.py"):
         assert "avatar_cache" not in (root / name).read_text(encoding="utf-8")

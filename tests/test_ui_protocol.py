@@ -835,7 +835,8 @@ class TestSendOptimisticRouting:
 
         wa_backend = MagicMock()
         wa_backend.ingest_message = MagicMock(return_value=True)
-        wa_backend.send_message_sync = MagicMock()
+        wa_backend.send_message_sync = MagicMock(return_value=None)
+        wa_backend.contacts = []
         signal_backend = MagicMock()
 
         app.manager = MagicMock()
@@ -857,11 +858,18 @@ class TestSendOptimisticRouting:
         with patch.object(stui, "replace_emoji_aliases", side_effect=lambda x: x):
             app.on_input_submitted(event)
 
-        # L'ottimista è andato al backend WHATSAPP (non a quello Signal)
-        wa_backend.ingest_message.assert_called_once()
-        assert wa_backend.ingest_message.call_args.args[0] == contact.id
-        # E il messaggio è mostrato subito
+        # Il messaggio è mostrato subito, senza toccare nessun backend
         assert app._add_message.call_count >= 1
+        wa_backend.ingest_message.assert_not_called()
+
+        # Il core (messages.send, dal worker) semina l'ottimista nel backend
+        # WHATSAPP (non in quello Signal) e invia da lì.
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+        with patch("server.ops.send.transition_outgoing_status", return_value=True):
+            app.run_worker.call_args.args[0]()
+        wa_backend.ingest_message.assert_called()
+        assert wa_backend.ingest_message.call_args_list[0].args[0] == contact.id
+        wa_backend.send_message_sync.assert_called_once()
         # Il Signal backend NON ha ricevuto l'ottimista
         signal_backend.ingest_message.assert_not_called()
 

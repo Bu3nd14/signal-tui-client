@@ -291,3 +291,28 @@ def test_client_msg_id_makes_a_replayed_call_a_duplicate(env):
     assert first["status"] == "sent"
     assert again == {"ok": True, "duplicate": True}
     assert env.send.call_count == 1
+
+
+def test_empty_quote_body_stays_on_the_wire_for_the_optimistic_caller(env):
+    """A media reply without caption quotes with "" (the web's blank -> None
+    normalisation would omit the body, which the Signal quote must not)."""
+    env.call(quote_timestamp=1234, quote_author=CONTACT, quote_message="")
+
+    assert env.send.call_args.kwargs["quote_message"] == ""
+
+
+def test_the_web_flavour_still_normalises_a_blank_quote_body(env):
+    env.client.call(
+        "messages.send",
+        {
+            "protocol": PROTOCOL_SIGNAL,
+            "contact_id": CONTACT,
+            "text": "x",
+            "quote_timestamp": 1234,
+            "quote_author": CONTACT,
+            "quote_message": "  ",
+        },
+    )
+
+    assert env.manager.get(PROTOCOL_SIGNAL) is env.backend
+    assert env.send.call_args.kwargs["quote_message"] is None

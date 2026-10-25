@@ -6,9 +6,9 @@ import logging
 import sqlite3
 from typing import Any
 
-from models import ChatContact, contact_cache_key, contact_storage_keys
+from models import ChatContact, contact_storage_keys
 from server.api import ApiError, ChatAPI, operation
-from server.domain import bump_recency, search_contacts
+from server.domain import search_contacts
 from server.events_api import ContactWire, contact_to_wire
 from server.models_api import (
     ContactOut,
@@ -20,8 +20,6 @@ from server.models_api import (
     ContactsForProtocolRequest,
     ContactsListRequest,
     ContactsRegisterRequest,
-    ContactsTouchRequest,
-    OkOut,
 )
 from server.ops.common import PROTOCOLS
 
@@ -180,21 +178,6 @@ def contacts_address_book(
         contacts=[ContactWire(**contact_to_wire(c)) for c in contacts],
         errors=errors,
     )
-
-
-@operation("contacts.touch", request=ContactsTouchRequest, response=OkOut)
-def contacts_touch(api: ChatAPI, req: ContactsTouchRequest) -> OkOut:
-    """Advance the backend contact's ``last_message_ts`` (never lowers it).
-
-    For frontends that show a message before the backend sees it (optimistic
-    send); incoming traffic is bumped by the core itself.
-    """
-    backend = api.manager.get(req.protocol)
-    if backend is not None:
-        bump_recency(
-            backend, contact_cache_key(req.protocol, req.contact_id), req.timestamp
-        )
-    return OkOut(ok=True)
 
 
 @operation(
