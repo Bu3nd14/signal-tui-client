@@ -115,7 +115,7 @@ class TestReceiptPersistence:
         app._cache = {key: [message]}
         # SignalBackend's cache is keyed by the *raw* contact id, so the
         # receipt handler (which looks up by phone number) can find it.
-        app.signal_backend.cache = {"+391234567890": [message]}
+        app.core.signal_backend.cache = {"+391234567890": [message]}
         app.selected_contact = ChatContact(
             id="+391234567890", display_name="Test", protocol=PROTOCOL_SIGNAL
         )

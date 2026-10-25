@@ -255,7 +255,7 @@ async def test_submit_edit_updates_cache_widget_and_backend(
 
         # Il core riceve l'edit (messages.edit) e lo applica al backend solo
         # dopo il successo: invio, poi cache chat + SQLite (apply_edit).
-        app.manager.edit_message_sync.assert_called_once_with(
+        app.core.manager.edit_message_sync.assert_called_once_with(
             PROTOCOL_SIGNAL, contact.id, "sig-1000", "nuovo"
         )
         signal_backend.apply_edit.assert_called_once_with(
@@ -277,10 +277,10 @@ async def test_submit_edit_failure_rolls_back(
     """Fallimento backend → rollback completo (cache + widget + identità) + status."""
     app, signal_backend = app_for_test_with_mocks
     if failure == "exception":
-        app.manager.edit_message_sync = MagicMock(side_effect=RuntimeError("boom"))
+        app.core.manager.edit_message_sync = MagicMock(side_effect=RuntimeError("boom"))
         expected_error = "boom"
     else:
-        app.manager.edit_message_sync = MagicMock(return_value=False)
+        app.core.manager.edit_message_sync = MagicMock(return_value=False)
         expected_error = "edit rejected by server"
 
     async with app.run_test() as pilot:
@@ -595,7 +595,7 @@ async def test_double_edit_consecutive(app_for_test_with_mocks, edit_row):
         widget = _only_message_widget(app)
         assert widget._msg_text == "nuovo2"
 
-        assert app.manager.edit_message_sync.call_args_list == [
+        assert app.core.manager.edit_message_sync.call_args_list == [
             call(PROTOCOL_SIGNAL, contact.id, "sig-1000", "nuovo1"),
             call(PROTOCOL_SIGNAL, contact.id, "sig-1000", "nuovo2"),
         ]

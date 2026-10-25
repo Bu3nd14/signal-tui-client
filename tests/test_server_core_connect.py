@@ -521,11 +521,11 @@ class TestTuiDispatch:
         app._status.assert_called_once_with("hi")
 
     def test_ready_passes_the_protocol_not_the_backend(self, app):
-        app.manager = MagicMock()
+        app.core.manager = MagicMock()
         app._dispatch_core_event(
             self._ev("backend_ready", {"protocol": "x", "contacts": 1})
         )
-        app.manager.get.assert_not_called()
+        app.core.manager.get.assert_not_called()
         app._on_backend_ready.assert_called_once_with("x")
 
     def test_done(self, app):
@@ -549,12 +549,15 @@ class TestTuiDispatch:
         app._reconnect_touched_backends({"signal"})
         assert app.client.calls == [("link.reconnect", {"protocols": ["signal"]})]
 
-    def test_backend_aliases_follow_core(self, app):
-        marker = MagicMock()
-        app.whatsapp_backend = marker
-        assert app.core.whatsapp_backend is marker
-        assert app.signal_backend is app.core.signal_backend
-        assert app.manager is app.core.manager
+    def test_tui_has_no_backend_aliases(self, app):
+        """Backends are reached through ``client`` only; ``core`` owns them."""
+        for name in (
+            "manager",
+            "signal_backend",
+            "whatsapp_backend",
+            "telegram_backend",
+        ):
+            assert not hasattr(type(app), name), name
 
     def test_event_worker_forwards_to_ui_thread(self, app):
         app._polling_active = True

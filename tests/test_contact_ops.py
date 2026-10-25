@@ -211,7 +211,7 @@ def _app(manager) -> SignalTUI:
         patch("server.core.telegram_enabled", return_value=False),
     ):
         app = SignalTUI()
-    app.manager = manager
+    app.core.manager = manager
     app._render_contact_list = MagicMock()
     app._update_unread_badges = MagicMock()
     app._status = MagicMock()

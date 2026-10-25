@@ -251,7 +251,7 @@ class TestSnapshotOperation:
 
 def _app(backend: Any) -> SignalTUI:
     app = SignalTUI()
-    app.manager = SimpleNamespace(get=lambda _p: backend)
+    app.core.manager = SimpleNamespace(get=lambda _p: backend)
     app._render_contact_list = MagicMock()
     app._update_unread_badges = MagicMock()
     app._status = MagicMock()
@@ -338,7 +338,7 @@ class TestBackendReadyThroughClient:
 class TestLoadWorkerThroughClient:
     def _setup(self, backend: Any, contact: ChatContact) -> SignalTUI:
         app = SignalTUI()
-        app.manager = SimpleNamespace(get=lambda _p: backend)
+        app.core.manager = SimpleNamespace(get=lambda _p: backend)
         app.contacts = [contact]
         app.selected_contact = contact
         app._chat_reload_token = 1

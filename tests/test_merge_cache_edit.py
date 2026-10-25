@@ -393,8 +393,8 @@ class TestLoadWorkerRemount:
         app._loaded_all = False
 
         backend = _FakeBackend(contact.id, [])  # vuota all'inizio
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
 
         new_msg = _msg("new", is_mine=False, ts=1000, mid="m1")
 

@@ -300,7 +300,7 @@ class TestMergeUpdatesStatus:
             contacts=[],
         )
 
-        app.manager = SimpleNamespace(get=lambda _proto: backend)
+        app.core.manager = SimpleNamespace(get=lambda _proto: backend)
 
         app._on_backend_ready(backend.protocol)
 

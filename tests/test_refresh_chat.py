@@ -869,8 +869,8 @@ class TestRenderDedupSameSecond:
         from unittest.mock import MagicMock
 
         app = SignalTUI()
-        app.manager = MagicMock()
-        app.manager.get.return_value = None
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = None
         from models import PROTOCOL_WHATSAPP
 
         contact = ChatContact(
@@ -1067,8 +1067,8 @@ class TestRenderDedupSameSecond:
         }
 
         backend.find_contact.return_value = contact
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
         window = app.client.call(
             "messages.window", {"protocol": contact.protocol, "contact_id": contact.id}
         )

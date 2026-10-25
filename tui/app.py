@@ -29,12 +29,6 @@ from models import (
     ChatContact,
     protocol_emoji,
 )
-from protocols import (
-    BackendManager,
-    SignalBackend,
-    TelegramBackend,
-    WhatsAppBackend,
-)
 from server.bus import EventBus
 from server.client import ChatClient, ClientSubscription, InProcessClient
 from server.core import ChatCore
@@ -261,40 +255,6 @@ class SignalTUI(
         self._status_timer: Timer | None = None
         # True while a transient or persistent status message is on display.
         self._status_active: bool = False
-
-    # Backend aliases: the core owns the objects; assigning (tests, relink)
-    # replaces the core's attribute so both sides always agree.
-    @property
-    def manager(self) -> BackendManager:
-        return self.core.manager
-
-    @manager.setter
-    def manager(self, value: BackendManager) -> None:
-        self.core.manager = value
-
-    @property
-    def signal_backend(self) -> SignalBackend:
-        return self.core.signal_backend
-
-    @signal_backend.setter
-    def signal_backend(self, value: SignalBackend) -> None:
-        self.core.signal_backend = value
-
-    @property
-    def whatsapp_backend(self) -> WhatsAppBackend | None:
-        return self.core.whatsapp_backend
-
-    @whatsapp_backend.setter
-    def whatsapp_backend(self, value: WhatsAppBackend | None) -> None:
-        self.core.whatsapp_backend = value
-
-    @property
-    def telegram_backend(self) -> TelegramBackend | None:
-        return self.core.telegram_backend
-
-    @telegram_backend.setter
-    def telegram_backend(self, value: TelegramBackend | None) -> None:
-        self.core.telegram_backend = value
 
     def compose(self):
         yield Header()

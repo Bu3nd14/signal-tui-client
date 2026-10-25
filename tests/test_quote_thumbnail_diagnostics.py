@@ -65,7 +65,7 @@ def _kitty_app() -> tuple[SignalTUI, list[str]]:
     written: list[str] = []
     app = SignalTUI(image_support=ImageSupport.KITTY)
     app._native_renderer = KittyRenderer(write=written.append, cell_w=8, cell_h=16)
-    app.manager = MagicMock()
+    app.core.manager = MagicMock()
     app.run_worker = MagicMock(side_effect=lambda fn, **kw: fn())
     app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
     return app, written
@@ -144,7 +144,7 @@ class TestSignalStalePathNoRecovery:
 
     def test_signal_reenter_stale_path_recovers_thumbnail(self, tmp_path):
         app, written = _kitty_app()
-        app.manager.get_attachment_path.return_value = _png_path(tmp_path)
+        app.core.manager.get_attachment_path.return_value = _png_path(tmp_path)
         stale = tmp_path / "gone.png"  # never created → cleaned/missing
         quote = QuoteWidget(
             "🖼️ Immagine",

@@ -629,10 +629,10 @@ class TestContactPickerScreenM4:
             await app_for_test.push_screen(screen)
             await pilot.pause()
 
-            app_for_test.manager.list_address_book_sync.return_value = [
+            app_for_test.core.manager.list_address_book_sync.return_value = [
                 _contact("+2", "Late", PROTOCOL_SIGNAL)
             ]
-            app_for_test.manager.address_book_errors = {}
+            app_for_test.core.manager.address_book_errors = {}
             app_for_test.call_from_thread = MagicMock(
                 side_effect=lambda fn, *a, **k: fn(*a, **k)
             )
@@ -656,8 +656,8 @@ class TestContactPickerScreenM4:
             await app_for_test.push_screen(screen)
             await pilot.pause()
 
-            app_for_test.manager.list_address_book_sync.return_value = [fast, late]
-            app_for_test.manager.address_book_errors = {}
+            app_for_test.core.manager.list_address_book_sync.return_value = [fast, late]
+            app_for_test.core.manager.address_book_errors = {}
             app_for_test.call_from_thread = MagicMock(
                 side_effect=lambda fn, *a, **k: fn(*a, **k)
             )

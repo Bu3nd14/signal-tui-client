@@ -41,8 +41,8 @@ def _make_app() -> SignalTUI:
 def _ready(app: SignalTUI, backend: MagicMock) -> None:
     """Run ``_on_backend_ready``: contacts reach the TUI through the core's
     ``contacts.for_protocol`` operation, which reads ``manager.get(protocol)``."""
-    app.manager = MagicMock()
-    app.manager.get.return_value = backend
+    app.core.manager = MagicMock()
+    app.core.manager.get.return_value = backend
     app._on_backend_ready(backend.protocol)
 
 

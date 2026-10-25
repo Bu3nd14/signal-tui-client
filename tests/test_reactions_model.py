@@ -73,7 +73,7 @@ def _reaction_event() -> ChatEvent:
 
 
 def test_reaction_dispatch_without_backend_support_returns_false(app_for_test):
-    app_for_test.manager.get.return_value = object()
+    app_for_test.core.manager.get.return_value = object()
     app_for_test._contact_list_dirty = False
 
     assert app_for_test._handle_event(_reaction_event()) is False
@@ -96,7 +96,7 @@ def test_reaction_dispatch_applies_without_marking_contact_dirty(
 
 
 def test_reaction_dispatch_unknown_backend_returns_false(app_for_test):
-    app_for_test.manager.get.return_value = None
+    app_for_test.core.manager.get.return_value = None
     app_for_test._contact_list_dirty = False
 
     assert app_for_test._handle_event(_reaction_event()) is False

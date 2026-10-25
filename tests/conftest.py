@@ -320,8 +320,8 @@ def _make_test_app():
         app = SignalTUI()
         # Route manager.get(protocol) to the mocked Signal backend so selection
         # and send paths resolve to the same mock (easy to assert on).
-        app.signal_backend.protocol = PROTOCOL_SIGNAL
-        app.manager.get.return_value = app.signal_backend
+        app.core.signal_backend.protocol = PROTOCOL_SIGNAL
+        app.core.manager.get.return_value = app.core.signal_backend
         # Neutralize background workers (load-messages / send) to keep tests
         # deterministic and thread-free.
         app.run_worker = MagicMock()
@@ -359,4 +359,4 @@ def app_for_test_with_mocks():
     Useful for tests that must assert on backend calls (e.g. message send).
     """
     with _make_test_app() as app:
-        yield app, app.signal_backend
+        yield app, app.core.signal_backend

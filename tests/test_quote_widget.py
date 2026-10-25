@@ -479,8 +479,8 @@ class TestQuoteThumbnailFlow:
     def test_generates_thumbnail_from_attachment_id(self, tmp_path):
         app, written = _make_kitty_app()
         img_path = self._write_png(tmp_path)
-        app.manager = MagicMock()
-        app.manager.get_attachment_path.return_value = img_path
+        app.core.manager = MagicMock()
+        app.core.manager.get_attachment_path.return_value = img_path
         quote = QuoteWidget(
             "🖼️ Immagine", attachment_id="tgref:42:12", protocol="telegram"
         )
@@ -490,14 +490,14 @@ class TestQuoteThumbnailFlow:
 
         assert any("a=t" in s for s in written)
         assert quote.native_image_id == 1
-        app.manager.get_attachment_path.assert_called_once_with(
+        app.core.manager.get_attachment_path.assert_called_once_with(
             "telegram", "tgref:42:12"
         )
 
     def test_attachment_id_unresolvable_no_thumbnail(self):
         app, written = _make_kitty_app()
-        app.manager = MagicMock()
-        app.manager.get_attachment_path.return_value = None
+        app.core.manager = MagicMock()
+        app.core.manager.get_attachment_path.return_value = None
         quote = QuoteWidget(
             "🖼️ Immagine", attachment_id="tgref:42:12", protocol="telegram"
         )
@@ -523,8 +523,8 @@ class TestQuoteThumbnailFlow:
         """Uscita con path=None ma attachment_id+protocol → lazy resolve (WA)."""
         app, written = _make_kitty_app()
         img_path = self._write_png(tmp_path)
-        app.manager = MagicMock()
-        app.manager.get_attachment_path.return_value = img_path
+        app.core.manager = MagicMock()
+        app.core.manager.get_attachment_path.return_value = img_path
         quote = QuoteWidget(
             "🖼️ Immagine", attachment_id="wa-media-123", protocol="whatsapp"
         )
@@ -534,7 +534,7 @@ class TestQuoteThumbnailFlow:
 
         assert any("a=t" in s for s in written)
         assert quote.native_image_id == 1
-        app.manager.get_attachment_path.assert_called_once_with(
+        app.core.manager.get_attachment_path.assert_called_once_with(
             "whatsapp", "wa-media-123"
         )
 
@@ -542,8 +542,8 @@ class TestQuoteThumbnailFlow:
         """Path persistito ma file mancante → fallback lazy su attachment_id."""
         app, written = _make_kitty_app()
         img_path = self._write_png(tmp_path)
-        app.manager = MagicMock()
-        app.manager.get_attachment_path.return_value = img_path
+        app.core.manager = MagicMock()
+        app.core.manager.get_attachment_path.return_value = img_path
         stale = tmp_path / "gone.png"  # never created → missing
         quote = QuoteWidget(
             "🖼️ Immagine",
@@ -558,15 +558,15 @@ class TestQuoteThumbnailFlow:
         # Stale path detected → lazy resolve produced a valid file → thumbnail.
         assert any("a=t" in s for s in written)
         assert quote.native_image_id == 1
-        app.manager.get_attachment_path.assert_called_once_with(
+        app.core.manager.get_attachment_path.assert_called_once_with(
             "telegram", "tgref:42:12"
         )
 
     def test_stale_path_and_lazy_fails_text_only(self, tmp_path):
         """Path stale + lazy resolve None → testo, nessun crash."""
         app, written = _make_kitty_app()
-        app.manager = MagicMock()
-        app.manager.get_attachment_path.return_value = None
+        app.core.manager = MagicMock()
+        app.core.manager.get_attachment_path.return_value = None
         stale = tmp_path / "gone.png"
         quote = QuoteWidget(
             "🖼️ Immagine",

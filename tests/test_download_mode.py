@@ -209,7 +209,6 @@ class TestDownloadMode:
         widget._is_mounted = True
         event = widget._make_media_open_requested()
         app = DownloadModeMixin()
-        app.manager = manager
         app.client = client_for(manager)
         app._download_mode = True
         app._start_download = MagicMock()

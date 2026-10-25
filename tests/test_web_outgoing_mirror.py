@@ -1722,7 +1722,7 @@ def test_sent_mirror_updates_real_contact_object_and_flags():
     assert app._dirty_contact_keys == {contact.cache_key}
     # No placeholder duplicate was created.
     assert app.contacts == [contact]
-    app.manager.get("signal")._identify_contact.assert_not_called()
+    app.core.manager.get("signal")._identify_contact.assert_not_called()
 
 
 def test_sent_mirror_prefers_self_contacts_over_rebuilt_payload_copy():
@@ -1733,7 +1733,7 @@ def test_sent_mirror_prefers_self_contacts_over_rebuilt_payload_copy():
     # list holds its own copy: THAT one must be updated.
     event = _mirror_event(rebuilt)
     event.payload["contact"] = rebuilt
-    app.manager.get("signal")._identify_contact.return_value = rebuilt
+    app.core.manager.get("signal")._identify_contact.return_value = rebuilt
 
     assert app._handle_event(event) is True
     assert real.last_message_ts == 1_787_250_931_234
@@ -1744,7 +1744,7 @@ def test_sent_mirror_prefers_self_contacts_over_rebuilt_payload_copy():
 def test_sent_mirror_uses_backend_identify_when_not_in_tui_list():
     known = ChatContact(id="42", display_name="Ada", protocol="telegram")
     app = _mirror_app(contacts=[])
-    app.manager.get("telegram")._identify_contact.return_value = known
+    app.core.manager.get("telegram")._identify_contact.return_value = known
     event = _mirror_event(known, protocol="telegram")
 
     assert app._handle_event(event) is True
@@ -1766,7 +1766,7 @@ def test_sent_mirror_creates_placeholder_for_unknown_contact():
     assert placeholder.id == "+391111111111"
     assert placeholder.cache_key == "signal:+391111111111"
     assert placeholder.last_message_ts == 1_787_250_931_234
-    assert app.manager.get("signal").contacts == [placeholder]
+    assert app.core.manager.get("signal").contacts == [placeholder]
     assert app._contact_list_dirty is True
     assert app._dirty_contact_keys == {placeholder.cache_key}
 

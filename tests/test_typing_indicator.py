@@ -108,8 +108,8 @@ class TestSignalTUITyping:
             extras={"aci": "uuid-123"},
         )
         app.contacts = [contact]
-        app.signal_backend.contacts = [contact]
-        app.signal_backend._set_contacts([contact])
+        app.core.signal_backend.contacts = [contact]
+        app.core.signal_backend._set_contacts([contact])
         app._unread_counts = {}
         app._typing_contacts = {}
         app._typing_mumbling = {}
@@ -117,7 +117,7 @@ class TestSignalTUITyping:
 
     def _dispatch(self, app, envelope: dict) -> None:
         """Convert an envelope to ChatEvents and route them through _handle_event."""
-        events = app.signal_backend.envelope_to_event(envelope)
+        events = app.core.signal_backend.envelope_to_event(envelope)
         for event in events:
             with patch.object(app, "call_from_thread"):
                 app._handle_event(event)
@@ -400,7 +400,7 @@ class TestUpdateTypingLabel:
             extras={"aci": "uuid-123"},
         )
         app.contacts = [contact]
-        app.signal_backend.contacts = [contact]
+        app.core.signal_backend.contacts = [contact]
         app._unread_counts = {}
         app._typing_contacts = {}
         app._typing_mumbling = {}

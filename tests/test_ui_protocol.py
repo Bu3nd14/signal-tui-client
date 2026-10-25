@@ -157,8 +157,8 @@ class TestProtocolFilter:
         app._clear_chat = MagicMock()
         app._cancel_reply = MagicMock()
         app._load_messages_worker = MagicMock()
-        app.manager = MagicMock()
-        app.manager.get.return_value = MagicMock()
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = MagicMock()
         # run_worker è il wrapper async di Textual: usa un no-op sincrono così non
         # crea coroutine mai attese.
         app.run_worker = MagicMock()
@@ -194,8 +194,8 @@ class TestProtocolFilter:
         app._clear_chat = MagicMock()
         app._cancel_reply = MagicMock()
         app._load_messages_worker = MagicMock()
-        app.manager = MagicMock()
-        app.manager.get.return_value = MagicMock()
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = MagicMock()
         app.run_worker = MagicMock()
         app.run_worker.return_value = None
 
@@ -230,8 +230,8 @@ class TestProtocolFilter:
         app._clear_chat = MagicMock()
         app._cancel_reply = MagicMock()
         app._load_messages_worker = MagicMock()
-        app.manager = MagicMock()
-        app.manager.get.return_value = MagicMock()
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = MagicMock()
         app.run_worker = MagicMock()
         app.run_worker.return_value = None
 
@@ -327,8 +327,8 @@ class TestProtocolFilter:
         app._clear_chat = MagicMock()
         app._cancel_reply = MagicMock()
         app._load_messages_worker = MagicMock()
-        app.manager = MagicMock()
-        app.manager.get.return_value = MagicMock()
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = MagicMock()
         app.run_worker = MagicMock()
         app.run_worker.return_value = None
 
@@ -663,8 +663,8 @@ class TestWhatsAppHistoryLoad:
             ]
         }
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
         backend.find_contact.return_value = c
 
         # evita operazioni su widget reali; call_from_thread esegue sincronico
@@ -715,8 +715,8 @@ class TestWhatsAppHistoryLoad:
             ]
         }
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
         backend.find_contact.return_value = c
 
         app._add_message = MagicMock()
@@ -839,9 +839,9 @@ class TestSendOptimisticRouting:
         wa_backend.contacts = []
         signal_backend = MagicMock()
 
-        app.manager = MagicMock()
-        app.manager.get.return_value = wa_backend  # manager.get(whatsapp) -> wa
-        app.signal_backend = signal_backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = wa_backend  # manager.get(whatsapp) -> wa
+        app.core.signal_backend = signal_backend
 
         # Evita side-effetti di on_input_submitted
         app._is_completion_visible = MagicMock(return_value=False)
@@ -977,8 +977,8 @@ class TestContactListFlush:
         backend._identify_contact.return_value = self._whatsapp_contact(
             "wa:1@s.whatsapp.net", "Anna"
         )
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
 
         event = ChatEvent(
             type="message",
@@ -1083,8 +1083,8 @@ class TestWhatsAppLoadRetry:
             return backend.cache[c.id]
 
         backend.fetch_history = MagicMock(side_effect=fake_fetch)
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
         backend.find_contact.return_value = c
         app._make_message_widget = MagicMock()
         app._add_load_more_widget = MagicMock()
@@ -1141,8 +1141,8 @@ class TestWhatsAppMountOrdering:
             ]
         }
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
         backend.find_contact.return_value = c
         app._add_load_more_widget = MagicMock()
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
@@ -1192,8 +1192,8 @@ class TestWhatsAppRenderFirst:
         backend = MagicMock()
         backend.cache = {c.id: list(backend_msgs)}
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
         backend.find_contact.return_value = c
 
         app._add_load_more_widget = MagicMock()
@@ -1234,7 +1234,7 @@ class TestWhatsAppRenderFirst:
             return MagicMock()
 
         app._make_message_widget = MagicMock(side_effect=fake_make_widget)
-        fetch = app.manager.get.return_value.fetch_history
+        fetch = app.core.manager.get.return_value.fetch_history
 
         app._load_messages_worker()
 

@@ -46,7 +46,7 @@ def _make_kitty_app() -> tuple[SignalTUI, list[str]]:
     written: list[str] = []
     app = SignalTUI(image_support=ImageSupport.KITTY)
     app._native_renderer = KittyRenderer(write=written.append, cell_w=8, cell_h=16)
-    app.manager = MagicMock()
+    app.core.manager = MagicMock()
     app.run_worker = MagicMock()
     app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
     app._chat_log = _FakeChatLog()
@@ -77,7 +77,7 @@ class TestResolveAttachmentWorkerKitty:
         app, written = _make_kitty_app()
         img_path = tmp_path / "photo.png"
         Image.new("RGB", (64, 32), "red").save(img_path)
-        app.manager.get_attachment_path.return_value = img_path
+        app.core.manager.get_attachment_path.return_value = img_path
 
         widget = ImageWidget(attachment_path=None, attachment_id="att-1")
         widget._is_mounted = True
@@ -97,7 +97,7 @@ class TestResolveAttachmentWorkerKitty:
     def test_worker_uses_semaphore(self, tmp_path):
         app, _ = _make_kitty_app()
         app._image_resolve_semaphore = MagicMock()
-        app.manager.get_attachment_path.return_value = None
+        app.core.manager.get_attachment_path.return_value = None
         widget = ImageWidget(attachment_path=None, attachment_id="att-1")
 
         app._resolve_attachment_worker(PROTOCOL_SIGNAL, "att-1", widget, "Photo")
@@ -118,7 +118,7 @@ class TestResolveAttachmentWorkerKitty:
         app, written = _make_kitty_app()
         img_path = tmp_path / "not-an-image.png"
         img_path.write_text("garbage")
-        app.manager.get_attachment_path.return_value = img_path
+        app.core.manager.get_attachment_path.return_value = img_path
         widget = ImageWidget(attachment_path=None, attachment_id="att-1")
         widget._is_mounted = True
 
@@ -377,12 +377,12 @@ class TestMediaKindRendering:
 
     def test_non_image_worker_only_resolves_path_then_opens(self, tmp_path):
         app = SignalTUI()
-        app.manager = MagicMock()
+        app.core.manager = MagicMock()
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
         app._open_media_path = MagicMock()
         path = tmp_path / "manual.pdf"
         path.write_bytes(b"%PDF-1.4")  # the operation only serves existing files
-        app.manager.get_attachment_path.return_value = path
+        app.core.manager.get_attachment_path.return_value = path
         widget = MessageWidget(
             "📎 manual.pdf", attachment_ref=("doc-1", PROTOCOL_SIGNAL)
         )
@@ -390,7 +390,7 @@ class TestMediaKindRendering:
 
         app._resolve_media_path_worker(PROTOCOL_SIGNAL, "doc-1", widget)
 
-        app.manager.get_attachment_path.assert_called_once_with(
+        app.core.manager.get_attachment_path.assert_called_once_with(
             PROTOCOL_SIGNAL, "doc-1"
         )
         assert widget.attachment_path == path
@@ -474,7 +474,7 @@ class TestWindowLoadAnchor:
         app._chat_log = log
         img_path = tmp_path / "photo.png"
         Image.new("RGB", (64, 32), "red").save(img_path)
-        app.manager.get_attachment_path.return_value = img_path
+        app.core.manager.get_attachment_path.return_value = img_path
         widgets = []
         for i in range(n_images):
             widget = ImageWidget(attachment_path=None, attachment_id=f"att-{i}")
@@ -521,7 +521,7 @@ class TestWindowLoadAnchor:
                 return img_bad  # prepare-failed branch
             return img_ok  # native success branch
 
-        app.manager.get_attachment_path.side_effect = _get_path
+        app.core.manager.get_attachment_path.side_effect = _get_path
 
         self._run_window(app, widgets)
         assert app._window_native_pending == 3

@@ -103,8 +103,8 @@ def _prepare_select(app: SignalTUI, fake_list) -> None:
     app._cancel_reply = MagicMock()
     app._cancel_edit = MagicMock()
     app._load_messages_worker = MagicMock()
-    app.manager = MagicMock()
-    app.manager.get.return_value = MagicMock()
+    app.core.manager = MagicMock()
+    app.core.manager.get.return_value = MagicMock()
     app.run_worker = MagicMock()
     app.run_worker.return_value = None
 
@@ -550,7 +550,7 @@ class TestSelectContactMarksRead:
             "chats.mark_read", {"protocol": "signal", "contact_id": "+1"}
         )
         assert app._unread_counts["signal:+1"] == 0
-        app.manager.get.return_value.mark_read_sync.assert_not_called()
+        app.core.manager.get.return_value.mark_read_sync.assert_not_called()
 
 
 # ─── A. Auto-selection of the first visible contact on filter change ──────────
