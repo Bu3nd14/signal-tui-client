@@ -55,6 +55,7 @@ from protocols import (
 from protocols.config import signal_enabled, telegram_enabled, whatsapp_enabled
 from protocols.webhook import WEBHOOK_PORT, ensure_webhook_server
 from server.address_book_refresh import DynamicAddressBookMixin
+from server.api import ChatAPI
 from server.bus import EventBus
 from server.domain import looks_unresolved, resolve_placeholder_name
 
@@ -88,6 +89,8 @@ class ChatCore(DynamicAddressBookMixin):
 
     def __init__(self, bus: EventBus) -> None:
         self.bus = bus
+        #: Operation registry bound to this core (the server API).
+        self.api = ChatAPI(self)
 
         # Multi-protocol backend manager + the always-registered Signal backend.
         self.manager = BackendManager()

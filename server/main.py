@@ -154,6 +154,7 @@ def serve(
                 host=host,
                 require_auth=not args.web_no_auth,
                 bus=bus,
+                api=core.api,
             )
             if web_handle is None or web_handle.status == "down":
                 logger.error("Web adapter failed to start (see log); exiting")

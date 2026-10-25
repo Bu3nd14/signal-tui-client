@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from server.api import ChatAPI
 from server.bus import EventBus
 
 logger = logging.getLogger(__name__)
@@ -73,8 +74,12 @@ def start_web_server(
     host: str = "127.0.0.1",
     require_auth: bool = True,
     bus: EventBus | None = None,
+    api: ChatAPI | None = None,
 ) -> WebServerHandle | None:
     """Start uvicorn on a dedicated thread and event loop.
+
+    *api* is the server API the routes call (``core.api`` under ``megachat
+    serve``); when omitted, ``web.ops.get_api`` builds one around *manager*.
 
     *require_auth* set to ``False`` (``--web-no-auth``) drops the Bearer
     token requirement entirely — every REST/media/WebSocket request is
@@ -108,6 +113,8 @@ def start_web_server(
 
     app = FastAPI()
     app.state.manager = manager
+    if api is not None:
+        app.state.api = api
     app.state.token = token
     app.state.websocket_connections = set()
 
