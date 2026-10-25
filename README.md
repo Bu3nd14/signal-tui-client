@@ -865,6 +865,22 @@ make coverage                               # test + coverage (gate 68%)
 
 This suite also runs in CI (`.github/workflows/ci.yml`, Python 3.12/3.13).
 
+### Verifica end-to-end
+
+```bash
+make smoke                                  # oppure: scripts/smoke_e2e.sh (PY=... per l'interprete)
+```
+
+Avvia processi reali (nessun backend configurato) in un `HOME`, un lock file e un socket temporanei
+sotto `/tmp/mcXXXX`: non tocca un'installazione vera né un'istanza in esecuzione. Scenari: `serve`
+(HTTP `/health`, `/api/status`, `/api/contacts`, `/ws`, `/ws/v2`, socket Unix con permessi 0600/0700 e
+runtime file, stop con SIGINT); TUI che avvia il server e lo lascia vivo all'uscita (Detach); seconda
+TUI che si attacca (un solo server); `--in-process` rifiutato mentre un server tiene il lock;
+`server.shutdown` dal socket (percorso Quit) che rimuove lock e socket; `--in-process` da solo; TUI
+che esce anche se il SIGINT arriva a un thread non principale. Dura circa un minuto, richiede `script`
+(util-linux) e `curl`, e fallisce se resta un processo, un lock o un socket. Gira anche in CI (job
+`smoke`).
+
 ### Optional "live" integration tests (real accounts)
 
 The tests in `tests/test_live_quote_media.py` (E1–E7) verify end-to-end behavior **against a real
