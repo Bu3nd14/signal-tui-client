@@ -5,18 +5,23 @@ import sqlite3
 import stat
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from event_harness import feed
 
 from models import ChatContact, ChatEvent
 from protocols.manager import BackendManager
 from protocols.signal import SignalBackend
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
+from server.bus import EventBus
+from server.core import ChatCore
 from tui.events import EventHandlingMixin
+from tui.polling import PollingMixin
 
 
 def _backend(protocol: str):
@@ -289,7 +294,7 @@ def test_image_caption_race_always_persists_caption(protocol, order):
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["text"] == ""
     assert backend.cache["42"][0]["attachment_info"] == "caption from echo"
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         rows = conn.execute(
             "SELECT attachment_info FROM messages WHERE protocol = ? AND contact_number = ?",
             (protocol, "42"),
@@ -562,7 +567,7 @@ def _echo_payload(attachment_id: str) -> dict:
 def _batch_rows():
     from protocols import db
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         return connection.execute(
             "SELECT msg_id, attachment_id, batch_id, batch_index FROM messages "
             "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
@@ -848,7 +853,7 @@ def test_signal_multi_attachment_echo_upgrades_each_mirror_row(tmp_path, monkeyp
 
     from protocols import db
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT batch_index, attachment_id FROM messages "
             "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
@@ -886,7 +891,7 @@ def test_signal_same_filename_attachments_keep_unambiguous_association(
     ]
     from protocols import db
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT batch_index, attachment_id FROM messages "
             "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
@@ -926,7 +931,7 @@ def test_signal_multi_attachment_echo_without_full_mirror_never_duplicates(
     ]
     from protocols import db
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM messages WHERE protocol = 'signal' "
@@ -990,7 +995,7 @@ def test_signal_send_attachments_barrier_rollback_cleans_partial_rows(
 
     from protocols import db
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT msg_id, attachment_id FROM messages "
             "WHERE protocol = 'signal' AND contact_number = '42' ORDER BY id"
@@ -1170,7 +1175,7 @@ def test_whatsapp_manager_batch_mirrors_n_events_with_batch_index(
             "39333@c.us", event.payload, event.payload["timestamp"]
         )
 
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT msg_id, batch_id, batch_index FROM messages "
             "WHERE protocol = 'whatsapp' AND contact_number = '39333@c.us' "
@@ -1456,7 +1461,7 @@ def test_telegram_manager_batch_mirrors_n_events_with_batch_index(
 
     for event in events:
         assert backend.ingest_message("42", event.payload, event.payload["timestamp"])
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT msg_id, batch_id, batch_index FROM messages "
             "WHERE protocol = 'telegram' AND contact_number = '42' "
@@ -1516,7 +1521,7 @@ def test_telegram_batch_slot_fuses_on_echo_mirror_dedup(order):
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["batch_id"] == "batch-2"
     assert backend.cache["42"][0]["batch_index"] == 0
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT batch_id, batch_index FROM messages "
             "WHERE protocol = 'telegram' AND contact_number = '42'"
@@ -1539,7 +1544,7 @@ def test_telegram_batch_slots_fuse_per_message():
     assert len(backend.cache["42"]) == 2
     assert {message["batch_id"] for message in backend.cache["42"]} == {"batch-2"}
     assert sorted(message["batch_index"] for message in backend.cache["42"]) == [0, 1]
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT msg_id, batch_id, batch_index FROM messages "
             "WHERE protocol = 'telegram' AND contact_number = '42' ORDER BY msg_id"
@@ -1560,7 +1565,7 @@ def test_telegram_batch_slot_fuses_onto_optimistic_row():
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["batch_id"] == "batch-1"
     assert backend.cache["42"][0]["batch_index"] == 0
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         assert connection.execute(
             "SELECT batch_id, batch_index FROM messages "
             "WHERE protocol = 'telegram' AND contact_number = '42'"
@@ -1602,7 +1607,7 @@ def test_whatsapp_batch_slot_fuses_on_echo_mirror_dedup(order, tmp_path, monkeyp
     assert len(backend.cache[contact]) == 1
     assert backend.cache[contact][0]["batch_id"] == "batch-9"
     assert backend.cache[contact][0]["batch_index"] == 1
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         rows = connection.execute(
             "SELECT batch_id, batch_index FROM messages "
             "WHERE protocol = 'whatsapp' AND contact_number = ?",
@@ -1628,7 +1633,7 @@ def test_whatsapp_batch_slot_fuses_onto_optimistic_row(tmp_path, monkeypatch):
 
     assert len(backend.cache[contact]) == 1
     assert backend.cache[contact][0]["batch_id"] == "batch-9"
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         assert connection.execute(
             "SELECT batch_id, batch_index FROM messages "
             "WHERE protocol = 'whatsapp' AND contact_number = ?",
@@ -1659,11 +1664,14 @@ def test_whatsapp_batch_slot_never_overwrites_existing_batch(tmp_path, monkeypat
 # ─── TUI routing of the "sent-mirror" event (design §4.6.1) ──────────────────
 
 
-class _MirrorApp(EventHandlingMixin):
+class _MirrorApp(EventHandlingMixin, PollingMixin):
     """Minimal app instance exposing the attributes the handler touches."""
 
     def __init__(self, contacts=None, *, web_enabled=False, backend=None):
         self.manager = SimpleNamespace(get=lambda _protocol: backend)
+        self.bus = EventBus()
+        self.core = ChatCore(self.bus)
+        self.core.manager = self.manager
         self.contacts = list(contacts or [])
         self.selected_contact = None
         self._contact_list_dirty = False
@@ -1695,12 +1703,13 @@ def test_sent_mirror_event_is_routed_to_dedicated_handler():
     event = _mirror_event(contact)
 
     with (
-        patch.object(app, "_handle_sent_mirror_event", return_value=True) as handler,
-        patch.object(app, "_handle_message_event") as message_handler,
+        patch.object(app, "_view_sent_mirror", return_value=True) as handler,
+        patch.object(app, "_view_message") as message_handler,
     ):
-        assert app._handle_event(event)
+        assert feed(app, event)
 
-    handler.assert_called_once_with(event)
+    handler.assert_called_once()
+    assert handler.call_args[0][0].type == "sent_mirror"
     message_handler.assert_not_called()
 
 
@@ -1709,14 +1718,14 @@ def test_sent_mirror_updates_real_contact_object_and_flags():
     app = _mirror_app(contacts=[contact])
     event = _mirror_event(contact)
 
-    assert app._handle_sent_mirror_event(event) is True
+    assert feed(app, event) is True
     # The REAL object in self.contacts (not a placeholder) was updated.
     assert contact.last_message_ts == 1_787_250_931_234
     assert app._contact_list_dirty is True
     assert app._dirty_contact_keys == {contact.cache_key}
     # No placeholder duplicate was created.
     assert app.contacts == [contact]
-    app.manager.get("signal")._identify_contact.assert_not_called()
+    app.core.manager.get("signal")._identify_contact.assert_not_called()
 
 
 def test_sent_mirror_prefers_self_contacts_over_rebuilt_payload_copy():
@@ -1727,9 +1736,9 @@ def test_sent_mirror_prefers_self_contacts_over_rebuilt_payload_copy():
     # list holds its own copy: THAT one must be updated.
     event = _mirror_event(rebuilt)
     event.payload["contact"] = rebuilt
-    app.manager.get("signal")._identify_contact.return_value = rebuilt
+    app.core.manager.get("signal")._identify_contact.return_value = rebuilt
 
-    assert app._handle_sent_mirror_event(event) is True
+    assert feed(app, event) is True
     assert real.last_message_ts == 1_787_250_931_234
     assert rebuilt.last_message_ts == 0
     assert app.contacts == [real]
@@ -1738,10 +1747,10 @@ def test_sent_mirror_prefers_self_contacts_over_rebuilt_payload_copy():
 def test_sent_mirror_uses_backend_identify_when_not_in_tui_list():
     known = ChatContact(id="42", display_name="Ada", protocol="telegram")
     app = _mirror_app(contacts=[])
-    app.manager.get("telegram")._identify_contact.return_value = known
+    app.core.manager.get("telegram")._identify_contact.return_value = known
     event = _mirror_event(known, protocol="telegram")
 
-    assert app._handle_sent_mirror_event(event) is True
+    assert feed(app, event) is True
     assert known.last_message_ts == 1_787_250_931_234
     # Known contact: promoted into the TUI list (the dynamic lid resolver may
     # materialize a contact the TUI has never seen), no placeholder duplicate.
@@ -1754,13 +1763,13 @@ def test_sent_mirror_creates_placeholder_for_unknown_contact():
         ChatContact(id="+391111111111", display_name="+391111111111", protocol="signal")
     )
 
-    assert app._handle_sent_mirror_event(event) is True
+    assert feed(app, event) is True
     assert len(app.contacts) == 1
     placeholder = app.contacts[0]
     assert placeholder.id == "+391111111111"
     assert placeholder.cache_key == "signal:+391111111111"
     assert placeholder.last_message_ts == 1_787_250_931_234
-    assert app.manager.get("signal").contacts == [placeholder]
+    assert app.core.manager.get("signal").contacts == [placeholder]
     assert app._contact_list_dirty is True
     assert app._dirty_contact_keys == {placeholder.cache_key}
 
@@ -1776,12 +1785,12 @@ def test_sent_mirror_does_not_ingest_or_push_web_event():
     app.selected_contact = contact
     event = _mirror_event(contact)
 
-    with patch("web.bridge.push_event") as push_event:
-        assert app._handle_sent_mirror_event(event) is True
+    sub = app.bus.subscribe()
+    assert feed(app, event) is True
 
     # No double DB write and no duplicate web push: the selected contact's
     # timestamp is refreshed but the list stays clean.
     backend.ingest_message.assert_not_called()
-    push_event.assert_not_called()
+    assert all(e.type != "web_push" for e in sub.drain())
     assert app._contact_list_dirty is False
     assert app._dirty_contact_keys == set()

@@ -15,17 +15,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
 import protocols.rpc as signal_rpc
-from web.api import (
-    _attach_media_versions,
-    _attachment_version,
-    _thumbnail,
-    create_api_router,
-)
+from server.media import _attach_media_versions, _attachment_version
+from server.thumbnails import _thumbnail
+from web.api import create_api_router
 
 
 def _signal_root(tmp_path: Path) -> Path:
@@ -97,7 +95,7 @@ def test_attachment_version_telegram_rejects_tgref_and_outside(tmp_path):
 def test_attach_media_versions_is_best_effort_when_root_fails():
     messages = [{"attachment": {"attachment_id": "image.png"}}]
 
-    with patch("web.api._allowed_media_root", side_effect=OSError("mkdir negato")):
+    with patch("server.media._allowed_media_root", side_effect=OSError("mkdir negato")):
         _attach_media_versions(None, "whatsapp", messages)
 
     assert "version" not in messages[0]["attachment"]
@@ -154,7 +152,7 @@ def _messages_client(monkeypatch, tmp_path) -> TestClient:
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     manager = SimpleNamespace(get=lambda _proto: None, list_contacts=list)
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return TestClient(app)
 
@@ -170,7 +168,7 @@ def test_messages_endpoint_attaches_and_refreshes_versions(monkeypatch, tmp_path
     files = [_payload("image.png"), _payload("missing.png")]
     client = _messages_client(monkeypatch, tmp_path)
 
-    with patch("web.api._messages", return_value=files):
+    with patch("server.messages._messages", return_value=files):
         first = client.get(
             "/api/messages", params={"proto": "signal", "contact_id": "alice"}
         )
@@ -181,7 +179,7 @@ def test_messages_endpoint_attaches_and_refreshes_versions(monkeypatch, tmp_path
     assert "version" not in data[1]["attachment"]
 
     source.write_bytes(b"a-larger-overwrite")
-    with patch("web.api._messages", return_value=files):
+    with patch("server.messages._messages", return_value=files):
         second = client.get(
             "/api/messages", params={"proto": "signal", "contact_id": "alice"}
         )
@@ -203,7 +201,7 @@ def test_media_endpoint_ignores_version_param(monkeypatch, tmp_path):
         )
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
     with TestClient(app) as client:
@@ -218,7 +216,7 @@ def test_media_endpoint_ignores_version_param(monkeypatch, tmp_path):
 
 def test_thumbnail_invalidates_on_size_change_with_same_mtime(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr("web.api._attachment_content_type", lambda *_args: None)
+    monkeypatch.setattr("server.media._attachment_content_type", lambda *_args: None)
     root = _signal_root(tmp_path)
     source = root / "photo.png"
     Image.new("RGB", (800, 600), "#3a7bac").save(source)

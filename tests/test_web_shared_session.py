@@ -1,6 +1,6 @@
 """P3a — shared HTTP session: lifecycle, isolation, cookies and SSRF.
 
-The shared session is module-level state in :mod:`web.link_preview` and is
+The shared session is module-level state in :mod:`server.link_preview` and is
 bound to the event loop that created it.  Coroutine tests request the
 ``_closed_session`` fixture, which closes the session *inside that same loop*;
 the few sync tests that use explicit ``asyncio.run`` blocks own their cleanup.
@@ -17,8 +17,9 @@ from types import SimpleNamespace
 import aiohttp
 import pytest
 from aiohttp import web as aioweb
+from client_harness import api_for
 
-import web.link_preview as lp
+import server.link_preview as lp
 from web import gmail
 
 PAGE = "<html><head><title>t</title></head><body>x</body></html>"
@@ -443,10 +444,11 @@ def test_web_server_shutdown_closes_session_and_imap_pool_on_same_loop(monkeypat
     monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
     monkeypatch.setattr(lp, "close_shared_session", fake_close_shared_session)
     monkeypatch.setattr(gmail, "close_imap_pool", fake_close_imap_pool)
-    monkeypatch.setattr(server_mod, "_init_transcription_service", lambda _app: None)
 
     try:
-        handle = server_mod.start_web_server(SimpleNamespace(), require_auth=False)
+        handle = server_mod.start_web_server(
+            api_for(SimpleNamespace()), require_auth=False
+        )
         assert handle is not None
         handle.thread.join(2)
         assert not handle.thread.is_alive()

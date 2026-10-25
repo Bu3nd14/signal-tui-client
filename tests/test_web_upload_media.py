@@ -4,8 +4,9 @@ from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from upload_harness import store_upload_sync as _store_upload_sync
 
-from web.uploads import UploadValidationError, _store_upload_sync
+from server.uploads import UploadValidationError
 
 
 def _upload(name: str, data: bytes):
@@ -55,7 +56,9 @@ def test_store_upload_sanitizes_original_filename(monkeypatch, tmp_path):
 def test_store_upload_applies_kind_limit(monkeypatch, tmp_path):
     monkeypatch.setattr("web.uploads.upload_directory", lambda: tmp_path)
     monkeypatch.setitem(
-        __import__("web.uploads", fromlist=["_MAX_BYTES_BY_KIND"])._MAX_BYTES_BY_KIND,
+        __import__(
+            "server.uploads", fromlist=["_MAX_BYTES_BY_KIND"]
+        )._MAX_BYTES_BY_KIND,
         "image",
         8,
     )

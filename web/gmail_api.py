@@ -62,12 +62,12 @@ def create_gmail_image_router() -> Any:
     The URL is carried by an HMAC-signed token, so this endpoint is safe to
     mount outside the Bearer-protected ``/api`` namespace (``<img src>`` cannot
     send an Authorization header).  Fetching reuses the SSRF-safe resolver and
-    raster sniffing from ``web.link_preview``.
+    raster sniffing from ``server.link_preview``.
     """
     from fastapi import APIRouter, HTTPException
     from fastapi.responses import Response
 
-    from web.link_preview import fetch_external_image
+    from server.link_preview import fetch_external_image
 
     router = APIRouter()
 

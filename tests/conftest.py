@@ -5,12 +5,56 @@ All tests use in-memory / tmp_path to avoid touching real files or daemons.
 
 from __future__ import annotations
 
+import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def fail_on_unclosed_sqlite(monkeypatch: pytest.MonkeyPatch):
+    """Fail any test that leaves a SQLite connection open.
+
+    ``ResourceWarning: unclosed database`` is only emitted when the garbage
+    collector finalises a leaked connection, i.e. inside an unrelated later
+    test, so ``-W error`` cannot attribute or reliably fail it. Instead every
+    connection opened through ``sqlite3.connect`` during the test is recorded
+    (with strong references, so none is finalised early) and checked at
+    teardown. ``with closing(sqlite3.connect(...)) as conn, conn`` does not close: use
+    ``contextlib.closing`` or an explicit ``close()``.
+    """
+    real_connect = sqlite3.connect
+    opened: list[tuple[sqlite3.Connection, str]] = []
+
+    def recording_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        frame = sys._getframe(1)
+        site = f"{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}"
+        opened.append((conn, site))
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", recording_connect)
+    yield
+    leaked = []
+    for conn, site in opened:
+        try:
+            conn.execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            continue  # closed
+        except sqlite3.Error:
+            pass  # open but unusable: still a leak
+        leaked.append(site)
+        conn.close()
+    if leaked:
+        pytest.fail(
+            "SQLite connection(s) left open (use contextlib.closing / close()):\n  "
+            + "\n  ".join(leaked),
+            pytrace=False,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +107,70 @@ def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     monkeypatch.setattr(download_mod, "_DOWNLOAD_SERVER", None)
     monkeypatch.setattr(download_mod, "_DOWNLOAD_URL_BASE", None)
     return cache_dir
+
+
+@pytest.fixture(autouse=True)
+def isolate_server_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """No test may bind (or probe) the user's real server socket: ``megachat
+    serve`` and the socket adapter resolve their default path from this."""
+    path = tmp_path / "megachat-run" / "server.sock"
+    monkeypatch.setenv("MEGACHAT_SOCKET", str(path))
+    return path
+
+
+@pytest.fixture(autouse=True)
+def isolate_instance_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Child processes (spawned servers, shell aliases) resolve the instance
+    lock from this: the real ``/tmp/signal-tui.lock`` is never touched.
+    (In-process code reads ``server.lock.LOCK_FILE``, which tests patch.)"""
+    path = tmp_path / "signal-tui.lock"
+    monkeypatch.setenv("MEGACHAT_LOCK_FILE", str(path))
+    return path
+
+
+@pytest.fixture
+def open_media_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let ``media.*`` operations hand out any path a test's fake manager returns.
+
+    The real operations confine attachments to the protocol's media root; tests
+    of *callers* (TUI, adapters) that return arbitrary tmp files from a fake
+    manager open the root.  Confinement itself is covered by
+    ``tests/test_blob_ops.py``.
+    """
+    monkeypatch.setattr(
+        "server.media._allowed_media_root", lambda _manager, _proto: Path("/")
+    )
+
+
+@pytest.fixture(autouse=True)
+def bus_wire_guard(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Every event published on any ``EventBus`` must be JSON-serializable.
+
+    The Phase 2 socket adapter forwards payloads unchanged, so a live object
+    (``ChatContact``, set, Path, ...) on the bus is a bug.  Violations are
+    collected (a publisher thread may swallow exceptions) and asserted at
+    teardown.  Opt out with ``@pytest.mark.allow_unserializable_events``.
+    """
+    import json
+
+    from server.bus import EventBus
+
+    if request.node.get_closest_marker("allow_unserializable_events"):
+        yield
+        return
+    original = EventBus.publish
+    violations: list[str] = []
+
+    def guarded(self, type, payload=None):
+        try:
+            json.dumps(payload)
+        except (TypeError, ValueError) as exc:
+            violations.append(f"{type}: {exc}")
+        return original(self, type, payload)
+
+    monkeypatch.setattr(EventBus, "publish", guarded)
+    yield
+    assert not violations, f"non-JSON event payloads published: {violations}"
 
 
 @pytest.fixture(autouse=True)
@@ -284,17 +392,17 @@ def _make_test_app():
     # Patch the symbols where they are IMPORTED/USED (``tui.app``), not where
     # they are defined (``protocols`` / ``signal_tui`` shim).
     with (
-        patch("tui.app.BackendManager"),
-        patch("tui.app.SignalBackend"),
-        patch("tui.app.whatsapp_enabled", return_value=False),
-        patch("tui.app.telegram_enabled", return_value=False),
+        patch("server.core.BackendManager"),
+        patch("server.core.SignalBackend"),
+        patch("server.core.whatsapp_enabled", return_value=False),
+        patch("server.core.telegram_enabled", return_value=False),
         patch.object(SignalTUI, "on_mount", _noop_on_mount),
     ):
         app = SignalTUI()
         # Route manager.get(protocol) to the mocked Signal backend so selection
         # and send paths resolve to the same mock (easy to assert on).
-        app.signal_backend.protocol = PROTOCOL_SIGNAL
-        app.manager.get.return_value = app.signal_backend
+        app.core.signal_backend.protocol = PROTOCOL_SIGNAL
+        app.core.manager.get.return_value = app.core.signal_backend
         # Neutralize background workers (load-messages / send) to keep tests
         # deterministic and thread-free.
         app.run_worker = MagicMock()
@@ -332,4 +440,4 @@ def app_for_test_with_mocks():
     Useful for tests that must assert on backend calls (e.g. message send).
     """
     with _make_test_app() as app:
-        yield app, app.signal_backend
+        yield app, app.core.signal_backend

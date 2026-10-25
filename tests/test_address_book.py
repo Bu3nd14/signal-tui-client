@@ -304,6 +304,14 @@ def _wa_backend() -> WhatsAppBackend:
     return backend
 
 
+def _drain_events(backend: WhatsAppBackend) -> list:
+    """Eventi accodati dal backend (stessa coda che consuma ``poll_once``)."""
+    out = []
+    while not backend._events.empty():
+        out.append(backend._events.get_nowait())
+    return out
+
+
 def _chat(jid: str, name: str | None = None, ts: int = 0) -> ChatContact:
     return ChatContact(
         id=jid,
@@ -963,13 +971,13 @@ class TestWALidResolver:
         backend._rest.list_lids.return_value = []
         backend.contacts = []
 
-        with patch("web.bridge.push_event") as mock_push:
-            backend._lid_resolver_run()
+        backend._lid_resolver_run()
 
-        mock_push.assert_called_once()
-        event = mock_push.call_args.args[0]
-        assert event["type"] == "lid_warmup_done"
-        assert event["payload"]["protocol"] == "whatsapp"
+        queued = _drain_events(backend)
+        assert len(queued) == 1
+        event = queued[0]
+        assert event.type == "lid_warmup_done"
+        assert event.protocol == "whatsapp"
 
     def test_lid_resolver_run_emits_warmup_done_on_error(self, monkeypatch, tmp_path):
         """Il ``finally`` notifica anche quando il corpo del resolver solleva."""
@@ -979,13 +987,13 @@ class TestWALidResolver:
         backend = _wa_backend()
         backend._lid_cache_load = MagicMock(side_effect=RuntimeError("boom"))
 
-        with patch("web.bridge.push_event") as mock_push:
-            backend._lid_resolver_run()
+        backend._lid_resolver_run()
 
-        mock_push.assert_called_once()
-        event = mock_push.call_args.args[0]
-        assert event["type"] == "lid_warmup_done"
-        assert event["payload"]["protocol"] == "whatsapp"
+        queued = _drain_events(backend)
+        assert len(queued) == 1
+        event = queued[0]
+        assert event.type == "lid_warmup_done"
+        assert event.protocol == "whatsapp"
 
     def test_lid_resolver_run_emits_warmup_done_once_with_candidates(
         self, monkeypatch, tmp_path
@@ -1004,15 +1012,20 @@ class TestWALidResolver:
         backend._rest.list_lids.return_value = []
         backend.list_address_book_sync = MagicMock(return_value=[])
 
-        with patch("time.sleep"), patch("web.bridge.push_event") as mock_push:
+        with patch("time.sleep"):
             backend._lid_resolver_run()
 
-        mock_push.assert_called_once_with(
-            {"type": "lid_warmup_done", "payload": {"protocol": "whatsapp"}}
+        queued = _drain_events(backend)
+        assert len(queued) == 1
+        assert (queued[0].type, queued[0].protocol, queued[0].contact_id) == (
+            "lid_warmup_done",
+            "whatsapp",
+            "",
         )
+        assert queued[0].payload == {}
 
-    def test_lid_resolver_run_swallows_push_event_failure(self, monkeypatch, tmp_path):
-        """Un errore del bridge non deve propagare fuori dal resolver."""
+    def test_lid_resolver_run_swallows_enqueue_failure(self, monkeypatch, tmp_path):
+        """Un errore di accodamento non deve propagare fuori dal resolver."""
         import protocols.db as backend_mod
 
         monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
@@ -1020,8 +1033,8 @@ class TestWALidResolver:
         backend._rest.list_lids.return_value = []
         backend.contacts = []
 
-        with patch("web.bridge.push_event", side_effect=RuntimeError("boom")):
-            backend._lid_resolver_run()  # non deve sollevare
+        backend._enqueue_event = MagicMock(side_effect=RuntimeError("boom"))
+        backend._lid_resolver_run()  # non deve sollevare
 
 
 # ─── Telegram rubrica (milestone 3) ───────────────────────────────────────────

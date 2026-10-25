@@ -1,101 +1,134 @@
-"""Background poll worker that drains backend events."""
+"""Event consumer worker: applies core events (from the client) to the TUI."""
 
 import logging
 import time
+
+from server.bus import GAP, Event
+from server.socket_client import CONNECTION_EVENT
 
 logger = logging.getLogger(__name__)
 
 
 class PollingMixin:
     def _poll_worker(self):
-        """Thread worker that polls the backend receive loop.
+        """Thread worker that consumes the core events through ``self.client``.
 
-        Runs as a plain (non-async) thread loop exactly like the original, so
-        quitting is prompt: every cycle it checks ``_polling_active`` and
-        sleeps briefly.  Each round pulls a batch of events via
-        ``backend.poll_once()`` and dispatches them through ``_handle_event``.
+        The event pump itself lives in ``ChatCore``: it polls the backends,
+        does all domain handling and publishes core events.  This worker is
+        the single event consumer of the TUI: every cycle it waits up to 0.1s
+        for an event, drains the rest of the batch and dispatches each event.
+        ``backend_*`` events are applied on the UI thread; domain events go to
+        the view handlers, which run on this worker thread and use
+        ``call_from_thread`` for widget work.  Every cycle checks
+        ``_polling_active`` so quitting is prompt.
         """
-        while self._polling_active:
-            try:
-                # Drain events from every registered backend (Signal, WhatsApp, ...).
-                for backend in self.manager.all():
-                    if not self._polling_active:
-                        return
-                    try:
-                        events = backend.poll_once()
-                    except AttributeError:
-                        events = []
+        sub = self._core_sub
+        if sub is None:
+            return
+        try:
+            while self._polling_active:
+                try:
+                    first = sub.get(timeout=0.1)
+                    if first is None and sub.closed:
+                        break
+                    events = [first] if first is not None else []
+                    events.extend(sub.drain())
                     for event in events:
                         if not self._polling_active:
                             return
-                        self._handle_event(event)
+                        self._dispatch_bus_event(event)
 
-                        # Typing timeout: a STARTED without a STOPPED within
-                        # _TYPING_TIMEOUT seconds moves the contact to mumbling (💭).
-                        if self._typing_contacts:
-                            now = time.time()
-                            expired = [
-                                key
-                                for key, started_at in self._typing_contacts.items()
-                                if now - started_at > self._TYPING_TIMEOUT
-                            ]
-                            if expired:
-                                for key in expired:
-                                    self._typing_contacts.pop(key, None)
-                                    self._typing_mumbling[key] = (
-                                        now + self._TYPING_MUMBLING_DURATION
-                                    )
-                                    self.call_from_thread(
-                                        self._update_typing_label, key
-                                    )
+                    self._expire_typing()
+                    self._flush_contact_list()
+                except Exception:
+                    logger.debug(
+                        "Poll worker iteration failed, continuing", exc_info=True
+                    )
+        finally:
+            sub.close()
 
-                        # Mumbling expiry: once the mumbling window passes, remove it.
-                        if self._typing_mumbling:
-                            now = time.time()
-                            expired = [
-                                key
-                                for key, expires_at in self._typing_mumbling.items()
-                                if now >= expires_at
-                            ]
-                            if expired:
-                                for key in expired:
-                                    self._typing_mumbling.pop(key, None)
-                                    self.call_from_thread(
-                                        self._update_typing_label, key
-                                    )
+    def _dispatch_bus_event(self, event: Event) -> None:
+        """Route one bus event; never raises (a bad event must not stop the loop)."""
+        try:
+            self._route_bus_event(event)
+        except Exception:
+            logger.debug("Core event dispatch failed", exc_info=True)
 
-                # Flush differito della lista contatti: se durante il batch è
-                # arrivato qualcosa (messaggio/typing), esegue UN solo aggiornamento
-                # unread + un solo re-sort/render della lista invece di uno per
-                # evento.  Entrambi devono girare nel thread della UI.
-                if self._contact_list_dirty:
-                    self._contact_list_dirty = False
-                    keys = tuple(self._dirty_contact_keys)
-                    self._dirty_contact_keys.clear()
-                    if keys and len(keys) <= self._CONTACT_UPDATE_BATCH_MAX:
-                        # Percorso incrementale: ricalcola l'unread SOLO nei dati
-                        # (_recompute_unread, nessun render) per i contatti del
-                        # batch (O(M) ciascuno), e fa poi UN SOLO render di lista.
-                        for k in keys:
-                            self.call_from_thread(self._recompute_unread, k)
-                    else:
-                        # Batch grande (> soglia) o senza key note: ricalcolo
-                        # completo dei dati (nessun render qui dentro).
-                        self.call_from_thread(self._recompute_unread)
-                    # UN solo sort+render a fine batch, in-place e non distruttivo.
-                    # Ciò lascia il main libero per la finestra di chat (prioritaria)
-                    # invece di rifare il giro completo due volte.
-                    self.call_from_thread(self._reorder_contact_list)
-                    self.call_from_thread(self._refresh_backend_status_if_idle)
+    def _route_bus_event(self, event: Event) -> bool:
+        """Apply one bus event to the TUI; ``True`` when something handled it."""
+        if event.type == "backend_ready":
+            # Fetch the heavy ready data here (worker), merge on the UI thread.
+            proto = event.payload["protocol"]
+            snapshot, contacts = self._prefetch_backend_ready(proto)
+            self.call_from_thread(self._on_backend_ready, proto, snapshot, contacts)
+            return True
+        if event.type.startswith("backend_"):
+            self.call_from_thread(self._dispatch_core_event, event)
+            return True
+        if event.type == GAP:
+            # Lost events: we cannot know what changed -> full flush.
+            logger.debug("Core event bus gap: %s", event.payload)
+            self._contact_list_dirty = True
+            self.call_from_thread(self._schedule_resync, "gap")
+            return True
+        if event.type == CONNECTION_EVENT:
+            # Synthetic event of a remote client: the server went away / came
+            # back (a restored connection resyncs).
+            self.call_from_thread(self._on_client_connection, event.payload)
+            return True
+        return self._dispatch_view_event(event)
 
-                # Prompt-exit inner sleep.  This runs every cycle (even when no
-                # messages arrived) so the worker exits as soon as the user quits.
-                for _ in range(10):
-                    if not self._polling_active:
-                        return
-                    time.sleep(0.1)
-            except Exception as _e:
-                logger.debug("Poll worker iteration failed, continuing", exc_info=True)
-            # Re-check before the next poll so an empty round still exits.
-            if not self._polling_active:
-                return
+    def _expire_typing(self) -> None:
+        # Typing timeout: a STARTED without a STOPPED within
+        # _TYPING_TIMEOUT seconds moves the contact to mumbling (💭).
+        if self._typing_contacts:
+            now = time.time()
+            expired = [
+                key
+                for key, started_at in self._typing_contacts.items()
+                if now - started_at > self._TYPING_TIMEOUT
+            ]
+            if expired:
+                for key in expired:
+                    self._typing_contacts.pop(key, None)
+                    self._typing_mumbling[key] = now + self._TYPING_MUMBLING_DURATION
+                    self.call_from_thread(self._update_typing_label, key)
+
+        # Mumbling expiry: once the mumbling window passes, remove it.
+        if self._typing_mumbling:
+            now = time.time()
+            expired = [
+                key
+                for key, expires_at in self._typing_mumbling.items()
+                if now >= expires_at
+            ]
+            if expired:
+                for key in expired:
+                    self._typing_mumbling.pop(key, None)
+                    self.call_from_thread(self._update_typing_label, key)
+
+    def _flush_contact_list(self) -> None:
+        # Flush differito della lista contatti: se durante il batch è
+        # arrivato qualcosa (messaggio/typing), esegue UN solo aggiornamento
+        # unread + un solo re-sort/render della lista invece di uno per
+        # evento.  Entrambi devono girare nel thread della UI.
+        if not self._contact_list_dirty:
+            return
+        self._contact_list_dirty = False
+        keys = tuple(self._dirty_contact_keys)
+        self._dirty_contact_keys.clear()
+        if keys and len(keys) <= self._CONTACT_UPDATE_BATCH_MAX:
+            # Percorso incrementale: ricalcola l'unread SOLO nei dati
+            # (_recompute_unread, nessun render) per i contatti del
+            # batch (O(M) ciascuno), e fa poi UN SOLO render di lista.
+            for k in keys:
+                self.call_from_thread(self._recompute_unread, k)
+        else:
+            # Batch grande (> soglia) o senza key note: ricalcolo
+            # completo dei dati (nessun render qui dentro).
+            self.call_from_thread(self._recompute_unread)
+        # UN solo sort+render a fine batch, in-place e non distruttivo.
+        # Ciò lascia il main libero per la finestra di chat (prioritaria)
+        # invece di rifare il giro completo due volte.
+        self.call_from_thread(self._reorder_contact_list)
+        self.call_from_thread(self._refresh_backend_status_if_idle)

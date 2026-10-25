@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,7 +26,7 @@ def prune_db(tmp_path, monkeypatch):
 
 def _insert_rows(db_file, rows):
     """Insert compact message tuples directly, preserving deliberate duplicates."""
-    with sqlite3.connect(db_file) as conn:
+    with closing(sqlite3.connect(db_file)) as conn, conn:
         conn.executemany(
             "INSERT INTO messages "
             "(protocol, contact_number, text, timestamp, status, msg_id, read) "
@@ -35,7 +36,7 @@ def _insert_rows(db_file, rows):
 
 
 def _rows(db_file, where="1=1", params=()):
-    with sqlite3.connect(db_file) as conn:
+    with closing(sqlite3.connect(db_file)) as conn, conn:
         return conn.execute(
             f"SELECT rowid, protocol, contact_number, text, timestamp, status, "
             f"msg_id, read FROM messages WHERE {where} ORDER BY rowid",
@@ -270,7 +271,7 @@ class TestCachePruneSafety:
         )
 
         assert db._prune_cache(limit=100, now_ms=1_000_000) == 1
-        with original_connect(prune_db) as conn:
+        with closing(original_connect(prune_db)) as conn:
             assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 100
 
 
@@ -285,16 +286,37 @@ class TestAppExitPrune:
         prune.assert_called_once_with()
 
     def test_on_exit_app_invokes_prune_and_swallows_failure(self):
+        from server.bus import EventBus
+        from server.core import ChatCore
+
+        with (
+            patch("server.core.BackendManager"),
+            patch(
+                "server.core.SignalBackend",
+                return_value=MagicMock(protocol="signal"),
+            ),
+            patch("server.core.whatsapp_enabled", return_value=False),
+            patch("server.core.telegram_enabled", return_value=False),
+        ):
+            core = ChatCore(EventBus())
         app = object.__new__(SignalTUI)
         app._polling_active = True
         app._hires_executor = MagicMock()
         app._web_enabled = False
-        app.telegram_backend = None
+        app.core = core
+        app.client = MagicMock()
 
         with patch("protocols.db._prune_cache") as prune:
             SignalTUI.on_exit_app(app)
         prune.assert_called_once_with()
         assert app._polling_active is False
 
+        # A second exit path (SIGINT handler then on_exit_app) is a no-op;
+        # a fresh core shows that a failing prune is best-effort.
+        with patch("protocols.db._prune_cache") as prune:
+            SignalTUI.on_exit_app(app)
+        prune.assert_not_called()
+
+        core._shutdown_done = False
         with patch("protocols.db._prune_cache", side_effect=RuntimeError("boom")):
             SignalTUI.on_exit_app(app)  # best-effort: must not propagate

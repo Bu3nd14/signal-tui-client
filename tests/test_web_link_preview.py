@@ -5,10 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 from aiohttp import web as aioweb
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import web.link_preview as lp
+import server.link_preview as lp
 from web.api import create_api_router
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
@@ -179,7 +180,7 @@ def test_redirect_to_blocked_host_gives_no_preview(monkeypatch):
 
 def _client() -> TestClient:
     app = FastAPI()
-    app.state.manager = SimpleNamespace()
+    app.state.api = api_for(SimpleNamespace())
     app.include_router(create_api_router())
     return TestClient(app)
 

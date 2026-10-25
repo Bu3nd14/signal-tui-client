@@ -10,12 +10,14 @@ import subprocess
 import sys
 import time
 from base64 import b64decode
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib.parse import quote
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -135,7 +137,7 @@ def make_app(manager, *, required: bool = True):
     from web.ws import install_websocket
 
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.state.websocket_connections = set()
     install_auth(app, TOKEN, required=required)
     app.include_router(create_api_router())
@@ -1689,7 +1691,7 @@ def test_send_multipart_cleanup_when_second_file_is_invalid_media(web_client):
 
 
 def test_send_multipart_cleanup_when_second_file_is_oversize(web_client):
-    from web import uploads as uploads_module
+    from server import uploads as uploads_module
 
     client, manager, db_file = web_client
     manager.contacts = [ChatContact("alice", "Alice", "signal")]
@@ -1952,7 +1954,7 @@ def test_contacts_schema_order_and_unread_count(web_client):
         ChatContact("second", "Second", "whatsapp", {"last_message_ts": 10}),
         ChatContact("first", "First", "signal", {"last_message_ts": 20}),
     ]
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.executemany(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, timestamp, read) VALUES (?, ?, ?, ?, ?, ?)",
             [
@@ -2018,7 +2020,7 @@ def test_messages_schema_filters_and_stable_chronological_order(web_client):
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.executemany(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, timestamp, attachment_id, attachment_info, content_type, msg_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -2084,7 +2086,7 @@ def test_messages_exposes_delivery_and_edit_state(web_client):
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.executemany(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_id, msg_type, status, read, edited) "
@@ -2133,7 +2135,7 @@ def test_messages_edit_id_rules(
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_id, msg_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2154,7 +2156,7 @@ def test_messages_exposes_persisted_quote_fields(web_client):
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, quote_text, quote_timestamp, quote_author) "
@@ -2184,7 +2186,7 @@ def test_messages_never_serializes_image_placeholder_text(web_client, protocol):
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_type, attachment_id, attachment_info, content_type) "
@@ -2231,7 +2233,7 @@ def test_messages_distinguishes_video_placeholders_from_captions(
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_type, attachment_id, attachment_info, content_type, "
@@ -2271,7 +2273,7 @@ def test_messages_preserves_image_caption_cleanup(web_client, text, expected_tex
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_type, attachment_id, attachment_info, content_type, "
@@ -2322,7 +2324,7 @@ def test_messages_attachment_info_exposes_only_real_image_captions(
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_type, attachment_id, attachment_info, content_type) "
@@ -2379,7 +2381,7 @@ def test_messages_infers_missing_image_content_type(web_client):
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.executemany(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, timestamp, attachment_id, attachment_info, content_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -2483,7 +2485,7 @@ def test_whatsapp_messages_filter_only_synthetic_media_text(
     client, _, db_file = web_client
     import sqlite3
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_type, attachment_id, attachment_info, content_type) "
@@ -2511,20 +2513,25 @@ def test_whatsapp_messages_filter_only_synthetic_media_text(
     assert response.json()[0]["text"] == expected_text
 
 
-def test_bridge_is_bounded_nonblocking_and_counts_drop():
-    from web import bridge
+def test_web_push_is_bounded_nonblocking_and_overflow_becomes_gap():
+    from client_harness import api_for
 
-    push_queue = bridge.init_bridge()
+    from server.bus import GAP, EventBus
+
+    bus = EventBus(buffer_size=10, subscriber_queue_size=10)
+    sub = bus.subscribe()
+    api = api_for(object(), bus)
     started = time.monotonic()
+    # Far more events than the subscriber queue holds: the producer never blocks.
     for index in range(1000):
-        assert bridge.push_event({"n": index})
-    assert not bridge.push_event({"n": "overflow"})
+        assert api.publish_web_push({"n": index})
     elapsed = time.monotonic() - started
-    assert push_queue.maxsize == 1000
-    assert push_queue.qsize() == 1000
-    assert bridge.dropped_events() == 1
     assert elapsed < 1
-    bridge.close_bridge()
+    events = sub.drain()
+    # The overflowing subscriber is told to resync instead of blocking producers.
+    assert any(e.type == GAP for e in events)
+    assert all(e.type in ("web_push", GAP) for e in events)
+    assert not api_for(object(), None).publish_web_push({"n": "closed"})
 
 
 def test_occupied_port_degrades_to_down_without_raising():
@@ -2534,7 +2541,7 @@ def test_occupied_port_degrades_to_down_without_raising():
     listener.bind(("127.0.0.1", 0))
     listener.listen()
     port = listener.getsockname()[1]
-    handle = start_web_server(FakeManager(), port=port, token=TOKEN)
+    handle = start_web_server(api_for(FakeManager()), port=port, token=TOKEN)
     assert handle is not None
     deadline = time.monotonic() + 2
     while handle.status == "starting" and time.monotonic() < deadline:
@@ -2552,7 +2559,7 @@ def test_clean_start_and_stop_web_server():
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
-    handle = start_web_server(FakeManager(), port=port, token=TOKEN)
+    handle = start_web_server(api_for(FakeManager()), port=port, token=TOKEN)
     assert handle is not None
     deadline = time.monotonic() + 2
     while handle.status == "starting" and time.monotonic() < deadline:
@@ -2572,7 +2579,7 @@ def test_start_web_server_requires_token_by_default(monkeypatch: pytest.MonkeyPa
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
-    assert start_web_server(FakeManager(), port=port, token="") is None
+    assert start_web_server(api_for(FakeManager()), port=port, token="") is None
 
 
 def test_start_web_server_no_auth_works_without_a_token():
@@ -2582,7 +2589,9 @@ def test_start_web_server_no_auth_works_without_a_token():
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
-    handle = start_web_server(FakeManager(), port=port, token="", require_auth=False)
+    handle = start_web_server(
+        api_for(FakeManager()), port=port, token="", require_auth=False
+    )
     try:
         assert handle is not None
         deadline = time.monotonic() + 2
@@ -2604,7 +2613,7 @@ def test_health_reports_auth_required_flag():
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
-    handle = start_web_server(FakeManager(), port=port, token=TOKEN)
+    handle = start_web_server(api_for(FakeManager()), port=port, token=TOKEN)
     try:
         deadline = time.monotonic() + 2
         while handle.status == "starting" and time.monotonic() < deadline:

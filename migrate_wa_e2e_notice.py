@@ -15,6 +15,7 @@ import argparse
 import sqlite3
 import sys
 from collections.abc import Sequence
+from contextlib import closing
 
 import protocols.db as backend
 from models import MSG_TYPE_SYSTEM
@@ -38,7 +39,7 @@ def cleanup(*, apply: bool = False) -> tuple[int, int]:
     if not db_file.exists():
         raise FileNotFoundError(db_file)
 
-    with _DB_LOCK, sqlite3.connect(db_file) as connection:
+    with _DB_LOCK, closing(sqlite3.connect(db_file)) as connection, connection:
         if apply:
             connection.execute("BEGIN IMMEDIATE")
         (count,) = connection.execute(

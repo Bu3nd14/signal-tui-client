@@ -1,105 +1,20 @@
 """REST API for contacts, persisted messages, media, and message sending."""
 
 import asyncio
-import hashlib
-import json
 import logging
-import mimetypes
-import os
-import random
-import re
-import sqlite3
-import tempfile
-import threading
-import time
-import uuid
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote as url_quote
 from urllib.parse import urlsplit
 
-from models import (
-    MSG_TYPE_SYSTEM,
-    attachment_display_name,
-    contact_storage_keys,
-    dedup_cross_key,
-    is_caption_like,
-    is_duplicate_media_identity,
-    is_media_quote_placeholder_composite,
-    is_whatsapp_synthetic_media_text,
-    pick_survivor_and_merge,
-)
-from web.bridge import push_event
-from web.retry import (
-    SEND_RETRY_MAX_ATTEMPTS,
-    classify_send_error,
-    compute_delay,
-    safe_error_text,
-)
-from web.send_registry import SendRegistry, build_fingerprint
+from server.models_api import AttachmentIn
+from server.uploads import MAX_ATTACHMENTS, UploadValidationError
+from web import uploads as uploads_module
+from web.ops import call_op
+from web.uploads import TempUpload, store_temp_upload
 
 logger = logging.getLogger(__name__)
 
-_PROTOCOLS = {"signal", "whatsapp", "telegram"}
-_MAX_TEXT_LENGTH = 64 * 1024
-_MAX_ATTACHMENTS = 10
-_THUMB_WIDTHS = {96, 240, 480}
-_MAX_MESSAGES_LIMIT = 2000
-_MESSAGES_LIMIT_SLACK = 50
-_THUMB_CACHE_LIMIT = 500 * 1024 * 1024
-_THUMB_LOCKS: dict[Path, threading.Lock] = {}
-_THUMB_LOCKS_GUARD = threading.Lock()
-
-_IMAGE_EXTENSIONS = {
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".webp",
-    ".bmp",
-    ".heic",
-    ".heif",
-    ".tif",
-    ".tiff",
-}
-
-_VIDEO_EXTENSIONS = {
-    ".mp4",
-    ".m4v",
-    ".mov",
-    ".webm",
-    ".mkv",
-    ".3gp",
-    ".avi",
-    ".mpg",
-    ".mpeg",
-}
-
-_AUDIO_MIME_BY_EXT: dict[str, str] = {
-    ".m4a": "audio/mp4",
-    ".aac": "audio/aac",
-    ".oga": "audio/ogg",
-    ".ogg": "audio/ogg",
-    ".opus": "audio/ogg",
-    ".mp3": "audio/mpeg",
-    ".wav": "audio/wav",
-    ".flac": "audio/flac",
-}
-
-
-def _media_content_type(path: Path, *, prefer_audio: bool = False) -> str | None:
-    """Return deterministic audio MIME types and guess all other types.
-
-    ``.webm`` è ambiguo (video o audio): ``prefer_audio`` lo serve come
-    ``audio/webm`` quando il messaggio lo classifica come audio.
-    """
-    ext = path.suffix.lower()
-    if ext in _AUDIO_MIME_BY_EXT:
-        return _AUDIO_MIME_BY_EXT[ext]
-    if prefer_audio and ext == ".webm":
-        return "audio/webm"
-    return mimetypes.guess_type(path.name)[0]
+_MAX_ATTACHMENTS = MAX_ATTACHMENTS
 
 
 def _effective_host(request: Any) -> str:
@@ -119,1349 +34,53 @@ def _effective_host(request: Any) -> str:
     return (request.headers.get("host") or "").lower()
 
 
-@lru_cache(maxsize=1)
-def _emoji_categories() -> list[dict[str, Any]]:
-    import emoji
+async def _store_attachments(
+    upload_files: list[Any], stored: list[TempUpload]
+) -> list[AttachmentIn]:
+    """Copy multipart files to temp files; return blob handles for the operation.
 
-    from emoji_data import PREDEFINED_CATEGORIES
-
-    aliases = {
-        char: data.get("en", "").strip(":")
-        for char, data in emoji.EMOJI_DATA.items()
-        if data.get("en")
-    }
-    return [
-        {
-            "category": name,
-            "icon": icon,
-            "emojis": list(chars),
-            "aliases": {char: aliases.get(char, "") for char in chars},
-        }
-        for name, icon, chars in PREDEFINED_CATEGORIES
-    ]
-
-
-def _infer_attachment_type(attachment_id: str, content_type: str | None) -> str | None:
-    if content_type and content_type.strip():
-        return content_type
-    path = attachment_id.split("?", 1)[0]
-    suffix = Path(path).suffix.lower()
-    if suffix not in _IMAGE_EXTENSIONS:
-        return None
-    guessed_type, _ = mimetypes.guess_type(path)
-    if guessed_type and guessed_type.startswith("image/"):
-        return guessed_type
-    return f"image/{'jpeg' if suffix in {'.jpg', '.jpeg'} else suffix[1:]}"
-
-
-def _is_whatsapp_synthetic_text(
-    text: str | None, attachment_id: str | None = None
-) -> bool:
-    """Alias locale del predicato canonico ``models.is_whatsapp_synthetic_media_text``.
-
-    Il predicato vive in ``models`` così ingest backend, dedup SQLite e web
-    condividono una sola definizione.  *attachment_id* permette di riconoscere
-    anche un'identità ``"Media: <id>"`` che non rientra nei pattern canonici.
+    Appends each temp file to *stored* (the caller deletes them).  A file over
+    the request-wide byte budget is not an error here: its slot (and the rest)
+    is marked ``rejected`` so the operation reports problems in file order.
+    Files are not stored at all when there are too many (the operation answers
+    "Too many attachments"); a field that is not a file gets an empty handle.
     """
-    return is_whatsapp_synthetic_media_text(text, attachment_id=attachment_id)
-
-
-def _unread_counts() -> dict[tuple[str, str], int]:
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    with _DB_LOCK:
-        try:
-            connection = sqlite3.connect(backend.DB_FILE)
-            try:
-                rows = connection.execute(
-                    "SELECT protocol, contact_number, COUNT(*) FROM messages "
-                    "WHERE is_mine = 0 AND read = 0 "
-                    "GROUP BY protocol, contact_number"
-                ).fetchall()
-            finally:
-                connection.close()
-        except sqlite3.Error:
-            return {}
-    return {(row[0], row[1]): row[2] for row in rows}
-
-
-def _contact_payload(
-    contact: Any, unread: dict[tuple[str, str], int]
-) -> dict[str, Any]:
-    """Serializza un contatto nel formato usato dalla web UI."""
-    extras = dict(contact.extras)
-    return {
-        "id": str(contact.id),
-        "display_name": str(contact.display_name),
-        "protocol": str(contact.protocol),
-        "extras": extras,
-        "last_message_ts": int(extras.get("last_message_ts", 0) or 0),
-        # Read-union: somma gli unread di tutte le chiavi alias dello stesso
-        # contatto WhatsApp (storico DB diviso fra @c.us e @lid).
-        "unread": sum(
-            unread.get((contact.protocol, key), 0)
-            for key in contact_storage_keys(contact)
-        ),
-    }
-
-
-def _message_edit_id(row: sqlite3.Row | dict[str, Any]) -> str | None:
-    if (
-        not row["is_mine"]
-        or row["msg_type"] != "text"
-        or row["status"] in {"pending", "failed"}
-    ):
-        return None
-    if row["protocol"] == "signal":
-        return str(row["msg_id"] or row["timestamp"])
-    return str(row["msg_id"]) if row["msg_id"] else None
-
-
-def _message_row_for_edit(
-    protocol: str,
-    contact_id: str,
-    message_id: str,
-    extra_keys: tuple[str, ...] = (),
-) -> dict[str, Any] | None:
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    keys = [contact_id, *(key for key in extra_keys if key)]
-    placeholders = ", ".join("?" for _ in keys)
-    with _DB_LOCK:
-        try:
-            connection = sqlite3.connect(backend.DB_FILE)
-            connection.row_factory = sqlite3.Row
-            try:
-                row = connection.execute(
-                    "SELECT id, msg_id, text, is_mine, timestamp, protocol, msg_type, "
-                    "status FROM messages "
-                    f"WHERE protocol = ? AND contact_number IN ({placeholders}) "
-                    "AND (msg_id = ? OR (? = 'signal' AND msg_id IS NULL "
-                    "AND timestamp = CAST(? AS INTEGER))) "
-                    "ORDER BY CASE WHEN msg_id = ? THEN 0 ELSE 1 END LIMIT 1",
-                    (
-                        protocol,
-                        *keys,
-                        message_id,
-                        protocol,
-                        message_id,
-                        message_id,
-                    ),
-                ).fetchone()
-            finally:
-                connection.close()
-        except sqlite3.Error:
-            from fastapi import HTTPException
-
-            logger.exception(
-                "Web edit lookup database error: protocol=%s contact=%s",
-                protocol,
-                contact_id,
-            )
-            raise HTTPException(status_code=500, detail="Database error") from None
-    return dict(row) if row else None
-
-
-def _message_row_for_reaction(
-    protocol: str, contact_id: str, message_id: str
-) -> dict[str, Any] | None:
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    with _DB_LOCK:
-        try:
-            connection = sqlite3.connect(backend.DB_FILE)
-            connection.row_factory = sqlite3.Row
-            try:
-                row = connection.execute(
-                    "SELECT id, msg_id, is_mine, timestamp, protocol FROM messages "
-                    "WHERE protocol = ? AND contact_number = ? AND "
-                    "(msg_id = ? "
-                    "OR (? = 'signal' AND timestamp = CAST(? AS INTEGER)) "
-                    "OR (? = 'signal' AND id = CAST(? AS INTEGER))) "
-                    "ORDER BY CASE WHEN msg_id = ? THEN 0 ELSE 1 END LIMIT 1",
-                    (
-                        protocol,
-                        contact_id,
-                        message_id,
-                        protocol,
-                        message_id,
-                        protocol,
-                        message_id,
-                        message_id,
-                    ),
-                ).fetchone()
-            finally:
-                connection.close()
-        except sqlite3.Error:
-            from fastapi import HTTPException
-
-            logger.exception(
-                "Web reaction lookup database error: protocol=%s contact=%s",
-                protocol,
-                contact_id,
-            )
-            raise HTTPException(status_code=500, detail="Database error") from None
-    return dict(row) if row else None
-
-
-def _persist_message_edit(
-    protocol: str, contact_id: str, message_id: str, new_text: str
-) -> int:
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    with _DB_LOCK:
-        connection = sqlite3.connect(backend.DB_FILE)
-        try:
-            cursor = connection.execute(
-                "UPDATE messages SET text = ?, edited = 1 "
-                "WHERE protocol = ? AND contact_number = ? "
-                "AND (msg_id = ? OR (? = 'signal' AND msg_id IS NULL "
-                "AND timestamp = CAST(? AS INTEGER)))",
-                (
-                    new_text,
-                    protocol,
-                    contact_id,
-                    message_id,
-                    protocol,
-                    message_id,
-                ),
-            )
-            connection.commit()
-            return cursor.rowcount
-        finally:
-            connection.close()
-
-
-def _aggregate_reactions(
-    message_rows: list[sqlite3.Row], reaction_rows: list[dict[str, Any]]
-) -> dict[int, list[dict[str, Any]]]:
-    """Aggregate persisted reactions for each matching message row."""
-    result: dict[int, list[dict[str, Any]]] = {}
-    for message_row in message_rows:
-        message_timestamp = int(message_row["timestamp"])
-        message_ids = {str(message_timestamp)}
-        if message_row["msg_id"] is not None:
-            message_ids.add(str(message_row["msg_id"]))
-
-        grouped: dict[str, dict[str, Any]] = {}
-        for reaction_row in reaction_rows:
-            target_msg_id = reaction_row.get("target_msg_id")
-            matches_id = target_msg_id is not None and str(target_msg_id) in message_ids
-            matches_timestamp = (
-                reaction_row.get("target_timestamp") == message_timestamp
-            )
-            if not matches_id and not matches_timestamp:
-                continue
-
-            emoji = str(reaction_row["emoji"])
-            reaction_timestamp = int(reaction_row["timestamp"])
-            aggregate = grouped.setdefault(
-                emoji,
-                {
-                    "emoji": emoji,
-                    "count": 0,
-                    "is_mine": False,
-                    "authors": set(),
-                    "first_timestamp": reaction_timestamp,
-                },
-            )
-            aggregate["count"] += int(reaction_row.get("count") or 0)
-            aggregate["is_mine"] = aggregate["is_mine"] or bool(
-                reaction_row.get("is_mine")
-            )
-            author = str(reaction_row.get("author") or "").strip()
-            if author:
-                aggregate["authors"].add(author)
-            aggregate["first_timestamp"] = min(
-                aggregate["first_timestamp"], reaction_timestamp
-            )
-
-        if grouped:
-            ordered = sorted(
-                grouped.values(),
-                key=lambda item: (-item["count"], item["first_timestamp"]),
-            )
-            result[int(message_row["id"])] = [
-                {
-                    "emoji": item["emoji"],
-                    "count": item["count"],
-                    "is_mine": item["is_mine"],
-                    "authors": sorted(item["authors"]),
-                }
-                for item in ordered
-            ]
-    return result
-
-
-def _row_message_identity(row: sqlite3.Row) -> dict[str, Any]:
-    """Normalizza un row SQLite nella forma attesa da ``_cross_key_message_equivalent``.
-
-    Il rowid ``id`` (chiave di ordinamento) NON è l'identità del messaggio:
-    l'identità cross-key è ``msg_id`` ed è mappata sul campo ``id``.
-    """
-    return {
-        "id": row["msg_id"],
-        "is_mine": row["is_mine"],
-        "text": row["text"],
-        "timestamp": row["timestamp"],
-        "msg_type": row["msg_type"],
-        "attachment_id": row["attachment_id"],
-    }
-
-
-def _cross_key_dedup_rows(rows: list[sqlite3.Row], canonical: str) -> list[sqlite3.Row]:
-    """Dedup read-union cross-key (due passate, regola condivisa in ``models``).
-
-    Tiene integre le righe della chiave canonica; per le alias scarta i twin
-    equivalenti (stesso ``msg_id``, attachment a parte, oppure tupla esatta).
-    La dedup per chiave avviene DOPO aver raccolto tutte le canoniche, così
-    un'alias con rowid minore del twin canonico non genera un duplicato.
-    """
-    kept = dedup_cross_key(
-        rows,
-        canonical_key=canonical,
-        key_of=lambda row: row["contact_number"],
-        normalize=_row_message_identity,
-    )
-    kept.sort(key=lambda r: (int(r["timestamp"]), int(r["id"])))
-    return kept
-
-
-def _real_caption(
-    text: str | None,
-    *,
-    attachment_id: str | None,
-    media_filename: str | None,
-) -> str | None:
-    """Classifica il testo di una riga come caption reale, o ``None``.
-
-    Unica fonte di verità per la dedup intra-chiave web: scarta il vuoto,
-    l'identità media sintetica WhatsApp (``"Media: <id>"``, ``attachment_id``
-    in modalità non restrittiva come il resto del layer web) e il duplicato
-    dell'identità (testo uguale al filename del media).  Tutto il resto è una
-    caption reale.  È l'unica eccezione al ``text`` immutabile del merge.
-    """
-    stripped = (text or "").strip()
-    if not stripped:
-        return None
-    if is_whatsapp_synthetic_media_text(stripped, attachment_id=attachment_id):
-        return None
-    if media_filename and is_duplicate_media_identity(stripped, media_filename):
-        return None
-    return stripped
-
-
-def _basename(attachment_id: str | None) -> str:
-    """Basename di un ``attachment_id``/URL senza query string né fragment."""
-    return Path(str(attachment_id or "").split("?", 1)[0].split("#", 1)[0]).name
-
-
-def _dedup_intra_key_rows(
-    rows: list[sqlite3.Row],
-) -> list[sqlite3.Row | dict[str, Any]]:
-    """Dedup intra-chiave col merge condiviso di ``models``.
-
-    Il gruppo fisico è ``(msg_id, attachment-compat, is_mine)``: stesso
-    ``msg_id`` non vuoto, stesso ``is_mine`` e stesso ``attachment_id`` (OPPURE
-    uno dei due assente).  Id uguale con due ``attachment_id`` distinti ed
-    entrambi non vuoti sono allegati diversi (multi-allegato/batch) e restano
-    separati; un ``is_mine`` diverso non è MAI fuso (R5).
-
-    Flow unificata per media e no-media.  Il survivor è scelto con
-    ``pick_survivor_and_merge(..., prefer_attachment=has_media)`` (l'allegato,
-    se presente, non viene mai scartato).  Le caption reali del gruppo sono
-    classificate da ``_real_caption``: se ne emergono >=2 distinte il gruppo NON
-    viene fuso (anti-perdita, nessun "first-wins"); se ne emerge esattamente una
-    e il survivor non la porta, viene trasferita sul suo ``text`` (unica
-    eccezione all'immutabilità del text).  ``attachment_id``, ``msg_id``,
-    ``batch_id``, ``batch_index``, ``is_mine``, ``read`` e ``id`` restano SEMPRE
-    dal survivor.
-
-    Per ogni gruppo fuso survivor e merge sono calcolati da
-    ``models.pick_survivor_and_merge`` (status rank, ts reale, rowid; fill senza
-    sovrascrittura, sender display, ``edited=max``); le righe singole restano
-    l'oggetto originale.  In uscita l'ordine è ri-normalizzato su
-    ``(timestamp, id)``.
-
-    Nota reazioni (follow-up non bloccante): ``_aggregate_reactions`` aggancia
-    le reazioni per rowid DOPO questa dedup, quindi una reazione registrata solo
-    su ``target_timestamp`` del twin (id assente) non sopravvive.  Le reazioni
-    con ``target_msg_id`` restano corrette perché il survivor condivide l'id.
-    """
-    groups: list[dict[str, Any]] = []
-    for row in rows:
-        msg_id = row["msg_id"]
-        if not msg_id:
-            groups.append({"rows": [row], "attachments": set()})
+    attachments: list[AttachmentIn] = []
+    store = len(upload_files) <= MAX_ATTACHMENTS
+    rejected = False
+    total_stored_bytes = 0
+    for upload_file in upload_files:
+        if not hasattr(upload_file, "read"):
+            attachments.append(AttachmentIn())
             continue
-        attachment_id = row["attachment_id"]
-        is_mine = bool(row["is_mine"])
-        target = None
-        for group in groups:
-            if group.get("msg_id") != msg_id or group.get("is_mine") != is_mine:
-                continue
-            attachments = group["attachments"]
-            if not attachment_id or not attachments or attachment_id in attachments:
-                # Stesso allegato OPPURE uno dei due assente: compatibili.
-                target = group
-                break
-        if target is None:
-            target = {
-                "msg_id": msg_id,
-                "is_mine": is_mine,
-                "rows": [],
-                "attachments": set(),
-            }
-            groups.append(target)
-        target["rows"].append(row)
-        if attachment_id:
-            target["attachments"].add(attachment_id)
-
-    merged: list[sqlite3.Row | dict[str, Any]] = []
-    for group in groups:
-        group_rows = group["rows"]
-        if len(group_rows) < 2:
-            merged.extend(group_rows)
+        if not store:
+            attachments.append(AttachmentIn())
             continue
-
-        has_media = any(row["attachment_id"] for row in group_rows)
-        survivor_index, overrides = pick_survivor_and_merge(
-            group_rows, prefer_attachment=has_media
-        )
-        survivor = dict(group_rows[survivor_index])
-        survivor.update(overrides)
-
-        attachment_id = survivor["attachment_id"]
-        media_filename = (
-            (survivor["attachment_info"] or _basename(attachment_id))
-            if attachment_id
-            else None
-        )
-
-        captions = {
-            caption
-            for row in group_rows
-            if (
-                caption := _real_caption(
-                    row["text"],
-                    attachment_id=attachment_id,
-                    media_filename=media_filename,
-                )
-            )
-            is not None
-        }
-
-        if len(captions) > 1:
-            # Due caption reali distinte: due messaggi, nessuna fusione.
-            merged.extend(group_rows)
-            continue
-
-        if (
-            captions
-            and _real_caption(
-                survivor["text"],
-                attachment_id=attachment_id,
-                media_filename=media_filename,
-            )
-            is None
-        ):
-            survivor["text"] = next(iter(captions))
-
-        merged.append(survivor)
-
-    merged.sort(key=lambda row: (int(row["timestamp"] or 0), int(row["id"] or 0)))
-    return merged
-
-
-def _messages(
-    protocol: str,
-    contact_id: str,
-    extra_keys: tuple[str, ...] = (),
-    *,
-    limit: int | None = None,
-    since: int | None = None,
-) -> list[dict[str, Any]]:
-    """Messages of a chat, oldest first.
-
-    ``since`` keeps only messages with ``timestamp >= since`` (the web cache's
-    delta sync); ``limit`` keeps only the newest ``limit`` messages.
-    """
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK, _reactions_for_contact
-
-    keys = [contact_id, *(key for key in extra_keys if key)]
-    placeholders = ", ".join("?" for _ in keys)
-    where_since = "AND timestamp >= ? " if since is not None else ""
-    params: tuple[Any, ...] = (protocol, *keys) + (
-        (since,) if since is not None else ()
-    )
-    if limit is not None:
-        # Newest first in SQL, with slack for the rows the dedup drops; the
-        # result is put back in chronological order and trimmed below.
-        order = "ORDER BY timestamp DESC, id DESC LIMIT ?"
-        params = (*params, limit + _MESSAGES_LIMIT_SLACK)
-    else:
-        order = "ORDER BY timestamp, id"
-    with _DB_LOCK:
-        try:
-            connection = sqlite3.connect(backend.DB_FILE)
-            connection.row_factory = sqlite3.Row
-            try:
-                rows = connection.execute(
-                    "SELECT id, msg_id, text, is_mine, timestamp, contact_number, "
-                    "sender, attachment_id, attachment_info, content_type, media_kind, "
-                    "protocol, msg_type, "
-                    "quote_text, quote_timestamp, quote_author, quote_attachment_id, "
-                    "quote_content_type, quote_attachment_path, status, edited, read, "
-                    "reply_to_message_id, batch_id, batch_index "
-                    f"FROM messages WHERE protocol = ? "
-                    f"AND contact_number IN ({placeholders}) "
-                    f"{where_since}{order}",
-                    params,
-                ).fetchall()
-            finally:
-                connection.close()
-        except sqlite3.Error:
-            return []
-        if limit is not None:
-            rows.reverse()
-        if len(keys) > 1:
-            rows = _cross_key_dedup_rows(rows, contact_id)
-        rows = _dedup_intra_key_rows(rows)
-        if limit is not None:
-            rows = rows[-limit:]
-
-    messages = []
-    for row in rows:
-        attachment = None
-        text = row["text"] or ""
-        suppress_attachment_info_caption = False
-        if row["attachment_id"]:
-            attachment_id = row["attachment_id"]
-            attachment_name = attachment_display_name(
-                row["attachment_info"], attachment_id
-            )
-            attachment = {
-                "attachment_id": attachment_id,
-                "name": attachment_name,
-                "type": (
-                    row["content_type"]
-                    or ("image/*" if row["msg_type"] == "image" else None)
-                    or _infer_attachment_type(attachment_id, None)
-                ),
-                "media_kind": row["media_kind"],
-            }
-            logger.debug(
-                "web messages proto=%s id=%s attachment_id=%s content_type=%s type=%s",
-                row["protocol"],
-                row["msg_id"] or str(row["id"]),
-                attachment_id,
-                row["content_type"],
-                attachment["type"],
-            )
-            if (
-                row["msg_type"] == "image"
-                or (attachment["type"] or "").lower().startswith("image/")
-            ) and text:
-                # Caption: mantieni solo se reale; azzera placeholder media,
-                # nome file e URL media WA ("Media: http://...").
-                from models import is_media_quote_placeholder
-
-                stripped = text.strip()
-                info = str(row["attachment_info"] or "").strip()
-                prefixed_info = bool(
-                    info
-                    and any(
-                        stripped.casefold() == f"{label}: {info}".casefold()
-                        for label in (
-                            "immagine",
-                            "image",
-                            "media",
-                            "video",
-                            "audio",
-                            "file",
-                        )
-                    )
-                )
-                if (
-                    stripped == info
-                    or is_media_quote_placeholder(text)
-                    or prefixed_info
-                    or (
-                        protocol == "whatsapp"
-                        and _is_whatsapp_synthetic_text(text, row["attachment_id"])
-                    )
-                ):
-                    text = ""
-            elif text and (
-                str(row["media_kind"] or "").strip().lower()
-                in {"video", "audio", "document", "sticker", "voice"}
-                or str(row["msg_type"] or "").strip().lower()
-                in {"attachment", "video", "audio", "document", "sticker", "voice"}
-            ):
-                from models import is_media_quote_placeholder
-
-                stripped = text.strip()
-                info = str(row["attachment_info"] or "").strip()
-                prefixed_info = bool(info and stripped.startswith(f"{info}:"))
-                if (
-                    is_media_quote_placeholder(text)
-                    or prefixed_info
-                    or (
-                        protocol == "whatsapp"
-                        and _is_whatsapp_synthetic_text(text, row["attachment_id"])
-                    )
-                ):
-                    text = ""
-                    suppress_attachment_info_caption = prefixed_info
-            elif protocol == "whatsapp" and text:
-                from models import is_media_quote_placeholder
-
-                if is_media_quote_placeholder(text) or _is_whatsapp_synthetic_text(
-                    text, row["attachment_id"]
-                ):
-                    text = ""
-            if (
-                not text
-                and row["attachment_info"]
-                and not suppress_attachment_info_caption
-            ):
-                # Caption in attachment_info (es. invii WhatsApp che salvano la
-                # caption qui, col text = URL media): usala se non è un nome file.
-                info = str(row["attachment_info"] or "").strip()
-                file_name = Path(str(row["attachment_id"] or "")).name
-                if is_caption_like(info) and info != file_name:
-                    text = info
-        direction = "out" if row["is_mine"] else "in"
-        messages.append(
-            {
-                "id": row["msg_id"] or str(row["id"]),
-                "text": text,
-                "direction": direction,
-                "sender": row["sender"] or "",
-                "timestamp": row["timestamp"],
-                "attachment": attachment,
-                "quote_text": row["quote_text"],
-                "quote_timestamp": row["quote_timestamp"],
-                "quote_author": row["quote_author"],
-                "quote_attachment_id": row["quote_attachment_id"],
-                "quote_content_type": row["quote_content_type"],
-                "quote_thumb_url": _quote_thumb_url(row),
-                "quote_media_placeholder": _quote_media_placeholder(row["quote_text"]),
-                "status": (row["status"] or "sent") if direction == "out" else None,
-                "read": bool(row["read"]),
-                "edited": bool(row["edited"]),
-                "edit_id": _message_edit_id(row),
-                "batch_id": row["batch_id"],
-                "batch_index": row["batch_index"],
-            }
-        )
-        if row["msg_type"] == MSG_TYPE_SYSTEM:
-            # Avviso di servizio (es. codice di sicurezza WhatsApp cambiato):
-            # il client lo mostra centrato, fuori dalle bolle.
-            messages[-1]["system"] = True
-
-    # Le reazioni restano single-key (scelta di design): la read-union
-    # cross-key copre i messaggi, non l'aggregazione reazioni.
-    reactions_by_message = _aggregate_reactions(
-        rows, _reactions_for_contact(protocol, contact_id)
-    )
-    for row, message in zip(rows, messages):
-        reactions = reactions_by_message.get(int(row["id"]))
-        if reactions:
-            message["reactions"] = reactions
-    return messages
-
-
-def _telegram_reaction_snapshot(
-    contact_id: str, message_id: str, reaction_emoji: str
-) -> list[dict[str, Any]]:
-    message = next(
-        (
-            item
-            for item in _messages("telegram", contact_id)
-            if str(item["id"]) == message_id
-        ),
-        {},
-    )
-    snapshot: list[dict[str, Any]] = []
-    for reaction in message.get("reactions", []):
-        count = int(reaction.get("count") or 0)
-        authors = [
-            author
-            for author in reaction.get("authors", [])
-            if author not in {"You", "Tu"}
-        ]
-        if reaction.get("is_mine"):
-            count -= 1
-        if count > 0:
-            snapshot.append(
-                {
-                    "emoji": str(reaction.get("emoji") or ""),
-                    "count": count,
-                    "is_mine": False,
-                    "authors": authors,
-                }
-            )
-
-    selected = next(
-        (item for item in snapshot if item["emoji"] == reaction_emoji), None
-    )
-    if selected is None:
-        selected = {
-            "emoji": reaction_emoji,
-            "count": 0,
-            "is_mine": False,
-            "authors": [],
-        }
-        snapshot.append(selected)
-    selected["count"] += 1
-    selected["is_mine"] = True
-    selected["authors"].append("You")
-    return snapshot
-
-
-def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
-    """URL miniatura della quote, calcolato dal server (cascata).
-
-    1. ``quote_attachment_path`` sotto ``CACHE_DIR/quote-thumbs`` (thumb
-       estratta) → ``/api/quote-media`` (endpoint dedicato anti-traversal);
-    2. ``quote_attachment_path`` esistente e immagine/video (anche sotto la media
-       root del protocollo, es. allegato originale Signal/Telegram/WhatsApp)
-       → ``/api/media`` con il path;
-    3. ``quote_attachment_id`` + content type media (o estensione nota per
-       quote legacy senza content_type) → ``/api/media`` con l'id;
-    altrimenti ``None`` (nessuna miniatura: placeholder testuale).
-    """
-    proto = str(row["protocol"])
-    from protocols.db import CACHE_DIR
-
-    thumbs_root = (Path(CACHE_DIR) / "quote-thumbs").resolve()
-    image_extensions = (".jpg", ".jpeg", ".png", ".gif", ".webp")
-
-    def _media_url(value: str) -> str:
-        encoded = "/".join(url_quote(segment, safe="") for segment in value.split("/"))
-        return f"/api/media/{proto}/{encoded}?w=96"
-
-    path = row["quote_attachment_path"]
-    if path:
-        resolved = Path(path).resolve()
-        if resolved.parent == thumbs_root:
-            return f"/api/quote-media/{proto}/{row['id']}?w=96"
-        content_type = (row["quote_content_type"] or "").lower()
-        is_image = content_type.startswith("image/") or str(path).lower().endswith(
-            image_extensions
-        )
-        is_video = content_type.startswith("video/") or resolved.suffix.lower() in (
-            _VIDEO_EXTENSIONS
-        )
-        if (is_image or is_video) and resolved.is_file():
-            return _media_url(str(path))
-    quote_attachment_id = row["quote_attachment_id"]
-    quote_content_type = (row["quote_content_type"] or "").lower()
-    is_image = quote_content_type.startswith("image/") or (
-        not quote_content_type
-        and str(quote_attachment_id).lower().endswith(image_extensions)
-    )
-    is_video = quote_content_type.startswith("video/") or (
-        not quote_content_type
-        and Path(str(quote_attachment_id)).suffix.lower() in _VIDEO_EXTENSIONS
-    )
-    if quote_attachment_id and (is_image or is_video):
-        return _media_url(str(quote_attachment_id))
-    # 4. Fallback (reply inviate senza metadati quote persistiti): risolvi
-    # il media quotato dalla stessa chat tramite quote_timestamp e usa il
-    # suo attachment_id (il backend non persiste i metadati all'invio).
-    quote_text = str(row["quote_text"] or "").lower()
-    has_video_name = any(
-        re.search(rf"{re.escape(extension)}\b", quote_text)
-        for extension in _VIDEO_EXTENSIONS
-    )
-    has_image_name = bool(re.search(r"\.(?:jpe?g|png|gif|webp)\b", quote_text))
-    media_kind = (
-        "video"
-        if quote_content_type.startswith("video/")
-        or has_video_name
-        or "🎬" in quote_text
-        else "image"
-        if quote_content_type.startswith("image/")
-        or has_image_name
-        or "🖼️" in quote_text
-        else None
-    )
-    quoted = _quoted_media_attachment_id(
-        proto, str(row["contact_number"]), row["quote_timestamp"], media_kind
-    )
-    if not quoted and media_kind in {"image", "video"}:
-        # 5. Fallback per nome file: la quote testuale cita il file (es.
-        # "IMG_1303.jpg — 🖼️ Immagine"); lo cerchiamo tra gli allegati della
-        # chat quando il timestamp quotato non è stato persistito dal backend.
-        quoted = _quoted_media_by_filename(
-            proto,
-            str(row["contact_number"]),
-            row["quote_text"],
-            row["timestamp"],
-            media_kind,
-        )
-    if not quoted:
-        # 6. Fallback per id messaggio quotato (Telegram/WhatsApp persistono
-        # reply_to_message_id ma non sempre il timestamp quotato né l'allegato).
-        quoted = _quoted_media_by_message_id(
-            proto,
-            str(row["contact_number"]),
-            row["reply_to_message_id"],
-            media_kind,
-        )
-    if quoted:
-        return _media_url(quoted)
-    return None
-
-
-def _quoted_media_clause(kind: Literal["image", "video"] | None) -> str:
-    image = (
-        "content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-        "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-        "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp'"
-    )
-    video = "content_type LIKE 'video/%' OR " + " OR ".join(
-        f"lower(attachment_id) LIKE '%{extension}'"
-        for extension in sorted(_VIDEO_EXTENSIONS)
-    )
-    if kind == "image":
-        return f"AND ({image})"
-    if kind == "video":
-        return f"AND ({video})"
-    return f"AND ({image} OR {video})"
-
-
-def _quoted_media_attachment_id(
-    proto: str,
-    contact_number: str,
-    quote_ts: Any,
-    kind: Literal["image", "video"] | None = None,
-) -> str | None:
-    """Attachment id del media quotato (stessa chat).
-
-    Match PRIMA esatto sul timestamp: evita falsi positivi quando messaggi
-    vicini (±2s) convivono (es. un'immagine appena inviata e la reply).
-    La finestra ±2s viene usata solo se il timestamp esatto non esiste affatto
-    (drift del protocollo).
-    """
-    if not quote_ts:
-        return None
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    media_clause = _quoted_media_clause(kind)
-    try:
-        with _DB_LOCK:
-            connection = sqlite3.connect(backend.DB_FILE)
-            try:
-                row = connection.execute(
-                    "SELECT attachment_id FROM messages "
-                    "WHERE protocol = ? AND contact_number = ? "
-                    "AND timestamp = ? AND attachment_id IS NOT NULL "
-                    + media_clause
-                    + " LIMIT 1",
-                    (proto, contact_number, quote_ts),
-                ).fetchone()
-                if row is None:
-                    exists = connection.execute(
-                        "SELECT 1 FROM messages WHERE protocol = ? AND contact_number = ? "
-                        "AND timestamp = ? LIMIT 1",
-                        (proto, contact_number, quote_ts),
-                    ).fetchone()
-                    if exists:
-                        # Il messaggio quotato esiste ma non è un media compatibile:
-                        # niente miniatura (mai prendere messaggi vicini).
-                        return None
-                    row = connection.execute(
-                        "SELECT attachment_id FROM messages "
-                        "WHERE protocol = ? AND contact_number = ? "
-                        "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
-                        + media_clause
-                        + " ORDER BY ABS(timestamp - ?) LIMIT 1",
-                        (proto, contact_number, quote_ts, quote_ts),
-                    ).fetchone()
-            finally:
-                connection.close()
-    except sqlite3.Error:
-        return None
-    if row is None or not row[0]:
-        return None
-    return str(row[0])
-
-
-def _quoted_media_by_filename(
-    proto: str,
-    contact_number: str,
-    quote_text: Any,
-    quoter_ts: Any,
-    kind: Literal["image", "video"] | None = None,
-) -> str | None:
-    """Attachment id del media quotato, risolto per nome file nella quote.
-
-    Usato quando il backend non ha persistito ``quote_timestamp`` né metadati
-    dell'allegato quotato (es. quote Signal a un'immagine): la ``quote_text``
-    contiene il nome del file (``IMG_1303.jpg — 🖼️ Immagine``) che troviamo
-    tra gli allegati della stessa chat, scegliendo quello più vicino temporalmente
-    (solo prima del messaggio quotante, per non citare messaggi futuri).
-    """
-    if not quote_text:
-        return None
-    image_pattern = r"jpe?g|png|gif|webp"
-    video_pattern = "|".join(
-        extension.removeprefix(".") for extension in sorted(_VIDEO_EXTENSIONS)
-    )
-    extension_pattern = (
-        image_pattern
-        if kind == "image"
-        else video_pattern
-        if kind == "video"
-        else f"{image_pattern}|{video_pattern}"
-    )
-    match = re.search(
-        rf"([A-Za-z0-9][\w.\- ]*\.(?:{extension_pattern}))\b",
-        str(quote_text),
-        re.IGNORECASE,
-    )
-    if not match:
-        return None
-    filename = match.group(1).strip()
-    if not filename or not quoter_ts:
-        return None
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    media_clause = _quoted_media_clause(kind)
-    try:
-        with _DB_LOCK:
-            connection = sqlite3.connect(backend.DB_FILE)
-            try:
-                rows = connection.execute(
-                    "SELECT attachment_id, timestamp FROM messages "
-                    "WHERE protocol = ? AND contact_number = ? "
-                    "AND attachment_id IS NOT NULL AND timestamp < ? "
-                    "AND (attachment_info LIKE ? OR attachment_id LIKE ?) "
-                    + media_clause
-                    + " "
-                    "ORDER BY timestamp DESC LIMIT 5",
-                    (
-                        proto,
-                        contact_number,
-                        int(quoter_ts),
-                        f"%{filename}%",
-                        f"%{filename}%",
-                    ),
-                ).fetchall()
-            finally:
-                connection.close()
-    except sqlite3.Error:
-        return None
-    if not rows:
-        return None
-    # Più match: preferisci il più vicino al messaggio quotante.
-    best = min(
-        rows,
-        key=lambda r: abs(int(r[1]) - int(quoter_ts)),
-    )
-    return str(best[0])
-
-
-def _quoted_media_by_message_id(
-    proto: str,
-    contact_number: str,
-    reply_to_message_id: Any,
-    kind: Literal["image", "video"] | None = None,
-) -> str | None:
-    """Attachment id del media quotato per ``msg_id``.
-
-    Telegram/WhatsApp persistono ``reply_to_message_id`` (= id del messaggio
-    quotato, colonna ``msg_id``) ma non sempre il timestamp quotato: il match
-    per id è preciso e copre anche i target non in cache all'arrivo.
-    """
-    if not reply_to_message_id:
-        return None
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    media_clause = _quoted_media_clause(kind)
-    try:
-        with _DB_LOCK:
-            connection = sqlite3.connect(backend.DB_FILE)
-            try:
-                row = connection.execute(
-                    "SELECT attachment_id FROM messages "
-                    "WHERE protocol = ? AND contact_number = ? "
-                    "AND attachment_id IS NOT NULL "
-                    "AND (msg_id = ? OR msg_id LIKE '%_' || ?) "
-                    + media_clause
-                    + " LIMIT 1",
-                    (
-                        proto,
-                        contact_number,
-                        str(reply_to_message_id),
-                        str(reply_to_message_id),
-                    ),
-                ).fetchone()
-            finally:
-                connection.close()
-    except sqlite3.Error:
-        return None
-    if row is None or not row[0]:
-        return None
-    return str(row[0])
-
-
-def _quote_media_placeholder(text: Any) -> bool:
-    """True se ``text`` è un placeholder media tipizzato (o forma composta).
-
-    Riusa il predicato della TUI così la web UI nasconde il placeholder quando
-    la miniatura lo sostituisce (una caption reale resta visibile).
-    """
-    return is_media_quote_placeholder_composite(str(text or ""))
-
-
-def _allowed_media_root(manager: Any, proto: str) -> Path:
-    from protocols.db import CACHE_DIR
-    from protocols.rpc import SIGNAL_CLI_ATTACHMENTS_DIR
-
-    if proto == "signal":
-        return Path(SIGNAL_CLI_ATTACHMENTS_DIR).resolve()
-    if proto == "whatsapp":
-        instance = manager.get(proto)
-        if instance is not None and hasattr(instance, "_ensure_media_dir"):
-            return instance._ensure_media_dir().resolve()
-        return (CACHE_DIR / "whatsapp-media").resolve()
-    if proto == "telegram":
-        try:
-            from protocols.telegram import _media_dir
-
-            return _media_dir().resolve()
-        except ImportError:
-            return (Path(tempfile.gettempdir()) / "telegram-media").resolve()
-    raise ValueError(f"Unsupported protocol: {proto}")
-
-
-def _web_thumb_dir(proto: str) -> Path:
-    cache_home = Path(
-        os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")
-    ).expanduser()
-    return cache_home / "signal-tui-client" / "web-thumbs" / proto
-
-
-def _attachment_content_type(proto: str, attachment_id: str) -> str | None:
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    with _DB_LOCK:
-        try:
-            connection = sqlite3.connect(backend.DB_FILE)
-            try:
-                row = connection.execute(
-                    "SELECT content_type, msg_type FROM messages "
-                    "WHERE protocol = ? AND attachment_id = ? "
-                    "ORDER BY id DESC LIMIT 1",
-                    (proto, attachment_id),
-                ).fetchone()
-            finally:
-                connection.close()
-        except sqlite3.Error:
-            return None
-    if not row:
-        return None
-    return row[0] or ("image/*" if row[1] == "image" else None)
-
-
-def _attachment_media_kind(proto: str, attachment_id: str) -> str | None:
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    with _DB_LOCK:
-        try:
-            connection = sqlite3.connect(backend.DB_FILE)
-            try:
-                row = connection.execute(
-                    "SELECT media_kind FROM messages "
-                    "WHERE protocol = ? AND attachment_id = ? "
-                    "ORDER BY id DESC LIMIT 1",
-                    (proto, attachment_id),
-                ).fetchone()
-            finally:
-                connection.close()
-        except sqlite3.Error:
-            return None
-    if not row:
-        return None
-    return row[0]
-
-
-def _attachment_version(
-    manager, proto: str, root: Path, attachment_id: str
-) -> str | None:
-    """Versione cache-busting ('mtime_ns-size') dell'allegato già su disco.
-
-    Solo fast-path locale (mai lazy download). root è pre-risolta una volta per
-    richiesta. Ogni candidate è resolve()+is_relative_to(root)+is_file() prima
-    dello stat: nessun leak di mtime/size di file arbitrari (traversal/symlink
-    fuori root -> None).
-    """
-    if not attachment_id:
-        return None
-    bare = attachment_id.split("?", 1)[0]
-    name = Path(bare).name or bare
-    if proto == "signal":
-        candidates = (root / name, root / bare)
-    elif proto == "whatsapp":
-        candidates = (root / name,)
-    elif proto == "telegram":
-        candidates = (Path(bare), root / name)
-    else:
-        return None
-    root_resolved = root.resolve()
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve()
-        except (OSError, ValueError):
-            continue
-        if not resolved.is_relative_to(root_resolved):
+        if rejected:
+            attachments.append(AttachmentIn(rejected="too_large"))
             continue
         try:
-            st = resolved.stat()
-        except OSError:
+            # The request-wide byte cap is enforced WHILE each file is stored
+            # (each file gets the remaining budget), so a chunked request
+            # cannot write far beyond _MAX_TOTAL_BYTES before being rejected.
+            temp_upload = await store_temp_upload(
+                upload_file,
+                max_bytes=uploads_module._MAX_TOTAL_BYTES - total_stored_bytes,
+            )
+        except UploadValidationError:
+            rejected = True
+            attachments.append(AttachmentIn(rejected="too_large"))
             continue
-        if resolved.is_file() and st.st_size >= 0:
-            return f"{st.st_mtime_ns}-{st.st_size}"
-    return None
-
-
-def _attach_media_versions(manager, proto: str, messages: list[dict[str, Any]]) -> None:
-    """Arricchisce attachment['version'] per il cache-busting; best-effort.
-
-    root risolta una sola volta. Qualunque errore (incluso OSError/PermissionError
-    dal mkdir di _ensure_media_dir per WhatsApp) degrada silenziosamente a
-    'nessuna version': la lista messaggi non deve mai fallire per un cache-buster.
-    """
-    try:
-        root = _allowed_media_root(manager, proto)
-    except Exception:  # noqa: BLE001 — funzionalità accessoria, mai 500
-        return
-    memo: dict[str, str | None] = {}
-    for message in messages:
-        att = message.get("attachment")
-        if not att or not att.get("attachment_id"):
-            continue
-        att_id = att["attachment_id"]
-        if att_id not in memo:
-            try:
-                memo[att_id] = _attachment_version(manager, proto, root, att_id)
-            except Exception:  # noqa: BLE001
-                memo[att_id] = None
-        version = memo[att_id]
-        if version:
-            att["version"] = version
-
-
-def _is_thumbnail_candidate(path: Path, proto: str, attachment_id: str) -> bool:
-    content_type = (_attachment_content_type(proto, attachment_id) or "").lower()
-    suffix = path.suffix.lower()
-    is_image = content_type.startswith("image/") or suffix in _IMAGE_EXTENSIONS
-    return (
-        is_image
-        and suffix not in {".gif", ".heic", ".heif"}
-        and content_type
-        not in {
-            "image/gif",
-            "image/heic",
-            "image/heif",
-        }
-    )
-
-
-def _is_video_candidate(path: Path, proto: str, attachment_id: str) -> bool:
-    content_type = (_attachment_content_type(proto, attachment_id) or "").lower()
-    # Un audio (es. voice webm/m4a) non deve mai passare per la pipeline
-    # thumbnail video, anche quando l'estensione `.webm` è nella lista video.
-    if content_type.startswith("audio/"):
-        return False
-    if not content_type and _attachment_media_kind(proto, attachment_id) == "audio":
-        return False
-    return content_type.startswith("video/") or path.suffix.lower() in _VIDEO_EXTENSIONS
-
-
-def _thumb_lock(path: Path) -> threading.Lock:
-    with _THUMB_LOCKS_GUARD:
-        return _THUMB_LOCKS.setdefault(path, threading.Lock())
-
-
-def _prune_thumb_cache(cache_root: Path) -> None:
-    try:
-        files = [path for path in cache_root.rglob("*.jpg") if path.is_file()]
-        entries = sorted(
-            ((path.stat().st_mtime_ns, path.stat().st_size, path) for path in files),
-            reverse=True,
+        stored.append(temp_upload)
+        total_stored_bytes += temp_upload.size
+        attachments.append(
+            AttachmentIn(
+                path=str(temp_upload.path),
+                filename=temp_upload.filename,
+                content_type=temp_upload.content_type,
+            )
         )
-        total = sum(size for _, size, _ in entries)
-        for _, size, path in reversed(entries):
-            if total <= _THUMB_CACHE_LIMIT:
-                break
-            path.unlink(missing_ok=True)
-            total -= size
-    except OSError:
-        logger.debug("Unable to prune web thumbnail cache", exc_info=True)
-
-
-def _thumbnail(path: Path, proto: str, attachment_id: str, width: int) -> Path | None:
-    if not _is_thumbnail_candidate(path, proto, attachment_id):
-        return None
-
-    from PIL import Image
-
-    thumb_dir = _web_thumb_dir(proto)
-    stat = path.stat()
-    # La size entra nel digest: un overwrite che preserva mtime_ns ma cambia i
-    # byte deve invalidare la thumbnail già su disco (coerente col token client
-    # 'mtime_ns-size').
-    digest = hashlib.sha1(
-        f"{path}|{stat.st_mtime_ns}|{stat.st_size}|{width}".encode(),
-        usedforsecurity=False,
-    ).hexdigest()
-    thumb = thumb_dir / f"{digest}.jpg"
-    with _thumb_lock(thumb):
-        if thumb.exists():
-            try:
-                thumb.touch()
-            except OSError:
-                pass
-            return thumb
-        tmp = thumb.with_suffix(".tmp")
-        try:
-            thumb_dir.mkdir(parents=True, exist_ok=True)
-            with Image.open(path) as image:
-                if image.format == "GIF" or (
-                    image.format == "WEBP" and getattr(image, "is_animated", False)
-                ):
-                    return None
-                image.draft("RGB", (width, width))
-                with image.convert("RGB") as converted:
-                    converted.thumbnail((width, width), Image.BILINEAR)
-                    converted.save(tmp, "JPEG", quality=78, optimize=True)
-            tmp.replace(thumb)
-            _prune_thumb_cache(thumb_dir.parent)
-            return thumb
-        except (OSError, ValueError):
-            tmp.unlink(missing_ok=True)
-            logger.debug("Unable to generate web thumbnail for %s", path, exc_info=True)
-            return None
-
-
-def _quoted_sender(proto: str, contact_id: str, quote_ts: Any) -> str | None:
-    """Sender del messaggio quotato nella stessa chat (match esatto su timestamp)."""
-    if not quote_ts:
-        return None
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    try:
-        with _DB_LOCK:
-            connection = sqlite3.connect(backend.DB_FILE)
-            try:
-                row = connection.execute(
-                    "SELECT sender FROM messages "
-                    "WHERE protocol = ? AND contact_number = ? AND timestamp = ? "
-                    "LIMIT 1",
-                    (proto, contact_id, quote_ts),
-                ).fetchone()
-            finally:
-                connection.close()
-    except sqlite3.Error:
-        return None
-    if row is None or not row[0]:
-        return None
-    return str(row[0])
-
-
-def _group_sender_resolver(manager: Any, proto: str):
-    """Risolvi il sender (JID/numero) al nome della rubrica, come la TUI.
-
-    Mappa una volta la rubrica aggregata (id/phone/lid → display_name), poi per
-    ogni sender: nome diretto, @lid→nome (alias rubrica), @lid→phone cache del
-    backend → nome, @lid/numero locale → nome, @c.us → numero → nome.  Il
-    fallback resta un numero leggibile (mai il JID grezzo con ``@lid``/``@c.us``).
-    """
-    phone_to_name: dict[str, str] = {}
-    id_to_name: dict[str, str] = {}
-    lid_to_name: dict[str, str] = {}
-    try:
-        book = manager.list_address_book_sync(protocols={proto}, force=False)
-    except Exception:  # noqa: BLE001 — rubrica best-effort
-        book = []
-    for contact in book:
-        name = str(contact.display_name or "")
-        if not name:
-            continue
-        cid = str(contact.id or "")
-        phone = str(contact.phone or "")
-        extras = contact.extras if isinstance(contact.extras, dict) else {}
-        if cid:
-            id_to_name[cid] = name
-            # A merged active chat keeps its ``@lid`` as id: that IS the alias a
-            # group participant shows up with.
-            if cid.endswith("@lid"):
-                lid_to_name[cid] = name
-        if phone:
-            phone_to_name[phone] = name
-        lid = str(extras.get("lid") or "")
-        if lid:
-            lid_to_name[lid] = name
-
-    backend = None
-    try:
-        backend = manager.get(proto)
-    except Exception:  # noqa: BLE001 — backend opzionale
-        backend = None
-
-    def resolve(sender: str) -> str:
-        if not sender:
-            return sender
-        if sender in id_to_name:
-            return id_to_name[sender]
-        if sender in lid_to_name:
-            return lid_to_name[sender]
-        local = sender.split("@", 1)[0]
-
-        if sender.endswith("@lid"):
-            # 1) @lid → phone via cache backend (solo memoria), poi phone → nome.
-            phone = ""
-            try:
-                phone = str(backend._jid_to_phone(sender) or "")
-            except Exception:  # noqa: BLE001 — backend vecchi/mock senza il metodo
-                phone = ""
-            if phone and phone in phone_to_name:
-                return phone_to_name[phone]
-            # 2) Rubrica WAHA che espone la riga @lid: numero = cifre del lid.
-            if local in phone_to_name:
-                return phone_to_name[local]
-            # 3) Rubrica dove l'id è il numero reale: ``<lid>@c.us``.
-            if f"{local}@c.us" in id_to_name:
-                return id_to_name[f"{local}@c.us"]
-            # 4) Ultima spiaggia: il numero risolto (meglio del lid grezzo).
-            if phone:
-                return phone
-        if sender.endswith("@c.us") and local in phone_to_name:
-            return phone_to_name[local]
-        if sender in phone_to_name:
-            return phone_to_name[sender]
-        if sender.endswith(("@lid", "@c.us")):
-            # Fallback leggibile: numero senza @lid/@c.us (mai il JID grezzo).
-            return local
-        return sender
-
-    return resolve
+    return attachments
 
 
 def create_api_router() -> Any:
@@ -1471,33 +90,38 @@ def create_api_router() -> Any:
     from starlette.exceptions import HTTPException as StarletteHTTPException
 
     router = APIRouter(prefix="/api")
-    # Registry di idempotenza in-memory, scoped al processo (§8). Applicato
-    # SOLO al ramo testo: gli allegati restano legacy e non deduplicati.
-    registry = SendRegistry()
+
+    def _blob_response(blob: dict[str, Any]) -> Any:
+        """Stream the file of a blob handle with its cache policy."""
+        cache_control = (
+            "private, max-age=31536000, immutable"
+            if blob["immutable"]
+            else "private, max-age=86400"
+        )
+        return FileResponse(
+            blob["path"],
+            media_type=blob["content_type"],
+            headers={"Cache-Control": cache_control},
+        )
 
     @router.get("/emoji")
-    def emojis() -> JSONResponse:
+    async def emojis(request: Request) -> JSONResponse:
         return JSONResponse(
-            content=_emoji_categories(),
+            content=await call_op(request, "emoji.list"),
             headers={"Cache-Control": "public, max-age=3600"},
         )
 
     @router.get("/reactions")
     async def reactions(request: Request, protocol: str) -> dict[str, list[str]]:
-        if protocol != "telegram":
-            return {"emojis": []}
-        try:
-            backend = request.app.state.manager.get(protocol)
-            if backend is None or not hasattr(backend, "get_available_reactions"):
-                return {"emojis": []}
-            emojis = await asyncio.to_thread(backend.get_available_reactions)
-        except Exception:
-            logger.debug("Telegram available reactions request failed", exc_info=True)
-            return {"emojis": []}
-        return {"emojis": emojis if isinstance(emojis, list) else []}
+        return await call_op(request, "reactions.available", {"protocol": protocol})
 
     @router.post("/send")
     async def send(request: Request) -> dict[str, bool]:
+        """Transport only: CSRF/size checks, body parsing, uploads -> temp files.
+
+        Everything else (validation, idempotency, retry, the backend calls and
+        the ``/ws`` frames) is the ``messages.send`` operation.
+        """
         origin = request.headers.get("origin")
         if origin:
             origin_host = urlsplit(origin).netloc.lower()
@@ -1513,8 +137,7 @@ def create_api_router() -> Any:
         upload_files: list[Any] = []
         try:
             if is_multipart:
-                from web.uploads import _MAX_TOTAL_BYTES
-
+                _MAX_TOTAL_BYTES = uploads_module._MAX_TOTAL_BYTES
                 content_length = request.headers.get("content-length")
                 if (
                     content_length
@@ -1547,463 +170,101 @@ def create_api_router() -> Any:
             raise HTTPException(status_code=400, detail="Invalid request") from None
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Invalid request")
+        # Operation-level knobs of local frontends (the TUI's optimistic send,
+        # its single-attempt policy): never settable from a web request.
+        payload.pop("optimistic", None)
+        payload.pop("retry", None)
 
-        protocol = payload.get("protocol")
-        contact_id = payload.get("contact_id")
-        text = payload.get("text")
-        if protocol not in _PROTOCOLS:
-            raise HTTPException(status_code=400, detail="Invalid request")
-        if not isinstance(contact_id, str) or not contact_id.strip():
-            raise HTTPException(status_code=400, detail="Invalid request")
-        if not isinstance(text, str) or len(text) > _MAX_TEXT_LENGTH:
-            raise HTTPException(status_code=400, detail="Invalid request")
-        if not upload_files and not text.strip():
-            raise HTTPException(status_code=400, detail="Invalid request")
-        if len(upload_files) > _MAX_ATTACHMENTS:
-            raise HTTPException(status_code=400, detail="Too many attachments")
-        if any(not hasattr(upload_file, "read") for upload_file in upload_files):
-            raise HTTPException(status_code=400, detail="Invalid request")
-
-        # client_msg_id: opzionale con fallback server (client vecchi/tooling).
-        client_msg_id_raw = payload.get("client_msg_id")
-        if (
-            isinstance(client_msg_id_raw, str)
-            and client_msg_id_raw.strip()
-            and len(client_msg_id_raw) <= 128
-        ):
-            client_msg_id = client_msg_id_raw.strip()
-        else:
-            client_msg_id = str(uuid.uuid4())
-
-        quote_timestamp = payload.get("quote_timestamp")
-        quote_author = payload.get("quote_author")
-        quote_message = payload.get("quote_message")
-        reply_to_message_id = payload.get("reply_to_message_id")
-        quote_content_type = (
-            payload.get("quote_content_type") if protocol == "signal" else None
-        )
-        quote_attachment_id = (
-            payload.get("quote_attachment_id") if protocol == "signal" else None
-        )
         if is_multipart:
-            quote_author = quote_author or None
-            reply_to_message_id = reply_to_message_id or None
-            quote_content_type = quote_content_type or None
-            quote_attachment_id = quote_attachment_id or None
+            # Form fields are strings: "" means absent, digits mean an int.  A
+            # non-numeric value is passed through for the operation to reject.
+            quote_timestamp = payload.get("quote_timestamp")
             if quote_timestamp == "":
-                quote_timestamp = None
+                payload["quote_timestamp"] = None
             elif quote_timestamp is not None:
                 try:
-                    quote_timestamp = int(quote_timestamp)
+                    payload["quote_timestamp"] = int(quote_timestamp)
                 except (TypeError, ValueError):
-                    raise HTTPException(
-                        status_code=400, detail="Invalid request"
-                    ) from None
-        if isinstance(quote_author, str):
-            quote_author = quote_author.strip() or None
-        if isinstance(quote_content_type, str):
-            quote_content_type = quote_content_type.strip() or None
-        if isinstance(quote_attachment_id, str):
-            quote_attachment_id = quote_attachment_id.strip() or None
-        if isinstance(quote_message, str):
-            stripped_quote_message = quote_message.strip()
-            quote_message = (
-                stripped_quote_message
-                if stripped_quote_message or quote_content_type
-                else None
-            )
-        if isinstance(reply_to_message_id, str):
-            reply_to_message_id = reply_to_message_id.strip() or None
-        if isinstance(quote_timestamp, bool) or (
-            quote_timestamp is not None and not isinstance(quote_timestamp, int)
-        ):
-            raise HTTPException(status_code=400, detail="Invalid request")
-        if any(
-            value is not None and not isinstance(value, str)
-            for value in (
-                quote_author,
-                quote_message,
-                reply_to_message_id,
-                quote_content_type,
-                quote_attachment_id,
-            )
-        ):
-            raise HTTPException(status_code=400, detail="Invalid request")
-        is_reply = any(
-            value is not None
-            for value in (
-                quote_timestamp,
-                quote_author,
-                quote_message,
-                reply_to_message_id,
-                quote_content_type,
-                quote_attachment_id,
-            )
-        )
-        if protocol == "telegram" and is_reply:
-            try:
-                if int(reply_to_message_id) <= 0:
-                    raise ValueError
-            except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="Invalid request") from None
-        if protocol == "whatsapp" and is_reply and not reply_to_message_id:
-            raise HTTPException(status_code=400, detail="Invalid request")
+                    pass
 
-        manager = request.app.state.manager
-        backend = manager.get(protocol)
-        if backend is None:
-            raise HTTPException(status_code=404, detail="Not Found")
-
-        contact = backend.find_contact(contact_id)
-        if contact is None:
-            raise HTTPException(status_code=404, detail="Not Found")
-
-        # Contatto book-only (non ancora in self.contacts): registralo prima
-        # del send così gli eventi successivi lo risolvono.  Il backend
-        # WhatsApp crea da sé l'alias @lid → contatto @c.us.
-        is_known = any(str(c.id) == contact.id for c in backend.contacts)
-        if not is_known:
-            contact.extras["ghost"] = True
-            backend.register_contact(contact)
-        elif contact.extras.get("ghost"):
-            # Ghost book-only già registrato: ritenta l'alias @lid.  Il primo
-            # invio può averlo saltato se la cache LID era vuota; la cache può
-            # popolarsi dopo.  Idempotente (setdefault), zero rete.
-            backend.register_contact(contact)
-
-        quote_attachments = None
-        if protocol == "signal" and quote_attachment_id is not None:
-            contact_attachment_ids = {
-                message["attachment"]["attachment_id"]
-                for message in _messages(protocol, contact_id)
-                if message["attachment"] is not None
-            }
-            if quote_attachment_id not in contact_attachment_ids:
-                raise HTTPException(status_code=400, detail="Invalid request")
-        if protocol == "signal" and quote_content_type is not None:
-            if quote_attachment_id is None:
-                raise HTTPException(status_code=400, detail="Invalid request")
-            resolved = manager.get_attachment_path(protocol, quote_attachment_id)
-            path = Path(resolved) if resolved else None
-            quote_attachments = (
-                [f"{quote_content_type}:{path.name}:{path}"]
-                if path
-                else [quote_content_type]
-            )
-
-        kwargs = {
-            "quote_timestamp": quote_timestamp,
-            "quote_author": quote_author,
-            "quote_message": quote_message,
-        }
-        if protocol == "signal" and quote_attachments is not None:
-            kwargs["quote_attachments"] = quote_attachments
-        if protocol in {"whatsapp", "telegram"} and reply_to_message_id is not None:
-            kwargs["reply_to_message_id"] = reply_to_message_id
-
-        # Idempotenza (solo ramo testo, N7): claim atomico scoped al contatto.
-        request.app.state.send_registry = registry
-        registry_key: tuple[str, str, str] | None = None
-        registry_token: str | None = None
-        if not upload_files:
-            registry_key = (protocol, contact_id, client_msg_id)
-            fingerprint = build_fingerprint(
-                protocol=protocol,
-                contact_id=contact_id,
-                text=text,
-                quote_timestamp=quote_timestamp,
-                quote_author=quote_author,
-                quote_message=quote_message,
-                reply_to_message_id=reply_to_message_id,
-                quote_content_type=quote_content_type,
-                quote_attachment_id=quote_attachment_id,
-            )
-            outcome, value = registry.claim_or_lookup(registry_key, fingerprint)
-            if outcome == "sent":
-                if value.get("fingerprint") != fingerprint:
-                    raise HTTPException(
-                        status_code=422, detail="Client message id conflict"
-                    )
-                return {"ok": True, "duplicate": True}
-            if outcome == "inflight":
-                # Un altro handler sta inviando: retryable lato client.  Nessuna
-                # mutazione del registry (N2).
-                raise HTTPException(status_code=409, detail="Send in progress")
-            registry_token = value
-
-        uploads: list[Any] = []
-        succeeded = False
-        message_id: str | None = None
-        try:
-            if upload_files:
-                from web.uploads import (
-                    _MAX_TOTAL_BYTES,
-                    UploadValidationError,
-                    store_upload,
-                )
-
-                # Sequential validation keeps error messages stable (the
-                # first invalid file wins) and lets the finally block clean
-                # up every stored upload when a later one fails.  The
-                # request-wide byte cap is enforced WHILE each file is
-                # stored (each file gets the remaining budget), so a
-                # chunked request cannot write far beyond _MAX_TOTAL_BYTES
-                # before being rejected.
-                total_stored_bytes = 0
-                for upload_file in upload_files:
-                    try:
-                        uploads.append(
-                            await store_upload(
-                                upload_file,
-                                max_bytes=_MAX_TOTAL_BYTES - total_stored_bytes,
-                            )
-                        )
-                    except UploadValidationError as exc:
-                        detail = (
-                            "Upload too large"
-                            if exc.status_code == 413
-                            else "Unsupported media type"
-                        )
-                        raise HTTPException(
-                            status_code=exc.status_code, detail=detail
-                        ) from None
-                    total_stored_bytes += uploads[-1].path.stat().st_size
-                batch_id = payload.get("batch_id")
-                if not isinstance(batch_id, str) or not batch_id.strip():
-                    batch_id = None
-                await asyncio.to_thread(
-                    manager.send_attachments_sync,
-                    protocol,
-                    contact_id,
-                    [upload.path for upload in uploads],
-                    batch_id=batch_id,
-                    # Product default: the single text field captions the
-                    # first attachment only.
-                    captions=[text or None] + [None] * (len(uploads) - 1),
-                    mime_types=[upload.mime_type for upload in uploads],
-                    media_kinds=[upload.media_kind for upload in uploads],
-                    filenames=[upload.filename for upload in uploads],
-                    **kwargs,
-                )
-                succeeded = True
-            else:
-                # Ramo TESTO: retry con backoff esponenziale + jitter.
-                # Nessun timeout aggiuntivo: i backend hanno timeout interni propri.
-                rng = random.Random()
-                for attempt in range(1, SEND_RETRY_MAX_ATTEMPTS + 1):
-                    try:
-                        result = await asyncio.to_thread(
-                            manager.send_message_sync,
-                            protocol,
-                            contact_id,
-                            text,
-                            **kwargs,
-                        )
-                        if result is not None:
-                            message_id = str(result)
-                        succeeded = True
-                        break
-                    except Exception as exc:
-                        classification = classify_send_error(protocol, exc)
-                        if classification == "terminal":
-                            logger.exception(
-                                "Terminal send error, no retry: protocol=%s contact=%s",
-                                protocol,
-                                contact_id,
-                            )
-                            break
-                        if attempt == SEND_RETRY_MAX_ATTEMPTS:
-                            logger.exception(
-                                "Send failed after %d attempts: protocol=%s contact=%s",
-                                SEND_RETRY_MAX_ATTEMPTS,
-                                protocol,
-                                contact_id,
-                            )
-                            break
-                        delay = compute_delay(attempt, rng)
-                        logger.info(
-                            "Send retry %d/%d in %.1fs: protocol=%s contact=%s error=%s",
-                            attempt + 1,
-                            SEND_RETRY_MAX_ATTEMPTS,
-                            delay,
-                            protocol,
-                            contact_id,
-                            exc,
-                        )
-                        push_event(
-                            {
-                                "type": "send_retry",
-                                "payload": {
-                                    "client_msg_id": client_msg_id,
-                                    "protocol": protocol,
-                                    "contact_id": contact_id,
-                                    "attempt": attempt + 1,
-                                    "max_attempts": SEND_RETRY_MAX_ATTEMPTS,
-                                    "error": safe_error_text(exc),
-                                },
-                            }
-                        )
-                        await asyncio.sleep(delay)
-        except HTTPException:
-            raise
-        except NotImplementedError:
-            if upload_files:
-                raise HTTPException(
-                    status_code=501, detail="Attachment send not supported"
-                ) from None
-            logger.exception(
-                "Web send failed: protocol=%s contact=%s", protocol, contact_id
-            )
-            raise HTTPException(status_code=502, detail="Message send failed") from None
-        except Exception:
-            logger.exception(
-                "Web send failed: protocol=%s contact=%s", protocol, contact_id
-            )
-            raise HTTPException(status_code=502, detail="Message send failed") from None
-        finally:
-            for upload in uploads:
-                upload.cleanup()
-            # B3/N2: mark_sent solo su successo, release in tutti gli altri casi
-            # (incluso il 502 dopo i 3 tentativi), sempre vincolato al token.
-            if registry_token is not None and registry_key is not None:
-                if succeeded:
-                    registry.mark_sent(
-                        registry_key, registry_token, message_id, int(time.time())
-                    )
-                else:
-                    registry.release(registry_key, registry_token)
-
-        if not succeeded:
-            raise HTTPException(status_code=502, detail="Message send failed")
-
-        push_event(
-            {
-                "type": "message",
-                "payload": {
-                    "protocol": protocol,
-                    "contact_id": contact_id,
-                    "is_mine": True,
+        if upload_files:
+            # Cheap rejections (400/404) before any upload touches the disk.
+            await call_op(
+                request,
+                "messages.send.check",
+                {
+                    **payload,
+                    "attachments": [],
+                    "attachment_count": len(upload_files),
+                    "slots_ok": all(hasattr(f, "read") for f in upload_files),
                 },
-            }
-        )
-        return {"ok": True}
+            )
+
+        stored: list[TempUpload] = []
+        try:
+            try:
+                attachments = await _store_attachments(upload_files, stored)
+            except Exception:
+                logger.exception(
+                    "Web upload store failed: protocol=%s contact=%s",
+                    payload.get("protocol"),
+                    payload.get("contact_id"),
+                )
+                raise HTTPException(
+                    status_code=502, detail="Message send failed"
+                ) from None
+            # ``attachments`` are ours: never trust one from the request body.
+            return await call_op(
+                request, "messages.send", {**payload, "attachments": attachments}
+            )
+        finally:
+            # Temp files live only for this request, whatever the outcome.
+            for temp_upload in stored:
+                temp_upload.cleanup()
 
     @router.get("/status")
-    def backend_status(request: Request) -> dict[str, bool]:
-        """Real per-protocol connection state (not inferred from contacts).
-
-        A protocol with zero chats yet is still connected; a registered but
-        not-yet-connected backend is not.  Missing/unregistered protocols
-        (e.g. Telegram without credentials configured) report ``False``.
-        """
-        manager = request.app.state.manager
-        return {
-            proto: bool(getattr(manager.get(proto), "is_connected", False))
-            for proto in _PROTOCOLS
-        }
+    async def backend_status(request: Request) -> dict[str, bool]:
+        return await call_op(request, "server.status")
 
     @router.get("/contacts")
-    def contacts(request: Request, q: str | None = None) -> list[dict[str, Any]]:
-        manager = request.app.state.manager
-        # Riallinea il badge "non letti" WhatsApp allo stato reale (telefono
-        # incluso) prima di calcolare i conteggi: leggere sul telefono non
-        # tocca il DB locale finché non lo facciamo qui. Best-effort/throttled
-        # (vedi WhatsAppBackend.reconcile_unread), nessun impatto per gli
-        # altri protocolli o se il metodo non esiste.
-        reconcile = getattr(manager.get("whatsapp"), "reconcile_unread", None)
-        if reconcile is not None:
-            try:
-                reconcile()
-            except Exception:
-                logger.debug("WhatsApp unread reconcile failed", exc_info=True)
-        unread = _unread_counts()
-        contacts = manager.list_contacts()
-        query = (q or "").strip()
-        if query:
-            # Riusa la ricerca del picker TUI (substring case-insensitive su
-            # nome/id/telefono) sulle chat attive (risposta rapida).
-            from contact_picker import (
-                search_contacts,  # lazy: evitare import TUI all'avvio
-            )
-
-            contacts = search_contacts(contacts, query)
-        return [_contact_payload(contact, unread) for contact in contacts]
+    async def contacts(request: Request, q: str | None = None) -> list[dict[str, Any]]:
+        return await call_op(request, "contacts.list", {"q": q})
 
     @router.get("/contacts/book")
-    def contacts_book(
+    async def contacts_book(
         request: Request, q: str, force: bool = False
     ) -> list[dict[str, Any]]:
-        unread = _unread_counts()
-        manager = request.app.state.manager
-        query = (q or "").strip()
-        if not query:
-            return []
-        # Rubrica completa aggregata (come il picker TUI, in background):
-        # lenta, il client la chiama dopo aver già mostrato i risultati delle chat.
-        # ``force`` è disponibile ma non passato dal frontend di default per non
-        # martellare WAHA a ogni keystroke.
-        from contact_picker import search_contacts  # lazy: evitare import TUI all'avvio
-
-        contacts = search_contacts(manager.list_address_book_sync(force=force), query)
-        return [_contact_payload(contact, unread) for contact in contacts]
+        return await call_op(request, "contacts.book", {"q": q, "force": force})
 
     @router.get("/contact-avatar")
     async def contact_avatar(request: Request, proto: str, contact_id: str) -> Any:
-        if proto not in {"whatsapp", "signal", "telegram"}:
-            raise HTTPException(status_code=404, detail="Not Found")
-        if not contact_id.strip():
-            raise HTTPException(status_code=400, detail="Invalid request")
-        from web.avatar_cache import resolve_avatar
-
-        result = await asyncio.to_thread(
-            resolve_avatar, proto, request.app.state.manager, contact_id
+        blob = await call_op(
+            request, "contacts.avatar", {"protocol": proto, "contact_id": contact_id}
         )
-        if result is None:
-            raise HTTPException(status_code=404, detail="No profile picture")
-        data, content_type = result
+        # Small file: sent as a plain body (no ETag/Range), as it always was.
+        data = await asyncio.to_thread(Path(blob["path"]).read_bytes)
         return Response(
             content=data,
-            media_type=content_type,
+            media_type=blob["content_type"],
             headers={"Cache-Control": "private, max-age=86400"},
         )
 
     @router.get("/link-preview")
-    async def link_preview(url: str) -> Any:
-        from web.link_preview import BlockedURLError, get_preview
-
-        try:
-            preview = await get_preview(url)
-        except BlockedURLError:
-            raise HTTPException(status_code=400, detail="URL not allowed") from None
-        if preview is None:
-            raise HTTPException(status_code=404, detail="No preview")
+    async def link_preview(request: Request, url: str) -> Any:
+        preview = await call_op(request, "links.preview", {"url": url})
         return JSONResponse(
-            content={
-                "url": preview["url"],
-                "title": preview["title"],
-                "description": preview["description"],
-                "site_name": preview["site_name"],
-                "has_image": bool(
-                    preview.get("image_url") or preview.get("local_image")
-                ),
-            },
+            content=preview,
             headers={"Cache-Control": "private, max-age=3600"},
         )
 
     @router.get("/link-preview/image")
-    async def link_preview_image(url: str) -> Any:
-        from web.link_preview import BlockedURLError, get_preview_image
-
-        try:
-            result = await get_preview_image(url)
-        except BlockedURLError:
-            raise HTTPException(status_code=400, detail="URL not allowed") from None
-        if result is None:
-            raise HTTPException(status_code=404, detail="No preview image")
-        data, content_type = result
+    async def link_preview_image(request: Request, url: str) -> Any:
+        blob = await call_op(request, "links.preview_image", {"url": url})
+        # Small file: a plain body, with the type the operation sniffed.
+        data = await asyncio.to_thread(Path(blob["path"]).read_bytes)
         return Response(
             content=data,
-            media_type=content_type,
+            media_type=blob["content_type"],
             headers={
                 "Cache-Control": "private, max-age=86400",
                 "X-Content-Type-Options": "nosniff",
@@ -2011,87 +272,47 @@ def create_api_router() -> Any:
         )
 
     @router.post("/log")
-    def client_log(payload: dict[str, Any]) -> dict[str, str]:
-        message = str(payload.get("message") or "")[:500]
-        logger.info("[web-client] %s", message)
-        return {"status": "ok"}
+    async def client_log(request: Request, payload: dict[str, Any]) -> Any:
+        return await call_op(
+            request,
+            "server.client_log",
+            {"message": payload.get("message"), "source": "web-client"},
+        )
 
     @router.post("/transcribe")
-    def transcribe(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
-        proto = payload.get("protocol")
-        attachment_id = payload.get("attachment_id")
-        if proto not in _PROTOCOLS or not isinstance(attachment_id, str):
-            raise HTTPException(status_code=400, detail="Invalid request")
-        attachment_id = attachment_id.strip()
-        if not attachment_id:
-            raise HTTPException(status_code=400, detail="Invalid request")
-
-        service = getattr(request.app.state, "transcription_service", None)
-        if service is None:
-            raise HTTPException(status_code=503, detail="Trascrizione non configurata")
-        current = service.status(proto, attachment_id)
-        if current is not None and current["status"] == "ok":
-            return {"status": "done", "text": current.get("text", "")}
-        if current is not None and current["status"] == "pending":
-            return {"status": "pending"}
-
-        path = request.app.state.manager.get_attachment_path(proto, attachment_id)
-        if path is None:
-            raise HTTPException(status_code=404, detail="Allegato non trovato")
-        service.submit(proto, attachment_id, path)
-        return {"status": "pending"}
+    async def transcribe(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+        return await call_op(
+            request,
+            "transcribe.submit",
+            {
+                "protocol": payload.get("protocol"),
+                "attachment_id": payload.get("attachment_id"),
+            },
+        )
 
     @router.post("/config/openai-key")
-    def save_openai_key(request: Request, payload: dict[str, Any]) -> dict[str, str]:
-        api_key = payload.get("api_key")
-        if not isinstance(api_key, str):
-            raise HTTPException(status_code=400, detail="Chiave non valida")
-        api_key = api_key.strip()
-        if not api_key or not api_key.startswith("sk-"):
-            raise HTTPException(status_code=400, detail="Chiave non valida")
-
-        from protocols.config import PROJECT_DIR, _load_config
-
-        config_path = PROJECT_DIR / "config.json"
-        data = _load_config()
-        data["openai_api_key"] = api_key
-        try:
-            with config_path.open("w", encoding="utf-8") as config_file:
-                json.dump(data, config_file, indent=2)
-                config_file.write("\n")
-        except OSError:
-            logger.exception("Impossibile salvare la configurazione OpenAI")
-            raise HTTPException(
-                status_code=500, detail="Errore di salvataggio"
-            ) from None
-
-        try:
-            from web.server import _init_transcription_service
-
-            _init_transcription_service(request.app)
-        except Exception:
-            logger.exception("Impossibile inizializzare la trascrizione OpenAI")
-            raise HTTPException(
-                status_code=500, detail="Errore di inizializzazione"
-            ) from None
-        return {"status": "ok"}
+    async def save_openai_key(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, str]:
+        return await call_op(
+            request, "config.set_openai_key", {"api_key": payload.get("api_key")}
+        )
 
     @router.get("/transcribe/config")
-    def transcription_config(request: Request) -> dict[str, bool]:
-        service = getattr(request.app.state, "transcription_service", None)
-        return {"enabled": service is not None}
+    async def transcription_config(request: Request) -> dict[str, bool]:
+        return await call_op(request, "transcribe.config")
 
     @router.get("/transcribe/{proto}/{attachment_id:path}")
-    def transcription_status(
+    async def transcription_status(
         request: Request,
         proto: Literal["signal", "whatsapp", "telegram"],
         attachment_id: str,
     ) -> dict[str, Any]:
-        service = getattr(request.app.state, "transcription_service", None)
-        if service is None:
-            raise HTTPException(status_code=503, detail="Trascrizione non configurata")
-        current = service.status(proto, attachment_id)
-        return current if current is not None else {"status": "unknown"}
+        return await call_op(
+            request,
+            "transcribe.status",
+            {"protocol": proto, "attachment_id": attachment_id},
+        )
 
     @router.get("/messages")
     async def messages(
@@ -2102,467 +323,68 @@ def create_api_router() -> Any:
         limit: int | None = None,
         since: int | None = None,
     ) -> list[dict[str, Any]]:
-        if limit is not None and not 1 <= limit <= _MAX_MESSAGES_LIMIT:
-            raise HTTPException(status_code=400, detail="Invalid limit")
-        # Canonicalizza PRIMA del fetch remoto: una richiesta con l'id del ghost
-        # (@c.us) apre lo storico sulla chat attiva (@lid), R-G.  La read-union
-        # poi unisce comunque lo storico DB diviso fra le due chiavi.
-        manager = request.app.state.manager
-        get_backend = getattr(manager, "get", None)
-        backend = get_backend(proto) if callable(get_backend) else None
-        find_contact = getattr(backend, "find_contact", None)
-        contact = find_contact(contact_id) if callable(find_contact) else None
-        canonical_id = contact.id if contact is not None else contact_id
-        if refresh or proto == "telegram":
-            try:
-                fetch = getattr(backend, "fetch_history", None)
-                if fetch is not None and canonical_id:
-                    refreshed = await asyncio.to_thread(fetch, canonical_id, 20)
-                    logger.debug(
-                        "%s history refresh: %s -> %d",
-                        proto,
-                        canonical_id,
-                        len(refreshed),
-                    )
-            except Exception:
-                logger.debug(
-                    "%s history refresh failed: %s",
-                    proto,
-                    canonical_id,
-                    exc_info=True,
-                )
-        extra_keys = (
-            tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
+        return await call_op(
+            request,
+            "messages.page",
+            {
+                "protocol": proto,
+                "contact_id": contact_id,
+                "refresh": refresh,
+                "limit": limit,
+                "since": since,
+            },
         )
-        result = _messages(
-            proto, contact_id, extra_keys=extra_keys, limit=limit, since=since
-        )
-        _attach_media_versions(manager, proto, result)
-        is_group = contact_id.endswith("@g.us")
-        if not is_group:
-            manager = request.app.state.manager
-            try:
-                for contact in manager.list_contacts():
-                    if str(contact.id) == contact_id and contact.protocol == proto:
-                        is_group = bool(contact.extras.get("is_group"))
-                        break
-            except (AttributeError, TypeError):
-                is_group = False
-        if is_group:
-            manager = request.app.state.manager
-            resolver = _group_sender_resolver(manager, proto)
-            for message in result:
-                message["is_group"] = True
-                message["sender"] = resolver(message.get("sender") or "")
-                qa = message.get("quote_author") or ""
-                resolved_qa = resolver(qa)
-                if qa and resolved_qa.endswith(("@lid", "@c.us")):
-                    # L'autore della quote non risolto: il messaggio quotato
-                    # nella stessa chat ha il sender (spesso già un nome,
-                    # es. pushname) — lo usiamo come autore.
-                    quoted_sender = _quoted_sender(
-                        proto, contact_id, message.get("quote_timestamp")
-                    )
-                    if quoted_sender:
-                        resolved_qa = resolver(quoted_sender)
-                message["quote_author"] = resolved_qa
-        else:
-            # Chat 1:1: l'autore della quote è sempre il contatto (o noi) —
-            # ridondante, e il valore grezzo potrebbe essere un @lid.
-            for message in result:
-                message["quote_author"] = ""
-        return result
 
     @router.post("/messages/read")
     async def messages_read(
         request: Request, payload: dict[str, Any]
     ) -> dict[str, str]:
-        proto = str(payload.get("protocol") or "").strip()
-        contact_id = str(payload.get("contact_id") or "").strip()
-        if proto not in ("signal", "whatsapp", "telegram") or not contact_id:
-            raise HTTPException(status_code=400, detail="Invalid request")
-        manager = request.app.state.manager
-        try:
-            # Come il TUI: mark-read del backend (remoto, es. WAHA) + persistenza
-            # read=1 in SQLite (da cui la web UI calcola i badge non letti).
-            await manager.mark_read(proto, contact_id)
-        except Exception:
-            logger.warning(
-                "web mark-read failed proto=%s contact_id=%s",
-                proto,
-                contact_id,
-                exc_info=True,
-            )
-        return {"status": "ok"}
+        return await call_op(request, "chats.mark_read", payload)
 
     @router.post("/chats/archive")
     async def chats_archive(
         request: Request, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        proto = str(payload.get("protocol") or "").strip()
-        contact_id = str(payload.get("contact_id") or "").strip()
-        archived = payload.get("archived")
-        if proto != "whatsapp" or not contact_id or not isinstance(archived, bool):
-            raise HTTPException(status_code=400, detail="Invalid request")
-        backend = request.app.state.manager.get(proto)
-        if backend is None or not hasattr(backend, "set_chat_archived_sync"):
-            raise HTTPException(status_code=503, detail="Backend unavailable")
-        ok = await asyncio.to_thread(
-            backend.set_chat_archived_sync, contact_id, archived
-        )
-        if not ok:
-            raise HTTPException(status_code=502, detail="Archive failed")
-        return {"archived": archived}
+        return await call_op(request, "chats.archive", payload)
 
     @router.post("/messages/edit")
     async def messages_edit(
         request: Request, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        protocol = payload.get("protocol")
-        contact_id = payload.get("contact_id")
-        message_id = payload.get("message_id")
-        new_text = payload.get("new_text")
-        if (
-            not isinstance(protocol, str)
-            or protocol not in _PROTOCOLS
-            or not isinstance(contact_id, str)
-            or not contact_id.strip()
-            or not isinstance(message_id, str)
-            or not message_id.strip()
-            or not isinstance(new_text, str)
-            or not new_text.strip()
-            or len(new_text) > _MAX_TEXT_LENGTH
-        ):
-            raise HTTPException(status_code=400, detail="Invalid request")
-
-        # Read-union cross-key: la riga può stare sotto la chiave alias (@c.us
-        # ghost) mentre la richiesta arriva col canonical (@lid).
-        manager = request.app.state.manager
-        get_backend = getattr(manager, "get", None)
-        backend = get_backend(protocol) if callable(get_backend) else None
-        find_contact = getattr(backend, "find_contact", None)
-        contact = find_contact(contact_id) if callable(find_contact) else None
-        edit_keys = (
-            tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
-        )
-        row = _message_row_for_edit(
-            protocol, contact_id, message_id, extra_keys=edit_keys
-        )
-        if row is None:
-            raise HTTPException(status_code=404, detail="Not Found")
-        if _message_edit_id(row) is None:
-            raise HTTPException(status_code=400, detail="Message not editable")
-
-        try:
-            edited = await asyncio.to_thread(
-                manager.edit_message_sync,
-                protocol,
-                contact_id,
-                message_id,
-                new_text,
-            )
-            if not edited:
-                raise RuntimeError("Backend rejected message edit")
-            updated_rows = await asyncio.to_thread(
-                _persist_message_edit,
-                protocol,
-                contact_id,
-                message_id,
-                new_text,
-            )
-        except Exception:
-            logger.exception(
-                "Web edit failed: protocol=%s contact=%s", protocol, contact_id
-            )
-            raise HTTPException(status_code=502, detail="Message edit failed") from None
-
-        if updated_rows == 0:
-            logger.debug(
-                "Web edit persistence found no row: protocol=%s contact=%s id=%s",
-                protocol,
-                contact_id,
-                message_id,
-            )
-        backend = manager.get(protocol)
-        try:
-            await asyncio.to_thread(
-                backend.apply_edit,
-                contact_id,
-                message_id,
-                new_text,
-                is_mine=True,
-            )
-        except Exception:
-            logger.debug(
-                "Web edit backend cache sync failed: protocol=%s contact=%s",
-                protocol,
-                contact_id,
-                exc_info=True,
-            )
-
-        push_event(
-            {
-                "type": "message_edit",
-                "payload": {
-                    "protocol": protocol,
-                    "contact_id": contact_id,
-                    "message_id": str(message_id),
-                    "timestamp": int(row["timestamp"]),
-                    "old_text": row["text"] or "",
-                    "text": new_text,
-                    "is_mine": True,
-                },
-            }
-        )
-        return {"ok": True}
+        return await call_op(request, "messages.edit", payload)
 
     @router.post("/messages/reaction")
     async def messages_reaction(
         request: Request, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        protocol = payload.get("protocol")
-        contact_id = payload.get("contact_id")
-        message_id = payload.get("message_id")
-        reaction_emoji = payload.get("emoji")
-        if (
-            not isinstance(protocol, str)
-            or protocol not in _PROTOCOLS
-            or not isinstance(contact_id, str)
-            or not contact_id.strip()
-            or not isinstance(message_id, str)
-            or not message_id.strip()
-            or not isinstance(reaction_emoji, str)
-            or not reaction_emoji
-            or len(reaction_emoji) > 8
-        ):
-            raise HTTPException(status_code=400, detail="Invalid request")
-        import emoji
-
-        if not emoji.is_emoji(reaction_emoji):
-            raise HTTPException(status_code=400, detail="Invalid request")
-
-        contact_id = contact_id.strip()
-        message_id = message_id.strip()
-        manager = request.app.state.manager
-        backend = manager.get(protocol)
-        if backend is None:
-            raise HTTPException(status_code=404, detail="Backend not found")
-        row = _message_row_for_reaction(protocol, contact_id, message_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="Message not found")
-
-        target_timestamp = int(row["timestamp"])
-        target_author = None
-        backend_message_id = message_id
-        if protocol == "signal":
-            backend_message_id = str(target_timestamp)
-            target_author = (
-                str(getattr(backend, "user_number", ""))
-                if row["is_mine"]
-                else contact_id
-            )
-        try:
-            sent = await asyncio.to_thread(
-                backend.send_reaction_sync,
-                contact_id,
-                backend_message_id,
-                reaction_emoji,
-                target_author=target_author,
-            )
-        except Exception:  # noqa: BLE001
-            sent = False
-        if not sent:
-            raise HTTPException(status_code=502, detail="Reaction send failed")
-
-        event_timestamp = int(time.time() * 1000)
-        reaction_payload: dict[str, Any] = {
-            "mode": "snapshot" if protocol == "telegram" else "delta",
-            "target_message_id": str(row["msg_id"] or backend_message_id),
-            "target_timestamp": target_timestamp,
-            "emoji": reaction_emoji,
-            "is_mine": True,
-            "author_key": "me",
-            "author": "You",
-            "is_remove": False,
-            "timestamp": event_timestamp,
-        }
-        if protocol == "telegram":
-            reaction_payload["snapshot"] = _telegram_reaction_snapshot(
-                contact_id, message_id, reaction_emoji
-            )
-        aggregate = await asyncio.to_thread(
-            backend.apply_reaction, contact_id, reaction_payload
-        )
-        reactions = aggregate.get("reactions", []) if aggregate else []
-        resolved_message_id = (
-            str(aggregate["message_id"])
-            if aggregate and aggregate.get("message_id") is not None
-            else str(row["msg_id"] or backend_message_id)
-        )
-        resolved_timestamp = (
-            int(aggregate["timestamp"])
-            if aggregate and aggregate.get("timestamp") is not None
-            else target_timestamp
-        )
-        push_event(
-            {
-                "type": "reaction_update",
-                "payload": {
-                    "protocol": protocol,
-                    "contact_id": contact_id,
-                    "message_id": resolved_message_id,
-                    "timestamp": resolved_timestamp,
-                    "reactions": reactions,
-                },
-            }
-        )
-        return {"ok": True, "reactions": reactions}
+        return await call_op(request, "reactions.set", payload)
 
     @router.get("/media/{proto}/{attachment_id:path}")
-    def media(
+    async def media(
         request: Request,
         proto: Literal["signal", "whatsapp", "telegram"],
         attachment_id: str,
         w: int | None = None,
     ) -> Any:
-        manager = request.app.state.manager
-        root = _allowed_media_root(manager, proto)
-        path = None
-        video_request = w in _THUMB_WIDTHS and _is_video_candidate(
-            Path(attachment_id), proto, attachment_id
-        )
-        chunk_available = False
-        if video_request and proto in {"whatsapp", "telegram"}:
-            from web.video_thumbs import _chunk_video_thumbnail
-
-            thumb, chunk_available = _chunk_video_thumbnail(
-                manager, proto, attachment_id, w
-            )
-            if thumb is not None:
-                return FileResponse(
-                    thumb,
-                    media_type="image/jpeg",
-                    headers={"Cache-Control": "private, max-age=31536000, immutable"},
-                )
-        try:
-            resolved = manager.get_attachment_path(proto, attachment_id)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "web media 404 proto=%s attachment_id=%s resolved=%s",
-                proto,
-                attachment_id,
-                path,
-            )
-            if chunk_available:
-                raise HTTPException(
-                    status_code=422, detail="Video thumbnail unavailable"
-                ) from None
-            raise HTTPException(status_code=404) from None
-        path = Path(resolved).resolve() if resolved else None
-        if path is None or not path.is_file() or not path.is_relative_to(root):
-            logger.warning(
-                "web media 404 proto=%s attachment_id=%s resolved=%s",
-                proto,
-                attachment_id,
-                path,
-            )
-            if chunk_available:
-                raise HTTPException(
-                    status_code=422, detail="Video thumbnail unavailable"
-                )
-            raise HTTPException(status_code=404)
-        logger.info(
-            "web media ok proto=%s attachment_id=%s path=%s w=%s",
-            proto,
-            attachment_id,
-            path,
-            w,
-        )
-        if w in _THUMB_WIDTHS:
-            thumb = _thumbnail(path, proto, attachment_id, w)
-            if thumb is not None:
-                return FileResponse(
-                    thumb,
-                    media_type="image/jpeg",
-                    headers={"Cache-Control": "private, max-age=31536000, immutable"},
-                )
-            if video_request or _is_video_candidate(path, proto, attachment_id):
-                from web.video_thumbs import _video_thumbnail
-
-                thumb = _video_thumbnail(path, proto, attachment_id, w)
-                if thumb is None:
-                    raise HTTPException(
-                        status_code=422, detail="Video thumbnail unavailable"
-                    )
-                return FileResponse(
-                    thumb,
-                    media_type="image/jpeg",
-                    headers={"Cache-Control": "private, max-age=31536000, immutable"},
-                )
-        # R7: `.webm` è ambiguo; il media_kind persistito decide audio vs video.
-        prefer_audio = (
-            path.suffix.lower() == ".webm"
-            and _attachment_media_kind(proto, attachment_id) == "audio"
-        )
-        media_type = _media_content_type(path, prefer_audio=prefer_audio)
-        return FileResponse(
-            path,
-            media_type=media_type,
-            headers={"Cache-Control": "private, max-age=86400"},
-        )
+        data: dict[str, Any] = {"protocol": proto, "attachment_id": attachment_id}
+        if w is None:
+            blob = await call_op(request, "media.attachment", data)
+        else:
+            blob = await call_op(request, "media.thumbnail", {**data, "width": w})
+        return _blob_response(blob)
 
     @router.get("/quote-media/{proto}/{message_row_id}")
-    def quote_media(
+    async def quote_media(
+        request: Request,
         proto: Literal["signal", "whatsapp", "telegram"],
         message_row_id: int,
         w: int | None = None,
     ) -> Any:
-        import protocols.db as backend
-        from protocols.db import _DB_LOCK
-
-        with _DB_LOCK:
-            try:
-                connection = sqlite3.connect(backend.DB_FILE)
-                try:
-                    row = connection.execute(
-                        "SELECT quote_attachment_path FROM messages "
-                        "WHERE id = ? AND protocol = ?",
-                        (message_row_id, proto),
-                    ).fetchone()
-                finally:
-                    connection.close()
-            except sqlite3.Error:
-                logger.exception(
-                    "Web quote media lookup database error: proto=%s row_id=%s",
-                    proto,
-                    message_row_id,
-                )
-                raise HTTPException(status_code=500, detail="Database error") from None
-
-        stored = row[0] if row else None
-        root = (Path(backend.CACHE_DIR) / "quote-thumbs").resolve()
-        path = Path(stored).resolve() if stored else None
-        if path is None or not path.is_file() or path.parent != root:
-            logger.warning(
-                "web quote media 404 proto=%s row_id=%s resolved=%s",
-                proto,
-                message_row_id,
-                path,
-            )
-            raise HTTPException(status_code=404)
-
-        served_path = path
-        cache_control = "private, max-age=86400"
-        if w in _THUMB_WIDTHS:
-            thumb = _thumbnail(path, proto, str(message_row_id), w)
-            if thumb is not None:
-                served_path = thumb
-                cache_control = "private, max-age=31536000, immutable"
-        media_type, _ = mimetypes.guess_type(served_path.name)
-        return FileResponse(
-            served_path,
-            media_type=media_type,
-            headers={"Cache-Control": cache_control},
+        blob = await call_op(
+            request,
+            "media.quote",
+            {"protocol": proto, "message_row_id": message_row_id, "width": w},
         )
+        return _blob_response(blob)
 
     return router

@@ -10,6 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from server.api import ChatAPI
+from server.bus import EventBus
+
 logger = logging.getLogger(__name__)
 
 _SHARED_SESSION_CLOSE_TIMEOUT_S = 2.0
@@ -25,55 +28,26 @@ class WebServerHandle:
     status: str = "starting"
     loop: asyncio.AbstractEventLoop | None = None
     websocket_connections: set[Any] = field(default_factory=set)
+    websocket_v2_connections: set[Any] = field(default_factory=set)
 
 
 _active_server: WebServerHandle | None = None
 
 
-def _init_transcription_service(app: Any) -> Any:
-    from transcription import store
-    from transcription.client import CloudTranscriptionClient
-    from transcription.config import (
-        get_openai_api_key,
-        get_transcription_base_url,
-        get_transcription_language,
-        get_transcription_model,
-        get_transcription_timeout,
-    )
-    from transcription.service import TranscriptionService
-
-    current = getattr(app.state, "transcription_service", None)
-    if current is not None:
-        current.stop()
-    app.state.transcription_service = None
-
-    api_key = get_openai_api_key()
-    if not api_key:
-        logger.info("Trascrizione cloud OpenAI disattivata")
-        return None
-
-    client = CloudTranscriptionClient(
-        api_key,
-        base_url=get_transcription_base_url(),
-        model=get_transcription_model(),
-        language=get_transcription_language(),
-        timeout=get_transcription_timeout(),
-    )
-    service = TranscriptionService(client, store)
-    app.state.transcription_service = service
-    logger.info("Trascrizione cloud OpenAI attiva")
-    return service
-
-
 def start_web_server(
-    manager: Any,
+    api: ChatAPI,
     port: int = 4242,
     token: str | None = None,
     *,
     host: str = "127.0.0.1",
     require_auth: bool = True,
+    bus: EventBus | None = None,
 ) -> WebServerHandle | None:
     """Start uvicorn on a dedicated thread and event loop.
+
+    *api* is the server API every route calls (``core.api``): the adapter has
+    no other access to the core.  *bus* is the event bus ``/ws`` and ``/ws/v2``
+    stream from (default ``api.bus``).
 
     *require_auth* set to ``False`` (``--web-no-auth``) drops the Bearer
     token requirement entirely — every REST/media/WebSocket request is
@@ -106,20 +80,20 @@ def start_web_server(
         return None
 
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api
     app.state.token = token
     app.state.websocket_connections = set()
-
-    _init_transcription_service(app)
+    app.state.websocket_v2_connections = set()
 
     from web.api import create_api_router
     from web.auth import install_auth
-    from web.bridge import init_bridge
     from web.gmail_api import create_gmail_image_router, create_gmail_router
     from web.uploads import prepare_upload_directory
     from web.ws import install_websocket
 
-    init_bridge()
+    # The bus /ws and /ws/v2 stream from: the caller's, else the API's, else a
+    # private one (an API stand-in without a bus still gets heartbeats).
+    app.state.bus = bus or api.bus or EventBus()
     install_auth(app, token, required=require_auth)
     app.include_router(create_api_router())
     app.include_router(create_gmail_router())
@@ -209,10 +183,6 @@ def start_web_server(
                 )
         finally:
             handle.status = "down"
-            if _active_server is handle:
-                from web.bridge import close_bridge
-
-                close_bridge()
             loop = handle.loop
             if loop is not None:
                 try:
@@ -222,7 +192,7 @@ def start_web_server(
                             asyncio.gather(monitor, return_exceptions=True)
                         )
                     try:
-                        from web.link_preview import close_shared_session
+                        from server.link_preview import close_shared_session
 
                         loop.run_until_complete(
                             asyncio.wait_for(
@@ -254,6 +224,7 @@ def start_web_server(
         thread=thread,
         port=port,
         websocket_connections=app.state.websocket_connections,
+        websocket_v2_connections=app.state.websocket_v2_connections,
     )
     _active_server = handle
     thread.start()
@@ -270,7 +241,10 @@ def stop_web_server(handle: WebServerHandle | None = None) -> None:
         return
 
     async def close_websockets() -> None:
-        connections = tuple(handle.websocket_connections)
+        connections = (
+            *handle.websocket_connections,
+            *handle.websocket_v2_connections,
+        )
         if connections:
             await asyncio.gather(
                 *(connection.close() for connection in connections),
@@ -291,6 +265,3 @@ def stop_web_server(handle: WebServerHandle | None = None) -> None:
         handle.status = "down"
     if _active_server is handle:
         _active_server = None
-        from web.bridge import close_bridge
-
-        close_bridge()

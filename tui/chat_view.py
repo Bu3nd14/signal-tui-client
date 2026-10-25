@@ -9,23 +9,21 @@ from textual.containers import Vertical
 from textual.widgets import Button, Static
 
 from models import (
+    DEFAULT_THUMBNAIL_MAX_COLS,
+    DEFAULT_THUMBNAIL_MAX_LINES,
     MERGE_FILL_FIELDS,
     MSG_TYPE_SYSTEM,
     PROTOCOL_SIGNAL,
     PROTOCOL_WHATSAPP,
     _prefer_display_sender,
     attachment_display_name,
-    contact_storage_keys,
-    dedup_cross_key,
     is_caption_like,
     is_media_quote_placeholder,
     is_whatsapp_synthetic_media_text,
     media_kind_from_mime,
 )
-from protocols import (
-    WhatsAppBackend,
-)
-from protocols.config import thumbnail_max_cols, thumbnail_max_lines
+from server.client import ApiError
+from tui.blobs import resolve_attachment_path
 from tui.images.detect import ImageSupport
 from ui_components import (
     ImageWidget,
@@ -307,6 +305,18 @@ class ChatViewMixin:
         if self._chat_log is None:
             self._chat_log = self.query_one("#chat-log", Vertical)
         return self._chat_log
+
+    def _thumbnail_limits(self) -> tuple[int, int]:
+        """``(max_lines, max_cols)`` for image thumbnails, from ``server.config``.
+
+        UI thread, never a client call: the settings are fetched once by a
+        worker at mount (and again on resync); until they arrive, or when the
+        server cannot answer, the model defaults apply.
+        """
+        limits = self._thumbnail_limits_cache
+        if limits is None:
+            return (DEFAULT_THUMBNAIL_MAX_LINES, DEFAULT_THUMBNAIL_MAX_COLS)
+        return limits
 
     def _add_message(
         self,
@@ -661,8 +671,7 @@ class ChatViewMixin:
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
 
-        max_lines = thumbnail_max_lines()
-        max_cols = thumbnail_max_cols()
+        max_lines, max_cols = self._thumbnail_limits()
         chat_region = getattr(chat_log, "content_region", None)
         chat_width = chat_region.width if chat_region is not None else 0
         if chat_width > 0:
@@ -688,7 +697,7 @@ class ChatViewMixin:
         widget: MessageWidget,
     ) -> None:
         """Resolve non-image media without decoding it, then request opening."""
-        path = self.manager.get_attachment_path(protocol, attachment_id)
+        path = resolve_attachment_path(self.client, protocol, attachment_id)
         self.call_from_thread(self._finish_media_path_resolve, widget, path)
 
     def _finish_media_path_resolve(
@@ -727,7 +736,7 @@ class ChatViewMixin:
         window load.
         """
         with self._image_resolve_semaphore:
-            path = self.manager.get_attachment_path(protocol, attachment_id)
+            path = resolve_attachment_path(self.client, protocol, attachment_id)
             if path is None:
                 self.call_from_thread(
                     self._finish_attachment_resolve,
@@ -861,7 +870,7 @@ class ChatViewMixin:
 
         Uscita: an already-resolved ``attachment_path`` drives the thumbnail.
         Ingresso: a backend-produced ``attachment_id`` (+ ``protocol``) is
-        resolved lazily via ``get_attachment_path`` in the worker (best-effort).
+        resolved lazily via ``media.attachment`` in the worker (best-effort).
 
         Falls back silently to the text-only bubble otherwise (degrado): no
         path nor resolvable id, non-kitty, renderer gone, or an
@@ -929,7 +938,7 @@ class ChatViewMixin:
                     attachment_id = resolved_id
                     protocol = widget.protocol
                 try:
-                    path = self.manager.get_attachment_path(protocol, attachment_id)
+                    path = resolve_attachment_path(self.client, protocol, attachment_id)
                 except Exception as _e:
                     logger.warning(
                         "Quote attachment resolve raised (protocol=%s id=%r)",
@@ -957,177 +966,30 @@ class ChatViewMixin:
             self.call_from_thread(self._finish_quote_thumbnail, widget, png)
 
     def _quoted_attachment_id_from_chat(self, widget: QuoteWidget) -> str | None:
-        """Attachment id dell'immagine quotata (stessa chat).
+        """Attachment id of the quoted image (same chat), via the server.
 
-        Match PRIMA esatto sul timestamp: evita falsi positivi quando messaggi
-        vicini (±2s) convivono (es. un'immagine appena inviata e la reply).
-        La finestra ±2s solo se il timestamp esatto non esiste affatto (drift).
+        ``media.quoted_attachment`` matches the exact timestamp first (no false
+        positives from nearby messages), then the quoted message id, then the
+        file name found in the quote text.  Runs in a worker thread.
         """
         if not (widget.contact_key and widget.protocol):
             return None
-        import sqlite3
-
-        import protocols.db as backend
-        from protocols.db import _DB_LOCK
-
-        ts = widget.quote_timestamp
-        if not ts:
-            # Quote senza timestamp quotato: fallback per id messaggio quotato
-            # (Telegram/WhatsApp) o per nome file (es. Signal).
-            if widget.reply_to_message_id:
-                resolved = self._quoted_attachment_id_from_message_id(widget)
-                if resolved:
-                    return resolved
-            return self._quoted_attachment_id_from_filename(widget)
-        image_clause = (
-            "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-            "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-            "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
-        )
         try:
-            with _DB_LOCK:
-                connection = sqlite3.connect(backend.DB_FILE)
-                try:
-                    row = connection.execute(
-                        "SELECT attachment_id FROM messages "
-                        "WHERE protocol = ? AND contact_number = ? "
-                        "AND timestamp = ? AND attachment_id IS NOT NULL "
-                        + image_clause
-                        + " LIMIT 1",
-                        (widget.protocol, widget.contact_key, ts),
-                    ).fetchone()
-                    if row is None:
-                        exists = connection.execute(
-                            "SELECT 1 FROM messages WHERE protocol = ? AND contact_number = ? "
-                            "AND timestamp = ? LIMIT 1",
-                            (widget.protocol, widget.contact_key, ts),
-                        ).fetchone()
-                        if exists:
-                            # Il messaggio quotato esiste ma non è un'immagine:
-                            # niente miniatura (mai prendere messaggi vicini).
-                            return None
-                        row = connection.execute(
-                            "SELECT attachment_id FROM messages "
-                            "WHERE protocol = ? AND contact_number = ? "
-                            "AND ABS(timestamp - ?) <= 2000 AND attachment_id IS NOT NULL "
-                            + image_clause
-                            + " ORDER BY ABS(timestamp - ?) LIMIT 1",
-                            (widget.protocol, widget.contact_key, ts, ts),
-                        ).fetchone()
-                finally:
-                    connection.close()
-        except (sqlite3.Error, OSError):
+            result = self._call_op(
+                "media.quoted_attachment",
+                {
+                    "protocol": widget.protocol,
+                    "contact_key": widget.contact_key,
+                    "quote_timestamp": widget.quote_timestamp or None,
+                    "reply_to_message_id": widget.reply_to_message_id or None,
+                    "quote_text": str(getattr(widget, "_quote_text_raw", "") or ""),
+                    "content_type": str(widget.content_type or "") or None,
+                },
+            )
+        except ApiError:
+            logger.debug("Quoted attachment lookup failed", exc_info=True)
             return None
-        if row is None or not row[0]:
-            # Nessun match per timestamp: per le quote a immagine senza
-            # metadati, prova a risolvere per nome file.
-            return self._quoted_attachment_id_from_filename(widget)
-        return str(row[0])
-
-    def _quoted_attachment_id_from_message_id(
-        self,
-        widget: QuoteWidget,
-    ) -> str | None:
-        """Risolve l'immagine quotata per ``msg_id`` (Telegram/WhatsApp).
-
-        Il backend persiste ``reply_to_message_id`` (= msg_id del target) ma
-        non sempre il timestamp quotato né l'allegato: il match per id è
-        preciso e copre anche i target non in cache all'arrivo.
-        """
-        if not (widget.reply_to_message_id and widget.contact_key and widget.protocol):
-            return None
-        image_clause = (
-            "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-            "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-            "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
-        )
-        try:
-            import sqlite3
-
-            import protocols.db as backend
-            from protocols.db import _DB_LOCK
-
-            with _DB_LOCK:
-                connection = sqlite3.connect(backend.DB_FILE)
-                try:
-                    row = connection.execute(
-                        "SELECT attachment_id FROM messages "
-                        "WHERE protocol = ? AND contact_number = ? "
-                        "AND attachment_id IS NOT NULL "
-                        "AND (msg_id = ? OR msg_id LIKE '%_' || ?) "
-                        + image_clause
-                        + " LIMIT 1",
-                        (
-                            widget.protocol,
-                            widget.contact_key,
-                            widget.reply_to_message_id,
-                            widget.reply_to_message_id,
-                        ),
-                    ).fetchone()
-                finally:
-                    connection.close()
-        except (sqlite3.Error, OSError):
-            return None
-        if row is None or not row[0]:
-            return None
-        return str(row[0])
-
-    def _quoted_attachment_id_from_filename(
-        self,
-        widget: QuoteWidget,
-    ) -> str | None:
-        """Risolve l'immagine quotata per nome file (quote senza metadati).
-
-        Es. quote Signal a un'immagine: quote_text = "IMG_1303.jpg — 🖼️
-        Immagine" e nessun ``quote_timestamp``/``quote_attachment_id``. Il nome
-        file compare in ``attachment_info`` del messaggio quotato.
-        """
-        if not str(widget.content_type or "").lower().startswith("image/"):
-            return None
-        quote_text = str(getattr(widget, "_quote_text_raw", "") or "")
-        match = re.search(
-            r"([A-Za-z0-9][\w.\- ]*\.(?:jpe?g|png|gif|webp))\b",
-            quote_text,
-            re.IGNORECASE,
-        )
-        if not match:
-            return None
-        filename = match.group(1).strip()
-        image_clause = (
-            "AND (content_type LIKE 'image/%' OR lower(attachment_id) LIKE '%.jpg' "
-            "OR lower(attachment_id) LIKE '%.jpeg' OR lower(attachment_id) LIKE '%.png' "
-            "OR lower(attachment_id) LIKE '%.gif' OR lower(attachment_id) LIKE '%.webp')"
-        )
-        try:
-            import sqlite3
-
-            import protocols.db as backend
-            from protocols.db import _DB_LOCK
-
-            with _DB_LOCK:
-                connection = sqlite3.connect(backend.DB_FILE)
-                try:
-                    row = connection.execute(
-                        "SELECT attachment_id FROM messages "
-                        "WHERE protocol = ? AND contact_number = ? "
-                        "AND attachment_id IS NOT NULL "
-                        "AND (attachment_info LIKE ? OR attachment_id LIKE ?) "
-                        + image_clause
-                        + " LIMIT 1",
-                        (
-                            widget.protocol,
-                            widget.contact_key,
-                            f"%{filename}%",
-                            f"%{filename}%",
-                        ),
-                    ).fetchone()
-                finally:
-                    connection.close()
-        except (sqlite3.Error, OSError):
-            return None
-        if row is None or not row[0]:
-            return None
-        return str(row[0])
+        return result["attachment_id"]
 
     def _finish_quote_thumbnail(self, widget: QuoteWidget, png: bytes) -> None:
         """UI thread: transmit the quote thumbnail once and register the widget.
@@ -1164,8 +1026,7 @@ class ChatViewMixin:
             return
         if self._native_renderer is None:
             return
-        max_lines = thumbnail_max_lines()
-        max_cols = thumbnail_max_cols()
+        max_lines, max_cols = self._thumbnail_limits()
         chat_region = getattr(self.chat_log, "content_region", None)
         chat_width = chat_region.width if chat_region is not None else 0
         if chat_width > 0:
@@ -1245,7 +1106,7 @@ class ChatViewMixin:
                 or self.selected_contact != contact
             )
 
-        is_whatsapp = contact.protocol == WhatsAppBackend.protocol
+        is_whatsapp = contact.protocol == PROTOCOL_WHATSAPP
 
         # Phase 1: paint instantly from the local cache (no network wait).
         rendered_any = self._render_chat_window(
@@ -1261,40 +1122,49 @@ class ChatViewMixin:
         # client — download the remote history on every open.  `fetch_history`
         # dedups internally via `ingest_message`, so already-known messages are
         # not duplicated.  Fails non-destructively.
-        backend = self.manager.get(contact.protocol)
-        fetch = getattr(backend, "fetch_history", None)
         cache_changed = False
-        if fetch is not None:
-            try:
-                # Wider window: `fetch_history` reconciles remote history with
-                # the DB (adds missing messages, upgrades entries without id).
-                # With limit=20 a DB missing messages could never be repaired
-                # because the 20 newest were already present.  Retry: WAHA can
-                # return [] right after boot even with a WORKING session, so
-                # retry a couple of times with a short pause.  Respects
-                # _is_stale() to avoid mounting into a stale selection.
-                _retry = 0
-                while True:
-                    fetch(contact.id, limit=50)
-                    _bm = getattr(backend, "cache", {}).get(contact.id, [])
-                    if _bm or _is_stale() or _retry >= 2:
-                        break
-                    _retry += 1
-                    time.sleep(0.8)
+        try:
+            # Wider window: the history download reconciles remote history
+            # with the DB (adds missing messages, upgrades entries without
+            # id).  With limit=20 a DB missing messages could never be
+            # repaired because the 20 newest were already present.  Retry:
+            # WAHA can return [] right after boot even with a WORKING
+            # session, so retry a couple of times with a short pause.
+            # Respects _is_stale() to avoid mounting into a stale selection.
+            _retry = 0
+            while True:
+                window = self._call_op(
+                    "messages.window",
+                    {
+                        "protocol": contact.protocol,
+                        "contact_id": contact.id,
+                        "refresh": True,
+                        "refresh_limit": 50,
+                    },
+                )
+                if not window["refreshed"]:
+                    # No history download (backend lacks it or it failed):
+                    # stay on the local cache.
+                    window = None
+                    break
+                if window["messages"] or _is_stale() or _retry >= 2:
+                    break
+                _retry += 1
+                time.sleep(0.8)
 
-                # fetch_history fills the BACKEND cache; merge only the
-                # genuinely new messages into the protocol-aware UI cache
-                # (never replace: the UI cache must not shrink).
-                cache_changed = self._merge_backend_cache(contact, backend)
+            if window is not None:
+                # The core's cache now holds the downloaded history; merge
+                # only the genuinely new messages into the protocol-aware UI
+                # cache (never replace: the UI cache must not shrink).
+                cache_changed = self._merge_window_rows(contact, window["messages"])
                 # I'm viewing them now: freshly downloaded messages must not
                 # inflate unread badges (already zeroed by _select_contact).
                 for msg in self._cache.get(contact.cache_key, []):
                     if not msg.get("is_mine"):
                         msg["read"] = True
-            except Exception as _e:  # fallback: stay on the local cache
-                logger.debug(
-                    "History fetch failed, staying on local cache", exc_info=True
-                )
+        except Exception as exc:  # fallback: stay on the local cache
+            logger.debug("History fetch failed, staying on local cache", exc_info=True)
+            self._report_client_error(exc, "cronologia")
 
         if _is_stale():
             return
@@ -1417,10 +1287,11 @@ class ChatViewMixin:
 
         return True
 
-    def _merge_backend_cache(self, contact, backend) -> bool:
-        """Merge ``backend.cache`` into the UI cache for *contact*, add-only.
+    def _merge_window_rows(self, contact, backend_msgs: list[dict]) -> bool:
+        """Merge the core's rows of *contact* into the UI cache, add-only.
 
-        ``fetch_history`` fills the BACKEND cache (keyed by raw id); this
+        *backend_msgs* are the ``messages.window`` rows (the core's cache of
+        the chat, WhatsApp storage keys already unioned and deduped); this
         mirrors only the genuinely new messages into the protocol-aware UI
         cache.  It never removes existing entries, so a backend cache that is
         temporarily smaller than the UI cache can not shrink the rendered
@@ -1435,25 +1306,8 @@ class ChatViewMixin:
         message's text was updated (an edit).  A status-only upgrade does NOT
         count as a change (nothing to re-render).
         """
-        # Cache-union cross-key: per un contatto WhatsApp il backend cache può
-        # avere lo storico sotto qualunque chiave alias della union (@c.us/@lid).
-        # Tracciamo la chiave sorgente e applichiamo la dedup cross-key (stesso
-        # msg_id a attachment diverso compreso) PRIMA del loop intra-chiave.
-        backend_cache = getattr(backend, "cache", {})
-        tagged: list[tuple[str, dict]] = [
-            (storage_key, m)
-            for storage_key in contact_storage_keys(contact)
-            for m in backend_cache.get(storage_key, [])
-        ]
-        if not tagged:
+        if not backend_msgs:
             return False
-        kept_pairs = dedup_cross_key(
-            tagged,
-            canonical_key=contact.id,
-            key_of=lambda pair: pair[0],
-            normalize=lambda pair: pair[1],
-        )
-        backend_msgs: list[dict] = [m for _key, m in kept_pairs]
 
         ui_key = contact.cache_key
         ui_msgs = self._cache.setdefault(ui_key, [])

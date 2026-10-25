@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -906,6 +907,15 @@ class TestAliasIsolation:
         fake_bin.mkdir()
         shutil.copy(INSTALL_SCRIPT, script)
         _make_executable(script)
+        # The background alias runs ``.venv/bin/python megachat.py serve``:
+        # record the invocation instead of starting a real server.
+        serve_calls = tmp_path / "serve.calls"
+        venv_python = tmp_path / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        _write_stub(
+            venv_python,
+            f'#!/bin/sh\necho "$@" >> {str(serve_calls)!r}\n',
+        )
         _write_stub(
             fake_bin / "tmux",
             "#!/bin/sh\n"
@@ -920,6 +930,8 @@ class TestAliasIsolation:
             **os.environ,
             "HOME": str(home),
             "SHELL": "/bin/bash",
+            # Never read or remove the real /tmp/signal-tui.lock (mc-cvp).
+            "MEGACHAT_LOCK_FILE": str(tmp_path / "signal-tui.lock"),
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
         }
         install = subprocess.run(
@@ -955,5 +967,11 @@ class TestAliasIsolation:
         token = json.loads((tmp_path / "config.json").read_text())["web"]["token"]
         assert result.returncode == 0, result.stderr
         assert result.stdout.count(f"token: {token}") == 2
-        assert "TUI bg fermata." in result.stdout
+        assert "Server bg fermato." in result.stdout
+        # The server is no longer hosted in tmux: only the stop alias still
+        # kills a legacy session, and nothing creates one.
         assert not tmux_state.exists()
+        deadline = time.monotonic() + 5
+        while not serve_calls.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert set(serve_calls.read_text().splitlines()) == {"megachat.py serve"}

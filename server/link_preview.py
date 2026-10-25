@@ -9,19 +9,27 @@ the URL, and every resolved address (initial request and each redirect hop)
 must be a public, globally routable IP.  The check lives in the aiohttp
 resolver, so the address that is validated is the one that is connected to
 (no DNS-rebinding window).
+
+Core module (moved from ``web/``): the ``links.*`` operations call it, so every
+adapter gets the same protections.  Do not weaken ``validate_url`` or the
+resolver without a security review.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import logging
+import os
 import re
 import socket
+import threading
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
 
@@ -442,6 +450,50 @@ async def get_preview_image(url: str) -> tuple[bytes, str] | None:
     # Trust the magic bytes, not the header: only raster formats (no SVG).
     sniffed = _sniff_raster(body)
     return (body, sniffed) if sniffed else None
+
+
+_IMAGE_EXT = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+_IMAGE_DIR_NAME = "link-preview-images"
+_IMAGE_KEEP = 256
+
+
+def materialize_image(data: bytes, content_type: str) -> Path | None:
+    """Store preview image *data* as a content-addressed file; return its path.
+
+    The blob handle of ``links.preview_image`` needs a path, but the bytes come
+    from a (validated, size-capped) fetch or from the location thumbnail store.
+    The newest ``_IMAGE_KEEP`` files are kept.  ``protocols.db.CACHE_DIR`` is
+    looked up at call time, like the rest of the cache layout.
+    """
+    from protocols import db
+
+    digest = hashlib.sha256(data).hexdigest()
+    directory = Path(db.CACHE_DIR) / _IMAGE_DIR_NAME
+    path = directory / f"{digest}{_IMAGE_EXT.get(content_type, '.img')}"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        if path.is_file():
+            path.touch()
+            return path
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+        files = sorted(
+            (p for p in directory.iterdir() if p.is_file() and p.suffix != ".tmp"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in files[_IMAGE_KEEP:]:
+            stale.unlink(missing_ok=True)
+        return path
+    except OSError:
+        logger.debug("Unable to store link preview image", exc_info=True)
+        return None
 
 
 async def fetch_external_image(

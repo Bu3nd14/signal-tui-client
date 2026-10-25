@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -129,7 +130,7 @@ def test_refresh_updates_archived_flag_in_place():
 
 def _client(backend) -> TestClient:
     app = FastAPI()
-    app.state.manager = SimpleNamespace(get=lambda proto: backend)
+    app.state.api = api_for(SimpleNamespace(get=lambda proto: backend))
     app.include_router(create_api_router())
     return TestClient(app)
 

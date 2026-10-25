@@ -29,6 +29,8 @@ from textual.widgets import Static
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from event_harness import feed
+
 from models import PROTOCOL_SIGNAL, ChatEvent
 from ui_components import MessageTextArea, MessageWidget
 
@@ -96,6 +98,27 @@ def _fake_apply_edit(
         "text": new_text,
         "is_mine": is_mine if is_mine is not None else False,
     }
+
+
+@pytest.fixture
+def edit_row():
+    """The SQLite row ``messages.edit`` looks up and updates (own sent text)."""
+    row = {
+        "id": 1,
+        "msg_id": "sig-1000",
+        "text": "vecchio",
+        "is_mine": 1,
+        "timestamp": 1000,
+        "protocol": PROTOCOL_SIGNAL,
+        "msg_type": "text",
+        "status": "sent",
+    }
+    with (
+        patch("server.messages._message_row_for_edit", return_value=row),
+        patch("server.messages._persist_message_edit", return_value=1),
+        patch("server.ops.edit.contact_storage_keys", return_value=()),
+    ):
+        yield row
 
 
 # ─── Gate: richieste rifiutate ────────────────────────────────────────────────
@@ -190,7 +213,9 @@ async def test_edit_request_populates_state(app_for_test):
 
 
 @pytest.mark.integration
-async def test_submit_edit_updates_cache_widget_and_backend(app_for_test_with_mocks):
+async def test_submit_edit_updates_cache_widget_and_backend(
+    app_for_test_with_mocks, edit_row
+):
     """Submit ottimistico: cache, identità, widget, backend, input e barra."""
     app, signal_backend = app_for_test_with_mocks
     async with app.run_test() as pilot:
@@ -230,9 +255,13 @@ async def test_submit_edit_updates_cache_widget_and_backend(app_for_test_with_mo
         assert widget._msg_text == "nuovo"
         assert widget._edited is True
 
-        # Backend chiamato con (contact_id, message_id, new_text).
-        signal_backend.edit_message_sync.assert_called_once_with(
-            contact.id, "sig-1000", "nuovo"
+        # Il core riceve l'edit (messages.edit) e lo applica al backend solo
+        # dopo il successo: invio, poi cache chat + SQLite (apply_edit).
+        app.core.manager.edit_message_sync.assert_called_once_with(
+            PROTOCOL_SIGNAL, contact.id, "sig-1000", "nuovo"
+        )
+        signal_backend.apply_edit.assert_called_once_with(
+            contact.id, "sig-1000", "nuovo", is_mine=True
         )
 
         # Input svuotato e barra nascosta.
@@ -244,14 +273,16 @@ async def test_submit_edit_updates_cache_widget_and_backend(app_for_test_with_mo
 
 @pytest.mark.integration
 @pytest.mark.parametrize("failure", ["exception", "false"])
-async def test_submit_edit_failure_rolls_back(app_for_test_with_mocks, failure):
+async def test_submit_edit_failure_rolls_back(
+    app_for_test_with_mocks, edit_row, failure
+):
     """Fallimento backend → rollback completo (cache + widget + identità) + status."""
     app, signal_backend = app_for_test_with_mocks
     if failure == "exception":
-        signal_backend.edit_message_sync = MagicMock(side_effect=RuntimeError("boom"))
+        app.core.manager.edit_message_sync = MagicMock(side_effect=RuntimeError("boom"))
         expected_error = "boom"
     else:
-        signal_backend.edit_message_sync = MagicMock(return_value=False)
+        app.core.manager.edit_message_sync = MagicMock(return_value=False)
         expected_error = "edit rejected by server"
 
     async with app.run_test() as pilot:
@@ -290,6 +321,8 @@ async def test_submit_edit_failure_rolls_back(app_for_test_with_mocks, failure):
 
         status_bar = app.query_one("#status-text", Static)
         assert status_bar.content == f"❌ Edit failed: {expected_error}"
+        # The core never applied the edit, so there is nothing to undo there.
+        signal_backend.apply_edit.assert_not_called()
 
 
 # ─── Eventi message_edit in arrivo ────────────────────────────────────────────
@@ -348,7 +381,7 @@ async def test_incoming_edit_chat_open_updates_widget_no_new_bubble(
         with patch.object(
             app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
         ):
-            handled = app._handle_event(event)
+            handled = feed(app, event)
         await pilot.pause()
 
         assert handled is True
@@ -415,7 +448,7 @@ async def test_incoming_edit_chat_closed_updates_cache_only(
         with patch.object(
             app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
         ):
-            handled = app._handle_event(event)
+            handled = feed(app, event)
         await pilot.pause()
 
         assert handled is True
@@ -487,7 +520,7 @@ async def test_opening_reply_cancels_edit(app_for_test):
 
 
 @pytest.mark.integration
-async def test_refresh_chat_after_edit_no_duplicates(app_for_test):
+async def test_refresh_chat_after_edit_no_duplicates(app_for_test, edit_row):
     """Dopo un edit, ``_refresh_chat()`` non rimonta nulla di nuovo."""
     app = app_for_test
     async with app.run_test() as pilot:
@@ -523,9 +556,9 @@ async def test_refresh_chat_after_edit_no_duplicates(app_for_test):
 
 
 @pytest.mark.integration
-async def test_double_edit_consecutive(app_for_test_with_mocks):
+async def test_double_edit_consecutive(app_for_test_with_mocks, edit_row):
     """Due edit consecutivi sullo stesso messaggio funzionano."""
-    app, signal_backend = app_for_test_with_mocks
+    app, _signal_backend = app_for_test_with_mocks
     async with app.run_test() as pilot:
         await pilot.pause()
         contact = app.contacts[0]
@@ -564,7 +597,7 @@ async def test_double_edit_consecutive(app_for_test_with_mocks):
         widget = _only_message_widget(app)
         assert widget._msg_text == "nuovo2"
 
-        assert signal_backend.edit_message_sync.call_args_list == [
-            call(contact.id, "sig-1000", "nuovo1"),
-            call(contact.id, "sig-1000", "nuovo2"),
+        assert app.core.manager.edit_message_sync.call_args_list == [
+            call(PROTOCOL_SIGNAL, contact.id, "sig-1000", "nuovo1"),
+            call(PROTOCOL_SIGNAL, contact.id, "sig-1000", "nuovo2"),
         ]

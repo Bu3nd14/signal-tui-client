@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,10 @@ def _real_db_marker_count() -> int:
     if not REAL_DB.exists():
         pytest.skip("Real DB does not exist")
     try:
-        with sqlite3.connect(f"file:{REAL_DB}?mode=ro", uri=True) as connection:
+        with (
+            closing(sqlite3.connect(f"file:{REAL_DB}?mode=ro", uri=True)) as connection,
+            connection,
+        ):
             return connection.execute(
                 "SELECT COUNT(*) FROM messages WHERE contact_number IN (?, ?)",
                 TEST_MARKERS,

@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 from models import PROTOCOL_WHATSAPP, ChatContact
 from protocols.whatsapp import WhatsAppBackend
-from web.api import _group_sender_resolver
+from server.messages import _group_sender_resolver
 
 
 class _Manager:

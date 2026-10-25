@@ -18,6 +18,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from client_harness import api_for
+from event_harness import feed
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -32,13 +34,21 @@ from protocols.base import ChatBackend
 from protocols.signal import SignalBackend
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
+from server.bus import EventBus
+from server.core import ChatCore
 from tui.events import EventHandlingMixin
+from tui.polling import PollingMixin
 from web.api import create_api_router
+from web.legacy_events import to_legacy
 
 _PNG_1X1 = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
     "+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+class _ViewHost(EventHandlingMixin, PollingMixin):
+    pass
 
 
 class _MinimalBackend(ChatBackend):
@@ -152,7 +162,7 @@ class _RecordingManager:
 
 def _app(manager) -> FastAPI:
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return app
 
@@ -216,7 +226,10 @@ class TestCacheOnlyLookup:
         backend = _wa_backend(book=[book])
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event"), TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push"),
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={
@@ -236,7 +249,7 @@ class TestCacheOnlyLookup:
         backend._rest.list_all_contacts = MagicMock()
         backend._lid_resolve_remote = MagicMock()
         to_thread = MagicMock()
-        monkeypatch.setattr("web.api.asyncio.to_thread", to_thread)
+        monkeypatch.setattr("server.ops.send.asyncio.to_thread", to_thread)
 
         assert backend.find_contact("393@c.us") is book
 
@@ -253,7 +266,10 @@ class TestCacheOnlyLookup:
         backend._lid_resolve_remote = MagicMock()
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event"), TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push"),
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={
@@ -351,7 +367,10 @@ class TestActiveChatRegression:
         backend.register_contact = MagicMock()
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event") as pushed, TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push") as pushed,
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={
@@ -377,7 +396,10 @@ class TestWhatsAppIdentity:
         backend = _wa_backend(book=[book], lid_map={})
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event") as pushed, TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push") as pushed,
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={
@@ -399,7 +421,10 @@ class TestWhatsAppIdentity:
         backend = _wa_backend(book=[book], lid_map={})
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event") as pushed, TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push") as pushed,
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 data={"protocol": "whatsapp", "contact_id": "393@c.us", "text": ""},
@@ -459,7 +484,10 @@ class TestWhatsAppIdentity:
         manager = _RecordingManager(backend)
 
         def send():
-            with patch("web.api.push_event"), TestClient(_app(manager)) as client:
+            with (
+                patch("server.api.ChatAPI.publish_web_push"),
+                TestClient(_app(manager)) as client,
+            ):
                 return client.post(
                     "/api/send",
                     json={
@@ -498,8 +526,11 @@ class TestWhatsAppIdentity:
         backend.register_contact(book)
         backend.ingest_message = MagicMock(return_value=True)
 
-        harness = EventHandlingMixin()
+        harness = _ViewHost()
+        harness.bus = EventBus()
+        harness.core = ChatCore(harness.bus)
         harness.manager = SimpleNamespace(get=lambda protocol: backend)
+        harness.core.manager = harness.manager
         harness.contacts = [book]
         harness.selected_contact = None
         harness._contact_list_dirty = False
@@ -525,11 +556,12 @@ class TestWhatsAppIdentity:
                 "msg_type": "text",
             },
         )
-        with patch("web.bridge.push_event") as pushed:
-            assert harness._handle_message_event(event) is True
+        sub = harness.bus.subscribe()
+        assert feed(harness, event) is True
 
         assert backend.ingest_message.call_args.args[0] == "393@c.us"
-        assert pushed.call_args.args[0]["payload"]["contact_id"] == "393@c.us"
+        frames = [to_legacy(e) for e in sub.drain()]
+        assert frames[0]["payload"]["contact_id"] == "393@c.us"
 
     def test_phone_to_lid_applies_ttl(self):
         backend = _wa_backend()
@@ -561,7 +593,10 @@ class TestTelegramBookOnlySend:
         backend._address_book_ts = time.monotonic()
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event") as pushed, TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push") as pushed,
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={

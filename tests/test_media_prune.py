@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,7 @@ def _scope(label: str, directory: Path) -> MediaScope:
 
 
 def _db(path: Path, rows=()) -> Path:
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         conn.execute(
             "CREATE TABLE messages (protocol TEXT, attachment_id TEXT, "
             "quote_attachment_id TEXT, quote_attachment_path TEXT)"
@@ -237,7 +238,7 @@ def test_prune_cache_media_failure_does_not_propagate(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_FILE", tmp_path / "messages.db")
     monkeypatch.setattr(db, "CACHE_DIR", tmp_path)
     db._init_db()
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         conn.executemany(
             "INSERT INTO messages "
             "(protocol, contact_number, timestamp, status, msg_id) "

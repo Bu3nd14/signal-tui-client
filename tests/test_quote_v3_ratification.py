@@ -6,13 +6,13 @@ Ogni test è nominato ``test_rN_*`` e mappa 1:1 la condizione di ratifica.
 from __future__ import annotations
 
 import sqlite3
-from types import SimpleNamespace
-from unittest.mock import patch
+from contextlib import closing
+
+from event_harness import EventApp, feed, legacy_frames
 
 from models import ChatContact, ChatEvent
 from protocols import db as db_mod
 from protocols.signal import SignalBackend
-from tui.events import EventHandlingMixin
 from tui.unread_reply import UnreadReplyMixin
 
 CONTACT = "+391234567890"
@@ -60,22 +60,12 @@ def _db_row(msg_id: str = "in-1") -> dict:
 
 
 def _db_row_count() -> int:
-    with sqlite3.connect(db_mod.DB_FILE) as conn:
+    with closing(sqlite3.connect(db_mod.DB_FILE)) as conn, conn:
         return conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 
 
 def _app(backend, contact: ChatContact, *, web_enabled: bool = False):
-    return SimpleNamespace(
-        manager=SimpleNamespace(get=lambda _protocol: backend),
-        contacts=[contact],
-        selected_contact=None,
-        _contact_list_dirty=False,
-        _dirty_contact_keys=set(),
-        _cache={},
-        _typing_contacts={},
-        _typing_mumbling={},
-        _web_enabled=web_enabled,
-    )
+    return EventApp(backend, [contact], _web_enabled=web_enabled)
 
 
 class _UnreadHost(UnreadReplyMixin):
@@ -118,11 +108,11 @@ def test_r2_incoming_changed_adds_no_db_row_and_no_ui_cache_entry():
     contact = ChatContact(id=CONTACT, display_name="Mario", protocol="signal")
     app = _app(backend, contact)
 
-    assert EventHandlingMixin._handle_message_event(app, _event(_incoming(), contact))
+    assert feed(app, _event(_incoming(), contact))
     assert _db_row_count() == 1
     assert len(app._cache[contact.cache_key]) == 1
 
-    assert EventHandlingMixin._handle_message_event(app, _event(_enriched(), contact))
+    assert feed(app, _event(_enriched(), contact))
 
     assert _db_row_count() == 1
     assert len(app._cache[contact.cache_key]) == 1
@@ -139,13 +129,13 @@ def test_r3_incoming_changed_keeps_unread_unchanged_in_ui_and_db():
     host = _UnreadHost([contact], app._cache)
 
     # Primo arrivo: riga DB + cache UI + unread = 1.
-    EventHandlingMixin._handle_message_event(app, _event(_incoming(), contact))
+    feed(app, _event(_incoming(), contact))
     assert host._recompute_unread(contact.cache_key) is True
     assert host._unread_counts[contact.cache_key] == 1
     assert db_mod._count_unread() == {CONTACT: 1}
 
     # Echo arricchito ("changed"): unread resta 1 su entrambi i lati.
-    EventHandlingMixin._handle_message_event(app, _event(_enriched(), contact))
+    feed(app, _event(_enriched(), contact))
 
     assert host._recompute_unread(contact.cache_key) is False
     assert host._unread_counts[contact.cache_key] == 1
@@ -260,10 +250,10 @@ def test_r6_changed_echo_pushes_web_event_exactly_once():
     app = _app(backend, contact, web_enabled=True)
     event = _event(_enriched(), contact)
 
-    with patch("web.bridge.push_event") as push_event:
-        EventHandlingMixin._handle_message_event(app, event)
-        assert push_event.call_count == 1
+    sub = app.bus.subscribe()
+    feed(app, event)
+    assert len(legacy_frames(sub.drain())) == 1
 
-        # Secondo echo no-op: nessun secondo push.
-        EventHandlingMixin._handle_message_event(app, event)
-        assert push_event.call_count == 1
+    # Secondo echo no-op: nessun secondo push.
+    feed(app, event)
+    assert legacy_frames(sub.drain()) == []

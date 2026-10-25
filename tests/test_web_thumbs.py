@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import quote
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -27,7 +28,7 @@ def _client(monkeypatch, tmp_path: Path, files: dict[str, Path]) -> TestClient:
         get_attachment_path=lambda _proto, attachment_id: files.get(attachment_id),
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return TestClient(app)
 
@@ -73,7 +74,7 @@ def test_non_thumbnail_media_and_invalid_width_serve_original(monkeypatch, tmp_p
         response = client.get(_url(path.name))
         assert response.content == path.read_bytes()
         assert response.headers["cache-control"] == "private, max-age=86400"
-    with patch("web.video_thumbs._video_thumbnail", return_value=None):
+    with patch("server.video_thumbs._video_thumbnail", return_value=None):
         response = client.get(_url(video.name))
     assert response.status_code == 422
     assert response.json() == {"detail": "Video thumbnail unavailable"}

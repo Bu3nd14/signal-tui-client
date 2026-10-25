@@ -6,7 +6,7 @@ Complementary to the tests added in ``test_web_outgoing_mirror.py`` and
 * WhatsApp multi per-message slots (the added tests only cover one message).
 * DB is never overwritten when a batch is already present (cache-only asserted).
 * ``_merge_batch_slot`` return semantics (``True`` on fusion, ``False`` no-op).
-* End-to-end ``"changed"`` -> ``web.bridge.push_event`` through
+* End-to-end ``"changed"`` -> ``ChatAPI.publish_web_push`` through
   ``_handle_message_event`` (the requested end-to-end check).
 * Reconcile regression on singles and on failed multis.
 """
@@ -15,14 +15,14 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from types import SimpleNamespace
-from unittest.mock import patch
+from contextlib import closing
+
+from event_harness import EventApp, feed, legacy_frames
 
 from models import ChatContact, ChatEvent
 from protocols import db
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
-from tui.events import EventHandlingMixin
 
 
 def _telegram_echo(message_id: str, attachment_id: str | None) -> dict:
@@ -62,7 +62,7 @@ def _wa_backend(tmp_path, monkeypatch) -> WhatsAppBackend:
 
 
 def _db_rows(protocol: str, contact: str) -> list[tuple]:
-    with sqlite3.connect(db.DB_FILE) as connection:
+    with closing(sqlite3.connect(db.DB_FILE)) as connection, connection:
         return connection.execute(
             "SELECT msg_id, batch_id, batch_index FROM messages "
             "WHERE protocol = ? AND contact_number = ? ORDER BY msg_id",
@@ -242,17 +242,7 @@ def test_echo_first_batch_merge_on_cache_only_row_does_not_report_changed(
 
 
 def _event_app(backend, contact):
-    return SimpleNamespace(
-        manager=SimpleNamespace(get=lambda _protocol: backend),
-        contacts=[contact],
-        selected_contact=None,
-        _contact_list_dirty=False,
-        _dirty_contact_keys=set(),
-        _cache={},
-        _typing_contacts={},
-        _typing_mumbling={},
-        _web_enabled=True,
-    )
+    return EventApp(backend, [contact], _web_enabled=True)
 
 
 def _assert_echo_first_merge_pushes(backend, protocol, contact_id, echo):
@@ -269,10 +259,12 @@ def _assert_echo_first_merge_pushes(backend, protocol, contact_id, echo):
         payload={**mirror_payload, "contact": contact, "timestamp": 1787250931234},
     )
 
-    with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_message_event(app, event) is True
+    sub = app.bus.subscribe()
+    assert feed(app, event) is True
 
-    push_event.assert_called_once()
+    # One web frame for the "changed" echo (the TUI itself never pushes).
+    frames = legacy_frames(sub.drain())
+    assert len(frames) == 1 and frames[0]["type"] == "message"
     assert backend.cache[contact_id][0]["batch_id"] == "batch-1"
     assert backend.cache[contact_id][0]["batch_index"] == 0
 
@@ -307,9 +299,9 @@ def test_mirror_first_echo_does_not_push_duplicate():
         payload={**echo, "contact": contact},
     )
 
-    with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_message_event(app, event) is True
+    sub = app.bus.subscribe()
+    assert feed(app, event) is True
 
     # Unchanged duplicate -> no push, no double bubble.
-    push_event.assert_not_called()
+    assert legacy_frames(sub.drain()) == []
     assert backend.cache["42"][0]["batch_id"] == "batch-1"

@@ -222,7 +222,7 @@ class TestOnBackendReadyInitsDefault:
         backend.cache = {}
         backend.contacts = []
 
-        app._on_backend_ready(backend)
+        app._on_backend_ready(backend.protocol)
 
         assert bar.content == "📱 2  💬 3  📨 -"
         assert app._status_active is False

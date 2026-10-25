@@ -13,7 +13,7 @@
 
 PYTHON ?= python
 
-.PHONY: test lint typecheck coverage format-check check live-test live-test-manual
+.PHONY: test lint typecheck coverage format-check check live-test live-test-manual smoke
 
 # Esegue l'intera suite in tests/ — radice definita da testpaths.
 test:
@@ -53,3 +53,9 @@ live-test:
 # contatto di test mentre il test è in attesa). Richiede LIVE_MANUAL=1.
 live-test-manual:
 	LIVE_TESTS=1 LIVE_MANUAL=1 $(PYTHON) -m pytest tests/test_live_quote_media.py::test_e4_ingest_manual -v
+
+# Smoke end-to-end client/server (serve, socket, attach-or-spawn, Detach/Quit):
+# processi reali in un HOME/lock/socket temporanei, nessun backend. ~1 minuto.
+# Richiede `script` (util-linux) e curl. Vedi scripts/smoke_e2e.sh.
+smoke:
+	PY=$(PYTHON) bash scripts/smoke_e2e.sh

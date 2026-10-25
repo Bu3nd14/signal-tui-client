@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -29,7 +30,7 @@ def status_client():
 
     def make(backends: dict):
         app = FastAPI()
-        app.state.manager = StatusManager(backends)
+        app.state.api = api_for(StatusManager(backends))
         install_auth(app, TOKEN)
         app.include_router(create_api_router())
         return TestClient(app)

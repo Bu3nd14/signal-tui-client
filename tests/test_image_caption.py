@@ -51,7 +51,7 @@ class _FakeChatLog:
 def _make_app() -> SignalTUI:
     """App with a real manager and a neutralized worker (live-path tests)."""
     app = SignalTUI()
-    app.manager = BackendManager()
+    app.core.manager = BackendManager()
     app.run_worker = MagicMock()
     app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
     return app

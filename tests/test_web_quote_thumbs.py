@@ -3,12 +3,14 @@ from __future__ import annotations
 import io
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import quote
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -30,7 +32,7 @@ def web_client(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     _init_db()
     app = FastAPI()
-    app.state.manager = SimpleNamespace(get_attachment_path=lambda *_args: None)
+    app.state.api = api_for(SimpleNamespace(get_attachment_path=lambda *_args: None))
     install_auth(app, TOKEN)
     app.include_router(create_api_router())
     with TestClient(app) as client:
@@ -48,7 +50,7 @@ def _insert_message(db_file: Path, **values) -> int:
     }
     columns = ", ".join(fields)
     placeholders = ", ".join("?" for _ in fields)
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         cursor = connection.execute(
             f"INSERT INTO messages ({columns}) VALUES ({placeholders})",
             tuple(fields.values()),
@@ -181,7 +183,7 @@ def test_quote_media_requires_bearer(web_client):
 def test_quote_media_database_error_returns_500(web_client):
     client, _, _ = web_client
 
-    with patch("web.api.sqlite3.connect", side_effect=sqlite3.OperationalError):
+    with patch("server.media.sqlite3.connect", side_effect=sqlite3.OperationalError):
         response = client.get("/api/quote-media/signal/1", headers=AUTH)
 
     assert response.status_code == 500
@@ -460,7 +462,7 @@ def test_quote_video_resolver_path_timestamp_and_filename(web_client):
 
 def test_quote_filename_fallback_ignores_unknown_names_and_future():
     """Nessun nome file → nessuna risoluzione; allegati futuri esclusi."""
-    from web.api import _quoted_media_by_filename
+    from server.messages import _quoted_media_by_filename
 
     assert _quoted_media_by_filename("signal", "alice", "solo testo", 2000) is None
     assert (

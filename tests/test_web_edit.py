@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from client_harness import api_for
+from event_harness import legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from server.bus import EventBus
 
 TOKEN = "correct-secret"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -33,7 +38,7 @@ def edit_client(monkeypatch, tmp_path):
     _init_db()
     manager = EditManager()
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager, EventBus())
     install_auth(app, TOKEN)
     app.include_router(create_api_router())
     with TestClient(app) as client:
@@ -52,7 +57,7 @@ def _insert_message(
     msg_type="text",
     status="sent",
 ):
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_id, msg_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -120,7 +125,7 @@ def test_edit_returns_500_for_database_lookup_error(edit_client):
     client, manager, _ = edit_client
 
     with patch(
-        "web.api.sqlite3.connect",
+        "sqlite3.connect",
         side_effect=sqlite3.OperationalError("database unavailable"),
     ):
         response = client.post("/api/messages/edit", json=_payload(), headers=AUTH)
@@ -178,8 +183,10 @@ def test_edit_success_applies_locally_and_pushes_event(edit_client):
     client, manager, db_file = edit_client
     _insert_message(db_file, timestamp=4321)
 
-    with patch("web.api.push_event") as push_event:
-        response = client.post("/api/messages/edit", json=_payload(), headers=AUTH)
+    bus = client.app.state.api.bus
+    sub = bus.subscribe()
+    response = client.post("/api/messages/edit", json=_payload(), headers=AUTH)
+    frames = legacy_frames(sub.drain())
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
@@ -189,7 +196,7 @@ def test_edit_success_applies_locally_and_pushes_event(edit_client):
     manager.backend.apply_edit.assert_called_once_with(
         "alice", "message-1", "Dopo", is_mine=True
     )
-    push_event.assert_called_once_with(
+    assert frames == [
         {
             "type": "message_edit",
             "payload": {
@@ -202,4 +209,4 @@ def test_edit_success_applies_locally_and_pushes_event(edit_client):
                 "is_mine": True,
             },
         }
-    )
+    ]

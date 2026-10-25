@@ -30,6 +30,8 @@ import threading
 import time
 from pathlib import Path
 
+from models import DEFAULT_THUMBNAIL_MAX_COLS, DEFAULT_THUMBNAIL_MAX_LINES
+
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
 
@@ -377,12 +379,16 @@ def image_protocol() -> str:
 
 def thumbnail_max_lines() -> int:
     """Return the max thumbnail height in lines (default ``12``)."""
-    return _get_int("thumbnail_max_lines", "THUMBNAIL_MAX_LINES", 12)
+    return _get_int(
+        "thumbnail_max_lines", "THUMBNAIL_MAX_LINES", DEFAULT_THUMBNAIL_MAX_LINES
+    )
 
 
 def thumbnail_max_cols() -> int:
     """Return the max thumbnail width in columns (default ``60``)."""
-    return _get_int("thumbnail_max_cols", "THUMBNAIL_MAX_COLS", 60)
+    return _get_int(
+        "thumbnail_max_cols", "THUMBNAIL_MAX_COLS", DEFAULT_THUMBNAIL_MAX_COLS
+    )
 
 
 # ─── Optional web reader configuration ──────────────────────────────────────

@@ -15,6 +15,7 @@ All tests use an isolated temporary SQLite DB (``protocols.db.DB_FILE`` /
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -23,6 +24,8 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from client_harness import client_for
 
 import protocols.db as backend_mod
 from models import PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
@@ -218,7 +221,7 @@ class TestProcessReceiptPersistsById:
 class TestMergeUpdatesStatus:
     """🔄 Il merge della UI cache aggiorna lo status invece di un ``continue``."""
 
-    def test_merge_backend_cache_updates_status_higher_rank(self):
+    def test_merge_window_rows_updates_status_higher_rank(self):
         from tui.chat_view import ChatViewMixin
 
         mixin = ChatViewMixin()
@@ -248,7 +251,11 @@ class TestMergeUpdatesStatus:
             }
         )
 
-        changed = mixin._merge_backend_cache(contact, backend)
+        window = client_for(SimpleNamespace(get=lambda _proto: backend)).call(
+            "messages.window", {"protocol": contact.protocol, "contact_id": contact.id}
+        )
+
+        changed = mixin._merge_window_rows(contact, window["messages"])
 
         assert changed is False  # nothing appended
         assert mixin._cache[contact.cache_key][0]["status"] == "read"
@@ -294,7 +301,9 @@ class TestMergeUpdatesStatus:
             contacts=[],
         )
 
-        app._on_backend_ready(backend)
+        app.core.manager = SimpleNamespace(get=lambda _proto: backend)
+
+        app._on_backend_ready(backend.protocol)
 
         assert app._cache[key][0]["status"] == "read"
 
@@ -303,14 +312,19 @@ class TestSendPropagatesIdToUi:
     """📤 N1 (TUI) — l'id ritornato da ``send_message_sync`` raggiunge UI cache e widget."""
 
     def test_whatsapp_send_result_updates_ui_cache_and_widget_id(self):
+        from tui.client_calls import ClientCallsMixin
         from tui.send import SendMixin
         from ui_components import MessageWidget
 
-        class Handler(SendMixin):
+        class Handler(ClientCallsMixin, SendMixin):
+            is_running = False
+
             def __init__(self):
+                self._init_client_state()
+                self._thread_id = threading.get_ident()
                 self._cache = {}
                 self._status = MagicMock()
-                self._transition_outgoing_status = MagicMock(return_value=True)
+                self._update_message_widgets_status = MagicMock()
                 self.run_worker = MagicMock()
                 self.call_from_thread = MagicMock(
                     side_effect=lambda cb, *a, **k: cb(*a, **k)
@@ -334,17 +348,20 @@ class TestSendPropagatesIdToUi:
         backend = MagicMock()
         backend.send_message_sync.return_value = "BAYES-9"
         backend.ingest_message = MagicMock(return_value=False)
+        backend.contacts = []
         handler.manager = SimpleNamespace(get=MagicMock(return_value=backend))
+        handler.client = client_for(handler.manager)
 
-        handler._send_message_worker(
-            text,
-            timestamp,
-            None,
-            protocol=PROTOCOL_WHATSAPP,
-            contact_id=contact.id,
-        )
+        with patch("server.ops.send.transition_outgoing_status", return_value=True):
+            handler._send_message_worker(
+                text,
+                timestamp,
+                None,
+                protocol=PROTOCOL_WHATSAPP,
+                contact_id=contact.id,
+            )
 
-        # ingest_message riceve l'id reale...
+        # il core ingerisce l'id reale...
         assert backend.ingest_message.call_args[0][1]["id"] == "BAYES-9"
         # ...la UI cache viene aggiornata con l'id...
         assert handler._cache[contact.cache_key][0]["id"] == "BAYES-9"

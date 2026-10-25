@@ -209,33 +209,42 @@ install_aliases() {
     fi
 
     read -r -d '' ALIASES_BLOCK <<'EOF' || true
-# ─── Signal TUI Client: web reader + background via tmux ─────────────────
+# ─── Signal TUI Client: web reader + background via megachat serve ───────
 # Web su 0.0.0.0:4242. Token Bearer: config.json (web.token) o SIGNAL_TUI_WEB_TOKEN.
 # web-signal-tui-bg stampa ed esporta il token (fast cycle: curl + login Web UI).
 # Gmail TPM: la shell/TUI deve avere il gruppo tss (dopo usermod serve re-login).
 SIGNAL_TUI_DIR="__PROJECT_DIR__"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 _signal_tui_web_bg() {
-    if ! tmux has-session -t tui 2>/dev/null; then
-        tmux new-session -d -s tui "cd \"$SIGNAL_TUI_DIR\" && exec .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0" || return 1
+    local pid="" lock="${MEGACHAT_LOCK_FILE:-/tmp/signal-tui.lock}"
+    [ -f "$lock" ] && pid="$(cat "$lock")"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        ( ( cd "$SIGNAL_TUI_DIR" && exec nohup .venv/bin/python megachat.py serve ) </dev/null >/dev/null 2>&1 & )
     fi
     SIGNAL_TUI_WEB_TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["web"]["token"])' "$SIGNAL_TUI_DIR/config.json")" || return 1
     export SIGNAL_TUI_WEB_TOKEN
-    echo "TUI bg attiva — token: $SIGNAL_TUI_WEB_TOKEN"
+    echo "Server bg attivo — token: $SIGNAL_TUI_WEB_TOKEN"
 }
 _signal_tui_web_stop() {
-    if [ -f /tmp/signal-tui.lock ]; then
-        local pid
-        pid="$(cat /tmp/signal-tui.lock)"
-        [ -n "$pid" ] && kill -INT "$pid" 2>/dev/null || true
+    local lock="${MEGACHAT_LOCK_FILE:-/tmp/signal-tui.lock}" pid=""
+    [ -f "$lock" ] && pid="$(cat "$lock" 2>/dev/null)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill -INT "$pid" 2>/dev/null || true
+        for i in $(seq 1 60); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "Server (pid $pid) ancora attivo dopo 30s: lock lasciato." >&2
+            return 1
+        fi
     fi
-    for i in $(seq 1 12); do
-        [ ! -f /tmp/signal-tui.lock ] && break
-        sleep 0.5
-    done
     tmux kill-session -t tui 2>/dev/null || true
-    rm -f /tmp/signal-tui.lock
-    echo "TUI bg fermata."
+    # Rimuove il lock solo se punta ancora al processo appena fermato (o è orfano).
+    if [ -f "$lock" ] && [ "$(cat "$lock" 2>/dev/null)" = "$pid" ]; then
+        rm -f "$lock"
+    fi
+    echo "Server bg fermato."
 }
 alias web-signal-tui-bg='_signal_tui_web_bg'
 alias web-signal-tui-stop='_signal_tui_web_stop'

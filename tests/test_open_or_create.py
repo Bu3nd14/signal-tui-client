@@ -34,13 +34,13 @@ from tui.app import SignalTUI
 def _make_app(contacts: list[ChatContact] | None = None) -> SignalTUI:
     """Build a ``SignalTUI`` with neutralized workers and a controllable manager."""
     with (
-        patch("tui.app.BackendManager"),
-        patch("tui.app.SignalBackend"),
-        patch("tui.app.whatsapp_enabled", return_value=False),
-        patch("tui.app.telegram_enabled", return_value=False),
+        patch("server.core.BackendManager"),
+        patch("server.core.SignalBackend"),
+        patch("server.core.whatsapp_enabled", return_value=False),
+        patch("server.core.telegram_enabled", return_value=False),
     ):
         app = SignalTUI()
-    app.manager = MagicMock()
+    app.core.manager = MagicMock()
     app.contacts = list(contacts or [])
     app._render_contact_list = MagicMock()
     app._status = MagicMock()
@@ -78,13 +78,13 @@ class TestEnsureContactSelectable:
         result = app._ensure_contact_selectable(duplicate)
 
         assert result is known  # stesso oggetto già in lista (non il duplicato)
-        app.manager.get.assert_not_called()
+        app.core.manager.get.assert_not_called()
         app._render_contact_list.assert_not_called()
 
     def test_new_contact_ghost_append_register_and_render(self):
         backend = MagicMock()
         app = _make_app([])
-        app.manager.get.return_value = backend
+        app.core.manager.get.return_value = backend
         new = ChatContact(
             id="393331234567@c.us",
             display_name="Mario",
@@ -94,15 +94,25 @@ class TestEnsureContactSelectable:
 
         result = app._ensure_contact_selectable(new)
 
-        assert result is new
-        assert new.extras["ghost"] is True
-        assert app.contacts == [new]
-        backend.register_contact.assert_called_once_with(new)
-        app._render_contact_list.assert_called_once_with([new])
+        # The core registers the ghost; the TUI holds a copy of what it knows.
+        assert result is not new
+        assert result == ChatContact(
+            id="393331234567@c.us",
+            display_name="Mario",
+            protocol=PROTOCOL_WHATSAPP,
+            extras={"phone": "393331234567", "ghost": True},
+        )
+        assert "ghost" not in new.extras  # the caller's object is never touched
+        assert app.contacts == [result]
+        backend.register_contact.assert_called_once()
+        (registered,) = backend.register_contact.call_args.args
+        assert registered is not result  # backend-owned object, not shared
+        assert registered == result
+        app._render_contact_list.assert_called_once_with([result])
 
     def test_missing_backend_returns_none_without_mutation(self):
         app = _make_app([])
-        app.manager.get.return_value = None
+        app.core.manager.get.return_value = None
         new = ChatContact(id="x", display_name="x", protocol="nosuch")
 
         assert app._ensure_contact_selectable(new) is None
@@ -126,7 +136,7 @@ class TestGhostWhatsAppNumberCheck:
         backend = MagicMock()
         backend._rest.check_number_exists.return_value = False
         app = _make_app([])
-        app.manager.get.return_value = backend
+        app.core.manager.get.return_value = backend
 
         app._check_ghost_whatsapp_number(_ghost_whatsapp())
 
@@ -136,7 +146,7 @@ class TestGhostWhatsAppNumberCheck:
         backend = MagicMock()
         backend._rest.check_number_exists.return_value = True
         app = _make_app([])
-        app.manager.get.return_value = backend
+        app.core.manager.get.return_value = backend
 
         app._check_ghost_whatsapp_number(_ghost_whatsapp())
 
@@ -146,7 +156,7 @@ class TestGhostWhatsAppNumberCheck:
         backend = MagicMock()
         backend._rest.check_number_exists.return_value = None
         app = _make_app([])
-        app.manager.get.return_value = backend
+        app.core.manager.get.return_value = backend
 
         app._check_ghost_whatsapp_number(_ghost_whatsapp())
 
@@ -156,7 +166,7 @@ class TestGhostWhatsAppNumberCheck:
         backend = MagicMock()
         backend._rest.check_number_exists.side_effect = RuntimeError("boom")
         app = _make_app([])
-        app.manager.get.return_value = backend
+        app.core.manager.get.return_value = backend
 
         app._check_ghost_whatsapp_number(_ghost_whatsapp())
 
@@ -240,7 +250,7 @@ class TestSelectContactRegression:
 
     def test_select_contact_missing_backend_does_not_open(self):
         app = _make_app([])
-        app.manager.get.return_value = None
+        app.core.manager.get.return_value = None
 
         app._select_contact(ChatContact(id="x", display_name="x", protocol="nosuch"))
 

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -21,7 +23,7 @@ def client(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(backend, "DB_FILE", db_file)
     monkeypatch.setattr(backend, "CACHE_DIR", tmp_path)
     _init_db()
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         for ts in range(1, 11):
             connection.execute(
                 "INSERT INTO messages (protocol, contact_number, text, is_mine, "
@@ -29,7 +31,7 @@ def client(monkeypatch, tmp_path: Path):
                 (f"m{ts}", ts * 1000, f"id{ts}"),
             )
     app = FastAPI()
-    app.state.manager = SimpleNamespace(get_attachment_path=lambda *_args: None)
+    app.state.api = api_for(SimpleNamespace(get_attachment_path=lambda *_args: None))
     app.include_router(create_api_router())
     with TestClient(app) as test_client:
         yield test_client

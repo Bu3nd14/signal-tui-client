@@ -1,6 +1,7 @@
 """Contact list: sorting, filtering, progressive render, selection."""
 
 import logging
+import threading
 from dataclasses import dataclass
 
 from textual.widgets import Label, ListItem, ListView
@@ -17,9 +18,14 @@ from models import (
     ChatContact,
     protocol_emoji,
 )
+from server.api import ApiError
+from server.events_api import contact_from_wire, contact_to_wire
 from ui_components import MessageTextArea
 
 logger = logging.getLogger(__name__)
+
+#: Seconds a background call waits for the thread it must follow.
+_AFTER_JOIN_TIMEOUT = 15.0
 
 
 @dataclass
@@ -70,10 +76,38 @@ class ContactListMixin:
         if timestamp <= contact.last_message_ts:
             return
 
+        # The TUI contact is a view copy: the backend-owned one (web, other
+        # frontends) is advanced by ``messages.send`` itself.
         contact.last_message_ts = timestamp
         self._sort_contacts()
         if self._is_mounted:
             self._render_contact_list(list(self.contacts))
+
+    def _client_call_background(
+        self, name: str, data: dict, *, after: threading.Thread | None = None
+    ) -> None:
+        """Run operation *name* off the UI thread; failures are logged only.
+
+        Fire-and-forget (the result is not needed).  Without a running app
+        (plain unit tests: no UI thread, no worker loop) the call is made
+        inline.
+        """
+
+        def _run() -> None:
+            if after is not None:
+                after.join(_AFTER_JOIN_TIMEOUT)
+            try:
+                self._call_op(name, data)
+            except Exception as exc:
+                if isinstance(exc, ApiError) and self._report_client_error(
+                    exc, "operazione"
+                ):
+                    logger.warning("operation %s failed: %s", name, exc)
+                    self._note_unknown_outcome(exc)
+                else:
+                    logger.warning("operation %s failed", name, exc_info=True)
+
+        self._offload(_run)
 
     def _sync_last_ts(self):
         """Recover ``last_message_ts`` for every contact from the local cache.
@@ -692,20 +726,78 @@ class ContactListMixin:
         Returns ``None`` when the contact's protocol has no registered backend;
         the caller then shows ``❌ backend non disponibile`` and aborts.
         """
+        known = self._known_contact(contact)
+        if known is not None:
+            return known
+
+        try:
+            wire = self._call_op("contacts.register", contact_to_wire(contact))
+        except ApiError:
+            logger.debug("contacts.register refused for %s", contact.cache_key)
+            return None
+        return self._adopt_registered(contact_from_wire(wire))
+
+    def _known_contact(self, contact: ChatContact) -> ChatContact | None:
+        """The contact of ``self.contacts`` with *contact*'s ``cache_key``."""
         for existing in self.contacts:
             if existing.cache_key == contact.cache_key:
                 return existing
+        return None
 
-        backend = self.manager.get(contact.protocol)
-        if backend is None:
-            return None
+    def _adopt_registered(self, registered: ChatContact) -> ChatContact:
+        """UI thread: add a contact the core just registered to the list.
 
-        contact.extras["ghost"] = True
-        self.contacts.append(contact)
-        backend.register_contact(contact)
+        The core registered the ghost in its backend; the TUI keeps its own
+        copy of what the core now knows.  A contact already listed (a second
+        registration racing the first) is returned as it is.
+        """
+        known = self._known_contact(registered)
+        if known is not None:
+            return known
+        self.contacts.append(registered)
         self._sort_contacts()
         self._render_contact_list(list(self.contacts))
-        return contact
+        return registered
+
+    def _open_unregistered_contact(self, contact: ChatContact) -> None:
+        """Open a contact the list does not have yet without blocking the UI.
+
+        ``contacts.register`` may take a while (WhatsApp loads its LID cache
+        from disk; a remote server adds a round trip), so it runs in a worker;
+        the chat opens when it returns.  A newer selection in the meantime
+        wins: the contact is still added to the list, but not opened.
+        """
+        self._open_contact_token += 1
+        token = self._open_contact_token
+        self._status("⏳ Apertura chat…")
+
+        def _work() -> None:
+            try:
+                wire = self._call_op("contacts.register", contact_to_wire(contact))
+                registered = contact_from_wire(wire)
+            except ApiError as exc:
+                logger.debug("contacts.register failed for %s", contact.cache_key)
+                self._ui(self._register_failed, token, exc)
+                return
+            self._ui(self._register_done, token, registered)
+
+        self._offload(_work)
+
+    def _register_done(self, token: int, registered: ChatContact) -> None:
+        """UI thread: the core registered a contact; open it if still wanted."""
+        registered = self._adopt_registered(registered)
+        if token == self._open_contact_token:
+            self._select_contact(registered)
+
+    def _register_failed(self, token: int, exc: ApiError) -> None:
+        """UI thread: ``contacts.register`` failed."""
+        if token != self._open_contact_token:
+            return
+        if self._report_client_error(exc, "apertura chat"):
+            # A timed-out registration may have been applied: resync finds out.
+            self._note_unknown_outcome(exc)
+            return
+        self._status("❌ backend non disponibile")
 
     def _check_ghost_whatsapp_number(self, contact: ChatContact) -> None:
         """Worker thread: best-effort check che un numero WhatsApp ghost esista.
@@ -715,18 +807,11 @@ class ContactListMixin:
         produce un warning informativo (non bloccante) nello status bar;
         ``True``/``None`` (endpoint assente o errore) non fanno nulla.
         """
-        backend = self.manager.get(PROTOCOL_WHATSAPP)
-        if backend is None:
-            return
-        rest = getattr(backend, "_rest", None)
-        check = getattr(rest, "check_number_exists", None)
-        if check is None:
-            return
         phone = contact.phone
         if not phone:
             return
         try:
-            exists = check(phone)
+            exists = self._call_op("contacts.check_number", {"phone": phone})["exists"]
         except Exception:
             logger.debug("WhatsApp number-exists check failed", exc_info=True)
             return
@@ -742,6 +827,9 @@ class ContactListMixin:
         messages as read, updates unread badges, and returns focus to the
         message input.
         """
+        if self.is_running and self._known_contact(contact) is None:
+            self._open_unregistered_contact(contact)
+            return
         contact = self._ensure_contact_selectable(contact)
         if contact is None:
             self._status("❌ backend non disponibile")
@@ -786,9 +874,14 @@ class ContactListMixin:
             for msg in self._cache[cache_key]:
                 if not msg.get("read", True):
                     msg["read"] = True
-        # Mark read via the backend (persists to SQLite).
-        self.manager.get(self.selected_contact.protocol).mark_read_sync(
-            self.selected_contact.id
+        # Mark read through the core (backend + SQLite), off the UI thread: the
+        # badge below is cleared immediately, the persistence follows.
+        self._client_call_background(
+            "chats.mark_read",
+            {
+                "protocol": self.selected_contact.protocol,
+                "contact_id": self.selected_contact.id,
+            },
         )
         self._unread_counts[cache_key] = 0
         # With the unread-only filter active the just-read contact now has zero

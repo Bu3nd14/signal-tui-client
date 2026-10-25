@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -361,7 +362,7 @@ def test_apply_reaction_replaces_and_clears_aggregate_rows(tmp_db):
 
     assert cleared == {"message_id": "99", "timestamp": 1000, "reactions": []}
     assert backend_mod._reactions_for_contact(PROTOCOL_TELEGRAM, "42") == []
-    with sqlite3.connect(tmp_db) as connection:
+    with closing(sqlite3.connect(tmp_db)) as connection, connection:
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM reactions WHERE author_key LIKE '__agg__%'"

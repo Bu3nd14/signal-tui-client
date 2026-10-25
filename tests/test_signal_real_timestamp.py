@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,9 +34,12 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from client_harness import client_for
+
 import protocols.db as backend_mod
 from models import PROTOCOL_SIGNAL, ChatContact
 from protocols import SignalBackend
+from tui.client_calls import ClientCallsMixin
 from tui.edit import EditMessageMixin
 from tui.send import SendMixin
 from ui_components import MessageWidget
@@ -356,16 +360,22 @@ class TestApplyEditIdFirst:
 # ─── Worker Signal: "real id" path ────────────────────────────────────────────
 
 
-class _SendHandler(SendMixin):
+class _SendHandler(ClientCallsMixin, SendMixin):
     """Minimal SendMixin host (mirrors ``test_failed_send_status.py``)."""
 
+    is_running = False
+
     def __init__(self, contact, messages=(), bubble=None):
+        self._init_client_state()
+        self._thread_id = threading.get_ident()
         self.selected_contact = contact
         self._cache = {contact.cache_key: list(messages)}
         self._status = MagicMock()
-        self._transition_outgoing_status = MagicMock(return_value=True)
+        self._apply_outgoing_status = MagicMock()
+        self._update_message_widgets_status = MagicMock()
         self.run_worker = MagicMock()
         self.manager = SimpleNamespace(get=MagicMock())
+        self.client = client_for(self.manager)
         self.call_from_thread = MagicMock(
             side_effect=lambda callback, *args, **kwargs: callback(*args, **kwargs)
         )
@@ -392,22 +402,24 @@ class TestSignalWorkerRealId:
         )
         backend = MagicMock()
         backend.send_message_sync.return_value = real
-        backend.ingest_message = MagicMock()
+        backend.ingest_message = MagicMock(return_value=False)
+        backend.contacts = []
         handler.manager.get.return_value = backend
 
-        handler._send_message_worker(
-            text,
-            timestamp,
-            None,
-            protocol=PROTOCOL_SIGNAL,
-            contact_id=contact.id,
-        )
+        with patch("server.ops.send.transition_outgoing_status", return_value=True):
+            handler._send_message_worker(
+                text,
+                timestamp,
+                None,
+                protocol=PROTOCOL_SIGNAL,
+                contact_id=contact.id,
+            )
 
-        # ``ingest_message`` riceve l'id reale (path "real id" attivo per Signal).
-        backend.ingest_message.assert_called_once()
+        # Il core ingerisce l'id reale (path "real id" attivo per Signal): la
+        # seconda ingest (dopo il seed ottimistico) porta l'id.
         ingest_args = backend.ingest_message.call_args
         assert ingest_args.args[0] == contact.id
-        assert ingest_args.args[1]["id"] == real
+        assert ingest_args.args[1]["id"] == str(real)
         assert ingest_args.args[1]["text"] == text
         # Cache UI e widget ``_message_id`` aggiornati con l'id reale.
         assert handler._cache[contact.cache_key][0]["id"] == str(real)

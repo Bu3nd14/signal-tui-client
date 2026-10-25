@@ -2,15 +2,32 @@
 
 Script: `scripts/tui_handover.sh` (alias: `signal-tui-go-server`, `signal-tui-go-local`, `signal-tui-status`).
 
+Ciò che si sposta è il **server headless** (`megachat serve`: core + Web UI su `0.0.0.0:4242` + socket Unix), avviato come processo **staccato** (non più la TUI dentro tmux). Il processo che tiene il lock `/tmp/signal-tui.lock` è il server: "attivo" significa che quel pid è vivo.
+
 Il client usa account Signal/WhatsApp/Telegram **condivisi** tra due macchine (desktop locale e server). La sessione WAHA (WhatsApp) e il daemon `signal-cli` **non devono essere attivi su due macchine contemporaneamente**: gli script centralizzano il passaggio pulito.
 
 ## Comandi
 
 | Comando | Cosa fa |
 |---|---|
-| `signal-tui-go-server` | Spegne TUI/daemon/WAHA sul **locale** → accende TUI+WAHA sul **server** |
-| `signal-tui-go-local` | Spegne TUI/daemon/WAHA sul **server** → accende TUI+WAHA sul **locale** |
-| `signal-tui-status` | Mostra lo stato (TUI/daemon/WAHA) su **entrambe** le macchine |
+| `signal-tui-go-server` | Spegne server/daemon/WAHA sul **locale** → accende WAHA+server sul **server** |
+| `signal-tui-go-local` | Spegne server/daemon/WAHA sul **server** → accende WAHA+server sul **locale** |
+| `signal-tui-status` | Mostra lo stato (server/daemon/WAHA) su **entrambe** le macchine |
+
+Lo spegnimento invia SIGINT al pid del lock e **attende che il processo esca** (fino a 30 s); una vecchia sessione tmux `tui` (installazioni precedenti) viene ancora chiusa, ma non ne viene più avviata nessuna. Se il server non si ferma, l'handover si **interrompe** senza toccare il lock (mai due server attivi); lo stesso se il server remoto non si ferma o `ssh` fallisce durante `to-local`.
+
+Equivalente Python: `python3 launcher.py handover {to-server|to-local|status}`. Il recupero d'emergenza sul server (`scripts/start_on_server.sh {start|stop|status}`, `launcher.py server ...`) avvia e ferma lo stesso `megachat serve`.
+
+## Uso interattivo dopo l'handover
+
+Sulla macchina di destinazione non c'è più `tmux attach -t tui`: lancia la TUI come client del server già in esecuzione:
+
+```bash
+cd /root/signal-tui-client   # sul server (sul locale: la directory del progetto)
+.venv/bin/python megachat.py # si collega al server via socket Unix
+```
+
+**Detach** (`d`, Ctrl+C) chiude solo la TUI e lascia il server attivo (Web UI, sync); **Quit** (`q`, Ctrl+Q) esegue `server.shutdown` e lo ferma. Per spostare l'istanza usa sempre `signal-tui-go-*`, non Quit. Log del server: `/tmp/signal-tui.log` e `/tmp/megachat-serve.log`.
 
 Gli alias sono installati in `.bashrc` sia sul locale sia sul server. Lo script va lanciato **dalla macchina locale** (dove sta la chiave SSH privata).
 

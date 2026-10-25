@@ -103,8 +103,8 @@ def _prepare_select(app: SignalTUI, fake_list) -> None:
     app._cancel_reply = MagicMock()
     app._cancel_edit = MagicMock()
     app._load_messages_worker = MagicMock()
-    app.manager = MagicMock()
-    app.manager.get.return_value = MagicMock()
+    app.core.manager = MagicMock()
+    app.core.manager.get.return_value = MagicMock()
     app.run_worker = MagicMock()
     app.run_worker.return_value = None
 
@@ -522,11 +522,35 @@ class TestSelectContactUnreadOnly:
         ghost = _contact(PROTOCOL_WHATSAPP, "wa-ghost", "Ghost")
         app._select_contact(ghost)
 
-        assert app.selected_contact is ghost
-        assert ghost.extras.get("ghost") is True
+        # The ghost is registered by the core; the TUI selects its own copy.
+        assert app.selected_contact is not None
+        assert app.selected_contact.cache_key == ghost.cache_key
+        assert app.selected_contact.extras.get("ghost") is True
+        assert app.selected_contact in app.contacts
         ghost_item = app._contact_widgets.get(ghost.cache_key)
         assert ghost_item is not None
         assert ghost_item.display is False
+
+
+class TestSelectContactMarksRead:
+    def test_mark_read_goes_through_the_client_and_badge_clears_at_once(self):
+        mario = _contact(PROTOCOL_SIGNAL, "+1", "Mario", phone="391")
+        app = _make_app(mario)
+        lst = _SelectListView()
+        app.query_one = MagicMock(return_value=lst)
+        app._render_contact_list(list(app.contacts))
+        _prepare_select(app, lst)
+        app._cache = {}
+        app._unread_counts = {"signal:+1": 3}
+        app._client_call_background = MagicMock()
+
+        app._select_contact(mario)
+
+        app._client_call_background.assert_called_once_with(
+            "chats.mark_read", {"protocol": "signal", "contact_id": "+1"}
+        )
+        assert app._unread_counts["signal:+1"] == 0
+        app.core.manager.get.return_value.mark_read_sync.assert_not_called()
 
 
 # ─── A. Auto-selection of the first visible contact on filter change ──────────

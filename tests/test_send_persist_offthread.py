@@ -23,6 +23,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -31,6 +32,8 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from event_harness import feed, legacy_frames
 
 import protocols.db as backend_mod
 from models import (
@@ -53,12 +56,17 @@ def _db_rows(db_file: Path) -> list[dict]:
     return rows
 
 
+def _my_rows(db_file: Path) -> list[dict]:
+    """Our own (outgoing) rows, leaving out seeded incoming ones."""
+    return [r for r in _db_rows(db_file) if r["is_mine"]]
+
+
 def _signal_app() -> SignalTUI:
     """App with a real manager + Signal backend (no real backends/network)."""
     app = SignalTUI()
-    app.manager = BackendManager()
-    app.signal_backend = SignalBackend()
-    app.manager.register(app.signal_backend)
+    app.core.manager = BackendManager()
+    app.core.signal_backend = SignalBackend()
+    app.core.manager.register(app.core.signal_backend)
     return app
 
 
@@ -76,6 +84,37 @@ def _prepare_send(app: SignalTUI) -> None:
     app.run_worker = MagicMock()
     app._reply_to = None
     app._cache = {}
+    # The core resolves the contact in its backend (as it is in production,
+    # where the TUI list comes from the backends).
+    contact = app.selected_contact
+    if contact is not None:
+        backend = app.core.manager.get(contact.protocol)
+        if backend is not None:
+            backend.register_contact(contact)
+
+
+@contextmanager
+def _preview(app: SignalTUI, contact: ChatContact, attachment_id: str, path):
+    """The quoted media exists in the chat (SQLite) and resolves to *path*.
+
+    The core only trusts a quoted attachment that belongs to the chat, and
+    resolves its preview file itself.
+    """
+    backend_mod._add_message_to_cache(
+        contact.id,
+        "",
+        False,
+        "Mario",
+        1000,
+        msg_type="image",
+        attachment_id=attachment_id,
+        content_type="image/png",
+        protocol=PROTOCOL_SIGNAL,
+    )
+    with patch.object(
+        app.core.manager, "get_attachment_path", return_value=path
+    ) as resolver:
+        yield resolver
 
 
 def _send_text(app: SignalTUI, text: str) -> None:
@@ -138,7 +177,7 @@ class TestSendPersistOffthread:
         contact = ChatContact(id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM)
         app.selected_contact = contact
         _prepare_send(app)
-        app.manager = MagicMock()
+        app.core.manager = MagicMock()
         reply_data = {
             "text": "original message",
             "timestamp": 1234,
@@ -158,7 +197,7 @@ class TestSendPersistOffthread:
         assert app._cache == {}
         app._add_message.assert_not_called()
         app.run_worker.assert_not_called()
-        app.manager.get.assert_not_called()
+        app.core.manager.get.assert_not_called()
 
     # ── T2b: worker persists the correct row ─────────────────────────────
 
@@ -171,7 +210,7 @@ class TestSendPersistOffthread:
         app.selected_contact = contact
         _prepare_send(app)
         app._reply_to = {"text": "domanda", "timestamp": 1234}
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
         _send_text(app, "risposta")
         _run_workers(app)
@@ -203,7 +242,7 @@ class TestSendPersistOffthread:
             rows_at_send["n"] = len(_db_rows(tmp_db))
             return "ts-1"
 
-        app.signal_backend.send_message_sync = MagicMock(side_effect=send_spy)
+        app.core.signal_backend.send_message_sync = MagicMock(side_effect=send_spy)
 
         _send_text(app, "ciao")
         _run_workers(app)
@@ -220,7 +259,7 @@ class TestSendPersistOffthread:
         )
         app.selected_contact = contact
         _prepare_send(app)
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
 
         _send_text(app, "ciao")
@@ -239,19 +278,20 @@ class TestSendPersistOffthread:
             "attachment_id": None,
             "contact": contact,
         }
-        app._handle_message_event(
+        feed(
+            app,
             ChatEvent(
                 type="message",
                 protocol=PROTOCOL_SIGNAL,
                 contact_id=contact.id,
                 payload=echo_payload,
-            )
+            ),
         )
 
         # No duplicate bubble and no duplicate DB row.
         assert app._add_message.call_count == 1
         assert len(_db_rows(tmp_db)) == 1
-        assert len(app.signal_backend.cache[contact.id]) == 1
+        assert len(app.core.signal_backend.cache[contact.id]) == 1
 
     def test_persisted_send_pushes_web_event_once_across_echo(self, tmp_db):
         app = _signal_app()
@@ -261,35 +301,39 @@ class TestSendPersistOffthread:
         app.selected_contact = contact
         app._web_enabled = True
         _prepare_send(app)
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        with patch("web.bridge.push_event") as push_event:
-            _send_text(app, "ciao web")
-            ts = app._cache[contact.cache_key][0]["timestamp"]
-            push_event.assert_not_called()
-            _run_workers(app)
+        sub = app.bus.subscribe()
+        _send_text(app, "ciao web")
+        ts = app._cache[contact.cache_key][0]["timestamp"]
+        # Persist happens off-thread: nothing on the bus before the worker.
+        assert legacy_frames(sub.drain()) == []
+        _run_workers(app)
 
-            app._handle_message_event(
-                ChatEvent(
-                    type="message",
-                    protocol=PROTOCOL_SIGNAL,
-                    contact_id=contact.id,
-                    payload={
-                        "id": "ts-1",
-                        "text": "ciao web",
-                        "is_mine": True,
-                        "sender": "You",
-                        "timestamp": ts,
-                        "quote_text": None,
-                        "msg_type": "text",
-                        "attachment_info": None,
-                        "attachment_id": None,
-                        "contact": contact,
-                    },
-                )
-            )
+        feed(
+            app,
+            ChatEvent(
+                type="message",
+                protocol=PROTOCOL_SIGNAL,
+                contact_id=contact.id,
+                payload={
+                    "id": "ts-1",
+                    "text": "ciao web",
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": ts,
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                    "contact": contact,
+                },
+            ),
+        )
 
-        push_event.assert_called_once_with(
+        # The TUI publishes no web_push itself: exactly one legacy frame reaches
+        # the web via the bus (the persisted send; the echo adds none).
+        assert legacy_frames(sub.drain()) == [
             {
                 "type": "message",
                 "payload": {
@@ -300,7 +344,7 @@ class TestSendPersistOffthread:
                     "is_mine": True,
                 },
             }
-        )
+        ]
 
     # ── T2e: double identical send within 5s ─────────────────────────────
 
@@ -312,7 +356,9 @@ class TestSendPersistOffthread:
         )
         app.selected_contact = contact
         _prepare_send(app)
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        # The first send is still in flight (no server id yet) when the second
+        # row is seeded: the id-less optimistic twin absorbs it.
+        app.core.signal_backend.send_message_sync = MagicMock(return_value=None)
 
         _send_text(app, "ciao")
         time.sleep(0.002)
@@ -330,12 +376,12 @@ class TestSendPersistOffthread:
     def test_whatsapp_send_persists_whatsapp_protocol(self, tmp_db):
         """(f) invio WhatsApp → riga ``protocol='whatsapp'``."""
         app = SignalTUI()
-        app.manager = BackendManager()
+        app.core.manager = BackendManager()
         wa = WhatsAppBackend()
         wa.send_message_sync = MagicMock(return_value="wa-ts")
-        app.manager.register(wa)
-        app.signal_backend = SignalBackend()
-        app.manager.register(app.signal_backend)
+        app.core.manager.register(wa)
+        app.core.signal_backend = SignalBackend()
+        app.core.manager.register(app.core.signal_backend)
 
         contact = ChatContact(
             id="16660245291231@lid", display_name="Pix", protocol=PROTOCOL_WHATSAPP
@@ -358,7 +404,7 @@ class TestSendPersistOffthread:
         )
         app.selected_contact = contact
         _prepare_send(app)
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
         _send_text(app, "ciao signal")
         _run_workers(app)
@@ -378,7 +424,7 @@ class TestSendPersistOffthread:
         app.selected_contact = contact
         _prepare_send(app)
         app._reply_to = {"text": "domanda", "timestamp": 1234}
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
         _send_text(app, "risposta")
         _run_workers(app)
@@ -387,7 +433,7 @@ class TestSendPersistOffthread:
         assert len(rows) == 1
         assert rows[0]["quote_text"] == "domanda"
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_timestamp"] == 1234
         assert kwargs["quote_author"] == contact.id
         assert kwargs["quote_message"] == "domanda"
@@ -410,12 +456,13 @@ class TestSendPersistOffthread:
             "quote_attachment_path": Path("/tmp/quote-thumbs/abc123.png"),
             "quote_content_type": "image/png",
         }
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        _send_text(app, "risposta")
-        _run_workers(app)
+        with _preview(app, contact, "att-1", None):
+            _send_text(app, "risposta")
+            _run_workers(app)
 
-        rows = _db_rows(tmp_db)
+        rows = [r for r in _db_rows(tmp_db) if r["is_mine"]]
         assert len(rows) == 1
         assert rows[0]["quote_attachment_id"] == "att-1"
         assert rows[0]["quote_attachment_path"] == "/tmp/quote-thumbs/abc123.png"
@@ -424,12 +471,12 @@ class TestSendPersistOffthread:
     def test_whatsapp_reply_persists_quote_attachment_id(self, tmp_db):
         """Uscita WhatsApp: l'id della quote immagine è propagato e persistito."""
         app = SignalTUI()
-        app.manager = BackendManager()
+        app.core.manager = BackendManager()
         wa = WhatsAppBackend()
         wa.send_message_sync = MagicMock(return_value="wa-ts")
-        app.manager.register(wa)
-        app.signal_backend = SignalBackend()
-        app.manager.register(app.signal_backend)
+        app.core.manager.register(wa)
+        app.core.signal_backend = SignalBackend()
+        app.core.manager.register(app.core.signal_backend)
 
         contact = ChatContact(
             id="16660245291231@lid", display_name="Pix", protocol=PROTOCOL_WHATSAPP
@@ -482,13 +529,14 @@ class TestSendPersistOffthread:
             "quote_content_type": "image/png",
         }
 
-        handled = app._handle_message_event(
+        handled = feed(
+            app,
             ChatEvent(
                 type="message",
                 protocol=PROTOCOL_SIGNAL,
                 contact_id=contact.id,
                 payload=payload,
-            )
+            ),
         )
 
         assert handled is True
@@ -516,13 +564,13 @@ class TestSendPersistOffthread:
         app.selected_contact = original
         _prepare_send(app)
         app._reply_to = {"text": "domanda", "timestamp": 1234}
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
         _send_text(app, "risposta")
         app.selected_contact = other
         _run_workers(app)
 
-        args = app.signal_backend.send_message_sync.call_args
+        args = app.core.signal_backend.send_message_sync.call_args
         assert args.args[:2] == (original.id, "risposta")
         assert args.kwargs["quote_author"] == original.id
 
@@ -531,7 +579,7 @@ class TestSendPersistOffthread:
         app = _signal_app()
         whatsapp = WhatsAppBackend()
         whatsapp.send_message_sync = MagicMock(return_value="wa-ts")
-        app.manager.register(whatsapp)
+        app.core.manager.register(whatsapp)
         signal_contact = ChatContact(
             id="+391234567890", display_name="Mario", protocol=PROTOCOL_SIGNAL
         )
@@ -542,13 +590,13 @@ class TestSendPersistOffthread:
         )
         app.selected_contact = signal_contact
         _prepare_send(app)
-        app.signal_backend.send_message_sync = MagicMock(return_value="signal-ts")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="signal-ts")
 
         _send_text(app, "ciao")
         app.selected_contact = whatsapp_contact
         _run_workers(app)
 
-        app.signal_backend.send_message_sync.assert_called_once_with(
+        app.core.signal_backend.send_message_sync.assert_called_once_with(
             signal_contact.id,
             "ciao",
             quote_timestamp=None,
@@ -565,7 +613,7 @@ class TestSendPersistOffthread:
         app.selected_contact = contact
         _prepare_send(app)
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
-        app.signal_backend.send_message_sync = MagicMock(
+        app.core.signal_backend.send_message_sync = MagicMock(
             side_effect=RuntimeError("offline")
         )
 
@@ -574,9 +622,9 @@ class TestSendPersistOffthread:
 
         assert _db_rows(tmp_db)[0]["status"] == "failed"
         assert app._cache[contact.cache_key][0]["status"] == "failed"
-        assert app.signal_backend.cache[contact.id][0]["status"] == "failed"
+        assert app.core.signal_backend.cache[contact.id][0]["status"] == "failed"
 
-        app.signal_backend.send_message_sync = MagicMock(return_value="ok")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ok")
         ts = app._cache[contact.cache_key][0]["timestamp"]
         app.run_worker.reset_mock()
         app._retry_failed_message(ts, "ciao")
@@ -604,12 +652,12 @@ class TestMediaReplySend:
             "message_id": "sig-1234",
             "quote_wire_body": None,
         }
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
         _send_text(app, "risposta")
         _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_timestamp"] == 1234
         assert kwargs["quote_author"] == contact.id
         assert kwargs["quote_message"] == ""
@@ -632,12 +680,12 @@ class TestMediaReplySend:
             "message_id": "sig-1234",
             "quote_wire_body": "Che bella!",
         }
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
         _send_text(app, "risposta")
         _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_message"] == "Che bella!"
 
     def test_send_text_reply_is_unchanged(self, tmp_db):
@@ -649,12 +697,12 @@ class TestMediaReplySend:
         app.selected_contact = contact
         _prepare_send(app)
         app._reply_to = {"text": "domanda", "timestamp": 1234}
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
         _send_text(app, "risposta")
         _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_message"] == "domanda"
 
     def test_media_reply_signal_builds_quote_attachments_with_preview(self, tmp_db):
@@ -673,14 +721,14 @@ class TestMediaReplySend:
             "content_type": "image/png",
             "attachment_id": "att-1",
         }
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
         preview = Path("/tmp/att-1.png")
 
-        with patch("tui.send.get_attachment_path", return_value=preview):
+        with _preview(app, contact, "att-1", preview):
             _send_text(app, "risposta")
             _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_attachments"] == ["image/png:att-1.png:/tmp/att-1.png"]
         assert kwargs["quote_message"] == ""
 
@@ -700,13 +748,13 @@ class TestMediaReplySend:
             "content_type": "image/jpeg",
             "attachment_id": "att-1",
         }
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/a.jpg")):
+        with _preview(app, contact, "att-1", Path("/tmp/a.jpg")):
             _send_text(app, "risposta")
             _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_message"] == "Che bella!"
         assert kwargs["quote_attachments"] == ["image/jpeg:a.jpg:/tmp/a.jpg"]
 
@@ -719,12 +767,12 @@ class TestMediaReplySend:
         app.selected_contact = contact
         _prepare_send(app)
         app._reply_to = {"text": "domanda", "timestamp": 1234}
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
         _send_text(app, "risposta")
         _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert "quote_attachments" not in kwargs
 
     def test_media_reply_signal_missing_preview_falls_back_to_content_type(
@@ -745,13 +793,13 @@ class TestMediaReplySend:
             "content_type": "image/png",
             "attachment_id": "att-missing",
         }
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        with patch("tui.send.get_attachment_path", return_value=None):
+        with _preview(app, contact, "att-missing", None):
             _send_text(app, "risposta")
             _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_attachments"] == ["image/png"]
 
     def test_retry_media_reply_reconstructs_quote_attachments(self, tmp_db):
@@ -771,27 +819,27 @@ class TestMediaReplySend:
             "content_type": "image/png",
             "attachment_id": "att-1",
         }
-        app.signal_backend.send_message_sync = MagicMock(
+        app.core.signal_backend.send_message_sync = MagicMock(
             side_effect=RuntimeError("offline")
         )
 
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.png")):
+        with _preview(app, contact, "att-1", Path("/tmp/att-1.png")):
             _send_text(app, "risposta")
             _run_workers(app)
 
         assert app._cache[contact.cache_key][0]["status"] == "failed"
-        row = _db_rows(tmp_db)[0]
+        row = _my_rows(tmp_db)[0]
         assert row["content_type"] == "image/png"
         assert row["attachment_id"] == "att-1"
 
-        app.signal_backend.send_message_sync = MagicMock(return_value="ok")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ok")
         ts = app._cache[contact.cache_key][0]["timestamp"]
         app.run_worker.reset_mock()
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.png")):
+        with _preview(app, contact, "att-1", Path("/tmp/att-1.png")):
             app._retry_failed_message(ts, "risposta")
             _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_message"] == ""
         assert kwargs["quote_attachments"] == ["image/png:att-1.png:/tmp/att-1.png"]
 
@@ -820,28 +868,28 @@ class TestMediaReplySend:
             "content_type": "image/jpeg",
             "attachment_id": "att-1",
         }
-        app.signal_backend.send_message_sync = MagicMock(
+        app.core.signal_backend.send_message_sync = MagicMock(
             side_effect=RuntimeError("offline")
         )
 
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.jpg")):
+        with _preview(app, contact, "att-1", Path("/tmp/att-1.jpg")):
             _send_text(app, "risposta")
             _run_workers(app)
 
         assert app._cache[contact.cache_key][0]["status"] == "failed"
-        row = _db_rows(tmp_db)[0]
+        row = _my_rows(tmp_db)[0]
         assert row["quote_text"] == "Che bella!"
         assert row["content_type"] == "image/jpeg"
         assert row["attachment_id"] == "att-1"
 
-        app.signal_backend.send_message_sync = MagicMock(return_value="ok")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ok")
         ts = app._cache[contact.cache_key][0]["timestamp"]
         app.run_worker.reset_mock()
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/att-1.jpg")):
+        with _preview(app, contact, "att-1", Path("/tmp/att-1.jpg")):
             app._retry_failed_message(ts, "risposta")
             _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_message"] == "Che bella!"
         assert kwargs["quote_attachments"] == ["image/jpeg:att-1.jpg:/tmp/att-1.jpg"]
 
@@ -866,13 +914,12 @@ class TestMediaReplySend:
             "content_type": None,
             "attachment_id": "att-legacy",
         }
-        app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
-        with patch("tui.send.get_attachment_path", return_value=Path("/tmp/x")):
-            _send_text(app, "risposta")
-            _run_workers(app)
+        _send_text(app, "risposta")
+        _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert "quote_attachments" not in kwargs
         assert kwargs["quote_message"] == ""
 
@@ -891,7 +938,7 @@ class TestMediaReplySend:
             "message_id": "sig-1234",
             "quote_wire_body": None,
         }
-        app.signal_backend.send_message_sync = MagicMock(
+        app.core.signal_backend.send_message_sync = MagicMock(
             side_effect=RuntimeError("offline")
         )
 
@@ -901,13 +948,13 @@ class TestMediaReplySend:
         assert app._cache[contact.cache_key][0]["status"] == "failed"
         assert _db_rows(tmp_db)[0]["quote_text"] == "🖼️ Immagine"
 
-        app.signal_backend.send_message_sync = MagicMock(return_value="ok")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ok")
         ts = app._cache[contact.cache_key][0]["timestamp"]
         app.run_worker.reset_mock()
         app._retry_failed_message(ts, "risposta")
         _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_message"] == ""
         assert kwargs["quote_timestamp"] == 1234
         assert kwargs["reply_to_message_id"] == "sig-1234"
@@ -922,20 +969,20 @@ class TestMediaReplySend:
         _prepare_send(app)
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
         app._reply_to = {"text": "domanda", "timestamp": 1234}
-        app.signal_backend.send_message_sync = MagicMock(
+        app.core.signal_backend.send_message_sync = MagicMock(
             side_effect=RuntimeError("offline")
         )
 
         _send_text(app, "risposta")
         _run_workers(app)
 
-        app.signal_backend.send_message_sync = MagicMock(return_value="ok")
+        app.core.signal_backend.send_message_sync = MagicMock(return_value="ok")
         ts = app._cache[contact.cache_key][0]["timestamp"]
         app.run_worker.reset_mock()
         app._retry_failed_message(ts, "risposta")
         _run_workers(app)
 
-        kwargs = app.signal_backend.send_message_sync.call_args.kwargs
+        kwargs = app.core.signal_backend.send_message_sync.call_args.kwargs
         assert kwargs["quote_message"] == "domanda"
 
     def test_whatsapp_media_reply_without_id_is_blocked(self, tmp_db):
@@ -943,7 +990,7 @@ class TestMediaReplySend:
         app = _signal_app()
         whatsapp = WhatsAppBackend()
         whatsapp.send_message_sync = MagicMock(return_value="wa-ts")
-        app.manager.register(whatsapp)
+        app.core.manager.register(whatsapp)
         contact = ChatContact(
             id="391234567890@c.us", display_name="Pix", protocol=PROTOCOL_WHATSAPP
         )
@@ -967,7 +1014,7 @@ class TestMediaReplySend:
         app = _signal_app()
         whatsapp = WhatsAppBackend()
         whatsapp.send_message_sync = MagicMock(return_value="wa-ts")
-        app.manager.register(whatsapp)
+        app.core.manager.register(whatsapp)
         contact = ChatContact(
             id="391234567890@c.us", display_name="Pix", protocol=PROTOCOL_WHATSAPP
         )
@@ -994,7 +1041,7 @@ class TestMediaReplySend:
         app = _signal_app()
         telegram = TelegramBackend()
         telegram.send_message_sync = MagicMock(return_value="tg-ts")
-        app.manager.register(telegram)
+        app.core.manager.register(telegram)
         contact = ChatContact(id="42", display_name="Ada", protocol=PROTOCOL_TELEGRAM)
         app.selected_contact = contact
         _prepare_send(app)
