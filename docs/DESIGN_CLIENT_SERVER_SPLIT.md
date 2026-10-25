@@ -1,0 +1,181 @@
+# Design — Client/server split (TUI ↔ server core)
+
+Status: agreed, Phase 0 in progress.
+
+## 1. Problem
+
+Today the TUI process **is** the server:
+
+- `SignalTUI.__init__` (`tui/app.py`) builds the `BackendManager` and every
+  protocol backend; `on_mount` starts the web server on a thread of the TUI
+  process.
+- The event pump lives in the UI layer: `tui/polling.py` drains
+  `backend.poll_once()`, and `tui/events.py` mixes **domain** work
+  (`ingest_message` → SQLite, receipts, edits, contact registration/merge)
+  with **view** work (mounting bubbles, typing labels, list re-sort) and
+  **web fan-out** (`web.bridge.push_event`).
+- Consequence: without a running TUI nothing is persisted and the web UI gets
+  no live events. `launcher/server.py` runs the TUI inside tmux just to keep
+  the web UI alive; cache pruning is wired to the TUI's SIGINT handler.
+- `web/api.py` route handlers contain domain logic (id canonicalization,
+  group-sender resolution, send validation, edit/reaction handling and their
+  `push_event`s), partly duplicated by the TUI (`_resolve_placeholder_name`,
+  `_identify_contact`): the two UIs already drift.
+- Even a protocol reaches into the web layer (`protocols/whatsapp.py`,
+  `lid_warmup_done` push).
+
+## 2. Goals
+
+1. One binary, two roles:
+   ```
+   megachat serve            # headless server core + adapters (+ instance lock)
+   megachat                  # TUI: attach to a running server, else spawn one
+   ```
+2. The **server API is the single source of truth**. Every transport is an
+   adapter that only translates; no logic lives in adapters.
+3. Transports: in-process (tests/tooling), Unix socket (TUI), HTTP (browser).
+   TCP/remote is out of scope (Unix only is enough).
+4. TUI exit offers **Detach** (server keeps running) or **Quit** (server shuts
+   down: prune + stop).
+
+## 3. Architecture
+
+```
+                 ┌──────────────── server core ────────────────┐
+                 │ ChatCore: backends, connect, pump, DB,       │
+                 │ send registry, prune, address-book refresh   │
+                 │ ChatAPI: operation registry + EventBus       │  ← source of truth
+                 └───────▲──────────▲──────────────▲───────────┘
+                         │          │              │
+                  in-process    JSON-RPC stream    HTTP adapter
+                   adapter      (Unix socket)      (REST + WS + static SPA)
+                         │          │              │
+                 tests/tooling   TUI (always)      browser
+```
+
+### 3.1 Server core (`server/`)
+
+- `ChatCore` owns the `BackendManager` and the backends, runs the connect
+  workers, the single event pump and all domain handling of raw backend
+  `ChatEvent`s. It never imports Textual or FastAPI.
+- Backend progress (connecting, pairing, ready, failed, syncing) is published
+  as `backend_status` / `backend_ready` events instead of TUI status calls.
+
+### 3.2 Operations (registry)
+
+Each operation is declared **once**: name, request model, response model
+(pydantic). Examples: `contacts.list`, `messages.page`, `messages.send`,
+`messages.edit`, `reactions.set`, `chats.mark_read`, `chats.archive`,
+`address_book.list`, `link.start`, `media.get`, `server.status`,
+`server.shutdown`.
+
+- Neutral error model: `ApiError(code, message)` with codes such as
+  `invalid_request`, `not_found`, `unauthorized`, `too_large`, `backend_down`.
+  Each adapter maps codes to its own form (HTTP status, JSON-RPC error,
+  exception).
+- The HTTP route table and the JSON-RPC method table are generated from (or
+  validated against) the registry; a JSON Schema is exported from it.
+
+### 3.3 Events (`EventBus`)
+
+- Typed envelope `{seq, type, payload}` with **full** payloads (message,
+  message_edit, reaction, receipt, typing, contact_update, contact_merged,
+  backend_status, backend_ready, lid_warmup_done, …).
+- Multi-subscriber, thread-safe, monotonic `seq`, bounded ring buffer of
+  recent events: `subscribe(since=seq)` replays what a reconnecting client
+  missed, or signals a `gap` (client must resync) when `since` fell out of
+  the buffer or the subscriber's queue overflowed. Producers never block.
+
+### 3.4 Blobs
+
+Media, avatars, thumbnails, uploads are a separate concept: an operation
+returns a blob handle and each adapter delivers it its own way — HTTP streams
+it (cache headers, `?v=`, `?w=`, Range), the Unix socket returns a local file
+path (same machine), in-process returns the path. Uploads mirror this
+(multipart parsed by the HTTP adapter into file handles).
+
+## 4. Adapters
+
+### 4.1 In-process
+
+Direct calls into `ChatAPI`; used by tests and tooling. In tests the request
+and response go through the models so non-serializable values are caught.
+
+### 4.2 Unix socket (TUI)
+
+- Socket in `$XDG_RUNTIME_DIR/megachat/server.sock` (fallback
+  `~/.local/state/megachat/`), mode `0600`: filesystem permissions are the
+  authentication. A runtime file next to it records pid and socket path.
+- Framing: newline-delimited JSON-RPC 2.0. Notifications carry events
+  (`event` method) after `events.subscribe(since)`.
+
+### 4.3 HTTP (browser)
+
+- **Option A (now):** keep the current REST shapes used by `web/static`;
+  every JSON route shrinks to “parse → call operation → map result/errors”.
+  The quirks (`proto` vs `protocol`) live only in the translation.
+- **Option B (Phase 3, optional):** generic `POST /api/rpc/{op}` generated
+  from the registry and the SPA migrated to it.
+- Stays REST forever: blob routes (`/api/media/...`, `/api/contact-avatar`,
+  `/api/link-preview/image`, `/api/quote-media/...`) used as `<img>/<video>`
+  URLs; multipart `/api/send`; unauthenticated `/health`.
+- WebSocket: `/ws` keeps the legacy thin notification shape through a pure
+  field mapping from core events (`message_cache.js` keeps refetching);
+  `/ws/v2` exposes full core events with resume.
+
+### 4.4 Drift guards
+
+1. Import rule test: `web/` (and the socket adapter) may import only
+   `server.api` / its models, never `protocols.*` or `tui.*`.
+2. Contract tests: one suite run against every adapter; REST outputs compared
+   with the core operation output after mapping.
+
+## 5. TUI client
+
+- The TUI only knows `ChatClient` (socket transport in production,
+  in-process transport in tests).
+- Startup: `--connect PATH` → use it; else a live socket → attach; else spawn
+  `megachat serve` detached, wait for the socket, attach.
+- Exit dialog: **Detach** (disconnect only) / **Quit** (`server.shutdown`). If
+  the TUI attached to a server it did not spawn, Detach is the default.
+- Optimistic send: client-generated `client_msg_id`, confirmed by the
+  server's `message` event (the existing `web/send_registry.py` mechanism
+  moves to the core).
+- View-only state stays in the TUI (selection, filters, typing timers,
+  progressive render, widget maps); domain state comes from operations and
+  events.
+
+## 6. Phases
+
+Each phase ships on its own with the full test suite green.
+
+- **Phase 0 — core extraction + `serve`.**
+  1. `server/bus.py`: `EventBus` (seq, ring buffer, resume, gap).
+  2. `ChatCore` owns manager/backends and connect workers; status reported via
+     events; TUI consumes them (still in-process, `self.manager` kept as a
+     compatibility alias).
+  3. Event pump + domain handling move from `tui/events.py`/`tui/polling.py`
+     into the core; the TUI keeps view handling only and subscribes to the
+     bus. `push_event` disappears from `tui/` and `protocols/`; the web
+     WebSocket subscribes to the bus through the legacy mapping.
+  4. `megachat serve` entry point (headless: lock, logging, core, web
+     adapter, SIGINT → prune + stop); `launcher/server.py` uses it instead of
+     running the TUI in tmux.
+  5. Operation registry skeleton + move the domain logic out of the
+     `web/api.py` route handlers into operations (route by route).
+- **Phase 1 —** in-process adapter/client, TUI on `ChatClient`, HTTP adapter
+  fully on operations (Option A), contract tests, import rule.
+- **Phase 2 —** Unix-socket JSON-RPC adapter + client, events with resume,
+  blob handles, discovery, attach-or-spawn, Detach/Quit dialog.
+- **Phase 3 —** optional: SPA moved to `/api/rpc/{op}` and `/ws/v2`.
+
+## 7. Risks
+
+- Event ordering: the TUI previously did ingest and view in the same thread
+  step; after the split view handlers run on core events that already carry
+  the ingest result (`added` / `changed`, contact snapshot).
+- In Phase 0 event payloads may still carry in-process objects
+  (`ChatContact`); Phase 1 makes every payload serializable.
+- Large test surface (≈150 test files) relies on calling TUI handlers
+  directly; Phase 0 keeps compatibility wrappers so tests change only where
+  behaviour moves.
