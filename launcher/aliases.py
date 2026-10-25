@@ -15,18 +15,20 @@ END_MARKER = "# ── END signal-tui aliases ──"
 
 # Kept byte-for-byte identical to the block install.sh used to write, so an
 # existing installation is unaffected by the bash → Python switch.
-_ALIASES_TEMPLATE = r"""# ─── Signal TUI Client: web reader + background via tmux ─────────────────
+_ALIASES_TEMPLATE = r"""# ─── Signal TUI Client: web reader + background via megachat serve ───────
 # Web su 0.0.0.0:4242. Token Bearer: config.json (web.token) o SIGNAL_TUI_WEB_TOKEN.
 # web-signal-tui-bg stampa ed esporta il token (fast cycle: curl + login Web UI).
 SIGNAL_TUI_DIR="__PROJECT_DIR__"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 _signal_tui_web_bg() {
-    if ! tmux has-session -t tui 2>/dev/null; then
-        tmux new-session -d -s tui "cd \"$SIGNAL_TUI_DIR\" && exec .venv/bin/python -m signal_tui" || return 1
+    local pid=""
+    [ -f /tmp/signal-tui.lock ] && pid="$(cat /tmp/signal-tui.lock)"
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        ( cd "$SIGNAL_TUI_DIR" && nohup .venv/bin/python megachat.py serve >/dev/null 2>&1 </dev/null & ) || return 1
     fi
     SIGNAL_TUI_WEB_TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["web"]["token"])' "$SIGNAL_TUI_DIR/config.json")" || return 1
     export SIGNAL_TUI_WEB_TOKEN
-    echo "TUI bg attiva — token: $SIGNAL_TUI_WEB_TOKEN"
+    echo "Server bg attivo — token: $SIGNAL_TUI_WEB_TOKEN"
 }
 _signal_tui_web_stop() {
     if [ -f /tmp/signal-tui.lock ]; then

@@ -102,33 +102,87 @@ class TestStopAll:
         assert "WAHA non era attivo" in capsys.readouterr().out
 
 
+class _FakeProc:
+    def __init__(self, returncode=None):
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+
+@pytest.fixture
+def start_env(monkeypatch, tmp_path):
+    """Isolate start_all from tmux, the real lock, the log and real sleeping."""
+    monkeypatch.setattr(whatsapp_mod, "start", lambda **k: 0)
+    monkeypatch.setattr(server, "LOCK_FILE", tmp_path / "signal-tui.lock")
+    monkeypatch.setattr(server, "_kill_tmux_session", lambda name="tui": None)
+    monkeypatch.setattr(server, "SERVER_LOG", tmp_path / "serve.log")
+    monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+    spawned = []
+
+    def _popen(cmd, **kwargs):
+        spawned.append((cmd, kwargs))
+        return _FakeProc()
+
+    monkeypatch.setattr(server.subprocess, "Popen", _popen)
+    return spawned
+
+
 class TestStartAll:
-    def test_dies_when_tui_never_comes_up(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(whatsapp_mod, "start", lambda **k: 1)
-        monkeypatch.setattr(server, "LOCK_FILE", tmp_path / "signal-tui.lock")
-        monkeypatch.setattr(server, "_kill_tmux_session", lambda name="tui": None)
-        monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: _cp(a[0], 0))
-        monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+    def test_dies_when_server_never_comes_up(self, monkeypatch, start_env):
         monkeypatch.setattr(server, "port_listening", lambda port: False)
         with pytest.raises(SystemExit):
             server.start_all()
 
-    def test_reports_success_with_token_and_url(self, monkeypatch, tmp_path, capsys):
-        monkeypatch.setattr(whatsapp_mod, "start", lambda **k: 0)
-        monkeypatch.setattr(server, "LOCK_FILE", tmp_path / "signal-tui.lock")
-        monkeypatch.setattr(server, "_kill_tmux_session", lambda name="tui": None)
+    def test_dies_early_when_server_process_exits(self, monkeypatch, start_env):
+        monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: _FakeProc(1))
+        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        with pytest.raises(SystemExit):
+            server.start_all()
+
+    def test_reports_success_with_token_and_url(self, monkeypatch, start_env, capsys):
         monkeypatch.setattr(server, "_read_web_token", lambda: "tok123")
         monkeypatch.setattr(server, "_local_ip", lambda: "10.0.0.5")
-        monkeypatch.setattr(server.time, "sleep", lambda *_: None)
         monkeypatch.setattr(server, "port_listening", lambda port: True)
-
-        def _fake_run(cmd, **kwargs):
-            if cmd[:2] == ["tmux", "list-sessions"]:
-                return _cp(cmd, stdout="tui: 1 windows\n")
-            return _cp(cmd, 0)
-
-        monkeypatch.setattr(server.subprocess, "run", _fake_run)
         assert server.start_all() == 0
         out = capsys.readouterr().out
         assert "10.0.0.5:4242" in out
         assert "tok123" in out
+
+    def test_starts_detached_serve_process(self, monkeypatch, start_env):
+        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        assert server.start_all() == 0
+        ((cmd, kwargs),) = start_env
+        assert cmd[0].endswith(".venv/bin/python")
+        assert cmd[1:] == [
+            "megachat.py",
+            "serve",
+            "--web-port",
+            "4242",
+            "--web-host",
+            "0.0.0.0",
+        ]
+        assert kwargs["start_new_session"] is True
+        assert kwargs["cwd"] == server.PROJECT_DIR
+
+    def test_stops_previous_instance_before_starting(self, monkeypatch, start_env):
+        order = []
+        monkeypatch.setattr(server, "_stop_tui", lambda: order.append("stop"))
+        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        real_popen = server.subprocess.Popen
+        monkeypatch.setattr(
+            server.subprocess,
+            "Popen",
+            lambda *a, **k: order.append("spawn") or real_popen(*a, **k),
+        )
+        server.start_all()
+        assert order == ["stop", "spawn"]
+
+
+class TestKillTmuxSession:
+    def test_tolerates_missing_tmux(self, monkeypatch):
+        def _boom(*a, **k):
+            raise FileNotFoundError("tmux")
+
+        monkeypatch.setattr(server.subprocess, "run", _boom)
+        server._kill_tmux_session()  # must not raise

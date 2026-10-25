@@ -650,14 +650,34 @@ The automatic installer enables the Web UI in `config.json`, so a normal
 | Alias | What it does |
 |---|---|
 | `web-signal-tui` | Starts the TUI with the web server in the **foreground** on `0.0.0.0:4242` |
-| `web-signal-tui-bg` | Starts the TUI + web server in a **detached tmux session** (background) and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN` |
-| `web-signal-tui-stop` | Cleanly stops the tmux session and removes `/tmp/signal-tui.lock` |
+| `web-signal-tui-bg` | Starts the headless server (`megachat serve`: core + web server, no TUI) as a **detached background process** and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN` |
+| `web-signal-tui-stop` | Cleanly stops the background server (SIGINT; also kills a legacy tmux `tui` session if one exists) and removes `/tmp/signal-tui.lock` |
 
 `signal-tui-bg` and `signal-tui-stop` are shorter aliases for the two background commands.
-Starting the background command is idempotent: when the session is already active it still prints
+Starting the background command is idempotent: when the server is already running it still prints
 and exports the current token instead of failing.
 
 > The web server requires the optional dependencies in requirements-web.txt (installed by default; if you used --no-web: .venv/bin/pip install -r requirements-web.txt). Without them the TUI logs "optional dependencies are missing (web down)" and continues normally.
+
+### Headless server (`megachat serve`)
+
+The web UI no longer needs the TUI (or tmux) to stay alive. `megachat serve` runs the chat core and
+the web adapter without Textual, logs to `/tmp/signal-tui.log`, prints the web URL and Bearer token,
+and runs until SIGINT/SIGTERM (then stops the core and the web server, prunes the message cache and
+releases the lock):
+
+```bash
+python3 megachat.py serve                      # web on config.json host/port (default 127.0.0.1:4242)
+python3 megachat.py serve --web-host 0.0.0.0 --web-port 4242
+python3 -m server --web-no-auth                # same entry point, no token (trusted networks only)
+```
+
+Options: `--debug`, `--web-port`, `--web-host`, `--web-no-auth`, `--no-web` (no client can connect
+yet; logs a warning). The TUI and the server share the single-instance lock
+(`/tmp/signal-tui.lock`), so only one of them runs at a time. `python3 launcher.py server
+start|stop|status` starts/stops it (together with WAHA) as a detached background process; its
+stdout/stderr go to `/tmp/megachat-serve.log`. `megachat.py` with any other arguments starts the TUI
+as before (`python3 signal_tui.py` keeps working).
 
 ### Fast cycle (background + token)
 
@@ -666,7 +686,7 @@ so the token is immediately ready for the Web UI login (it is printed to the con
 
 ```bash
 web-signal-tui-bg
-# TUI bg avviata — token: <the-token>
+# Server bg attivo — token: <the-token>
 
 curl -H "Authorization: Bearer $SIGNAL_TUI_WEB_TOKEN" http://127.0.0.1:4242/api/contacts
 ```
@@ -864,9 +884,8 @@ creates a WAL-safe timestamped backup (`messages.db.bak-<timestamp>`) and runs a
 before deleting. Run it only in a maintenance window, with the app stopped:
 
 ```bash
-# 1. Stop the TUI (it embeds the web server — no separate process)
-tmux kill-session -t tui
-# or: pkill -f "python -m signal_tui"
+# 1. Stop the server/TUI (SIGINT to the pid in the lock file; the web server is embedded)
+signal-tui-stop        # or: kill -INT "$(cat /tmp/signal-tui.lock)"
 
 # 2. Gate: no process must hold the DB (the output must be empty)
 lsof ~/.local/share/signal-tui-client/messages.db
@@ -879,7 +898,7 @@ lsof ~/.local/share/signal-tui-client/messages.db
 
 # 5. Restart from the project root with the usual web options
 cd /home/rob/signal-tui-client
-tmux new-session -d -s tui ".venv/bin/python -m signal_tui --web --web-host 0.0.0.0 --web-port 4242"
+nohup .venv/bin/python megachat.py serve --web-host 0.0.0.0 --web-port 4242 >/dev/null 2>&1 &
 ```
 
 The script aborts (`-1`) if more rows than expected match, and is idempotent (a second run finds
@@ -890,7 +909,9 @@ zero rows). Never instantiate a backend outside `pytest`/the conftest: the autou
 
 ```
 signal-tui-client/
-├── signal_tui.py              # Entry point — main TUI application (Textual App), multi-protocol
+├── megachat.py                # Entry point — `megachat serve` (headless) or the TUI
+├── signal_tui.py              # TUI entry point — main TUI application (Textual App), multi-protocol
+├── server/                    # Headless core (ChatCore, EventBus, lock) + `serve` mode (main.py)
 ├── backend/                   # Shared backend: SQLite persistence, signal-cli RPC/subprocess,
 │                              #   webhook/HTTP server, receipts
 ├── backends/                  # Per-protocol backend implementations
