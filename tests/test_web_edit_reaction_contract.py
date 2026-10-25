@@ -23,7 +23,6 @@ from server.api import ApiError
 from server.bus import EventBus
 from web.api import create_api_router
 from web.auth import install_auth
-from web.bridge import close_bridge, init_bridge
 from web.ops import HTTP_STATUS, get_api
 
 AUTH = {"Authorization": "Bearer contract-secret"}
@@ -68,12 +67,8 @@ def env(monkeypatch, tmp_path):
     install_auth(app, "contract-secret")
     app.include_router(create_api_router())
     sub = bus.subscribe()
-    init_bridge(bus)
-    try:
-        with TestClient(app) as client:
-            yield client, get_api(app), manager, sub, db_file
-    finally:
-        close_bridge()
+    with TestClient(app) as client:
+        yield client, get_api(app), manager, sub, db_file
 
 
 def _edit(**over):

@@ -221,7 +221,7 @@ def test_web_modules_import_without_protocols_loaded():
 
     code = (
         "import sys, web.server, web.api, web.ws, web.auth, web.ops, web.uploads,"
-        " web.legacy_events, web.bridge;"
+        " web.legacy_events;"
         "bad = sorted(m for m in sys.modules if m.split('.')[0] in "
         "{'protocols','tui','textual','transcription','signal_tui'});"
         "print(bad); sys.exit(1 if bad else 0)"
@@ -255,3 +255,31 @@ def test_ui_modules_import_without_protocols_or_web_loaded():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_tui_has_no_test_only_plumbing():
+    """Tests drive the TUI through the bus (``tests/event_harness.feed``); the
+    production ``tui/`` carries no entry point or skip list made for tests."""
+    offenders = [
+        f"{path.relative_to(ROOT)}: {name}"
+        for path in sorted((ROOT / "tui").rglob("*.py"))
+        for name in ("_handle_event", "_compat_payload_ids")
+        if name in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
+
+
+def test_nobody_imports_the_removed_web_bridge():
+    """``web.bridge`` (a process-global bus) is gone: ``server/`` and ``tui/``
+    never import it, and web code publishes through ``ChatAPI``."""
+    assert not (ROOT / "web" / "bridge.py").exists()
+    offenders = []
+    for package in ("server", "tui", "web"):
+        for path in sorted((ROOT / package).rglob("*.py")):
+            modules = _imported_modules(path)
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, ast.ImportFrom) and node.module == "web":
+                    modules.update(f"web.{alias.name}" for alias in node.names)
+            if any(m == "web.bridge" or m.startswith("web.bridge.") for m in modules):
+                offenders.append(str(path.relative_to(ROOT)))
+    assert offenders == []

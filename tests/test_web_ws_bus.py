@@ -6,11 +6,12 @@ import pytest
 
 pytest.importorskip("fastapi")
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from server.bus import EventBus
-from web import bridge, ws
+from web import ws
 
 TOKEN = "t0k3n"
 
@@ -86,17 +87,14 @@ def test_core_events_are_sent_as_legacy_frames_in_order():
         }
 
 
-def test_push_event_dicts_reach_the_socket_unchanged():
+def test_web_push_dicts_reach_the_socket_unchanged():
     bus = EventBus()
-    bridge.init_bridge(bus)
-    try:
-        with TestClient(_app(bus)) as client, client.websocket_connect("/ws") as sock:
-            assert sock.receive_json() == {"type": "heartbeat"}
-            frame = {"type": "message", "payload": {"id": "x", "contact_id": "c"}}
-            assert bridge.push_event(frame)
-            assert _receive_non_heartbeat(sock) == frame
-    finally:
-        bridge.close_bridge()
+    api = api_for(object(), bus)
+    with TestClient(_app(bus)) as client, client.websocket_connect("/ws") as sock:
+        assert sock.receive_json() == {"type": "heartbeat"}
+        frame = {"type": "message", "payload": {"id": "x", "contact_id": "c"}}
+        assert api.publish_web_push(frame)
+        assert _receive_non_heartbeat(sock) == frame
 
 
 def test_heartbeat_is_sent_when_idle():
@@ -109,7 +107,6 @@ def test_heartbeat_is_sent_when_idle():
 
 
 def test_without_a_bus_the_broadcaster_idles_without_error():
-    bridge.close_bridge()
     with TestClient(_app(None)) as client, client.websocket_connect("/ws"):
         pass  # connects and closes cleanly; nothing is sent
     assert client.app is not None

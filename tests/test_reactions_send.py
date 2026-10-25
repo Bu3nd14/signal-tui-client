@@ -19,7 +19,6 @@ from protocols.whatsapp import WhatsAppBackend
 from server.bus import EventBus
 from tests.test_edit_contract import _MinimalBackend
 from web.api import create_api_router
-from web.bridge import close_bridge, init_bridge
 
 
 def test_base_send_reaction_default_is_false():
@@ -123,44 +122,40 @@ def test_reaction_endpoint_validates_sends_persists_and_pushes(tmp_path):
             msg_id="1234",
         )
         sub = bus.subscribe()
-        init_bridge(bus)
-        try:
-            with TestClient(app) as client:
-                assert (
-                    client.post(
-                        "/api/messages/reaction",
-                        json={
-                            "protocol": "invalid",
-                            "contact_id": "+3902",
-                            "message_id": "1234",
-                            "emoji": "👍",
-                        },
-                    ).status_code
-                    == 400
-                )
-                assert (
-                    client.post(
-                        "/api/messages/reaction",
-                        json={
-                            "protocol": "signal",
-                            "contact_id": "+3902",
-                            "message_id": "1234",
-                            "emoji": "not-emoji",
-                        },
-                    ).status_code
-                    == 400
-                )
-                response = client.post(
+        with TestClient(app) as client:
+            assert (
+                client.post(
+                    "/api/messages/reaction",
+                    json={
+                        "protocol": "invalid",
+                        "contact_id": "+3902",
+                        "message_id": "1234",
+                        "emoji": "👍",
+                    },
+                ).status_code
+                == 400
+            )
+            assert (
+                client.post(
                     "/api/messages/reaction",
                     json={
                         "protocol": "signal",
                         "contact_id": "+3902",
                         "message_id": "1234",
-                        "emoji": "👍",
+                        "emoji": "not-emoji",
                     },
-                )
-        finally:
-            close_bridge()
+                ).status_code
+                == 400
+            )
+            response = client.post(
+                "/api/messages/reaction",
+                json={
+                    "protocol": "signal",
+                    "contact_id": "+3902",
+                    "message_id": "1234",
+                    "emoji": "👍",
+                },
+            )
 
         assert response.status_code == 200
         assert response.json()["reactions"][0]["is_mine"] is True

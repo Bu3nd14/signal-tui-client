@@ -304,37 +304,35 @@ class TestSendPersistOffthread:
         app.core.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
         sub = app.bus.subscribe()
-        with patch("web.bridge.push_event") as push_event:
-            _send_text(app, "ciao web")
-            ts = app._cache[contact.cache_key][0]["timestamp"]
-            # Persist happens off-thread: nothing on the bus before the worker.
-            assert legacy_frames(sub.drain()) == []
-            _run_workers(app)
+        _send_text(app, "ciao web")
+        ts = app._cache[contact.cache_key][0]["timestamp"]
+        # Persist happens off-thread: nothing on the bus before the worker.
+        assert legacy_frames(sub.drain()) == []
+        _run_workers(app)
 
-            feed(
-                app,
-                ChatEvent(
-                    type="message",
-                    protocol=PROTOCOL_SIGNAL,
-                    contact_id=contact.id,
-                    payload={
-                        "id": "ts-1",
-                        "text": "ciao web",
-                        "is_mine": True,
-                        "sender": "You",
-                        "timestamp": ts,
-                        "quote_text": None,
-                        "msg_type": "text",
-                        "attachment_info": None,
-                        "attachment_id": None,
-                        "contact": contact,
-                    },
-                ),
-            )
+        feed(
+            app,
+            ChatEvent(
+                type="message",
+                protocol=PROTOCOL_SIGNAL,
+                contact_id=contact.id,
+                payload={
+                    "id": "ts-1",
+                    "text": "ciao web",
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": ts,
+                    "quote_text": None,
+                    "msg_type": "text",
+                    "attachment_info": None,
+                    "attachment_id": None,
+                    "contact": contact,
+                },
+            ),
+        )
 
-        # The TUI no longer calls push_event: exactly one legacy frame reaches
+        # The TUI publishes no web_push itself: exactly one legacy frame reaches
         # the web via the bus (the persisted send; the echo adds none).
-        push_event.assert_not_called()
         assert legacy_frames(sub.drain()) == [
             {
                 "type": "message",

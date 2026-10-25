@@ -162,8 +162,10 @@ class ChatAPI:
         reconnect(protocols)
 
     def publish_web_push(self, event: dict[str, Any]) -> bool:
-        """Publish a legacy ``/ws`` frame (until Phase 1 replaces them with
-        real core events).  Same payload as ``web.bridge.push_event``."""
+        """Publish a legacy ``/ws`` frame as a ``web_push`` bus event.
+
+        Typed events for the same changes exist on ``/ws/v2``; the legacy
+        ``/ws`` frames the SPA still consumes are produced from this."""
         bus = self.bus
         if bus is None:
             return False

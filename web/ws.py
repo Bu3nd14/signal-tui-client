@@ -32,7 +32,6 @@ from contextlib import suppress
 from typing import Any
 
 from web.auth import is_authorized
-from web.bridge import get_bus
 from web.legacy_events import to_legacy
 
 #: Heartbeat cadence: the SPA watchdog (app.js) treats the WebSocket as a
@@ -80,7 +79,7 @@ async def _broadcast(app: Any) -> None:
     sub_bus = None
     try:
         while True:
-            bus = getattr(app.state, "bus", None) or get_bus()
+            bus = getattr(app.state, "bus", None)
             if bus is None:
                 if sub is not None:
                     sub.close()

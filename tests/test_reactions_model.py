@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from event_harness import EventApp, feed, legacy_frames
@@ -130,11 +130,9 @@ def test_reaction_event_pushes_complete_web_update():
     )
 
     sub = app.bus.subscribe()
-    with patch("web.bridge.push_event") as push_event:
-        assert app_for_mixin(app, event)
+    assert app_for_mixin(app, event)
 
     # The TUI never pushes; the web maps the bus event to the legacy frame.
-    push_event.assert_not_called()
     frames = legacy_frames(sub.drain())
     assert len(frames) == 1
     assert frames[0] == (
@@ -162,11 +160,9 @@ def test_reaction_event_does_not_push_when_web_is_disabled():
     app = _reaction_app(web_enabled=False)
 
     sub = app.bus.subscribe()
-    with patch("web.bridge.push_event") as push_event:
-        assert app_for_mixin(app, _reaction_event())
+    assert app_for_mixin(app, _reaction_event())
 
     # No web server is attached to the bus: nothing is pushed to the web.
-    push_event.assert_not_called()
     assert all(e.type != "web_push" for e in sub.drain())
 
 

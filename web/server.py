@@ -85,13 +85,12 @@ def start_web_server(
 
     from web.api import create_api_router
     from web.auth import install_auth
-    from web.bridge import init_bridge
     from web.uploads import prepare_upload_directory
     from web.ws import install_websocket
 
     # The bus /ws and /ws/v2 stream from: the caller's, else the API's, else a
     # private one (an API stand-in without a bus still gets heartbeats).
-    app.state.bus = init_bridge(bus or api.bus or EventBus())
+    app.state.bus = bus or api.bus or EventBus()
     install_auth(app, token, required=require_auth)
     app.include_router(create_api_router())
     install_websocket(app, token, required=require_auth)
@@ -179,10 +178,6 @@ def start_web_server(
                 )
         finally:
             handle.status = "down"
-            if _active_server is handle:
-                from web.bridge import close_bridge
-
-                close_bridge()
             loop = handle.loop
             if loop is not None:
                 try:
@@ -243,6 +238,3 @@ def stop_web_server(handle: WebServerHandle | None = None) -> None:
         handle.status = "down"
     if _active_server is handle:
         _active_server = None
-        from web.bridge import close_bridge
-
-        close_bridge()

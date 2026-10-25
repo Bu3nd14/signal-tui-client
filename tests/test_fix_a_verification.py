@@ -6,7 +6,7 @@ Complementary to the tests added in ``test_web_outgoing_mirror.py`` and
 * WhatsApp multi per-message slots (the added tests only cover one message).
 * DB is never overwritten when a batch is already present (cache-only asserted).
 * ``_merge_batch_slot`` return semantics (``True`` on fusion, ``False`` no-op).
-* End-to-end ``"changed"`` -> ``web.bridge.push_event`` through
+* End-to-end ``"changed"`` -> ``ChatAPI.publish_web_push`` through
   ``_handle_message_event`` (the requested end-to-end check).
 * Reconcile regression on singles and on failed multis.
 """

@@ -11,7 +11,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from server.bus import EventBus
-from web.bridge import close_bridge, init_bridge
 
 TOKEN = "correct-secret"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -185,11 +184,7 @@ def test_edit_success_applies_locally_and_pushes_event(edit_client):
 
     bus = client.app.state.api.bus
     sub = bus.subscribe()
-    init_bridge(bus)
-    try:
-        response = client.post("/api/messages/edit", json=_payload(), headers=AUTH)
-    finally:
-        close_bridge()
+    response = client.post("/api/messages/edit", json=_payload(), headers=AUTH)
     frames = legacy_frames(sub.drain())
 
     assert response.status_code == 200

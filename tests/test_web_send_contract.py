@@ -27,7 +27,6 @@ from server.models_api import AttachmentIn
 from server.retry import SEND_RETRY_MAX_ATTEMPTS
 from web.api import create_api_router
 from web.auth import install_auth
-from web.bridge import close_bridge, init_bridge
 from web.ops import HTTP_STATUS, get_api
 
 AUTH = {"Authorization": "Bearer contract-secret"}
@@ -100,20 +99,16 @@ def env(monkeypatch, tmp_path):
     install_auth(app, "contract-secret")
     app.include_router(create_api_router())
     sub = bus.subscribe()
-    init_bridge(bus)
     uploads = tmp_path / "web-uploads"
-    try:
-        with TestClient(app) as client:
-            yield SimpleNamespace(
-                client=client,
-                api=get_api(app),
-                manager=manager,
-                sub=sub,
-                uploads=uploads,
-                tmp=tmp_path,
-            )
-    finally:
-        close_bridge()
+    with TestClient(app) as client:
+        yield SimpleNamespace(
+            client=client,
+            api=get_api(app),
+            manager=manager,
+            sub=sub,
+            uploads=uploads,
+            tmp=tmp_path,
+        )
 
 
 def _frames(env):

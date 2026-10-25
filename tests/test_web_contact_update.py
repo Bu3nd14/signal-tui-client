@@ -86,13 +86,11 @@ def test_contact_update_marks_dirty_and_pushes_web():
     event = _contact_update_event(contact, phone="391234567")
 
     sub = app.bus.subscribe()
-    with patch("web.bridge.push_event") as push:
-        assert feed(app, event) is True
+    assert feed(app, event) is True
 
     assert app._contact_list_dirty is True
     assert contact_cache_key(PROTOCOL_WHATSAPP, "1@lid") in app._dirty_contact_keys
     # The TUI no longer pushes to the web: the web WebSocket maps the bus event.
-    push.assert_not_called()
     frames = [to_legacy(e) for e in sub.drain()]
     assert len(frames) == 1
     pushed = frames[0]
@@ -110,11 +108,11 @@ def test_contact_update_without_web_does_not_push():
     app = _App(backend, web_enabled=False)
     contact = ChatContact(id="1@lid", display_name="Giulia", protocol=PROTOCOL_WHATSAPP)
 
-    with patch("web.bridge.push_event") as push:
-        assert feed(app, _contact_update_event(contact)) is True
+    sub = app.bus.subscribe()
+    assert feed(app, _contact_update_event(contact)) is True
 
     # No web server is attached to the bus: nothing is pushed to the web.
-    push.assert_not_called()
+    assert all(e.type != "web_push" for e in sub.drain())
 
 
 def test_materialized_contact_is_added_to_tui_list_on_message():

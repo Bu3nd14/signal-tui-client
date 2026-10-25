@@ -579,11 +579,9 @@ def test_receipt_event_does_not_push_when_web_is_disabled():
     )
 
     sub = app.bus.subscribe()
-    with patch("web.bridge.push_event") as push_event:
-        assert feed(app, event)
+    assert feed(app, event)
 
     # No web server is attached to the bus: nothing is pushed to the web.
-    push_event.assert_not_called()
     assert all(e.type != "web_push" for e in sub.drain())
 
 
@@ -637,11 +635,9 @@ def test_edit_event_does_not_push_when_web_is_disabled():
     )
 
     sub = app.bus.subscribe()
-    with patch("web.bridge.push_event") as push_event:
-        assert feed(app, event)
+    assert feed(app, event)
 
     # No web server is attached to the bus: nothing is pushed to the web.
-    push_event.assert_not_called()
     assert all(e.type != "web_push" for e in sub.drain())
 
 

@@ -1784,12 +1784,12 @@ def test_sent_mirror_does_not_ingest_or_push_web_event():
     app.selected_contact = contact
     event = _mirror_event(contact)
 
-    with patch("web.bridge.push_event") as push_event:
-        assert feed(app, event) is True
+    sub = app.bus.subscribe()
+    assert feed(app, event) is True
 
     # No double DB write and no duplicate web push: the selected contact's
     # timestamp is refreshed but the list stays clean.
     backend.ingest_message.assert_not_called()
-    push_event.assert_not_called()
+    assert all(e.type != "web_push" for e in sub.drain())
     assert app._contact_list_dirty is False
     assert app._dirty_contact_keys == set()
