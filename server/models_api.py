@@ -442,3 +442,32 @@ class ReactionsSetRequest(BaseModel):
 class ReactionsSetOut(BaseModel):
     ok: bool
     reactions: list[dict[str, Any]]
+
+
+# -- links / client log -------------------------------------------------------
+
+
+class LinksPreviewRequest(BaseModel):
+    url: str
+
+
+class LinkPreviewOut(BaseModel):
+    """Sanitized card of a page: the page's HTML never reaches a client."""
+
+    url: str
+    title: str
+    description: str
+    site_name: str
+    has_image: bool
+
+
+class ClientLogRequest(BaseModel):
+    """A line a frontend wants in the server log (``source`` is set by the
+    adapter, never taken from the client)."""
+
+    message: Any = None
+    source: str = "client"
+
+
+class StatusOut(BaseModel):
+    status: str

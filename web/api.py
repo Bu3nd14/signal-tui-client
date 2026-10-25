@@ -263,42 +263,21 @@ def create_api_router() -> Any:
         )
 
     @router.get("/link-preview")
-    async def link_preview(url: str) -> Any:
-        from web.link_preview import BlockedURLError, get_preview
-
-        try:
-            preview = await get_preview(url)
-        except BlockedURLError:
-            raise HTTPException(status_code=400, detail="URL not allowed") from None
-        if preview is None:
-            raise HTTPException(status_code=404, detail="No preview")
+    async def link_preview(request: Request, url: str) -> Any:
+        preview = await call_op(request, "links.preview", {"url": url})
         return JSONResponse(
-            content={
-                "url": preview["url"],
-                "title": preview["title"],
-                "description": preview["description"],
-                "site_name": preview["site_name"],
-                "has_image": bool(
-                    preview.get("image_url") or preview.get("local_image")
-                ),
-            },
+            content=preview,
             headers={"Cache-Control": "private, max-age=3600"},
         )
 
     @router.get("/link-preview/image")
-    async def link_preview_image(url: str) -> Any:
-        from web.link_preview import BlockedURLError, get_preview_image
-
-        try:
-            result = await get_preview_image(url)
-        except BlockedURLError:
-            raise HTTPException(status_code=400, detail="URL not allowed") from None
-        if result is None:
-            raise HTTPException(status_code=404, detail="No preview image")
-        data, content_type = result
+    async def link_preview_image(request: Request, url: str) -> Any:
+        blob = await call_op(request, "links.preview_image", {"url": url})
+        # Small file: a plain body, with the type the operation sniffed.
+        data = await asyncio.to_thread(Path(blob["path"]).read_bytes)
         return Response(
             content=data,
-            media_type=content_type,
+            media_type=blob["content_type"],
             headers={
                 "Cache-Control": "private, max-age=86400",
                 "X-Content-Type-Options": "nosniff",
@@ -306,10 +285,12 @@ def create_api_router() -> Any:
         )
 
     @router.post("/log")
-    def client_log(payload: dict[str, Any]) -> dict[str, str]:
-        message = str(payload.get("message") or "")[:500]
-        logger.info("[web-client] %s", message)
-        return {"status": "ok"}
+    async def client_log(request: Request, payload: dict[str, Any]) -> Any:
+        return await call_op(
+            request,
+            "server.client_log",
+            {"message": payload.get("message"), "source": "web-client"},
+        )
 
     @router.post("/transcribe")
     def transcribe(request: Request, payload: dict[str, Any]) -> dict[str, Any]:

@@ -8,11 +8,13 @@ from typing import Any
 
 from server.api import ChatAPI, operation
 from server.models_api import (
+    ClientLogRequest,
     EmojiCategoryOut,
     EmptyRequest,
     ReactionsAvailableOut,
     ReactionsAvailableRequest,
     ServerConfigOut,
+    StatusOut,
 )
 from server.ops.common import PROTOCOL_ORDER
 
@@ -93,3 +95,10 @@ def server_config(api: ChatAPI, req: EmptyRequest) -> ServerConfigOut:
         thumbnail_max_lines=thumbnail_max_lines(),
         thumbnail_max_cols=thumbnail_max_cols(),
     )
+
+
+@operation("server.client_log", request=ClientLogRequest, response=StatusOut)
+def server_client_log(api: ChatAPI, req: ClientLogRequest) -> StatusOut:
+    """Write a line from a frontend (truncated to 500 characters) to the log."""
+    logger.info("[%s] %s", req.source, str(req.message or "")[:500])
+    return StatusOut(status="ok")

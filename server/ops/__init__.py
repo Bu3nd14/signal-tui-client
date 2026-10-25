@@ -11,6 +11,7 @@ from server.ops import (  # noqa: F401
     download,
     edit,
     link,
+    links,
     media,
     messages,
     meta,

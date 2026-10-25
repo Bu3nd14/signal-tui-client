@@ -8,7 +8,7 @@ from aiohttp import web as aioweb
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import web.link_preview as lp
+import server.link_preview as lp
 from web.api import create_api_router
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 32

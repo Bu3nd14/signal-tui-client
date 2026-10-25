@@ -48,7 +48,9 @@ def get_api(app: Any) -> ChatAPI:
     """The ``ChatAPI`` for *app* (see module docstring)."""
     state = app.state
     api = getattr(state, "api", None)
-    manager = state.manager
+    manager = getattr(state, "manager", None)
+    if api is not None and manager is None:
+        return api
     if api is None or api.manager is not manager:
         api = ChatAPI(_ManagerHost(manager))
         state.api = api
