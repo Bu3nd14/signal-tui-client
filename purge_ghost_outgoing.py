@@ -7,6 +7,7 @@ import argparse
 import sqlite3
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 from protocols import db
@@ -26,7 +27,12 @@ def _backup_database(db_file: Path) -> Path:
     while backup_file.exists():
         epoch += 1
         backup_file = db_file.with_name(f"{db_file.name}.bak-{epoch}")
-    with sqlite3.connect(db_file) as source, sqlite3.connect(backup_file) as backup:
+    with (
+        closing(sqlite3.connect(db_file)) as source,
+        closing(sqlite3.connect(backup_file)) as backup,
+        source,
+        backup,
+    ):
         source.backup(backup)
     return backup_file
 
@@ -95,7 +101,7 @@ def purge(
         backup_file = _backup_database(target)
         print(f"Backup created: {backup_file}")
         removed = 0
-        with sqlite3.connect(target) as connection:
+        with closing(sqlite3.connect(target)) as connection, connection:
             for loser in losers:
                 removed += connection.execute(
                     "DELETE FROM messages WHERE id = ?", (loser["id"],)
