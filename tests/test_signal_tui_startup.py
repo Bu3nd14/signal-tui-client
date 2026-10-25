@@ -125,10 +125,14 @@ def test_connect_and_in_process_are_exclusive(harness):
     assert exc.value.code == 2
 
 
-def test_client_modes_use_their_own_log_file(harness):
+def test_client_modes_use_their_own_log_file(harness, monkeypatch):
     handler = MagicMock()
     signal_tui.logging.basicConfig.reset_mock()
     import logging
+
+    # A fresh process has no root handlers (pytest adds its own capture ones);
+    # ``main`` only opens its log file when basicConfig would use it.
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
 
     created = []
     orig = logging.FileHandler

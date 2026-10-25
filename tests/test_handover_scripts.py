@@ -95,6 +95,7 @@ def _spawn_fake_server(lock: Path) -> subprocess.Popen:
     )
     assert proc.stdout is not None
     assert proc.stdout.readline().strip() == "ready"
+    proc.stdout.close()  # the child prints nothing else
     # Reap it as soon as it exits: a zombie would still answer ``kill -0``,
     # unlike the real server (reparented to init).
     threading.Thread(target=proc.wait, daemon=True).start()

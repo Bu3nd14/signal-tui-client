@@ -145,15 +145,18 @@ def main(argv: list[str] | None = None) -> int:
     # interferire con stderr usato da Textual per la TUI.  Il TUI client ha il
     # suo log; con --in-process (il TUI e' il core) resta quello storico.
     level = logging.DEBUG if args.debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=[
-            logging.FileHandler(
-                CORE_LOG_FILE if args.in_process else TUI_LOG_FILE, mode="a"
-            )
-        ],
-    )
+    # basicConfig is a no-op once the root logger has handlers: only open the
+    # file when it will actually be used (else the handler leaks its file).
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(name)s %(levelname)s %(message)s",
+            handlers=[
+                logging.FileHandler(
+                    CORE_LOG_FILE if args.in_process else TUI_LOG_FILE, mode="a"
+                )
+            ],
+        )
     import signal as signal_module
 
     client = None

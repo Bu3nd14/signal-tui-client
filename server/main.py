@@ -81,11 +81,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _configure_logging(debug: bool) -> None:
     """Log to the same file as the TUI (append), INFO unless ``--debug``."""
-    logging.basicConfig(
-        level=logging.DEBUG if debug else logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=[logging.FileHandler(LOG_FILE, mode="a")],
-    )
+    # basicConfig is a no-op once the root logger has handlers: only open the
+    # file when it will actually be used (else the handler leaks its file).
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=logging.DEBUG if debug else logging.INFO,
+            format="%(asctime)s %(name)s %(levelname)s %(message)s",
+            handlers=[logging.FileHandler(LOG_FILE, mode="a")],
+        )
     logger.setLevel(logging.DEBUG if debug else logging.INFO)
 
 

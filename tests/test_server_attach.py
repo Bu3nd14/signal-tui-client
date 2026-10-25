@@ -263,6 +263,8 @@ def test_simultaneous_acquire_has_exactly_one_winner(tmp_path):
         done.touch()
         for p in procs:
             p.wait(timeout=20)
+            if p.stdout is not None:
+                p.stdout.close()
     assert results.count("WON") == 1 and results.count("LOST") == 7
 
 
