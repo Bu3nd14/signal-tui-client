@@ -103,11 +103,133 @@ and response go through the models so non-serializable values are caught.
 
 ### 4.2 Unix socket (TUI)
 
-- Socket in `$XDG_RUNTIME_DIR/megachat/server.sock` (fallback
-  `~/.local/state/megachat/`), mode `0600`: filesystem permissions are the
-  authentication. A runtime file next to it records pid and socket path.
-- Framing: newline-delimited JSON-RPC 2.0. Notifications carry events
-  (`event` method) after `events.subscribe(since)`.
+Implemented by `server/socket_adapter.py` (imports only `server.*`), started
+by `megachat serve` unless `--no-socket`. Everything below is the wire
+contract the `SocketClient` (P2.2) implements.
+
+#### Location, permissions, runtime file
+
+- Socket: `$XDG_RUNTIME_DIR/megachat/server.sock`; without
+  `XDG_RUNTIME_DIR`, `~/.local/state/megachat/server.sock`. Overrides:
+  `megachat serve --socket PATH`, else the env var `MEGACHAT_SOCKET`
+  (tests use both). `sun_path` is limited to ~100 bytes: a longer path is an
+  error at startup, not a silent truncation.
+- A directory the adapter creates is `0700`; an existing default
+  `megachat/` directory owned by us is tightened to `0700`; the parent of an
+  explicit `--socket` path that already exists is left alone. The socket is
+  bound under `umask 077` and then `chmod 0600` (no window in which another
+  uid can connect). Filesystem permissions are the authentication.
+- On Linux the adapter also checks `SO_PEERCRED` on every accepted
+  connection and drops peers whose uid differs from the server's effective
+  uid (defence in depth, e.g. a wrongly shared directory); platforms without
+  `SO_PEERCRED` rely on the permissions alone.
+- Runtime file `server.json` in the socket's directory (`0600`):
+  `{"pid", "socket", "version", "api_version", "started_at"}`
+  (`version` = server version string, `api_version` = int protocol version,
+  `started_at` = Unix time, float). It is written atomically (temp file +
+  `rename`) only after the socket listens, and removed on shutdown (the
+  socket and the file are only removed if they are still the ones this
+  server created).
+- Startup finds an existing path: not a socket, or owned by another uid ->
+  refuse (never unlink what we did not create); a socket nobody accepts on
+  (connect refused: the previous server crashed) -> unlink it and the old
+  runtime file, continue; a socket that accepts -> a live server answers:
+  refuse to start (`megachat serve` exits 1). The single-instance lock
+  (`server/lock.py`) already prevents two servers; this protects the path
+  when the lock is bypassed.
+
+#### Framing
+
+Newline-delimited JSON-RPC 2.0: one JSON object per line, UTF-8, `\n`
+terminated, no batches (an array is answered with `-32600`). The server
+writes with `ensure_ascii` (no raw U+2028 etc. in lines). A line longer than
+`MAX_LINE_BYTES` (16 MiB) is answered with a `too_large` error (id `null`)
+and the connection is closed (the stream cannot be resynchronised). A line
+that is not valid UTF-8/JSON is answered with `-32700` (id `null`) and the
+connection stays open. Blank lines are ignored. A connection that does not
+drain its writes for 30 s is dropped. At most 32 concurrent connections.
+
+#### Requests and responses
+
+Request: `{"jsonrpc":"2.0","id":1,"method":"contacts.list","params":{...},
+"timeout": 30}`. `id` is a string or an integer (any other type is `-32600`);
+a request without `id` is a notification: executed, never answered. `params`
+is the operation's request object (absent/`null` = `{}`; a non-object is
+`-32602`). The non-standard envelope member `timeout` (seconds, `0 <
+timeout <= 600`) sets this call's server-side time limit; the default is 120
+s (`DEFAULT_TIMEOUT_S`). Success: `{"jsonrpc":"2.0","id":1,"result":<call_json
+output>}`.
+
+Requests of one connection run concurrently and may be answered in any
+order (match by `id`; at most 64 in flight per connection, beyond that
+`-32030`). Operations never block the loop: sync operations run in a bounded
+thread pool, async ones (`messages.send`) on the adapter loop (their internal
+`to_thread` uses a second bounded pool), so a slow call blocks neither other
+connections nor this connection's event notifications. A timeout answers
+`-32020` (`data.code` `"timeout"`) but **does not cancel** the operation
+(threads cannot be interrupted and a half-done send must not be torn down):
+its result is discarded, so a client must treat a timed-out mutation as
+unknown and re-sync.
+
+Errors: `{"error":{"code":N,"message":"...","data":{"code":"<ApiError code>",
+"message":"...","details":...}}}` where `data.message` is the exact
+user-facing `ApiError.message`.
+
+| ApiError code | JSON-RPC code | | ApiError code | JSON-RPC code |
+|---|---|---|---|---|
+| `invalid_request` | -32602 | | `unprocessable` | -32006 |
+| `not_found` | -32001 | | `not_supported` | -32007 |
+| `unauthorized` | -32002 | | `backend_down` | -32008 |
+| `forbidden` | -32003 | | `backend_error` | -32009 |
+| `too_large` | -32004 | | `internal` | -32603 |
+| `conflict` | -32005 | | | |
+
+Protocol-level errors: `-32700` parse error, `-32600` invalid request
+(envelope), `-32601` unknown method (`data.code` `"method_not_found"`),
+`-32602` invalid params, `-32603` internal error (unexpected exception,
+details only in the server log), `-32020` timeout, `-32030` too many requests
+in flight. Everything else (`-320xx`) maps from `ApiError` as above.
+
+#### Methods
+
+- Every registered operation, by its registry name.
+- `rpc.hello` -> `{"api_version", "server_version", "operations": [names]}`;
+  clients call it first and refuse an `api_version` they do not know.
+- `server.ping` -> `{"pong": true, "ts": <float>}`.
+- `events.subscribe {"since"?: N}` -> `{"subscribed": true, "last_seq": M}`.
+  Afterwards the server sends notifications
+  `{"jsonrpc":"2.0","method":"event","params":{"seq","type","payload","ts"}}`
+  for every bus event (including `gap`), exactly the `/ws/v2` frame: events
+  with `seq > N` still in the ring buffer are replayed first, a `gap` event
+  (`reason` `buffer` or `overflow`) tells the client to resync, and while
+  idle a `{"method":"heartbeat","params":{"ts"}}` notification arrives every
+  5 s. `since` must be an int >= 0 (else `-32602`); without `since` the stream
+  is live only. One subscription per connection: a second `events.subscribe`
+  restarts the stream. Events are delivered in order; a client that reads too
+  slowly overflows into a `gap` rather than blocking the bus.
+- `events.unsubscribe` -> `{"subscribed": false}` (idempotent).
+
+#### Attachment paths (mc-7kp)
+
+`messages.send` trusts `AttachmentIn.path`; HTTP only passes files it stored
+itself and keeps that behaviour. A socket client is the same uid on the same
+machine, so reading its files is no privilege escalation, but the operation
+must not be steered into attaching something the user did not choose.
+Decision: **copy, do not trust.** Before calling the operation the adapter
+stages every attachment: the path must be absolute; it is opened with
+`O_NOFOLLOW|O_NONBLOCK` (a symlink as the last component is refused), the
+open descriptor must be a regular file (no FIFO, device, directory, socket),
+and its bytes are copied into the upload directory (`0600`, size/kind guard
+of `server/uploads.py` applied while copying, 250 MiB total, at most
+`MAX_ATTACHMENTS` files). The operation then validates the staged copy
+(sniffed kind, per-kind limits, extension) and only sees paths the server
+owns; staged files are deleted when the call ends. A file that is not an
+acceptable attachment (a key file, a text file) is therefore rejected by the
+same content policy as an upload, never sent. The payload is pre-checked with
+`messages.send.check` before any copy so invalid requests cost no I/O.
+Because the filename decides the extension check, a missing `filename`
+defaults to the basename of the path. Confining paths to home/tmp was
+rejected: it blocks legitimate mounts and still trusts content.
 
 ### 4.3 HTTP (browser)
 
