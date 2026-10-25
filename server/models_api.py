@@ -11,6 +11,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, Field, StrictBool, StrictStr
 
+from server.events_api import ContactWire
+
 
 def _stripped(value: Any) -> str:
     """Coerce like the legacy routes: ``str(value or "").strip()``."""
@@ -65,6 +67,45 @@ class ContactsListRequest(BaseModel):
 class ContactsBookRequest(BaseModel):
     q: str
     force: bool = False
+
+
+class ContactsForProtocolRequest(BaseModel):
+    protocol: Stripped
+
+
+class ContactsRegisterRequest(BaseModel):
+    """A contact the frontend opens (address book / picker): open-or-create."""
+
+    id: Stripped
+    display_name: str
+    protocol: Stripped
+    extras: dict[str, Any] = {}
+
+
+class ContactsAddressBookRequest(BaseModel):
+    protocols: list[str] | None = None
+    force: bool = False
+
+
+class ContactsAddressBookOut(BaseModel):
+    """Full address book of the requested protocols + per-protocol failures."""
+
+    contacts: list[ContactWire]
+    errors: dict[str, str]
+
+
+class ContactsCheckNumberRequest(BaseModel):
+    phone: Stripped
+
+
+class ContactsCheckNumberOut(BaseModel):
+    exists: bool | None
+
+
+class ContactsTouchRequest(BaseModel):
+    protocol: Stripped
+    contact_id: Stripped
+    timestamp: int
 
 
 # -- chats --------------------------------------------------------------------

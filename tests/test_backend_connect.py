@@ -38,6 +38,14 @@ def _make_app() -> SignalTUI:
     return app
 
 
+def _ready(app: SignalTUI, backend: MagicMock) -> None:
+    """Run ``_on_backend_ready``: contacts reach the TUI through the core's
+    ``contacts.for_protocol`` operation, which reads ``manager.get(protocol)``."""
+    app.manager = MagicMock()
+    app.manager.get.return_value = backend
+    app._on_backend_ready(backend)
+
+
 def _make_backend(
     contacts: list[ChatContact], protocol: str = PROTOCOL_SIGNAL
 ) -> MagicMock:
@@ -56,7 +64,7 @@ class TestBackendReadyAutoSelect:
         # Un altro backend (WhatsApp) è ancora in connessione.
         app._pending_backends = {"whatsapp"}
 
-        app._on_backend_ready(_make_backend([mario, anna]))
+        _ready(app, _make_backend([mario, anna]))
 
         # Signal è pronto, ma WA non ha ancora riportato → nessuna selezione.
         app._select_contact.assert_not_called()
@@ -65,8 +73,11 @@ class TestBackendReadyAutoSelect:
         # L'ultimo backend riporta (ready o fallito) → seleziona il top.
         app._mark_backend_done("whatsapp")
 
-        app._select_contact.assert_called_once_with(anna)
-        assert app.selected_contact is anna
+        # The TUI list holds wire copies of the core's contacts (not ``anna``).
+        app._select_contact.assert_called_once()
+        assert app.selected_contact is not anna
+        assert app.selected_contact is not None
+        assert app.selected_contact.cache_key == anna.cache_key
 
     def test_last_backend_failure_still_selects_first_contact(self):
         app = _make_app()
@@ -174,7 +185,7 @@ class TestBackendReadyMergeDedup:
             },
         )
 
-        app._on_backend_ready(backend)
+        _ready(app, backend)
 
         key = contact_cache_key(PROTOCOL_SIGNAL, cid)
         entries = app._cache[key]
@@ -189,7 +200,7 @@ class TestBackendReadyMergeDedup:
         msg = _media_msg(mid=msg_id, att="att-0115", text="Image: IMG_0115.jpg")
         backend = self._make_backend(PROTOCOL_SIGNAL, {cid: [msg, dict(msg)]})
 
-        app._on_backend_ready(backend)
+        _ready(app, backend)
 
         key = contact_cache_key(PROTOCOL_SIGNAL, cid)
         assert len(app._cache[key]) == 1
@@ -219,7 +230,7 @@ class TestBackendReadyMergeDedup:
         }
         backend = self._make_backend(PROTOCOL_WHATSAPP, {cid: [media, ack]})
 
-        app._on_backend_ready(backend)
+        _ready(app, backend)
 
         key = contact_cache_key(PROTOCOL_WHATSAPP, cid)
         entries = app._cache[key]

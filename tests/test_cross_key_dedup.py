@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from client_harness import client_for
 
 from models import (
     PROTOCOL_SIGNAL,
@@ -146,7 +147,10 @@ class _ChatViewStub:
 class _BackendConnectStub:
     """Minimal duck-type for ``BackendConnectMixin._on_backend_ready``."""
 
-    def __init__(self) -> None:
+    def __init__(self, backend: Any) -> None:
+        # Contacts come from the core through the client (operation), the cache
+        # is still merged from the backend object.
+        self.client = client_for(SimpleNamespace(get=lambda _proto: backend))
         self._cache: dict[str, list[dict]] = {}
         self.contacts: list[ChatContact] = []
         self._pending_backends: set[str] = set()
@@ -159,6 +163,15 @@ class _BackendConnectStub:
 
     def _mark_backend_done(self, proto: str) -> None:
         self._pending_backends.discard(proto)
+
+    def _merge_ready_backend_cache(self, backend: Any) -> None:
+        BackendConnectMixin._merge_ready_backend_cache(self, backend)  # type: ignore[arg-type]
+
+    def _fetch_protocol_contacts(self, proto: str) -> list[ChatContact]:
+        return BackendConnectMixin._fetch_protocol_contacts(self, proto)  # type: ignore[arg-type]
+
+    def _merge_backend_contacts(self, contacts: list[ChatContact]) -> None:
+        BackendConnectMixin._merge_backend_contacts(self, contacts)  # type: ignore[arg-type]
 
     def _sync_last_ts(self) -> None:
         pass
@@ -629,7 +642,7 @@ class TestOnBackendReady:
                 ],
             },
         )
-        stub = _BackendConnectStub()
+        stub = _BackendConnectStub(backend)
 
         BackendConnectMixin._on_backend_ready(stub, backend)
 
@@ -665,7 +678,7 @@ class TestOnBackendReady:
                 ],
             },
         )
-        stub = _BackendConnectStub()
+        stub = _BackendConnectStub(backend)
 
         BackendConnectMixin._on_backend_ready(stub, backend)
 
@@ -709,7 +722,7 @@ class TestOnBackendReady:
                 ]
             },
         )
-        stub = _BackendConnectStub()
+        stub = _BackendConnectStub(backend)
 
         BackendConnectMixin._on_backend_ready(stub, backend)
 

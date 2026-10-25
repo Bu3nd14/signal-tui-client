@@ -94,11 +94,21 @@ class TestEnsureContactSelectable:
 
         result = app._ensure_contact_selectable(new)
 
-        assert result is new
-        assert new.extras["ghost"] is True
-        assert app.contacts == [new]
-        backend.register_contact.assert_called_once_with(new)
-        app._render_contact_list.assert_called_once_with([new])
+        # The core registers the ghost; the TUI holds a copy of what it knows.
+        assert result is not new
+        assert result == ChatContact(
+            id="393331234567@c.us",
+            display_name="Mario",
+            protocol=PROTOCOL_WHATSAPP,
+            extras={"phone": "393331234567", "ghost": True},
+        )
+        assert "ghost" not in new.extras  # the caller's object is never touched
+        assert app.contacts == [result]
+        backend.register_contact.assert_called_once()
+        (registered,) = backend.register_contact.call_args.args
+        assert registered is not result  # backend-owned object, not shared
+        assert registered == result
+        app._render_contact_list.assert_called_once_with([result])
 
     def test_missing_backend_returns_none_without_mutation(self):
         app = _make_app([])

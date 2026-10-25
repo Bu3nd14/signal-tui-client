@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from client_harness import client_for
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -580,8 +581,7 @@ class TestDynamicAddressBookIntegration:
     def test_picker_worker_forces_address_book(self):
         class _PickerHarness(PickerMixin):
             def __init__(self, manager, token=1):
-                self.whatsapp_backend = None
-                self.manager = manager
+                self.client = client_for(manager)
                 self._address_book_token = token
                 self.statuses: list[str] = []
 

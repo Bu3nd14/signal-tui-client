@@ -58,7 +58,12 @@ from protocols.webhook import WEBHOOK_PORT, ensure_webhook_server
 from server.address_book_refresh import DynamicAddressBookMixin
 from server.api import ChatAPI
 from server.bus import EventBus
-from server.domain import looks_unresolved, resolve_placeholder_name
+from server.domain import (
+    bump_recency,
+    looks_unresolved,
+    resolve_placeholder_name,
+    sync_recency,
+)
 from server.events_api import to_wire
 
 logger = logging.getLogger("signal_tui")
@@ -201,6 +206,12 @@ class ChatCore(DynamicAddressBookMixin):
         )
 
     def _ready(self, backend) -> None:
+        # The TUI used to recover the recency of the (shared) contacts from the
+        # messages it merged at this point; the core owns them now.
+        try:
+            sync_recency(backend)
+        except Exception:
+            logger.debug("recency sync failed for %s", backend.protocol, exc_info=True)
         self.bus.publish(
             "backend_ready",
             {"protocol": backend.protocol, "contacts": len(backend.contacts)},
@@ -511,12 +522,7 @@ class ChatCore(DynamicAddressBookMixin):
         it shared with the backend; with wire-form events the TUI holds copies
         so the core (the owner of the backend's contacts) does it.
         """
-        if not isinstance(ts, int) or isinstance(ts, bool):
-            return
-        for known in getattr(backend, "contacts", None) or []:
-            if known.cache_key == cache_key:
-                known.last_message_ts = max(known.last_message_ts, ts)
-                return
+        bump_recency(backend, cache_key, ts)
 
     def process(self, event: ChatEvent) -> list[tuple[str, dict[str, Any]]]:
         """Domain step for ONE raw backend event; returns events to publish.

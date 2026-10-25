@@ -17,6 +17,8 @@ from models import (
     ChatContact,
     protocol_emoji,
 )
+from server.api import ApiError
+from server.events_api import contact_from_wire, contact_to_wire
 from ui_components import MessageTextArea
 
 logger = logging.getLogger(__name__)
@@ -71,9 +73,38 @@ class ContactListMixin:
             return
 
         contact.last_message_ts = timestamp
+        # The TUI contact is a copy: the backend-owned one (web, other
+        # frontends) is advanced by the core.
+        self._client_call_background(
+            "contacts.touch",
+            {
+                "protocol": contact.protocol,
+                "contact_id": contact.id,
+                "timestamp": int(timestamp),
+            },
+        )
         self._sort_contacts()
         if self._is_mounted:
             self._render_contact_list(list(self.contacts))
+
+    def _client_call_background(self, name: str, data: dict) -> None:
+        """Run operation *name* off the UI thread; failures are logged only.
+
+        Fire-and-forget (the result is not needed).  Without a running app
+        (plain unit tests: no UI thread, no worker loop) the call is made
+        inline.
+        """
+
+        def _run() -> None:
+            try:
+                self.client.call(name, data)
+            except Exception:
+                logger.warning("operation %s failed", name, exc_info=True)
+
+        if self.is_running:
+            self.run_worker(_run, thread=True, exclusive=False)
+        else:
+            _run()
 
     def _sync_last_ts(self):
         """Recover ``last_message_ts`` for every contact from the local cache.
@@ -696,16 +727,18 @@ class ContactListMixin:
             if existing.cache_key == contact.cache_key:
                 return existing
 
-        backend = self.manager.get(contact.protocol)
-        if backend is None:
+        try:
+            wire = self.client.call("contacts.register", contact_to_wire(contact))
+        except ApiError:
+            logger.debug("contacts.register refused for %s", contact.cache_key)
             return None
-
-        contact.extras["ghost"] = True
-        self.contacts.append(contact)
-        backend.register_contact(contact)
+        # The core registered the ghost in its backend; the TUI keeps its own
+        # copy of what the core now knows.
+        registered = contact_from_wire(wire)
+        self.contacts.append(registered)
         self._sort_contacts()
         self._render_contact_list(list(self.contacts))
-        return contact
+        return registered
 
     def _check_ghost_whatsapp_number(self, contact: ChatContact) -> None:
         """Worker thread: best-effort check che un numero WhatsApp ghost esista.
@@ -715,18 +748,13 @@ class ContactListMixin:
         produce un warning informativo (non bloccante) nello status bar;
         ``True``/``None`` (endpoint assente o errore) non fanno nulla.
         """
-        backend = self.manager.get(PROTOCOL_WHATSAPP)
-        if backend is None:
-            return
-        rest = getattr(backend, "_rest", None)
-        check = getattr(rest, "check_number_exists", None)
-        if check is None:
-            return
         phone = contact.phone
         if not phone:
             return
         try:
-            exists = check(phone)
+            exists = self.client.call("contacts.check_number", {"phone": phone})[
+                "exists"
+            ]
         except Exception:
             logger.debug("WhatsApp number-exists check failed", exc_info=True)
             return
@@ -786,9 +814,14 @@ class ContactListMixin:
             for msg in self._cache[cache_key]:
                 if not msg.get("read", True):
                     msg["read"] = True
-        # Mark read via the backend (persists to SQLite).
-        self.manager.get(self.selected_contact.protocol).mark_read_sync(
-            self.selected_contact.id
+        # Mark read through the core (backend + SQLite), off the UI thread: the
+        # badge below is cleared immediately, the persistence follows.
+        self._client_call_background(
+            "chats.mark_read",
+            {
+                "protocol": self.selected_contact.protocol,
+                "contact_id": self.selected_contact.id,
+            },
         )
         self._unread_counts[cache_key] = 0
         # With the unread-only filter active the just-read contact now has zero

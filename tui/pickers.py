@@ -13,6 +13,7 @@ from emoji_picker import (
 from models import (
     ChatContact,
 )
+from server.events_api import contact_from_wire
 from ui_components import MessageTextArea
 
 logger = logging.getLogger("signal_tui")
@@ -94,10 +95,16 @@ class PickerMixin:
         errors) back on the UI thread via ``call_from_thread`` — but only if the
         token is still current and the screen is still mounted.
         """
-        if self.whatsapp_backend is not None:
-            self.whatsapp_backend.start_lid_resolver()
-        contacts = self.manager.list_address_book_sync(protocols=scope, force=True)
-        errors = dict(self.manager.address_book_errors)
+        try:
+            result = self.client.call(
+                "contacts.address_book",
+                {"protocols": sorted(scope) if scope else None, "force": True},
+            )
+        except Exception:
+            logger.warning("contacts.address_book failed", exc_info=True)
+            return
+        contacts = [contact_from_wire(w) for w in result["contacts"]]
+        errors = dict(result["errors"])
 
         def _apply() -> None:
             if token != self._address_book_token or not screen.is_mounted:

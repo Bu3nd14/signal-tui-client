@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from models import PROTOCOL_WHATSAPP, ChatContact
+from typing import Any
+
+from models import PROTOCOL_WHATSAPP, ChatContact, contact_storage_keys
 from protocols.whatsapp import _is_placeholder_display_name, _jid_digits
 
 
@@ -78,3 +80,41 @@ def search_contacts(
             if len(results) >= max_results:
                 break
     return results
+
+
+def bump_recency(backend, cache_key: str, ts: Any) -> bool:
+    """Raise ``last_message_ts`` of the backend's own contact for *cache_key*.
+
+    The backend owns its contact objects; frontends hold wire copies, so the
+    recency of the shared (backend/web) view is advanced here.  Returns True
+    when a contact with that key exists.
+    """
+    if not isinstance(ts, int) or isinstance(ts, bool):
+        return False
+    for known in getattr(backend, "contacts", None) or []:
+        if known.cache_key == cache_key:
+            known.last_message_ts = max(known.last_message_ts, ts)
+            return True
+    return False
+
+
+def sync_recency(backend) -> None:
+    """Recover ``last_message_ts`` of *backend*'s contacts from its message cache.
+
+    Best-effort fallback for backends that did not populate it (e.g. WhatsApp
+    whose ``/chats`` payload may lack ``t``): keeps the highest cached message
+    timestamp across the contact's storage keys, never lowering the value.
+    """
+    cache = getattr(backend, "cache", None)
+    if not isinstance(cache, dict):
+        return
+    for contact in list(getattr(backend, "contacts", None) or []):
+        best = contact.last_message_ts
+        for key in contact_storage_keys(contact):
+            for message in list(cache.get(key) or []):
+                try:
+                    best = max(best, int(message.get("timestamp") or 0))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+        if best > contact.last_message_ts:  # noqa: PLR1730 (no write when equal)
+            contact.last_message_ts = best
