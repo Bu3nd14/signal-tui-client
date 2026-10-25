@@ -1,6 +1,6 @@
 # Design — Client/server split (TUI ↔ server core)
 
-Status: agreed. Phase 1 done; Phase 2 next (see §8, §9, §10).
+Status: Phase 2 done (see §8, §9, §10, §11, §12). Phase 3 (optional) not started.
 
 ## 1. Problem
 
@@ -570,3 +570,45 @@ trip that can be slow or fail. Rules, implemented in `tui/client_calls.py`
   status.
 - `SignalTUI(client=...)` injects a client; the TUI then does not own the core
   (it neither starts nor shuts it down). Attach-or-spawn is P2.4.
+
+## 12. Phase 2 outcome
+
+What exists now:
+
+- `megachat serve` listens on a Unix socket (`server/socket_adapter.py`,
+  JSON-RPC over newline-delimited JSON, `events.subscribe` with resume,
+  `0600` socket in a `0700` dir, `SO_PEERCRED` check, runtime file next to the
+  socket). `server/socket_client.py` is the `ChatClient` over it, with
+  reconnect and `since` resume.
+- The TUI is always a client (`server/attach.py`): `megachat` attaches to the
+  server on the socket or spawns `megachat serve` detached and attaches;
+  `--connect PATH` never spawns; `--in-process` keeps the old
+  core-inside-the-TUI mode (debugging/tests) and refuses to run next to a
+  server (it needs the instance lock, which belongs to `serve`).
+- Exit: Ctrl+C / SIGINT = Detach (the server keeps running); Ctrl+Q opens the
+  Detach/Quit dialog; Quit calls `server.shutdown` and waits for the server to
+  go away. `server.shutdown` and `server.clients` are ordinary operations.
+- `scripts/smoke_e2e.sh` (`make smoke`, CI job `smoke`) drives all of this with
+  real processes in an isolated HOME/lock/socket.
+
+Decisions: the socket is the only authentication boundary (filesystem
+permissions); the server owns the lock, attached TUIs never take it; the
+default dialog button is Quit only when this TUI spawned the server;
+SIGINT never stops a server; the TUI makes no client call on the UI thread.
+
+Known limitations:
+
+- Any client of the same uid can call `server.shutdown` (and every other
+  operation): there is no per-client authorization.
+- Quit waits up to 30 s for the server to go away, then exits anyway (the
+  server may still be stopping); "other clients" in the dialog is a snapshot.
+- A mutation (send, edit) that timed out or lost its connection has an
+  unknown outcome: the TUI keeps it `pending` and lets the resync settle it;
+  it is never retried automatically.
+- Resync is add-only and merged by `cache_key` (no deletions are propagated);
+  it covers a `gap`, a reconnect and a timed-out mutation, and re-reads only
+  the open chat's window, not the history of every chat.
+- Log files are fixed paths in `/tmp` (`signal-tui.log`, `megachat-serve.log`,
+  `megachat-tui.log`), also in the smoke run.
+- The smoke needs `script` (util-linux) and Linux (`/proc`); it uses no real
+  backend, so backend behaviour is covered by the unit/integration suites.
