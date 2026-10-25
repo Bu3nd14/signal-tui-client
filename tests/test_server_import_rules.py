@@ -18,19 +18,34 @@ def _imported_roots(path: Path) -> set[str]:
     return roots
 
 
-def _violations(package: str, forbidden: set[str]) -> list[str]:
+def _violations(
+    package: str, forbidden: set[str], exempt: dict[str, set[str]] | None = None
+) -> list[str]:
     found = []
     for path in sorted((ROOT / package).rglob("*.py")):
-        bad = _imported_roots(path) & forbidden
+        allowed = (exempt or {}).get(path.name, set())
+        bad = _imported_roots(path) & (forbidden - allowed)
         if bad:
             found.append(f"{path.relative_to(ROOT)}: {sorted(bad)}")
     return found
 
 
 def test_server_imports_no_ui_or_web():
+    # ``server/main.py`` hosts the web adapter in serve mode and imports
+    # ``web`` lazily; it still must never touch Textual or the TUI.
     assert (
-        _violations("server", {"textual", "fastapi", "starlette", "tui", "web"}) == []
+        _violations(
+            "server",
+            {"textual", "fastapi", "starlette", "tui", "web"},
+            exempt={"main.py": {"fastapi", "starlette", "web"}},
+        )
+        == []
     )
+
+
+def test_serve_path_has_no_textual_or_tui():
+    path = ROOT / "server" / "main.py"
+    assert _imported_roots(path) & {"textual", "tui"} == set()
 
 
 def test_protocols_import_no_web():
@@ -43,7 +58,8 @@ def test_server_modules_import_without_ui_modules_loaded():
     import sys
 
     code = (
-        "import sys, server.core, server.bus, server.domain;"
+        "import sys, server.core, server.bus, server.domain, server.main, "
+        "server.lock;"
         "bad = sorted(m for m in sys.modules if m.split('.')[0] in "
         "{'textual','fastapi','tui','web'});"
         "print(bad); sys.exit(1 if bad else 0)"
