@@ -139,7 +139,7 @@ and response go through the models so non-serializable values are caught.
 - Exit dialog: **Detach** (disconnect only) / **Quit** (`server.shutdown`). If
   the TUI attached to a server it did not spawn, Detach is the default.
 - Optimistic send: client-generated `client_msg_id`, confirmed by the
-  server's `message` event (the existing `web/send_registry.py` mechanism
+  server's `message` event (the existing `server/send_registry.py` mechanism
   moves to the core).
 - View-only state stays in the TUI (selection, filters, typing timers,
   progressive render, widget maps); domain state comes from operations and

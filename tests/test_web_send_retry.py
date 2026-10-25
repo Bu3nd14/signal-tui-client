@@ -23,15 +23,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from models import ChatContact
-from tests.test_web_plugin import AUTH, FakeManager, make_app
-from web.retry import (
+from server.retry import (
     SEND_RETRY_BASE_DELAY_S,
     SEND_RETRY_JITTER_MAX_S,
     SEND_RETRY_MAX_ATTEMPTS,
     classify_send_error,
     compute_delay,
 )
-from web.send_registry import SendRegistry, build_fingerprint
+from server.send_registry import SendRegistry, build_fingerprint
+from tests.test_web_plugin import AUTH, FakeManager, make_app
 
 _PNG_1X1 = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"

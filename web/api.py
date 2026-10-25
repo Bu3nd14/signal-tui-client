@@ -30,15 +30,15 @@ from server.messages import (
     _quoted_media_by_filename,  # noqa: F401  (re-export)
 )
 from server.ops.common import PROTOCOLS as _PROTOCOLS
-from web.bridge import push_event
-from web.ops import call_op
-from web.retry import (
+from server.retry import (
     SEND_RETRY_MAX_ATTEMPTS,
     classify_send_error,
     compute_delay,
     safe_error_text,
 )
-from web.send_registry import SendRegistry, build_fingerprint
+from server.send_registry import SendRegistry, build_fingerprint
+from web.bridge import push_event
+from web.ops import call_op
 
 logger = logging.getLogger(__name__)
 

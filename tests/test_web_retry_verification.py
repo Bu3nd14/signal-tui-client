@@ -23,8 +23,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from models import ChatContact
+from server.send_registry import SendRegistry, build_fingerprint
 from tests.test_web_plugin import AUTH, FakeManager, make_app
-from web.send_registry import SendRegistry, build_fingerprint
 
 _PNG_1X1 = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
@@ -1002,7 +1002,7 @@ vm.runInThisContext(code);
 
 
 def test_indep_registry_stale_sent_beyond_ttl_is_reclaimed():
-    from web.send_registry import SendRegistry
+    from server.send_registry import SendRegistry
 
     clock = _Clock()
     registry = SendRegistry(
