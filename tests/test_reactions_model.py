@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from event_harness import EventApp, legacy_frames
 
 from models import PROTOCOL_SIGNAL, ChatContact, ChatEvent
 from protocols.base import ChatBackend
@@ -116,10 +117,7 @@ def _reaction_app(web_enabled: bool):
         ],
     }
     backend = SimpleNamespace(apply_reaction=MagicMock(return_value=info))
-    return SimpleNamespace(
-        manager=SimpleNamespace(get=lambda _protocol: backend),
-        _web_enabled=web_enabled,
-    )
+    return EventApp(backend, _web_enabled=web_enabled)
 
 
 def test_reaction_event_pushes_complete_web_update():
@@ -131,10 +129,15 @@ def test_reaction_event_pushes_complete_web_update():
         payload={"mode": "snapshot"},
     )
 
+    sub = app.bus.subscribe()
     with patch("web.bridge.push_event") as push_event:
         assert app_for_mixin(app, event)
 
-    push_event.assert_called_once_with(
+    # The TUI never pushes; the web maps the bus event to the legacy frame.
+    push_event.assert_not_called()
+    frames = legacy_frames(sub.drain())
+    assert len(frames) == 1
+    assert frames[0] == (
         {
             "type": "reaction_update",
             "payload": {
@@ -158,16 +161,19 @@ def test_reaction_event_pushes_complete_web_update():
 def test_reaction_event_does_not_push_when_web_is_disabled():
     app = _reaction_app(web_enabled=False)
 
+    sub = app.bus.subscribe()
     with patch("web.bridge.push_event") as push_event:
         assert app_for_mixin(app, _reaction_event())
 
+    # No web server is attached to the bus: nothing is pushed to the web.
     push_event.assert_not_called()
+    assert all(e.type != "web_push" for e in sub.drain())
 
 
 def app_for_mixin(app, event):
     from tui.events import EventHandlingMixin
 
-    return EventHandlingMixin._handle_reaction_event(app, event)
+    return EventHandlingMixin._handle_event(app, event)
 
 
 class _MinimalBackend(ChatBackend):

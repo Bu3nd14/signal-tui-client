@@ -1,7 +1,13 @@
-"""Incoming event dispatch: messages, receipts, typing."""
+"""View handling of core events: messages, receipts, typing.
+
+The domain work (ingest, edits, reactions, receipts, contact registration) is
+done by :meth:`server.core.ChatCore.process`; the handlers here only update
+the TUI (contact list, cache mirror, widgets) from the resulting core events.
+"""
 
 import logging
 import time
+from typing import Any
 
 from models import (
     PROTOCOL_SIGNAL,
@@ -12,46 +18,17 @@ from models import (
     protocol_emoji,
     protocol_name,
 )
-from protocols.whatsapp import _is_placeholder_display_name, _jid_digits
+from server.bus import Event
+from server.domain import looks_unresolved, resolve_placeholder_name
 from ui_components import (
     MessageWidget,
 )
 
 logger = logging.getLogger(__name__)
 
-
-def _resolve_placeholder_name(backend, contact_id: str) -> str:
-    """Nome placeholder dallo snapshot in-memory della rubrica (zero rete)."""
-    if getattr(backend, "protocol", None) != PROTOCOL_WHATSAPP:
-        return contact_id
-    phone = ""
-    lid = ""
-    if contact_id.endswith("@lid"):
-        lid = contact_id
-        lid_map = getattr(backend, "_lid_map", None)
-        if lid_map and contact_id in lid_map:
-            entry = lid_map[contact_id]
-            if isinstance(entry, dict):
-                phone = str(entry.get("phone") or "")
-    elif "@" in contact_id:
-        phone = _jid_digits(contact_id.split("@", 1)[0])
-    from protocols.whatsapp import _cached_address_book_name
-
-    name = _cached_address_book_name(backend, phone or None, lid or None)
-    return name or contact_id
-
-
-def _looks_unresolved(contact: ChatContact) -> bool:
-    """True when *contact* still shows a placeholder instead of a real name."""
-    if contact.protocol == PROTOCOL_WHATSAPP:
-        return _is_placeholder_display_name(
-            contact.display_name, contact.id, contact.extras.get("phone")
-        )
-    return (
-        not contact.display_name
-        or contact.display_name == contact.id
-        or contact.display_name.isdigit()
-    )
+# Re-exported for callers/tests that imported the helpers from here.
+_resolve_placeholder_name = resolve_placeholder_name
+_looks_unresolved = looks_unresolved
 
 
 def _signal_stable_key(c: ChatContact) -> str:
@@ -100,32 +77,47 @@ def _merge_cached_messages(dest: list[dict], src: list[dict]) -> None:
 
 
 class EventHandlingMixin:
-    def _handle_event(self, event: ChatEvent) -> bool:
-        """Dispatch a normalized ``ChatEvent`` from a backend poll worker.
+    def _handle_event(self, raw: ChatEvent) -> bool:
+        """TEST-ONLY compatibility entry point for a raw backend ``ChatEvent``.
 
-        This is the single entry point for all incoming data.  It handles
-        message ingestion (via the backend), typing indicators, and receipts,
-        and applies only UI-side side effects (display, unread badges).
+        Production code must NOT call this: the core pump (``ChatCore``)
+        processes raw events and the poll worker consumes the resulting core
+        events from the bus.  This wrapper runs ``core.process(raw)``,
+        publishes each result on ``self.bus`` (so bus/web consumers observe
+        it) and applies the view handler directly, returning ``True`` when
+        the event was handled (i.e. the core produced events).
 
-        Returns ``True`` if the event was handled.
+        The published events are marked so the poll worker does not apply
+        their view handlers a second time.
         """
-        if event.type == "typing":
-            return self._handle_typing_event(event)
-        if event.type == "receipt":
-            return self._handle_receipt_event(event)
-        if event.type == "message_edit":
-            return self._handle_edit_event(event)
-        if event.type == "reaction_update":
-            return self._handle_reaction_event(event)
-        if event.type == "message":
-            return self._handle_message_event(event)
-        if event.type == "sent-mirror":
-            return self._handle_sent_mirror_event(event)
-        if event.type == "contact_update":
-            return self._handle_contact_update_event(event)
-        return False
+        results = self.core.process(raw)
+        handled = False
+        skip: dict[int, dict] = self.__dict__.setdefault("_compat_payload_ids", {})
+        for etype, payload in results:
+            # Before publish (the worker may be racing); the payload itself is
+            # kept as the value so its id cannot be reused while marked.
+            skip[id(payload)] = payload
+            event = self.bus.publish(etype, payload)
+            if self._dispatch_view_event(event):
+                handled = True
+        return handled
 
-    def _handle_contact_update_event(self, event: ChatEvent) -> bool:
+    def _dispatch_view_event(self, event: Event) -> bool:
+        """Apply the view-side effects of a domain core event."""
+        handler = {
+            "message": self._view_message,
+            "message_edit": self._view_edit,
+            "reaction_update": self._view_reaction,
+            "receipt": self._view_receipt,
+            "typing": self._view_typing,
+            "contact_update": self._view_contact_update,
+            "sent_mirror": self._view_sent_mirror,
+        }.get(event.type)
+        if handler is None:
+            return False
+        return handler(event)
+
+    def _view_contact_update(self, ev: Event) -> bool:
         """Applica/appende in UI un contatto risolto dinamicamente.
 
         - Aggiorna ``display_name``/``phone`` sull'oggetto esistente della lista
@@ -137,16 +129,18 @@ class EventHandlingMixin:
           un winner già in lista; lo rimuove (lista, widget, cache) e ri-ancora
           la selezione, senza appendere il contatto.
         """
-        merged_into = event.payload.get("merged_into")
-        if merged_into and event.protocol == PROTOCOL_WHATSAPP:
-            return self._handle_contact_merged_event(event, str(merged_into))
+        p = ev.payload
+        protocol = p["protocol"]
+        merged_into = p.get("merged_into")
+        if merged_into and protocol == PROTOCOL_WHATSAPP:
+            return self._view_contact_merged(ev, str(merged_into))
 
-        cache_key = contact_cache_key(event.protocol, event.contact_id)
-        contact = event.payload.get("contact")
-        new_name = event.payload.get("display_name")
-        phone = event.payload.get("phone")
+        cache_key = contact_cache_key(protocol, p["contact_id"])
+        contact = p.get("contact")
+        new_name = p.get("display_name")
+        phone = p.get("phone")
 
-        if contact is not None and event.protocol == PROTOCOL_SIGNAL:
+        if contact is not None and protocol == PROTOCOL_SIGNAL:
             stable = _signal_stable_key(contact)
             if stable:
                 for stale in list(self.contacts):
@@ -174,30 +168,17 @@ class EventHandlingMixin:
 
         self._contact_list_dirty = True
         self._dirty_contact_keys.add(cache_key)
-        if getattr(self, "_web_enabled", False):
-            from web.bridge import push_event
-
-            push_event(
-                {
-                    "type": "contact_update",
-                    "payload": {
-                        "protocol": event.protocol,
-                        "contact_id": event.contact_id,
-                        "display_name": new_name,
-                        "phone": phone,
-                    },
-                }
-            )
         return True
 
-    def _handle_contact_merged_event(self, event: ChatEvent, merged_into: str) -> bool:
+    def _view_contact_merged(self, ev: Event, merged_into: str) -> bool:
         """Rimuove dalla UI il ghost loser fuso in *merged_into* (WhatsApp).
 
         Non appende ``payload["contact"]``: il winner è già nella lista.  Unisce
         la cache del loser nel winner (add-only) e ripunta la selezione.
         """
-        loser_key = contact_cache_key(event.protocol, event.contact_id)
-        winner_key = contact_cache_key(event.protocol, merged_into)
+        protocol = ev.payload["protocol"]
+        loser_key = contact_cache_key(protocol, ev.payload["contact_id"])
+        winner_key = contact_cache_key(protocol, merged_into)
         self.contacts = [c for c in self.contacts if c.cache_key != loser_key]
         widgets = getattr(self, "_contact_widgets", None)
         if widgets is not None:
@@ -217,42 +198,21 @@ class EventHandlingMixin:
             if winner is not None:
                 self.selected_contact = winner
         self._contact_list_dirty = True
-        if getattr(self, "_web_enabled", False):
-            from web.bridge import push_event
-
-            push_event(
-                {
-                    "type": "contact_update",
-                    "payload": {
-                        "protocol": event.protocol,
-                        "contact_id": event.contact_id,
-                        "merged_into": merged_into,
-                        "display_name": event.payload.get("display_name"),
-                        "phone": event.payload.get("phone"),
-                    },
-                }
-            )
         return True
 
-    def _handle_sent_mirror_event(self, event: ChatEvent) -> bool:
-        """Handle the lightweight ``sent-mirror`` notification (batch sends).
+    def _view_sent_mirror(self, ev: Event) -> bool:
+        """Handle the lightweight ``sent_mirror`` notification (batch sends).
 
         The backend send barrier has already materialized the mirror rows
         in cache/DB and ``web/api.py`` already pushed the generic web
         refresh, so this handler only promotes the contact in the TUI
-        list: it never calls ``ingest_message`` (no double DB write) and
-        never emits a second ``push_event``.
+        list: the core never ingests it (no double DB write).
         """
-        backend = self.manager.get(event.protocol)
-        if backend is None:
-            return False
-
-        # Resolve the REAL contact object: prefer the copy already in
-        # ``self.contacts`` (it may differ from the payload/backend copy
-        # after a contact-list rebuild), then the payload copy, then the
-        # backend lookup.  A placeholder is created only for unknown ids
-        # so an existing contact is never duplicated.
-        target_key = contact_cache_key(event.protocol, event.contact_id)
+        p = ev.payload
+        # Prefer the copy already in ``self.contacts`` (it may differ from the
+        # core/backend copy after a contact-list rebuild); the core resolved
+        # (and registered with the backend) the fallback in ``p["contact"]``.
+        target_key = contact_cache_key(p["protocol"], p["contact_id"])
         contact = next(
             (
                 candidate
@@ -262,34 +222,19 @@ class EventHandlingMixin:
             None,
         )
         if contact is None:
-            contact = event.payload.get("contact")
-        if contact is None:
-            identify = getattr(backend, "_identify_contact", None)
-            if identify is not None:
-                contact = identify(event.contact_id)
-        if contact is None:
-            contact = ChatContact(
-                id=event.contact_id,
-                display_name=_resolve_placeholder_name(backend, event.contact_id),
-                protocol=event.protocol,
-            )
+            contact = p["contact"]
         # Ensure the contact is in the TUI list: a contact materialized by the
-        # dynamic lid resolver and returned by ``_identify_contact`` must still
-        # be added, so this check lives OUTSIDE the ``contact is None`` branch.
+        # dynamic lid resolver must still be added.
         existing = {c.cache_key for c in self.contacts}
         if contact.cache_key not in existing:
             self.contacts.append(contact)
-            if hasattr(backend, "register_contact"):
-                backend.register_contact(contact)
-            elif hasattr(backend, "contacts"):
-                backend.contacts.append(contact)
             self._contact_list_dirty = True
             self._dirty_contact_keys.add(contact.cache_key)
 
         # Promote the contact in the "most recent first" ordering; the
-        # re-sort/render is deferred to the end of the poll batch by the
-        # poll worker (same pattern as _handle_message_event).
-        ts = event.payload.get("timestamp", 0)
+        # re-sort/render is deferred to the end of the batch by the poll
+        # worker (same pattern as _view_message).
+        ts = p.get("timestamp", 0)
         if isinstance(ts, int) and ts > (contact.last_message_ts or 0):
             contact.last_message_ts = ts
             if contact.cache_key != (
@@ -299,33 +244,17 @@ class EventHandlingMixin:
                 self._dirty_contact_keys.add(contact.cache_key)
         return True
 
-    def _handle_message_event(self, event: ChatEvent) -> bool:
-        """Ingest and display a normalized incoming/outgoing message."""
-        # Resolve the owning backend by protocol (Signal, WhatsApp, ...).
-        backend = self.manager.get(event.protocol)
-        if backend is None:
-            return False
-
-        contact = event.payload.get("contact")
-        was_placeholder = False
-        if contact is None:
-            # Resolve via the backend's contact table, or fall back to a
-            # placeholder built from the event's contact id.
-            identify = getattr(backend, "_identify_contact", None)
-            if identify is not None:
-                contact = identify(event.contact_id)
-            if contact is None:
-                was_placeholder = True
-                contact = ChatContact(
-                    id=event.contact_id,
-                    display_name=_resolve_placeholder_name(backend, event.contact_id),
-                    protocol=event.protocol,
-                )
+    def _view_message(self, ev: Event) -> bool:
+        """Display an ingested incoming/outgoing message (ingest done by core)."""
+        p = ev.payload
+        protocol = p["protocol"]
+        contact: ChatContact = p["contact"]
+        msg: dict[str, Any] = p["message"]
+        added: bool = p["added"]
         # RIANCORAGGIO: preferisci l'oggetto già nella lista TUI (identità
         # stabile) così gli aggiornamenti a display_name/last_message_ts si
-        # riflettono su sort/render.  Se assente, appendilo e registralo sul
-        # backend (un contatto materializzato dal resolver lid deve comunque
-        # entrare in lista).
+        # riflettono su sort/render.  Se assente, appendilo (un contatto
+        # materializzato dal resolver lid deve comunque entrare in lista).
         tui_contact = next(
             (c for c in self.contacts if c.cache_key == contact.cache_key), None
         )
@@ -333,22 +262,18 @@ class EventHandlingMixin:
             contact = tui_contact
         else:
             self.contacts.append(contact)
-            if hasattr(backend, "register_contact"):
-                backend.register_contact(contact)
-            elif hasattr(backend, "contacts"):
-                backend.contacts.append(contact)
             self._contact_list_dirty = True
             self._dirty_contact_keys.add(contact.cache_key)
         cache_key = contact.cache_key
-        ts = event.payload.get("timestamp", 0)
-        is_mine = event.payload.get("is_mine", False)
+        ts = p["timestamp"]
+        is_mine = msg.get("is_mine", False)
 
         # Trigger lazy scoped: il nome non è (più) risolto → chiedi un refresh
         # del solo protocollo del messaggio (throttled dal cooldown del worker).
-        if was_placeholder or _looks_unresolved(contact):
+        if p["was_placeholder"] or _looks_unresolved(contact):
             schedule = getattr(self, "schedule_address_book_refresh", None)
             if schedule is not None:
-                schedule(event.protocol)
+                schedule(protocol)
 
         # Aggiorna il timestamp dell'ultimo messaggio del contatto così la
         # lista contatti (ordinata per "ultimo messaggio") risente subito del
@@ -363,67 +288,30 @@ class EventHandlingMixin:
                 self._contact_list_dirty = True
                 self._dirty_contact_keys.add(cache_key)
 
-        # Save to DB + backend cache.  Returns True only if newly added;
-        # if the identity already exists (e.g. an optimistic save is confirmed
-        # by a sync sent-envelope), nothing is duplicated.
-        ingest = getattr(backend, "ingest_message", None)
-        ingest_result = (
-            ingest(contact.id, event.payload, ts) if ingest is not None else True
-        )
-        added = ingest_result is True
-        changed = ingest_result == "changed"
-
-        if (added or changed) and getattr(self, "_web_enabled", False):
-            logger.debug(
-                "events: push type=%s added=%s changed=%s protocol=%s contact=%s id=%s",
-                event.type,
-                added,
-                changed,
-                event.protocol,
-                contact.id,
-                event.payload.get("id"),
-            )
-            from web.bridge import push_event
-
-            push_event(
-                {
-                    "type": "message",
-                    "payload": {
-                        "id": event.payload.get("id"),
-                        "protocol": event.protocol,
-                        "contact_id": contact.id,
-                        "timestamp": ts,
-                        "is_mine": bool(event.payload.get("is_mine")),
-                    },
-                }
-            )
-
         # Mirror into the UI's protocol-aware cache only when actually new.
         if added:
             if cache_key not in self._cache:
                 self._cache[cache_key] = []
             self._cache[cache_key].append(
                 {
-                    "id": event.payload.get("id"),
-                    "text": event.payload["text"],
+                    "id": msg.get("id"),
+                    "text": msg["text"],
                     "is_mine": is_mine,
-                    "sender": event.payload.get("sender", ""),
+                    "sender": msg.get("sender", ""),
                     "timestamp": ts,
-                    "quote_text": event.payload.get("quote_text"),
-                    "msg_type": event.payload.get("msg_type", "text"),
-                    "attachment_info": event.payload.get("attachment_info"),
-                    "attachment_id": event.payload.get("attachment_id"),
-                    "content_type": event.payload.get("content_type"),
-                    "quote_timestamp": event.payload.get("quote_timestamp"),
-                    "quote_author": event.payload.get("quote_author"),
-                    "reply_to_message_id": event.payload.get("reply_to_message_id"),
-                    "quote_attachment_id": event.payload.get("quote_attachment_id"),
-                    "quote_attachment_path": event.payload.get("quote_attachment_path"),
-                    "quote_content_type": event.payload.get("quote_content_type"),
+                    "quote_text": msg.get("quote_text"),
+                    "msg_type": msg.get("msg_type", "text"),
+                    "attachment_info": msg.get("attachment_info"),
+                    "attachment_id": msg.get("attachment_id"),
+                    "content_type": msg.get("content_type"),
+                    "quote_timestamp": msg.get("quote_timestamp"),
+                    "quote_author": msg.get("quote_author"),
+                    "reply_to_message_id": msg.get("reply_to_message_id"),
+                    "quote_attachment_id": msg.get("quote_attachment_id"),
+                    "quote_attachment_path": msg.get("quote_attachment_path"),
+                    "quote_content_type": msg.get("quote_content_type"),
                     "read": is_mine,
-                    "status": event.payload.get(
-                        "status", "sent" if is_mine else "read"
-                    ),
+                    "status": msg.get("status", "sent" if is_mine else "read"),
                 }
             )
 
@@ -447,30 +335,30 @@ class EventHandlingMixin:
             # mostrati entrambi; il timestamp da solo li renderebbe indistinguibili
             # e il secondo verrebbe scartato (poi ricompariva solo rientrando).
             identity = (
-                event.protocol,
+                protocol,
                 cache_key,
                 int(ts),
-                event.payload.get("text", ""),
+                msg.get("text", ""),
             )
             if ts and identity not in self._seen_message_ids:
-                self._seen_timestamps.add((event.protocol, cache_key, ts))
+                self._seen_timestamps.add((protocol, cache_key, ts))
                 self._seen_message_ids.add(identity)
                 self.call_from_thread(
                     self._add_message,
-                    event.payload["text"],
+                    msg["text"],
                     is_mine=is_mine,
-                    quote_text=event.payload.get("quote_text"),
-                    msg_type=event.payload.get("msg_type", "text"),
-                    attachment_info=event.payload.get("attachment_info"),
-                    attachment_id=event.payload.get("attachment_id"),
-                    content_type=event.payload.get("content_type"),
+                    quote_text=msg.get("quote_text"),
+                    msg_type=msg.get("msg_type", "text"),
+                    attachment_info=msg.get("attachment_info"),
+                    attachment_id=msg.get("attachment_id"),
+                    content_type=msg.get("content_type"),
                     timestamp=ts,
-                    sender=event.payload.get("sender", ""),
-                    status=event.payload.get("status", "sent" if is_mine else "read"),
-                    message_id=event.payload.get("id"),
-                    quote_attachment_id=event.payload.get("quote_attachment_id"),
-                    quote_attachment_path=event.payload.get("quote_attachment_path"),
-                    quote_content_type=event.payload.get("quote_content_type"),
+                    sender=msg.get("sender", ""),
+                    status=msg.get("status", "sent" if is_mine else "read"),
+                    message_id=msg.get("id"),
+                    quote_attachment_id=msg.get("quote_attachment_id"),
+                    quote_attachment_path=msg.get("quote_attachment_path"),
+                    quote_content_type=msg.get("quote_content_type"),
                 )
         else:
             # Message for another contact: mark the list dirty; the unread
@@ -480,62 +368,13 @@ class EventHandlingMixin:
 
         return True
 
-    def _handle_edit_event(self, event: ChatEvent) -> bool:
-        """Applica un edit ricevuto: backend cache + DB (via apply_edit),
-        cache UI, identity sets e widget — senza mai creare una bolla nuova."""
-        backend = self.manager.get(event.protocol)
-        if backend is None:
-            return False
-        apply_edit = getattr(backend, "apply_edit", None)
-        if apply_edit is None:
-            return False
-        payload = event.payload
-        new_text = payload.get("text", "")
-        edit_id = payload.get("edit_message_id")
-        if edit_id is None or not new_text:
-            return False
-
-        contact = payload.get("contact")
-        if contact is None:
-            identify = getattr(backend, "_identify_contact", None)
-            if identify is not None:
-                contact = identify(event.contact_id)
-        if contact is None:
-            contact = ChatContact(
-                id=event.contact_id,
-                display_name=_resolve_placeholder_name(backend, event.contact_id),
-                protocol=event.protocol,
-            )
-
-        # Single mutation point: cache backend + SQLite.  Idempotente:
-        # testo già nuovo / target ignoto / media → None → no-op.
-        info = apply_edit(
-            event.contact_id,
-            str(edit_id),
-            new_text,
-            is_mine=payload.get("is_mine"),
-            edit_timestamp=payload.get("edit_timestamp"),
-        )
-        if not info:
-            return False
-
-        if getattr(self, "_web_enabled", False):
-            from web.bridge import push_event
-
-            push_event(
-                {
-                    "type": "message_edit",
-                    "payload": {
-                        "protocol": event.protocol,
-                        "contact_id": event.contact_id,
-                        "message_id": str(info["message_id"]),
-                        "timestamp": int(info["timestamp"]),
-                        "old_text": str(info["old_text"] or ""),
-                        "text": new_text,
-                        "is_mine": bool(info["is_mine"]),
-                    },
-                }
-            )
+    def _view_edit(self, ev: Event) -> bool:
+        """Riflette un edit già applicato dal core: cache UI, identity sets e
+        widget — senza mai creare una bolla nuova."""
+        p = ev.payload
+        info = p["info"]
+        new_text = p["text"]
+        contact: ChatContact = p["contact"]
 
         # Mirror nella cache UI + chirurgia identità.
         cache_key = contact.cache_key
@@ -561,7 +400,7 @@ class EventHandlingMixin:
             )
         if target is not None:
             self._rewrite_message_identity(
-                event.protocol,
+                p["protocol"],
                 cache_key,
                 info["timestamp"],
                 info["old_text"],
@@ -577,33 +416,9 @@ class EventHandlingMixin:
             self.call_from_thread(self._update_edited_widget, info, new_text)
         return True
 
-    def _handle_reaction_event(self, event: ChatEvent) -> bool:
-        """Applica una reaction ricevuta senza creare un nuovo messaggio."""
-        backend = self.manager.get(event.protocol)
-        if backend is None:
-            return False
-        apply_reaction = getattr(backend, "apply_reaction", None)
-        if apply_reaction is None:
-            return False
-        info = apply_reaction(event.contact_id, event.payload)
-        if not info:
-            return False
-
-        if getattr(self, "_web_enabled", False):
-            from web.bridge import push_event
-
-            push_event(
-                {
-                    "type": "reaction_update",
-                    "payload": {
-                        "protocol": event.protocol,
-                        "contact_id": event.contact_id,
-                        "message_id": str(info["message_id"]),
-                        "timestamp": int(info["timestamp"]),
-                        "reactions": info["reactions"],
-                    },
-                }
-            )
+    def _view_reaction(self, ev: Event) -> bool:
+        """Reaction già applicata dal core: nessun effetto di vista (la bolla
+        si aggiorna al prossimo render dalla cache del backend)."""
         return True
 
     def _update_edited_widget(self, info: dict, new_text: str) -> None:
@@ -626,66 +441,15 @@ class EventHandlingMixin:
         except Exception:
             logger.debug("edited widget update failed", exc_info=True)
 
-    def _handle_receipt_event(self, event: ChatEvent) -> bool:
-        """Process a receipt event (delivery / read receipts).
-
-        The backend updates its own cache (and SQLite for Signal); the status
-        changes are mirrored into the UI cache, and widgets are refreshed if
-        the affected contact is currently selected.
-        """
-        backend = self.manager.get(event.protocol)
-        if backend is None:
-            return False
-        process = getattr(backend, "process_receipt", None)
-        if process is None:
-            return False
-
-        if event.protocol == PROTOCOL_SIGNAL:
-            # Reconstruct the Signal receipt envelope the backend expects.
-            receipt = event.payload.get("receipt", {})
-            envelope = {
-                "sourceNumber": event.contact_id,
-                "source": event.contact_id,
-                "receiptMessage": receipt,
-            }
-            updated = process(envelope)
-        else:
-            # Generic backend (WhatsApp/Telegram) uses a message-ids receipt
-            # payload scoped to the contact that generated the receipt.
-            updated = process(
-                {
-                    "message_ids": event.payload.get("message_ids", []),
-                    "is_read": event.payload.get("is_read", False),
-                    "contact_id": event.contact_id,
-                }
-            )
-        if not updated:
-            return False
-
-        if getattr(self, "_web_enabled", False):
-            from web.bridge import push_event
-
-            push_event(
-                {
-                    "type": "receipt",
-                    "payload": {
-                        "protocol": event.protocol,
-                        "contact_id": event.contact_id,
-                        "updates": [
-                            {
-                                "id": str(msg.get("id")) if msg.get("id") else None,
-                                "timestamp": int(msg.get("timestamp") or 0),
-                                "status": str(msg.get("status") or "sent"),
-                                "text": str(msg.get("text") or ""),
-                            }
-                            for msg in updated
-                        ],
-                    },
-                }
-            )
+    def _view_receipt(self, ev: Event) -> bool:
+        """Mirror the statuses updated by the core into the UI cache and
+        refresh widgets if the affected contact is currently selected."""
+        p = ev.payload
+        updated = p["updated"]
+        contact_id = p["contact_id"]
 
         # Mirror the updated statuses into the UI's cache.
-        ui_key = contact_cache_key(event.protocol, event.contact_id)
+        ui_key = contact_cache_key(p["protocol"], contact_id)
         ui_msgs = self._cache.get(ui_key)
         if ui_msgs is not None:
             by_id = {str(m.get("id", "")): m for m in ui_msgs if m.get("id")}
@@ -716,7 +480,7 @@ class EventHandlingMixin:
                     if mid is not None and not target.get("id"):
                         target["id"] = mid
 
-        if self.selected_contact and self.selected_contact.id == event.contact_id:
+        if self.selected_contact and self.selected_contact.id == contact_id:
             self.call_from_thread(self._update_message_widgets_status, updated)
         return True
 
@@ -766,8 +530,10 @@ class EventHandlingMixin:
 
     # ─── Typing indicators ──────────────────────────────────────────────────
 
-    def _handle_typing_event(self, event: ChatEvent) -> bool:
-        """Process a typing-indicator event.
+    # ─── Typing indicators ──────────────────────────────────────────────────
+
+    def _view_typing(self, ev: Event) -> bool:
+        """Apply a (core-validated) typing-indicator event.
 
         Updates ``self._typing_contacts`` (contact cache_key → time of last
         STARTED) and refreshes the contact list label so the ``✍️`` icon
@@ -776,11 +542,8 @@ class EventHandlingMixin:
         Typing indicators are ephemeral: they are never saved to cache and
         never shown as messages in the chat log.
         """
-        action = event.payload.get("action", "")
-        if action not in ("STARTED", "STOPPED"):
-            return False
-
-        cache_key = contact_cache_key(event.protocol, event.contact_id)
+        action = ev.payload["action"]
+        cache_key = contact_cache_key(ev.payload["protocol"], ev.payload["contact_id"])
         now = time.time()
 
         if action == "STARTED":
@@ -798,19 +561,6 @@ class EventHandlingMixin:
         # Refresh del label del contatto (in-place, solo la riga interessata:
         # niente rebuild dell'intera lista a ogni evento typing).
         self.call_from_thread(self._update_typing_label, cache_key)
-        if getattr(self, "_web_enabled", False):
-            from web.bridge import push_event
-
-            push_event(
-                {
-                    "type": "typing",
-                    "payload": {
-                        "protocol": event.protocol,
-                        "contact_id": event.contact_id,
-                        "action": action,
-                    },
-                }
-            )
         return True
 
     def _update_typing_label(self, cache_key: str) -> None:

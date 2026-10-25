@@ -4345,7 +4345,7 @@ class TestSeedCacheFromDB:
 
     def test_placeholder_uses_address_book_name(self):
         """Il placeholder live usa il nome rubrica dallo snapshot in-memory."""
-        from tui.events import _resolve_placeholder_name
+        from server.domain import resolve_placeholder_name as _resolve_placeholder_name
 
         backend = _make_backend()
         backend._address_book = [

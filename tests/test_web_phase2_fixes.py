@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from event_harness import EventApp, legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -503,17 +504,7 @@ def test_web_does_not_hide_literal_media_caption(monkeypatch, tmp_path):
 def test_push_on_attachment_upgrade():
     contact = ChatContact(id="42", display_name="Test", protocol="telegram")
     backend = SimpleNamespace(ingest_message=MagicMock(return_value="changed"))
-    app = SimpleNamespace(
-        manager=SimpleNamespace(get=lambda _protocol: backend),
-        contacts=[contact],
-        selected_contact=None,
-        _contact_list_dirty=False,
-        _dirty_contact_keys=set(),
-        _cache={},
-        _typing_contacts={},
-        _typing_mumbling={},
-        _web_enabled=True,
-    )
+    app = EventApp(backend, [contact], _web_enabled=True)
     event = ChatEvent(
         type="message",
         protocol="telegram",
@@ -525,21 +516,16 @@ def test_push_on_attachment_upgrade():
         },
     )
 
-    with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_message_event(app, event)
+    sub = app.bus.subscribe()
+    assert EventHandlingMixin._handle_event(app, event)
 
-    push_event.assert_called_once()
+    assert len(legacy_frames(sub.drain())) == 1
     assert app._cache == {}
 
 
 def _receipt_app(updated, web_enabled=True):
     backend = SimpleNamespace(process_receipt=MagicMock(return_value=updated))
-    return SimpleNamespace(
-        manager=SimpleNamespace(get=lambda _protocol: backend),
-        _cache={},
-        selected_contact=None,
-        _web_enabled=web_enabled,
-    )
+    return EventApp(backend, _web_enabled=web_enabled)
 
 
 def test_receipt_event_pushes_normalized_web_update():
@@ -556,10 +542,10 @@ def test_receipt_event_pushes_normalized_web_update():
         payload={"message_ids": ["77"], "is_read": False},
     )
 
-    with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_receipt_event(app, event)
+    sub = app.bus.subscribe()
+    assert EventHandlingMixin._handle_event(app, event)
 
-    push_event.assert_called_once_with(
+    assert legacy_frames(sub.drain()) == [
         {
             "type": "receipt",
             "payload": {
@@ -576,7 +562,7 @@ def test_receipt_event_pushes_normalized_web_update():
                 ],
             },
         }
-    )
+    ]
 
 
 def test_receipt_event_does_not_push_when_web_is_disabled():
@@ -591,10 +577,13 @@ def test_receipt_event_does_not_push_when_web_is_disabled():
         payload={"message_ids": ["77"], "is_read": True},
     )
 
+    sub = app.bus.subscribe()
     with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_receipt_event(app, event)
+        assert EventHandlingMixin._handle_event(app, event)
 
+    # No web server is attached to the bus: nothing is pushed to the web.
     push_event.assert_not_called()
+    assert all(e.type != "web_push" for e in sub.drain())
 
 
 def _edit_app(web_enabled=True):
@@ -606,12 +595,7 @@ def _edit_app(web_enabled=True):
         "is_mine": False,
     }
     backend = SimpleNamespace(apply_edit=MagicMock(return_value=info))
-    return SimpleNamespace(
-        manager=SimpleNamespace(get=lambda _protocol: backend),
-        _cache={},
-        selected_contact=None,
-        _web_enabled=web_enabled,
-    )
+    return EventApp(backend, _web_enabled=web_enabled)
 
 
 def test_edit_event_pushes_web_update():
@@ -623,10 +607,10 @@ def test_edit_event_pushes_web_update():
         payload={"edit_message_id": 77, "text": "Dopo", "is_mine": False},
     )
 
-    with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_edit_event(app, event)
+    sub = app.bus.subscribe()
+    assert EventHandlingMixin._handle_event(app, event)
 
-    push_event.assert_called_once_with(
+    assert legacy_frames(sub.drain()) == [
         {
             "type": "message_edit",
             "payload": {
@@ -639,7 +623,7 @@ def test_edit_event_pushes_web_update():
                 "is_mine": False,
             },
         }
-    )
+    ]
 
 
 def test_edit_event_does_not_push_when_web_is_disabled():
@@ -651,10 +635,13 @@ def test_edit_event_does_not_push_when_web_is_disabled():
         payload={"edit_message_id": "77", "text": "Dopo"},
     )
 
+    sub = app.bus.subscribe()
     with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_edit_event(app, event)
+        assert EventHandlingMixin._handle_event(app, event)
 
+    # No web server is attached to the bus: nothing is pushed to the web.
     push_event.assert_not_called()
+    assert all(e.type != "web_push" for e in sub.drain())
 
 
 def test_whatsapp_echo_first_is_upgraded_to_sent_attachment(monkeypatch, tmp_path):

@@ -849,6 +849,8 @@ class ChatEvent:
     - ``"typing"``: a typing indicator (payload: ``{"action": "STARTED"|"STOPPED"}``).
     - ``"receipt"``: a delivery/read receipt (payload: list of updated messages).
     - ``"contact_update"``: contact metadata changed (payload: ``ChatContact`` dict).
+    - ``"sent-mirror"``: lightweight notification of a batch send mirror.
+    - ``"lid_warmup_done"``: the WhatsApp lid resolver run finished (no payload).
     """
 
     type: str

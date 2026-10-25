@@ -1,58 +1,48 @@
-"""Non-blocking bridge from protocol ingestion to the web event loop."""
+"""Bridge from legacy ``push_event(dict)`` call sites to the core event bus.
+
+``web/api.py`` route handlers still build the legacy WebSocket frames
+themselves; they are published on the active bus as ``web_push`` events and
+``web.legacy_events.to_legacy`` maps them back to the unchanged dict.
+"""
 
 from __future__ import annotations
 
 import logging
-import queue
 import threading
 from typing import Any
 
+from server.bus import EventBus
+
 logger = logging.getLogger(__name__)
 
-_QUEUE_SIZE = 1000
-_push_queue: queue.Queue[dict[str, Any]] | None = None
-_dropped_events = 0
+_bus: EventBus | None = None
 _lock = threading.Lock()
 
 
-def init_bridge() -> queue.Queue[dict[str, Any]]:
-    """Activate a fresh bounded queue for one web-server lifecycle."""
-    global _dropped_events, _push_queue
+def init_bridge(bus: EventBus | None = None) -> EventBus:
+    """Activate forwarding on *bus* (a private bus when omitted)."""
+    global _bus
     with _lock:
-        _push_queue = queue.Queue(maxsize=_QUEUE_SIZE)
-        _dropped_events = 0
-        return _push_queue
+        _bus = bus if bus is not None else EventBus()
+        return _bus
 
 
 def close_bridge() -> None:
     """Deactivate event forwarding."""
-    global _push_queue
+    global _bus
     with _lock:
-        _push_queue = None
+        _bus = None
 
 
-def get_push_queue() -> queue.Queue[dict[str, Any]] | None:
-    """Return the active push queue, if the web server is enabled."""
-    return _push_queue
+def get_bus() -> EventBus | None:
+    """Return the active bus, if the web server is enabled."""
+    return _bus
 
 
 def push_event(event: dict[str, Any]) -> bool:
-    """Enqueue an event without ever blocking its producer."""
-    global _dropped_events
-    push_queue = _push_queue
-    if push_queue is None:
+    """Publish a legacy frame on the active bus; never blocks the producer."""
+    bus = _bus
+    if bus is None:
         return False
-    try:
-        push_queue.put_nowait(event)
-        return True
-    except queue.Full:
-        with _lock:
-            _dropped_events += 1
-            dropped = _dropped_events
-        logger.warning("Web push queue full; dropped event (total=%d)", dropped)
-        return False
-
-
-def dropped_events() -> int:
-    """Return the number of events dropped in the current lifecycle."""
-    return _dropped_events
+    bus.publish("web_push", {"event": event})
+    return True

@@ -32,6 +32,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from event_harness import legacy_frames
+
 import protocols.db as backend_mod
 from models import (
     PROTOCOL_SIGNAL,
@@ -239,7 +241,7 @@ class TestSendPersistOffthread:
             "attachment_id": None,
             "contact": contact,
         }
-        app._handle_message_event(
+        app._handle_event(
             ChatEvent(
                 type="message",
                 protocol=PROTOCOL_SIGNAL,
@@ -263,13 +265,15 @@ class TestSendPersistOffthread:
         _prepare_send(app)
         app.signal_backend.send_message_sync = MagicMock(return_value="ts-1")
 
+        sub = app.bus.subscribe()
         with patch("web.bridge.push_event") as push_event:
             _send_text(app, "ciao web")
             ts = app._cache[contact.cache_key][0]["timestamp"]
-            push_event.assert_not_called()
+            # Persist happens off-thread: nothing on the bus before the worker.
+            assert legacy_frames(sub.drain()) == []
             _run_workers(app)
 
-            app._handle_message_event(
+            app._handle_event(
                 ChatEvent(
                     type="message",
                     protocol=PROTOCOL_SIGNAL,
@@ -289,7 +293,10 @@ class TestSendPersistOffthread:
                 )
             )
 
-        push_event.assert_called_once_with(
+        # The TUI no longer calls push_event: exactly one legacy frame reaches
+        # the web via the bus (the persisted send; the echo adds none).
+        push_event.assert_not_called()
+        assert legacy_frames(sub.drain()) == [
             {
                 "type": "message",
                 "payload": {
@@ -300,7 +307,7 @@ class TestSendPersistOffthread:
                     "is_mine": True,
                 },
             }
-        )
+        ]
 
     # ── T2e: double identical send within 5s ─────────────────────────────
 
@@ -482,7 +489,7 @@ class TestSendPersistOffthread:
             "quote_content_type": "image/png",
         }
 
-        handled = app._handle_message_event(
+        handled = app._handle_event(
             ChatEvent(
                 type="message",
                 protocol=PROTOCOL_SIGNAL,

@@ -12,7 +12,13 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
+from models import (
+    PROTOCOL_SIGNAL,
+    PROTOCOL_WHATSAPP,
+    ChatContact,
+    ChatEvent,
+    contact_cache_key,
+)
 from signal_tui import SignalTUI
 from ui_components import ContactListView, ContactListWidget, MessageWidget
 
@@ -869,8 +875,7 @@ class TestContactListFlush:
         del PRIMO flush, poi ferma il loop in modo deterministico."""
         import threading
 
-        app.manager = MagicMock()
-        app.manager.all.return_value = []  # nessun backend reale
+        app._core_sub = app.bus.subscribe()  # il worker consuma il bus del core
         app._contact_list_dirty = True
         app._dirty_contact_keys = set(dirty_keys)
         app._polling_active = True
@@ -950,7 +955,7 @@ class TestContactListFlush:
         assert len(reorders) == 1
 
     def test_message_for_other_contact_populates_dirty_keys(self):
-        """_handle_message_event per una chat non aperta registra il cache_key
+        """La vista del messaggio per una chat non aperta registra il cache_key
         nel set (così il flush usa la via incrementale)."""
         app = _make_app(self._whatsapp_contact("wa:1@s.whatsapp.net", "Anna"))
         app.selected_contact = None
@@ -965,23 +970,25 @@ class TestContactListFlush:
         app.manager = MagicMock()
         app.manager.get.return_value = backend
 
-        event = MagicMock()
-        event.protocol = PROTOCOL_WHATSAPP
-        event.contact_id = "wa:1@s.whatsapp.net"
-        event.payload = {
-            "contact": self._whatsapp_contact("wa:1@s.whatsapp.net", "Anna"),
-            "timestamp": 1234567890000,
-            "text": "hey",
-            "is_mine": False,
-            "sender": "Anna",
-            "quote_text": None,
-            "msg_type": "text",
-            "attachment_info": None,
-            "attachment_id": None,
-        }
+        event = ChatEvent(
+            type="message",
+            protocol=PROTOCOL_WHATSAPP,
+            contact_id="wa:1@s.whatsapp.net",
+            payload={
+                "contact": self._whatsapp_contact("wa:1@s.whatsapp.net", "Anna"),
+                "timestamp": 1234567890000,
+                "text": "hey",
+                "is_mine": False,
+                "sender": "Anna",
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            },
+        )
 
         with patch.object(app, "call_from_thread"):
-            handled = app._handle_message_event(event)
+            handled = app._handle_event(event)
 
         assert handled is True
         assert app._contact_list_dirty is True

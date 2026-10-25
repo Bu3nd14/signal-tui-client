@@ -221,6 +221,7 @@ if __name__ == "__main__":
         segnale (web-signal-tui-stop) non poterebbe mai lo storico.
         """
         app._polling_active = False
+        app.core.stop()
         try:
             from protocols.db import _prune_cache
 

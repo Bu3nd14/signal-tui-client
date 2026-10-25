@@ -16,6 +16,8 @@ from protocols.manager import BackendManager
 from protocols.signal import SignalBackend
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
+from server.bus import EventBus
+from server.core import ChatCore
 from tui.events import EventHandlingMixin
 
 
@@ -1664,6 +1666,9 @@ class _MirrorApp(EventHandlingMixin):
 
     def __init__(self, contacts=None, *, web_enabled=False, backend=None):
         self.manager = SimpleNamespace(get=lambda _protocol: backend)
+        self.bus = EventBus()
+        self.core = ChatCore(self.bus)
+        self.core.manager = self.manager
         self.contacts = list(contacts or [])
         self.selected_contact = None
         self._contact_list_dirty = False
@@ -1695,12 +1700,13 @@ def test_sent_mirror_event_is_routed_to_dedicated_handler():
     event = _mirror_event(contact)
 
     with (
-        patch.object(app, "_handle_sent_mirror_event", return_value=True) as handler,
-        patch.object(app, "_handle_message_event") as message_handler,
+        patch.object(app, "_view_sent_mirror", return_value=True) as handler,
+        patch.object(app, "_view_message") as message_handler,
     ):
         assert app._handle_event(event)
 
-    handler.assert_called_once_with(event)
+    handler.assert_called_once()
+    assert handler.call_args[0][0].type == "sent_mirror"
     message_handler.assert_not_called()
 
 
@@ -1709,7 +1715,7 @@ def test_sent_mirror_updates_real_contact_object_and_flags():
     app = _mirror_app(contacts=[contact])
     event = _mirror_event(contact)
 
-    assert app._handle_sent_mirror_event(event) is True
+    assert app._handle_event(event) is True
     # The REAL object in self.contacts (not a placeholder) was updated.
     assert contact.last_message_ts == 1_787_250_931_234
     assert app._contact_list_dirty is True
@@ -1729,7 +1735,7 @@ def test_sent_mirror_prefers_self_contacts_over_rebuilt_payload_copy():
     event.payload["contact"] = rebuilt
     app.manager.get("signal")._identify_contact.return_value = rebuilt
 
-    assert app._handle_sent_mirror_event(event) is True
+    assert app._handle_event(event) is True
     assert real.last_message_ts == 1_787_250_931_234
     assert rebuilt.last_message_ts == 0
     assert app.contacts == [real]
@@ -1741,7 +1747,7 @@ def test_sent_mirror_uses_backend_identify_when_not_in_tui_list():
     app.manager.get("telegram")._identify_contact.return_value = known
     event = _mirror_event(known, protocol="telegram")
 
-    assert app._handle_sent_mirror_event(event) is True
+    assert app._handle_event(event) is True
     assert known.last_message_ts == 1_787_250_931_234
     # Known contact: promoted into the TUI list (the dynamic lid resolver may
     # materialize a contact the TUI has never seen), no placeholder duplicate.
@@ -1754,7 +1760,7 @@ def test_sent_mirror_creates_placeholder_for_unknown_contact():
         ChatContact(id="+391111111111", display_name="+391111111111", protocol="signal")
     )
 
-    assert app._handle_sent_mirror_event(event) is True
+    assert app._handle_event(event) is True
     assert len(app.contacts) == 1
     placeholder = app.contacts[0]
     assert placeholder.id == "+391111111111"
@@ -1777,7 +1783,7 @@ def test_sent_mirror_does_not_ingest_or_push_web_event():
     event = _mirror_event(contact)
 
     with patch("web.bridge.push_event") as push_event:
-        assert app._handle_sent_mirror_event(event) is True
+        assert app._handle_event(event) is True
 
     # No double DB write and no duplicate web push: the selected contact's
     # timestamp is refreshed but the list stays clean.

@@ -2511,20 +2511,25 @@ def test_whatsapp_messages_filter_only_synthetic_media_text(
     assert response.json()[0]["text"] == expected_text
 
 
-def test_bridge_is_bounded_nonblocking_and_counts_drop():
+def test_bridge_is_bounded_nonblocking_and_overflow_becomes_gap():
+    from server.bus import GAP, EventBus
     from web import bridge
 
-    push_queue = bridge.init_bridge()
+    bus = EventBus(buffer_size=10, subscriber_queue_size=10)
+    sub = bus.subscribe()
+    assert bridge.init_bridge(bus) is bus
     started = time.monotonic()
+    # Far more events than the subscriber queue holds: the producer never blocks.
     for index in range(1000):
         assert bridge.push_event({"n": index})
-    assert not bridge.push_event({"n": "overflow"})
     elapsed = time.monotonic() - started
-    assert push_queue.maxsize == 1000
-    assert push_queue.qsize() == 1000
-    assert bridge.dropped_events() == 1
     assert elapsed < 1
+    events = sub.drain()
+    # The overflowing subscriber is told to resync instead of blocking producers.
+    assert any(e.type == GAP for e in events)
+    assert all(e.type in ("web_push", GAP) for e in events)
     bridge.close_bridge()
+    assert not bridge.push_event({"n": "closed"})
 
 
 def test_occupied_port_degrades_to_down_without_raising():

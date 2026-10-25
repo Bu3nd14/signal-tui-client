@@ -1759,13 +1759,12 @@ class WhatsAppBackend(ChatBackend):
             logger.warning("WhatsApp lid resolver run failed", exc_info=True)
         finally:
             try:
-                from web.bridge import push_event
-
-                push_event(
-                    {
-                        "type": "lid_warmup_done",
-                        "payload": {"protocol": "whatsapp"},
-                    }
+                self._enqueue_event(
+                    ChatEvent(
+                        type="lid_warmup_done",
+                        protocol=PROTOCOL_WHATSAPP,
+                        contact_id="",
+                    )
                 )
             except Exception:
                 logger.debug("lid warmup notify failed", exc_info=True)

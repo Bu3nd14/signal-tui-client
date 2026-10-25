@@ -134,7 +134,7 @@ class TestReceiptPersistence:
         app = self._make_app(tmp_db)
 
         with patch.object(app, "call_from_thread") as mock_cft:
-            result = app._handle_receipt_event(self._receipt_event([1000]))
+            result = app._handle_event(self._receipt_event([1000]))
 
         assert result is True
         # The message in self._cache must have status "read"
@@ -148,7 +148,7 @@ class TestReceiptPersistence:
         app = self._make_app(tmp_db)
 
         with patch.object(app, "call_from_thread") as mock_cft:
-            result = app._handle_receipt_event(self._receipt_event([9999]))
+            result = app._handle_event(self._receipt_event([9999]))
 
         assert result is False
         key = contact_cache_key(PROTOCOL_SIGNAL, "+391234567890")

@@ -567,6 +567,6 @@ class TestTuiDispatch:
 
         app.call_from_thread = call
         app.bus.publish("backend_done", {"protocol": "x", "ok": False})
-        app._core_event_worker()
+        app._poll_worker()
         assert seen == ["backend_done"]
         assert app._core_sub.closed

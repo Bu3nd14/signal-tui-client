@@ -215,30 +215,6 @@ class BackendConnectMixin:
         """
         self.core.reconnect(protocols)
 
-    def _core_event_worker(self) -> None:
-        """Worker thread: inoltra gli eventi del core al UI thread.
-
-        Sostituisce le vecchie ``call_from_thread`` dei connect worker.  La
-        subscription è creata in ``on_mount`` PRIMA di ``core.start()`` così
-        nessun evento va perso.
-        """
-        sub = self._core_sub
-        if sub is None:
-            return
-        try:
-            while self._polling_active:
-                event = sub.get(timeout=0.1)
-                if event is None:
-                    if sub.closed:
-                        break
-                    continue
-                try:
-                    self.call_from_thread(self._dispatch_core_event, event)
-                except Exception:
-                    logger.debug("Core event dispatch failed", exc_info=True)
-        finally:
-            sub.close()
-
     def _dispatch_core_event(self, event: Event) -> None:
         """UI thread: applica un evento del core al TUI."""
         payload = event.payload

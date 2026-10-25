@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from server.bus import EventBus
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,6 +72,7 @@ def start_web_server(
     *,
     host: str = "127.0.0.1",
     require_auth: bool = True,
+    bus: EventBus | None = None,
 ) -> WebServerHandle | None:
     """Start uvicorn on a dedicated thread and event loop.
 
@@ -116,7 +119,7 @@ def start_web_server(
     from web.uploads import prepare_upload_directory
     from web.ws import install_websocket
 
-    init_bridge()
+    app.state.bus = init_bridge(bus)
     install_auth(app, token, required=require_auth)
     app.include_router(create_api_router())
     install_websocket(app, token, required=require_auth)

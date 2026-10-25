@@ -17,14 +17,19 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import PROTOCOL_WHATSAPP, ChatContact, ChatEvent, contact_cache_key
 from protocols.whatsapp import WhatsAppBackend
+from server.bus import EventBus
+from server.core import ChatCore
 from tui.events import EventHandlingMixin
+from web.legacy_events import to_legacy
 
 
 class _App(EventHandlingMixin):
     """Harness minimale: espone solo gli attributi toccati dai handler."""
 
     def __init__(self, backend, contacts=None, *, web_enabled=False):
-        self.manager = SimpleNamespace(get=lambda _protocol: backend)
+        self.bus = EventBus()
+        self.core = ChatCore(self.bus)
+        self.core.manager = SimpleNamespace(get=lambda _protocol: backend)
         self.contacts = list(contacts or [])
         self.selected_contact = None
         self._contact_list_dirty = False
@@ -60,12 +65,14 @@ def test_dispatcher_routes_contact_update():
     contact = ChatContact(id="1@lid", display_name="Giulia", protocol=PROTOCOL_WHATSAPP)
     event = _contact_update_event(contact)
 
-    with patch.object(
-        app, "_handle_contact_update_event", return_value=True
-    ) as handler:
+    with patch.object(app, "_view_contact_update", return_value=True) as handler:
         assert app._handle_event(event) is True
 
-    handler.assert_called_once_with(event)
+    handler.assert_called_once()
+    core_event = handler.call_args[0][0]
+    assert core_event.type == "contact_update"
+    assert core_event.payload["contact"] is contact
+    assert core_event.payload["contact_id"] == "1@lid"
 
 
 def test_contact_update_marks_dirty_and_pushes_web():
@@ -74,13 +81,17 @@ def test_contact_update_marks_dirty_and_pushes_web():
     contact = ChatContact(id="1@lid", display_name="Giulia", protocol=PROTOCOL_WHATSAPP)
     event = _contact_update_event(contact, phone="391234567")
 
+    sub = app.bus.subscribe()
     with patch("web.bridge.push_event") as push:
-        assert app._handle_contact_update_event(event) is True
+        assert app._handle_event(event) is True
 
     assert app._contact_list_dirty is True
     assert contact_cache_key(PROTOCOL_WHATSAPP, "1@lid") in app._dirty_contact_keys
-    push.assert_called_once()
-    pushed = push.call_args[0][0]
+    # The TUI no longer pushes to the web: the web WebSocket maps the bus event.
+    push.assert_not_called()
+    frames = [to_legacy(e) for e in sub.drain()]
+    assert len(frames) == 1
+    pushed = frames[0]
     assert pushed["type"] == "contact_update"
     assert pushed["payload"] == {
         "protocol": PROTOCOL_WHATSAPP,
@@ -96,8 +107,9 @@ def test_contact_update_without_web_does_not_push():
     contact = ChatContact(id="1@lid", display_name="Giulia", protocol=PROTOCOL_WHATSAPP)
 
     with patch("web.bridge.push_event") as push:
-        assert app._handle_contact_update_event(_contact_update_event(contact)) is True
+        assert app._handle_event(_contact_update_event(contact)) is True
 
+    # No web server is attached to the bus: nothing is pushed to the web.
     push.assert_not_called()
 
 
@@ -127,7 +139,7 @@ def test_materialized_contact_is_added_to_tui_list_on_message():
         },
     )
 
-    assert app._handle_message_event(event) is True
+    assert app._handle_event(event) is True
     assert materialized in app.contacts
     assert app._contact_list_dirty is True
 
@@ -147,7 +159,7 @@ def test_materialized_contact_is_added_to_tui_list_on_sent_mirror():
         payload={"id": "x", "timestamp": 5000},
     )
 
-    assert app._handle_sent_mirror_event(event) is True
+    assert app._handle_event(event) is True
     assert materialized in app.contacts
 
 
@@ -172,7 +184,7 @@ def test_placeholder_is_registered_with_backend():
         },
     )
 
-    assert app._handle_message_event(event) is True
+    assert app._handle_event(event) is True
     backend.register_contact.assert_called_once()
     placeholder = backend.register_contact.call_args[0][0]
     assert placeholder.cache_key == contact_cache_key(PROTOCOL_WHATSAPP, "999@lid")

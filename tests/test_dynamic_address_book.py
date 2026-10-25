@@ -36,6 +36,8 @@ from models import (
     contact_cache_key,
 )
 from protocols.whatsapp import WhatsAppBackend
+from server.bus import EventBus
+from server.core import ChatCore
 from tui.address_book_refresh import DynamicAddressBookMixin
 from tui.events import EventHandlingMixin, _looks_unresolved, _signal_stable_key
 from tui.pickers import PickerMixin
@@ -47,7 +49,9 @@ class _App(EventHandlingMixin):
     """Minimal harness exposing only the attributes touched by the handlers."""
 
     def __init__(self, backend, contacts=None, *, web_enabled=False):
-        self.manager = SimpleNamespace(get=lambda _protocol: backend)
+        self.bus = EventBus()
+        self.core = ChatCore(self.bus)
+        self.core.manager = SimpleNamespace(get=lambda _protocol: backend)
         self.contacts = list(contacts or [])
         self.selected_contact = None
         self._contact_list_dirty = False
@@ -130,7 +134,7 @@ class TestMessageEventReanchor:
         event = _message_event(
             PROTOCOL_WHATSAPP, "1@c.us", contact=payload_contact, timestamp=5000
         )
-        assert app._handle_message_event(event) is True
+        assert app._handle_event(event) is True
 
         assert app.contacts[0] is tui_contact
         assert tui_contact.last_message_ts == 5000
@@ -144,7 +148,7 @@ class TestMessageEventReanchor:
         app = _App(backend, contacts=[])
 
         event = _message_event(PROTOCOL_WHATSAPP, "2@c.us")
-        assert app._handle_message_event(event) is True
+        assert app._handle_event(event) is True
 
         assert len(app.contacts) == 1
         assert app.contacts[0].cache_key == contact_cache_key(
@@ -160,7 +164,7 @@ class TestContactUpdateEvent:
         app = _App(_wa_backend(), contacts=[])
         new = ChatContact(id="9@c.us", display_name="Nina", protocol=PROTOCOL_WHATSAPP)
 
-        assert app._handle_contact_update_event(_contact_update_event(new)) is True
+        assert app._handle_event(_contact_update_event(new)) is True
 
         assert app.contacts == [new]
         assert app._cache == {}
@@ -179,7 +183,7 @@ class TestContactUpdateEvent:
             id="1@c.us", display_name="Mario Rossi", protocol=PROTOCOL_WHATSAPP
         )
 
-        assert app._handle_contact_update_event(_contact_update_event(incoming)) is True
+        assert app._handle_event(_contact_update_event(incoming)) is True
 
         assert len(app.contacts) == 1
         assert app.contacts[0] is existing
@@ -198,7 +202,7 @@ class TestContactUpdateEvent:
             id="1@c.us", display_name="Mario", protocol=PROTOCOL_WHATSAPP
         )
 
-        app._handle_contact_update_event(_contact_update_event(incoming, phone="222"))
+        app._handle_event(_contact_update_event(incoming, phone="222"))
 
         assert existing.extras["phone"] == "111"
 
@@ -249,7 +253,7 @@ class TestSignalDedupOnContactUpdate:
         app = _App(_wa_backend(), contacts=[stale])
         app._contact_widgets["signal:uuid-123"] = object()
 
-        assert app._handle_contact_update_event(_contact_update_event(fresh)) is True
+        assert app._handle_event(_contact_update_event(fresh)) is True
 
         assert len(app.contacts) == 1
         assert app.contacts[0] is fresh
@@ -272,7 +276,7 @@ class TestSignalDedupOnContactUpdate:
         )
         app = _App(_wa_backend(), contacts=[stale])
 
-        app._handle_contact_update_event(_contact_update_event(fresh))
+        app._handle_event(_contact_update_event(fresh))
 
         assert len(app.contacts) == 1
         assert app.contacts[0] is fresh
@@ -292,7 +296,7 @@ class TestSignalDedupOnContactUpdate:
         )
         app = _App(_wa_backend(), contacts=[other])
 
-        app._handle_contact_update_event(_contact_update_event(fresh))
+        app._handle_event(_contact_update_event(fresh))
 
         assert len(app.contacts) == 2
         assert other in app.contacts
@@ -352,7 +356,7 @@ class TestLazyTrigger:
         backend.register_contact = MagicMock(return_value=True)
         app = _App(backend, contacts=[])
 
-        app._handle_message_event(_message_event(PROTOCOL_WHATSAPP, "1@c.us"))
+        app._handle_event(_message_event(PROTOCOL_WHATSAPP, "1@c.us"))
 
         assert app.scheduled == [PROTOCOL_WHATSAPP]
 
@@ -365,7 +369,7 @@ class TestLazyTrigger:
         )
         app = _App(_wa_backend(), contacts=[resolved])
 
-        app._handle_message_event(
+        app._handle_event(
             _message_event(
                 PROTOCOL_WHATSAPP, "1@c.us", contact=resolved, timestamp=2000
             )
@@ -380,7 +384,7 @@ class TestLazyTrigger:
         )
         app = _App(_wa_backend(), contacts=[placeholder])
 
-        app._handle_message_event(
+        app._handle_event(
             _message_event(
                 PROTOCOL_WHATSAPP, "1@c.us", contact=placeholder, timestamp=3000
             )
@@ -397,7 +401,7 @@ class TestLazyTrigger:
         )
         app = _App(backend, contacts=[placeholder])
 
-        app._handle_message_event(
+        app._handle_event(
             _message_event(PROTOCOL_TELEGRAM, "42", contact=placeholder, timestamp=4000)
         )
 
@@ -609,7 +613,7 @@ class TestDynamicAddressBookIntegration:
         backend.register_contact = MagicMock(return_value=True)
         app = _App(backend, contacts=[])
 
-        app._handle_message_event(_message_event(PROTOCOL_WHATSAPP, "1@c.us"))
+        app._handle_event(_message_event(PROTOCOL_WHATSAPP, "1@c.us"))
         assert len(app.contacts) == 1
         placeholder = app.contacts[0]
         assert placeholder.display_name == "1@c.us"
@@ -617,7 +621,7 @@ class TestDynamicAddressBookIntegration:
         resolved = ChatContact(
             id="1@c.us", display_name="Mario", protocol=PROTOCOL_WHATSAPP
         )
-        app._handle_contact_update_event(_contact_update_event(resolved))
+        app._handle_event(_contact_update_event(resolved))
 
         assert len(app.contacts) == 1
         assert app.contacts[0] is placeholder

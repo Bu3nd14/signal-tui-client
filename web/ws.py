@@ -2,13 +2,13 @@
 
 import asyncio
 import base64
-import queue
 import time
 from contextlib import suppress
 from typing import Any
 
 from web.auth import is_authorized
-from web.bridge import get_push_queue
+from web.bridge import get_bus
+from web.legacy_events import to_legacy
 
 #: Heartbeat cadence: the SPA watchdog (app.js) treats the WebSocket as a
 #: zombie when no traffic arrives for 10s; the server therefore fans out a
@@ -43,34 +43,49 @@ def _browser_authorization(websocket: Any) -> tuple[str | None, str | None]:
 
 
 async def _broadcast(app: Any) -> None:
+    """Fan the core bus out to every WebSocket (legacy frames + heartbeat)."""
     last_send = 0.0
-    while True:
-        push_queue = get_push_queue()
-        if push_queue is None:
-            await asyncio.sleep(0.5)
-            continue
-        try:
-            event = await asyncio.to_thread(push_queue.get, True, 0.5)
-        except queue.Empty:
-            event = None
-        if event is None:
-            now = time.monotonic()
-            if now - last_send < HEARTBEAT_INTERVAL_S:
+    sub = None
+    sub_bus = None
+    try:
+        while True:
+            bus = getattr(app.state, "bus", None) or get_bus()
+            if bus is None:
+                if sub is not None:
+                    sub.close()
+                    sub = sub_bus = None
+                await asyncio.sleep(0.5)
                 continue
-            event = {"type": "heartbeat"}
-            last_send = now
-        else:
-            last_send = time.monotonic()
-        stale = []
-        for websocket in tuple(app.state.websocket_connections):
-            try:
-                await asyncio.wait_for(websocket.send_json(event), timeout=0.5)
-            except Exception:  # noqa: BLE001
-                stale.append(websocket)
-        for websocket in stale:
-            app.state.websocket_connections.discard(websocket)
-            with suppress(Exception):
-                await websocket.close()
+            if sub is None or sub_bus is not bus:
+                if sub is not None:
+                    sub.close()
+                sub = bus.subscribe()
+                sub_bus = bus
+            bus_event = await asyncio.to_thread(sub.get, 0.5)
+            # Events without a legacy frame (backend_*, gap, ...) are skipped
+            # like an idle tick, so the heartbeat cadence is unaffected.
+            event = None if bus_event is None else to_legacy(bus_event)
+            if event is None:
+                now = time.monotonic()
+                if now - last_send < HEARTBEAT_INTERVAL_S:
+                    continue
+                event = {"type": "heartbeat"}
+                last_send = now
+            else:
+                last_send = time.monotonic()
+            stale = []
+            for websocket in tuple(app.state.websocket_connections):
+                try:
+                    await asyncio.wait_for(websocket.send_json(event), timeout=0.5)
+                except Exception:  # noqa: BLE001
+                    stale.append(websocket)
+            for websocket in stale:
+                app.state.websocket_connections.discard(websocket)
+                with suppress(Exception):
+                    await websocket.close()
+    finally:
+        if sub is not None:
+            sub.close()
 
 
 def install_websocket(app: Any, token: str, *, required: bool = True) -> None:

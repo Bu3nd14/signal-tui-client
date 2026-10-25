@@ -32,8 +32,11 @@ from protocols.base import ChatBackend
 from protocols.signal import SignalBackend
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
+from server.bus import EventBus
+from server.core import ChatCore
 from tui.events import EventHandlingMixin
 from web.api import create_api_router
+from web.legacy_events import to_legacy
 
 _PNG_1X1 = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
@@ -499,7 +502,10 @@ class TestWhatsAppIdentity:
         backend.ingest_message = MagicMock(return_value=True)
 
         harness = EventHandlingMixin()
+        harness.bus = EventBus()
+        harness.core = ChatCore(harness.bus)
         harness.manager = SimpleNamespace(get=lambda protocol: backend)
+        harness.core.manager = harness.manager
         harness.contacts = [book]
         harness.selected_contact = None
         harness._contact_list_dirty = False
@@ -525,11 +531,12 @@ class TestWhatsAppIdentity:
                 "msg_type": "text",
             },
         )
-        with patch("web.bridge.push_event") as pushed:
-            assert harness._handle_message_event(event) is True
+        sub = harness.bus.subscribe()
+        assert harness._handle_event(event) is True
 
         assert backend.ingest_message.call_args.args[0] == "393@c.us"
-        assert pushed.call_args.args[0]["payload"]["contact_id"] == "393@c.us"
+        frames = [to_legacy(e) for e in sub.drain()]
+        assert frames[0]["payload"]["contact_id"] == "393@c.us"
 
     def test_phone_to_lid_applies_ttl(self):
         backend = _wa_backend()

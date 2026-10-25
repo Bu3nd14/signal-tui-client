@@ -277,19 +277,21 @@ class SendMixin:
             persist_backend, persist_contact_id, data, ts = persist
             persist_backend._persist_message(persist_contact_id, data, ts)
             if getattr(self, "_web_enabled", False):
-                from web.bridge import push_event
-
-                push_event(
+                # Legacy web frame, forwarded verbatim by the WebSocket.
+                self.bus.publish(
+                    "web_push",
                     {
-                        "type": "message",
-                        "payload": {
-                            "id": data.get("id"),
-                            "protocol": protocol,
-                            "contact_id": persist_contact_id,
-                            "timestamp": ts,
-                            "is_mine": True,
-                        },
-                    }
+                        "event": {
+                            "type": "message",
+                            "payload": {
+                                "id": data.get("id"),
+                                "protocol": protocol,
+                                "contact_id": persist_contact_id,
+                                "timestamp": ts,
+                                "is_mine": True,
+                            },
+                        }
+                    },
                 )
 
         # Extract quote parameters from reply_data

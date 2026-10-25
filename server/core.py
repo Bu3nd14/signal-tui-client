@@ -11,6 +11,24 @@ react.  Event types and payloads:
 - ``backend_done`` ``{"protocol": p, "ok": False}`` for failures, skips and
   timeouts (a ready backend implies done on the consumer side).
 
+Domain events, produced by :meth:`ChatCore.process` for every raw backend
+``ChatEvent`` (the pump publishes them on the bus; payloads carry in-process
+objects such as ``ChatContact`` until Phase 1):
+
+- ``message`` ``{"protocol", "contact_id", "contact": ChatContact,
+  "was_placeholder": bool, "message": <raw payload dict>, "timestamp": ts,
+  "added": bool, "changed": bool}`` (always emitted, even when nothing new
+  was stored: consumers use it for recency / list dirtiness)
+- ``message_edit`` ``{"protocol", "contact_id", "contact", "info", "text"}``
+- ``reaction_update`` ``{"protocol", "contact_id", "info"}``
+- ``receipt`` ``{"protocol", "contact_id", "updated": list[dict]}``
+- ``typing`` ``{"protocol", "contact_id", "action": "STARTED"|"STOPPED"}``
+- ``contact_update`` ``{"protocol", "contact_id", **backend payload}``
+  (``contact``, ``display_name``, ``phone``, WhatsApp ``merged_into``)
+- ``sent_mirror`` ``{"protocol", "contact_id", **backend payload,
+  "contact": ChatContact}`` (contact resolved/registered by the core)
+- ``lid_warmup_done`` ``{"protocol", "contact_id", **payload}``
+
 This module must not import Textual, FastAPI, ``tui`` or ``web``.
 """
 
@@ -20,7 +38,14 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
+from models import (
+    PROTOCOL_SIGNAL,
+    ChatContact,
+    ChatEvent,
+    contact_cache_key,
+)
 from protocols import (
     BackendManager,
     SignalBackend,
@@ -30,6 +55,7 @@ from protocols import (
 from protocols.config import signal_enabled, telegram_enabled, whatsapp_enabled
 from protocols.webhook import WEBHOOK_PORT, ensure_webhook_server
 from server.bus import EventBus
+from server.domain import resolve_placeholder_name
 
 logger = logging.getLogger("signal_tui")
 
@@ -85,10 +111,16 @@ class ChatCore:
         self._wa_connecting = False
         self._tg_connecting = False
 
+        # Event pump (one daemon thread, see start()/stop()).
+        self._pump_thread: threading.Thread | None = None
+        self._pump_stop = threading.Event()
+
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        """Start the connect workers (same gating as the old TUI ``on_mount``)."""
+        """Start the event pump and the connect workers (same gating as the
+        old TUI ``on_mount``)."""
+        self._start_pump()
         # Only connect backends that are already linked (skip slow daemon
         # startup for unlinked accounts — they connect after Ctrl+L link).
         if signal_enabled():
@@ -107,6 +139,13 @@ class ChatCore:
             and not self.telegram_backend.needs_pairing
         ):
             self._spawn(self.connect_telegram, "core-connect-telegram")
+
+    def stop(self) -> None:
+        """Stop the event pump; the thread exits within one 0.1s slice."""
+        self._pump_stop.set()
+        thread = self._pump_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(1.0)
 
     def reconnect(self, protocols: set[str]) -> None:
         """Reconnect only the backends whose link flow was actually started.
@@ -352,3 +391,304 @@ class ChatCore:
                     "Status report failed", exc_info=True
                 )  # il report è solo informativo
         return n
+
+    # -- event pump --------------------------------------------------------
+
+    def _start_pump(self) -> None:
+        thread = self._pump_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._pump_stop.clear()
+        self._pump_thread = threading.Thread(
+            target=self._pump_loop, name="core-pump", daemon=True
+        )
+        self._pump_thread.start()
+
+    def _pump_loop(self) -> None:
+        """Poll every backend, process each raw event, publish the results.
+
+        One round over all backends, then ~1s of sleep in 0.1s slices so
+        :meth:`stop` takes effect promptly.  A failing event or round is
+        logged at debug level and never kills the loop.
+        """
+        stop = self._pump_stop
+        while not stop.is_set():
+            try:
+                for backend in self.manager.all():
+                    if stop.is_set():
+                        return
+                    try:
+                        events = backend.poll_once()
+                    except AttributeError:
+                        events = []
+                    for event in events:
+                        if stop.is_set():
+                            return
+                        self._pump_event(event)
+            except Exception:
+                logger.debug("Pump iteration failed, continuing", exc_info=True)
+            for _ in range(10):
+                if stop.is_set():
+                    return
+                time.sleep(0.1)
+
+    def _pump_event(self, event: ChatEvent) -> None:
+        try:
+            results = self.process(event)
+        except Exception:
+            logger.debug("Event processing failed, continuing", exc_info=True)
+            return
+        for etype, payload in results:
+            self.bus.publish(etype, payload)
+
+    # -- domain processing -------------------------------------------------
+
+    def _resolve_contact(self, backend, event: ChatEvent) -> tuple[ChatContact, bool]:
+        """Payload contact -> backend lookup -> placeholder.
+
+        Returns ``(contact, was_placeholder)``.
+        """
+        contact = event.payload.get("contact")
+        if contact is not None:
+            return contact, False
+        identify = getattr(backend, "_identify_contact", None)
+        if identify is not None:
+            contact = identify(event.contact_id)
+        if contact is not None:
+            return contact, False
+        return (
+            ChatContact(
+                id=event.contact_id,
+                display_name=resolve_placeholder_name(backend, event.contact_id),
+                protocol=event.protocol,
+            ),
+            True,
+        )
+
+    @staticmethod
+    def _ensure_registered(backend, contact: ChatContact) -> None:
+        """Make *contact* known to *backend* when the backend does not have it.
+
+        The decision is based on the backend's own contact list (by
+        ``cache_key``).  Before the split it was based on the TUI list; the
+        two only differ for a contact the backend already knows but the TUI
+        list lacks (old code re-registered it, a no-op) or the reverse (an
+        object only the TUI list had, now registered too).
+        """
+        known = getattr(backend, "contacts", None)
+        if known is not None and any(c.cache_key == contact.cache_key for c in known):
+            return
+        if hasattr(backend, "register_contact"):
+            backend.register_contact(contact)
+        elif known is not None:
+            known.append(contact)
+
+    def process(self, event: ChatEvent) -> list[tuple[str, dict[str, Any]]]:
+        """Domain step for ONE raw backend event; returns events to publish.
+
+        Mutates the backend (cache / SQLite / contact registration) but does
+        not publish: the caller decides (the pump publishes on the bus).
+        """
+        handler = {
+            "message": self._process_message,
+            "message_edit": self._process_edit,
+            "reaction_update": self._process_reaction,
+            "receipt": self._process_receipt,
+            "typing": self._process_typing,
+            "contact_update": self._process_passthrough,
+            "sent-mirror": self._process_sent_mirror,
+            "lid_warmup_done": self._process_passthrough,
+        }.get(event.type)
+        if handler is None:
+            return []
+        return handler(event)
+
+    @staticmethod
+    def _passthrough_type(event: ChatEvent) -> str:
+        return event.type.replace("-", "_")
+
+    def _process_passthrough(self, event: ChatEvent) -> list[tuple[str, dict]]:
+        return [
+            (
+                self._passthrough_type(event),
+                {
+                    **event.payload,
+                    "protocol": event.protocol,
+                    "contact_id": event.contact_id,
+                },
+            )
+        ]
+
+    def _process_sent_mirror(self, event: ChatEvent) -> list[tuple[str, dict]]:
+        backend = self.manager.get(event.protocol)
+        if backend is None:
+            return []
+        # Prefer the object the backend already holds (no lookup needed);
+        # otherwise payload copy -> backend identify -> placeholder.
+        key = contact_cache_key(event.protocol, event.contact_id)
+        contact = next(
+            (c for c in getattr(backend, "contacts", None) or [] if c.cache_key == key),
+            None,
+        )
+        if contact is None:
+            contact, _ = self._resolve_contact(backend, event)
+        self._ensure_registered(backend, contact)
+        return [
+            (
+                "sent_mirror",
+                {
+                    **event.payload,
+                    "protocol": event.protocol,
+                    "contact_id": event.contact_id,
+                    "contact": contact,
+                },
+            )
+        ]
+
+    def _process_message(self, event: ChatEvent) -> list[tuple[str, dict]]:
+        backend = self.manager.get(event.protocol)
+        if backend is None:
+            return []
+        contact, was_placeholder = self._resolve_contact(backend, event)
+        self._ensure_registered(backend, contact)
+        ts = event.payload.get("timestamp", 0)
+        # Save to DB + backend cache.  True only if newly added; "changed"
+        # when an existing identity was upgraded (e.g. optimistic -> echo).
+        ingest = getattr(backend, "ingest_message", None)
+        result = ingest(contact.id, event.payload, ts) if ingest is not None else True
+        added = result is True
+        changed = result == "changed"
+        logger.debug(
+            "core: message added=%s changed=%s protocol=%s contact=%s id=%s",
+            added,
+            changed,
+            event.protocol,
+            contact.id,
+            event.payload.get("id"),
+        )
+        return [
+            (
+                "message",
+                {
+                    "protocol": event.protocol,
+                    "contact_id": contact.id,
+                    "contact": contact,
+                    "was_placeholder": was_placeholder,
+                    "message": event.payload,
+                    "timestamp": ts,
+                    "added": added,
+                    "changed": changed,
+                },
+            )
+        ]
+
+    def _process_edit(self, event: ChatEvent) -> list[tuple[str, dict]]:
+        backend = self.manager.get(event.protocol)
+        if backend is None:
+            return []
+        apply_edit = getattr(backend, "apply_edit", None)
+        if apply_edit is None:
+            return []
+        payload = event.payload
+        new_text = payload.get("text", "")
+        edit_id = payload.get("edit_message_id")
+        if edit_id is None or not new_text:
+            return []
+        contact, _ = self._resolve_contact(backend, event)
+        # Single mutation point: backend cache + SQLite.  Idempotent: text
+        # already new / unknown target / media -> None -> no-op.
+        info = apply_edit(
+            event.contact_id,
+            str(edit_id),
+            new_text,
+            is_mine=payload.get("is_mine"),
+            edit_timestamp=payload.get("edit_timestamp"),
+        )
+        if not info:
+            return []
+        return [
+            (
+                "message_edit",
+                {
+                    "protocol": event.protocol,
+                    "contact_id": event.contact_id,
+                    "contact": contact,
+                    "info": info,
+                    "text": new_text,
+                },
+            )
+        ]
+
+    def _process_reaction(self, event: ChatEvent) -> list[tuple[str, dict]]:
+        backend = self.manager.get(event.protocol)
+        if backend is None:
+            return []
+        apply_reaction = getattr(backend, "apply_reaction", None)
+        if apply_reaction is None:
+            return []
+        info = apply_reaction(event.contact_id, event.payload)
+        if not info:
+            return []
+        return [
+            (
+                "reaction_update",
+                {
+                    "protocol": event.protocol,
+                    "contact_id": event.contact_id,
+                    "info": info,
+                },
+            )
+        ]
+
+    def _process_receipt(self, event: ChatEvent) -> list[tuple[str, dict]]:
+        backend = self.manager.get(event.protocol)
+        if backend is None:
+            return []
+        process = getattr(backend, "process_receipt", None)
+        if process is None:
+            return []
+        if event.protocol == PROTOCOL_SIGNAL:
+            # Reconstruct the Signal receipt envelope the backend expects.
+            envelope = {
+                "sourceNumber": event.contact_id,
+                "source": event.contact_id,
+                "receiptMessage": event.payload.get("receipt", {}),
+            }
+            updated = process(envelope)
+        else:
+            # Generic backend (WhatsApp/Telegram): message-ids receipt payload
+            # scoped to the contact that generated the receipt.
+            updated = process(
+                {
+                    "message_ids": event.payload.get("message_ids", []),
+                    "is_read": event.payload.get("is_read", False),
+                    "contact_id": event.contact_id,
+                }
+            )
+        if not updated:
+            return []
+        return [
+            (
+                "receipt",
+                {
+                    "protocol": event.protocol,
+                    "contact_id": event.contact_id,
+                    "updated": updated,
+                },
+            )
+        ]
+
+    def _process_typing(self, event: ChatEvent) -> list[tuple[str, dict]]:
+        action = event.payload.get("action", "")
+        if action not in ("STARTED", "STOPPED"):
+            return []
+        return [
+            (
+                "typing",
+                {
+                    "protocol": event.protocol,
+                    "contact_id": event.contact_id,
+                    "action": action,
+                },
+            )
+        ]

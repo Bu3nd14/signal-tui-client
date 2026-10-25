@@ -27,6 +27,7 @@ from models import (
     protocol_emoji,
 )
 from protocols import (
+    BackendManager,
     SignalBackend,
     TelegramBackend,
     WhatsAppBackend,
@@ -153,7 +154,6 @@ class SignalTUI(
         # attributes below are aliases to the core's objects.
         self.bus = EventBus()
         self.core = ChatCore(self.bus)
-        self.manager = self.core.manager
         self._core_sub: Subscription | None = None
 
         self.contacts: list[ChatContact] = []
@@ -267,6 +267,14 @@ class SignalTUI(
     # Backend aliases: the core owns the objects; assigning (tests, relink)
     # replaces the core's attribute so both sides always agree.
     @property
+    def manager(self) -> BackendManager:
+        return self.core.manager
+
+    @manager.setter
+    def manager(self, value: BackendManager) -> None:
+        self.core.manager = value
+
+    @property
     def signal_backend(self) -> SignalBackend:
         return self.core.signal_backend
 
@@ -312,6 +320,7 @@ class SignalTUI(
                 self._web_token,
                 host=self._web_host,
                 require_auth=not self._web_no_auth,
+                bus=self.bus,
             )
             if self._web_server is not None:
                 # Only the web-signal-tui-bg shell alias used to print the
@@ -333,10 +342,10 @@ class SignalTUI(
         # Start poll worker immediately — Signal and WhatsApp events flow
         # as soon as their backends are ready (independent workers below).
         self._polling_active = True
-        self.run_worker(self._poll_worker, exclusive=True, thread=True)
-        # Subscribe BEFORE starting the core so no connect event is missed.
+        # Subscribe BEFORE starting the core so no event is missed.  The poll
+        # worker is the single bus consumer (the core owns the event pump).
         self._core_sub = self.bus.subscribe()
-        self.run_worker(self._core_event_worker, exclusive=False, thread=True)
+        self.run_worker(self._poll_worker, exclusive=True, thread=True)
         self.core.start()
 
         self._init_native_renderer()
@@ -622,6 +631,7 @@ class SignalTUI(
     def on_exit_app(self):
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
+        self.core.stop()
         self.stop_address_book_refresh()
         try:
             self._hires_executor.shutdown(wait=False)
