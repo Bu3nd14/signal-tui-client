@@ -89,10 +89,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-if __name__ == "__main__":
-    import logging
+def main(argv: list[str] | None = None) -> int:
+    """Run the TUI (single-instance lock, logging, image detection, app)."""
 
-    args = _parse_args()
+    args = _parse_args(argv)
 
     # --debug: logging di livello DEBUG su /tmp/signal-tui.log (default INFO).
     # Utile per la strumentazione (es. timing di send_message_sync) senza
@@ -114,7 +114,7 @@ if __name__ == "__main__":
             "   If you're sure it's not running, delete the lock file and try again.",
             file=sys.stderr,
         )
-        sys.exit(1)
+        return 1
 
     # Detect the terminal image backend BEFORE ``app.run()``.  Any failure
     # degrades to CATIMG (current behaviour), never blocking startup.
@@ -197,3 +197,8 @@ if __name__ == "__main__":
     signal_module.signal(signal_module.SIGINT, _handle_sigint)
     app.run()
     _release_lock()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
