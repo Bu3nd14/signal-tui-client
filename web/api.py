@@ -13,7 +13,6 @@ import tempfile
 import threading
 import time
 import uuid
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote as url_quote
@@ -30,7 +29,9 @@ from models import (
     is_whatsapp_synthetic_media_text,
     pick_survivor_and_merge,
 )
+from server.ops.common import PROTOCOLS as _PROTOCOLS
 from web.bridge import push_event
+from web.ops import call_op
 from web.retry import (
     SEND_RETRY_MAX_ATTEMPTS,
     classify_send_error,
@@ -41,7 +42,6 @@ from web.send_registry import SendRegistry, build_fingerprint
 
 logger = logging.getLogger(__name__)
 
-_PROTOCOLS = {"signal", "whatsapp", "telegram"}
 _MAX_TEXT_LENGTH = 64 * 1024
 _MAX_ATTACHMENTS = 10
 _THUMB_WIDTHS = {96, 240, 480}
@@ -117,28 +117,6 @@ def _effective_host(request: Any) -> str:
     ):
         return forwarded.split(",", 1)[0].strip().lower()
     return (request.headers.get("host") or "").lower()
-
-
-@lru_cache(maxsize=1)
-def _emoji_categories() -> list[dict[str, Any]]:
-    import emoji
-
-    from emoji_data import PREDEFINED_CATEGORIES
-
-    aliases = {
-        char: data.get("en", "").strip(":")
-        for char, data in emoji.EMOJI_DATA.items()
-        if data.get("en")
-    }
-    return [
-        {
-            "category": name,
-            "icon": icon,
-            "emojis": list(chars),
-            "aliases": {char: aliases.get(char, "") for char in chars},
-        }
-        for name, icon, chars in PREDEFINED_CATEGORIES
-    ]
 
 
 def _infer_attachment_type(attachment_id: str, content_type: str | None) -> str | None:
@@ -1476,25 +1454,15 @@ def create_api_router() -> Any:
     registry = SendRegistry()
 
     @router.get("/emoji")
-    def emojis() -> JSONResponse:
+    async def emojis(request: Request) -> JSONResponse:
         return JSONResponse(
-            content=_emoji_categories(),
+            content=await call_op(request, "emoji.list"),
             headers={"Cache-Control": "public, max-age=3600"},
         )
 
     @router.get("/reactions")
     async def reactions(request: Request, protocol: str) -> dict[str, list[str]]:
-        if protocol != "telegram":
-            return {"emojis": []}
-        try:
-            backend = request.app.state.manager.get(protocol)
-            if backend is None or not hasattr(backend, "get_available_reactions"):
-                return {"emojis": []}
-            emojis = await asyncio.to_thread(backend.get_available_reactions)
-        except Exception:
-            logger.debug("Telegram available reactions request failed", exc_info=True)
-            return {"emojis": []}
-        return {"emojis": emojis if isinstance(emojis, list) else []}
+        return await call_op(request, "reactions.available", {"protocol": protocol})
 
     @router.post("/send")
     async def send(request: Request) -> dict[str, bool]:
@@ -1889,18 +1857,8 @@ def create_api_router() -> Any:
         return {"ok": True}
 
     @router.get("/status")
-    def backend_status(request: Request) -> dict[str, bool]:
-        """Real per-protocol connection state (not inferred from contacts).
-
-        A protocol with zero chats yet is still connected; a registered but
-        not-yet-connected backend is not.  Missing/unregistered protocols
-        (e.g. Telegram without credentials configured) report ``False``.
-        """
-        manager = request.app.state.manager
-        return {
-            proto: bool(getattr(manager.get(proto), "is_connected", False))
-            for proto in _PROTOCOLS
-        }
+    async def backend_status(request: Request) -> dict[str, bool]:
+        return await call_op(request, "server.status")
 
     @router.get("/contacts")
     def contacts(request: Request, q: str | None = None) -> list[dict[str, Any]]:
