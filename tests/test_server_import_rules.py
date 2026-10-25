@@ -339,3 +339,51 @@ def test_socket_adapter_imports_without_ui_or_protocols_loaded():
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# -- the Unix-socket client --------------------------------------------------------
+
+#: ``server`` modules the socket client may import (it does not import the
+#: adapter: both only share ``server.paths`` and the wire contract).
+SOCKET_CLIENT_SERVER_ALLOWLIST = {
+    "server.api",
+    "server.bus",
+    "server.client",
+    "server.paths",
+    "server.version",
+}
+
+
+def test_socket_client_imports_only_the_client_surface():
+    for name in ("client.py", "socket_client.py"):
+        modules = _imported_modules(ROOT / "server" / name)
+        roots = {m.split(".")[0] for m in modules}
+        assert roots & (WEB_FORBIDDEN_ROOTS | {"web", "fastapi", "starlette"}) == set()
+        assert roots - {"server"} <= set(sys.stdlib_module_names) | {"pydantic"}
+    modules = _imported_modules(ROOT / "server" / "socket_client.py")
+    server_modules = {m for m in modules if m.split(".")[0] == "server"}
+    assert server_modules <= SOCKET_CLIENT_SERVER_ALLOWLIST, sorted(
+        server_modules - SOCKET_CLIENT_SERVER_ALLOWLIST
+    )
+    assert SOCKET_CLIENT_SERVER_ALLOWLIST <= modules
+
+
+def test_socket_client_imports_without_ui_or_protocols_loaded():
+    import subprocess
+
+    code = (
+        "import sys, server.socket_client;"
+        "bad = sorted(m for m in sys.modules if m.split('.')[0] in "
+        "{'web','tui','textual','fastapi','starlette','protocols','transcription',"
+        "'signal_tui'}) + (['server.socket_adapter'] if 'server.socket_adapter' "
+        "in sys.modules else []);"
+        "print(bad); sys.exit(1 if bad else 0)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -80,14 +80,30 @@ class ChatClient(abc.ABC):
     """Operations + events of a chat server, over some transport."""
 
     @abc.abstractmethod
-    def call(self, name: str, data: dict[str, Any] | None = None) -> Any:
+    def call(
+        self,
+        name: str,
+        data: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> Any:
         """Run operation *name* with JSON request *data*; returns JSON data.
 
-        Raises :class:`ApiError` on a neutral API error.  May block.
+        Raises :class:`ApiError` on a neutral API error.  May block.  *timeout*
+        (seconds) bounds how long a remote transport waits for the answer; the
+        in-process client runs the operation inline and ignores it.  A remote
+        timeout does NOT cancel the operation: its outcome is then unknown
+        (see :class:`~server.socket_client.OperationTimeout`).
         """
 
     @abc.abstractmethod
-    async def acall(self, name: str, data: dict[str, Any] | None = None) -> Any:
+    async def acall(
+        self,
+        name: str,
+        data: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> Any:
         """Like :meth:`call` from a running event loop."""
 
     @abc.abstractmethod
@@ -146,10 +162,22 @@ class InProcessClient(ChatClient):
         self._core = core
         self._subs: list[InProcessSubscription] = []
 
-    def call(self, name: str, data: dict[str, Any] | None = None) -> Any:
+    def call(
+        self,
+        name: str,
+        data: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> Any:
         return self._core.api.call_json(name, data)
 
-    async def acall(self, name: str, data: dict[str, Any] | None = None) -> Any:
+    async def acall(
+        self,
+        name: str,
+        data: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> Any:
         return await self._core.api.acall_json(name, data)
 
     def subscribe(self, since: int | None = None) -> InProcessSubscription:

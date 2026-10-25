@@ -239,6 +239,33 @@ Because the filename decides the extension check, a missing `filename`
 defaults to the basename of the path. Confining paths to home/tmp was
 rejected: it blocks legitimate mounts and still trusts content.
 
+#### Client: `server/socket_client.py`
+
+`SocketClient.connect(path=None, timeout=5)` implements `ChatClient` over the
+contract above (`call(name, data, timeout=)`, `acall`, `subscribe(since)`,
+`close`; `connected`/`state`; path resolution from `server/paths.py`, shared
+with the adapter). One socket, one supervisor thread that reads it and
+reconnects; `call` is thread safe (ids, out-of-order answers). Errors are all
+`ApiError`s: server errors keep their code; client-side codes
+`server_unavailable` (`ServerUnavailable`: connection down/refused/silent,
+client closed; a call in flight then has an unknown outcome),
+`timeout` (`OperationTimeout`: the operation is not cancelled, outcome
+unknown) and `incompatible_server` (`IncompatibleServer`: `rpc.hello`
+`api_version` differs; final, also on reconnect).
+
+Liveness: no bytes for `heartbeat_timeout` (15 s = 3 heartbeats) kills the
+connection; a client without subscription pings every 5 s instead.
+Reconnect: bounded jittered backoff (0.1 s to 5 s, forever unless
+`reconnect_timeout`); calls fail immediately meanwhile. The event stream is
+resumed with `events.subscribe {since: last seq seen}`. Subscribers get the
+synthetic event `client_connection {state: "lost"|"restored", reason}`
+(seq = last server seq, never advances the stream; consumers ignore unknown
+types) and, when events cannot be replayed (`gap` from the server) or the
+server restarted (runtime file pid/`started_at` changed, or `last_seq` went
+backwards), a `gap` event (`reason: "restart"` for a restart) so the frontend
+resyncs. All subscriptions of a client share one server-side stream; later
+ones are served from a ring of the last 2000 events.
+
 ### 4.3 HTTP (browser)
 
 - **Option A (now):** keep the current REST shapes used by `web/static`;
