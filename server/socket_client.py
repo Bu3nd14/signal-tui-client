@@ -719,10 +719,6 @@ class SocketClient(ChatClient):
         for sub in self._subs:
             sub._push(event)
 
-    def _emit_state(self, state: str, reason: str) -> None:
-        with self._lock:
-            self._broadcast_locked(CONNECTION_EVENT, {"state": state, "reason": reason})
-
     # -- connection lifecycle ---------------------------------------------------
 
     def _read_identity(self) -> tuple[Any, Any] | None:
@@ -936,13 +932,19 @@ class SocketClient(ChatClient):
             orphans = list(conn.pending.values())
             conn.pending.clear()
             announce = current and not self._closed
+            if announce:
+                # Same critical section that makes ``connected`` False: exactly
+                # the subscribers that existed at the loss get "lost"; one
+                # subscribing afterwards sees only the later "restored".
+                self._broadcast_locked(
+                    CONNECTION_EVENT, {"state": "lost", "reason": reason}
+                )
         conn.shutdown()
         error = ServerUnavailable(f"Connection to the server lost: {reason}")
         for pending in orphans:
             pending.resolve(error=error)
         if announce:
             logger.info("Server connection lost: %s", reason)
-            self._emit_state("lost", reason)
 
     def _run(self, conn: _Conn | None) -> None:
         """Supervisor thread: read the connection, reconnect when it drops."""
