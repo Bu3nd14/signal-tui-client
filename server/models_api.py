@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, Field, StrictBool
+from pydantic import BaseModel, BeforeValidator, Field, StrictBool, StrictStr
 
 
 def _stripped(value: Any) -> str:
@@ -101,3 +101,31 @@ class MessagesPageRequest(BaseModel):
 
 
 # ``messages.page`` returns ``list[dict[str, Any]]`` (see server/ops/messages.py).
+
+
+class MessagesEditRequest(BaseModel):
+    # Strict str: a missing or non-string field is "Invalid request" (legacy).
+    # Emptiness / protocol / length checks are done by the operation.
+    protocol: StrictStr
+    contact_id: StrictStr
+    message_id: StrictStr
+    new_text: StrictStr
+
+
+class OkOut(BaseModel):
+    ok: bool
+
+
+# -- reactions ----------------------------------------------------------------
+
+
+class ReactionsSetRequest(BaseModel):
+    protocol: StrictStr
+    contact_id: StrictStr
+    message_id: StrictStr
+    emoji: StrictStr
+
+
+class ReactionsSetOut(BaseModel):
+    ok: bool
+    reactions: list[dict[str, Any]]

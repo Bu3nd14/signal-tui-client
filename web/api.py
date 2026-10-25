@@ -15,9 +15,6 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from models import (
-    contact_storage_keys,
-)
 from server.media import (
     _IMAGE_EXTENSIONS,
     _VIDEO_EXTENSIONS,
@@ -26,9 +23,9 @@ from server.media import (
     _attachment_version,  # noqa: F401  (re-export)
 )
 from server.messages import (
+    MAX_TEXT_LENGTH,
     _cross_key_dedup_rows,  # noqa: F401  (re-export)
     _group_sender_resolver,  # noqa: F401  (re-export)
-    _message_edit_id,
     _messages,
     _quoted_media_by_filename,  # noqa: F401  (re-export)
 )
@@ -45,7 +42,7 @@ from web.send_registry import SendRegistry, build_fingerprint
 
 logger = logging.getLogger(__name__)
 
-_MAX_TEXT_LENGTH = 64 * 1024
+_MAX_TEXT_LENGTH = MAX_TEXT_LENGTH
 _MAX_ATTACHMENTS = 10
 _THUMB_WIDTHS = {96, 240, 480}
 _THUMB_CACHE_LIMIT = 500 * 1024 * 1024
@@ -93,172 +90,6 @@ def _effective_host(request: Any) -> str:
     ):
         return forwarded.split(",", 1)[0].strip().lower()
     return (request.headers.get("host") or "").lower()
-
-
-def _message_row_for_edit(
-    protocol: str,
-    contact_id: str,
-    message_id: str,
-    extra_keys: tuple[str, ...] = (),
-) -> dict[str, Any] | None:
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    keys = [contact_id, *(key for key in extra_keys if key)]
-    placeholders = ", ".join("?" for _ in keys)
-    with _DB_LOCK:
-        try:
-            connection = sqlite3.connect(backend.DB_FILE)
-            connection.row_factory = sqlite3.Row
-            try:
-                row = connection.execute(
-                    "SELECT id, msg_id, text, is_mine, timestamp, protocol, msg_type, "
-                    "status FROM messages "
-                    f"WHERE protocol = ? AND contact_number IN ({placeholders}) "
-                    "AND (msg_id = ? OR (? = 'signal' AND msg_id IS NULL "
-                    "AND timestamp = CAST(? AS INTEGER))) "
-                    "ORDER BY CASE WHEN msg_id = ? THEN 0 ELSE 1 END LIMIT 1",
-                    (
-                        protocol,
-                        *keys,
-                        message_id,
-                        protocol,
-                        message_id,
-                        message_id,
-                    ),
-                ).fetchone()
-            finally:
-                connection.close()
-        except sqlite3.Error:
-            from fastapi import HTTPException
-
-            logger.exception(
-                "Web edit lookup database error: protocol=%s contact=%s",
-                protocol,
-                contact_id,
-            )
-            raise HTTPException(status_code=500, detail="Database error") from None
-    return dict(row) if row else None
-
-
-def _message_row_for_reaction(
-    protocol: str, contact_id: str, message_id: str
-) -> dict[str, Any] | None:
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    with _DB_LOCK:
-        try:
-            connection = sqlite3.connect(backend.DB_FILE)
-            connection.row_factory = sqlite3.Row
-            try:
-                row = connection.execute(
-                    "SELECT id, msg_id, is_mine, timestamp, protocol FROM messages "
-                    "WHERE protocol = ? AND contact_number = ? AND "
-                    "(msg_id = ? "
-                    "OR (? = 'signal' AND timestamp = CAST(? AS INTEGER)) "
-                    "OR (? = 'signal' AND id = CAST(? AS INTEGER))) "
-                    "ORDER BY CASE WHEN msg_id = ? THEN 0 ELSE 1 END LIMIT 1",
-                    (
-                        protocol,
-                        contact_id,
-                        message_id,
-                        protocol,
-                        message_id,
-                        protocol,
-                        message_id,
-                        message_id,
-                    ),
-                ).fetchone()
-            finally:
-                connection.close()
-        except sqlite3.Error:
-            from fastapi import HTTPException
-
-            logger.exception(
-                "Web reaction lookup database error: protocol=%s contact=%s",
-                protocol,
-                contact_id,
-            )
-            raise HTTPException(status_code=500, detail="Database error") from None
-    return dict(row) if row else None
-
-
-def _persist_message_edit(
-    protocol: str, contact_id: str, message_id: str, new_text: str
-) -> int:
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    with _DB_LOCK:
-        connection = sqlite3.connect(backend.DB_FILE)
-        try:
-            cursor = connection.execute(
-                "UPDATE messages SET text = ?, edited = 1 "
-                "WHERE protocol = ? AND contact_number = ? "
-                "AND (msg_id = ? OR (? = 'signal' AND msg_id IS NULL "
-                "AND timestamp = CAST(? AS INTEGER)))",
-                (
-                    new_text,
-                    protocol,
-                    contact_id,
-                    message_id,
-                    protocol,
-                    message_id,
-                ),
-            )
-            connection.commit()
-            return cursor.rowcount
-        finally:
-            connection.close()
-
-
-def _telegram_reaction_snapshot(
-    contact_id: str, message_id: str, reaction_emoji: str
-) -> list[dict[str, Any]]:
-    message = next(
-        (
-            item
-            for item in _messages("telegram", contact_id)
-            if str(item["id"]) == message_id
-        ),
-        {},
-    )
-    snapshot: list[dict[str, Any]] = []
-    for reaction in message.get("reactions", []):
-        count = int(reaction.get("count") or 0)
-        authors = [
-            author
-            for author in reaction.get("authors", [])
-            if author not in {"You", "Tu"}
-        ]
-        if reaction.get("is_mine"):
-            count -= 1
-        if count > 0:
-            snapshot.append(
-                {
-                    "emoji": str(reaction.get("emoji") or ""),
-                    "count": count,
-                    "is_mine": False,
-                    "authors": authors,
-                }
-            )
-
-    selected = next(
-        (item for item in snapshot if item["emoji"] == reaction_emoji), None
-    )
-    if selected is None:
-        selected = {
-            "emoji": reaction_emoji,
-            "count": 0,
-            "is_mine": False,
-            "authors": [],
-        }
-        snapshot.append(selected)
-    selected["count"] += 1
-    selected["is_mine"] = True
-    selected["authors"].append("You")
-    return snapshot
 
 
 def _web_thumb_dir(proto: str) -> Path:
@@ -1018,205 +849,13 @@ def create_api_router() -> Any:
     async def messages_edit(
         request: Request, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        protocol = payload.get("protocol")
-        contact_id = payload.get("contact_id")
-        message_id = payload.get("message_id")
-        new_text = payload.get("new_text")
-        if (
-            not isinstance(protocol, str)
-            or protocol not in _PROTOCOLS
-            or not isinstance(contact_id, str)
-            or not contact_id.strip()
-            or not isinstance(message_id, str)
-            or not message_id.strip()
-            or not isinstance(new_text, str)
-            or not new_text.strip()
-            or len(new_text) > _MAX_TEXT_LENGTH
-        ):
-            raise HTTPException(status_code=400, detail="Invalid request")
-
-        # Read-union cross-key: la riga può stare sotto la chiave alias (@c.us
-        # ghost) mentre la richiesta arriva col canonical (@lid).
-        manager = request.app.state.manager
-        get_backend = getattr(manager, "get", None)
-        backend = get_backend(protocol) if callable(get_backend) else None
-        find_contact = getattr(backend, "find_contact", None)
-        contact = find_contact(contact_id) if callable(find_contact) else None
-        edit_keys = (
-            tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
-        )
-        row = _message_row_for_edit(
-            protocol, contact_id, message_id, extra_keys=edit_keys
-        )
-        if row is None:
-            raise HTTPException(status_code=404, detail="Not Found")
-        if _message_edit_id(row) is None:
-            raise HTTPException(status_code=400, detail="Message not editable")
-
-        try:
-            edited = await asyncio.to_thread(
-                manager.edit_message_sync,
-                protocol,
-                contact_id,
-                message_id,
-                new_text,
-            )
-            if not edited:
-                raise RuntimeError("Backend rejected message edit")
-            updated_rows = await asyncio.to_thread(
-                _persist_message_edit,
-                protocol,
-                contact_id,
-                message_id,
-                new_text,
-            )
-        except Exception:
-            logger.exception(
-                "Web edit failed: protocol=%s contact=%s", protocol, contact_id
-            )
-            raise HTTPException(status_code=502, detail="Message edit failed") from None
-
-        if updated_rows == 0:
-            logger.debug(
-                "Web edit persistence found no row: protocol=%s contact=%s id=%s",
-                protocol,
-                contact_id,
-                message_id,
-            )
-        backend = manager.get(protocol)
-        try:
-            await asyncio.to_thread(
-                backend.apply_edit,
-                contact_id,
-                message_id,
-                new_text,
-                is_mine=True,
-            )
-        except Exception:
-            logger.debug(
-                "Web edit backend cache sync failed: protocol=%s contact=%s",
-                protocol,
-                contact_id,
-                exc_info=True,
-            )
-
-        push_event(
-            {
-                "type": "message_edit",
-                "payload": {
-                    "protocol": protocol,
-                    "contact_id": contact_id,
-                    "message_id": str(message_id),
-                    "timestamp": int(row["timestamp"]),
-                    "old_text": row["text"] or "",
-                    "text": new_text,
-                    "is_mine": True,
-                },
-            }
-        )
-        return {"ok": True}
+        return await call_op(request, "messages.edit", payload)
 
     @router.post("/messages/reaction")
     async def messages_reaction(
         request: Request, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        protocol = payload.get("protocol")
-        contact_id = payload.get("contact_id")
-        message_id = payload.get("message_id")
-        reaction_emoji = payload.get("emoji")
-        if (
-            not isinstance(protocol, str)
-            or protocol not in _PROTOCOLS
-            or not isinstance(contact_id, str)
-            or not contact_id.strip()
-            or not isinstance(message_id, str)
-            or not message_id.strip()
-            or not isinstance(reaction_emoji, str)
-            or not reaction_emoji
-            or len(reaction_emoji) > 8
-        ):
-            raise HTTPException(status_code=400, detail="Invalid request")
-        import emoji
-
-        if not emoji.is_emoji(reaction_emoji):
-            raise HTTPException(status_code=400, detail="Invalid request")
-
-        contact_id = contact_id.strip()
-        message_id = message_id.strip()
-        manager = request.app.state.manager
-        backend = manager.get(protocol)
-        if backend is None:
-            raise HTTPException(status_code=404, detail="Backend not found")
-        row = _message_row_for_reaction(protocol, contact_id, message_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="Message not found")
-
-        target_timestamp = int(row["timestamp"])
-        target_author = None
-        backend_message_id = message_id
-        if protocol == "signal":
-            backend_message_id = str(target_timestamp)
-            target_author = (
-                str(getattr(backend, "user_number", ""))
-                if row["is_mine"]
-                else contact_id
-            )
-        try:
-            sent = await asyncio.to_thread(
-                backend.send_reaction_sync,
-                contact_id,
-                backend_message_id,
-                reaction_emoji,
-                target_author=target_author,
-            )
-        except Exception:  # noqa: BLE001
-            sent = False
-        if not sent:
-            raise HTTPException(status_code=502, detail="Reaction send failed")
-
-        event_timestamp = int(time.time() * 1000)
-        reaction_payload: dict[str, Any] = {
-            "mode": "snapshot" if protocol == "telegram" else "delta",
-            "target_message_id": str(row["msg_id"] or backend_message_id),
-            "target_timestamp": target_timestamp,
-            "emoji": reaction_emoji,
-            "is_mine": True,
-            "author_key": "me",
-            "author": "You",
-            "is_remove": False,
-            "timestamp": event_timestamp,
-        }
-        if protocol == "telegram":
-            reaction_payload["snapshot"] = _telegram_reaction_snapshot(
-                contact_id, message_id, reaction_emoji
-            )
-        aggregate = await asyncio.to_thread(
-            backend.apply_reaction, contact_id, reaction_payload
-        )
-        reactions = aggregate.get("reactions", []) if aggregate else []
-        resolved_message_id = (
-            str(aggregate["message_id"])
-            if aggregate and aggregate.get("message_id") is not None
-            else str(row["msg_id"] or backend_message_id)
-        )
-        resolved_timestamp = (
-            int(aggregate["timestamp"])
-            if aggregate and aggregate.get("timestamp") is not None
-            else target_timestamp
-        )
-        push_event(
-            {
-                "type": "reaction_update",
-                "payload": {
-                    "protocol": protocol,
-                    "contact_id": contact_id,
-                    "message_id": resolved_message_id,
-                    "timestamp": resolved_timestamp,
-                    "reactions": reactions,
-                },
-            }
-        )
-        return {"ok": True, "reactions": reactions}
+        return await call_op(request, "reactions.set", payload)
 
     @router.get("/media/{proto}/{attachment_id:path}")
     def media(

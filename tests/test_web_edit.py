@@ -5,8 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from event_harness import legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from server.bus import EventBus
+from web.bridge import close_bridge, init_bridge
 
 TOKEN = "correct-secret"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -178,8 +182,14 @@ def test_edit_success_applies_locally_and_pushes_event(edit_client):
     client, manager, db_file = edit_client
     _insert_message(db_file, timestamp=4321)
 
-    with patch("web.api.push_event") as push_event:
+    bus = EventBus()
+    sub = bus.subscribe()
+    init_bridge(bus)
+    try:
         response = client.post("/api/messages/edit", json=_payload(), headers=AUTH)
+    finally:
+        close_bridge()
+    frames = legacy_frames(sub.drain())
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
@@ -189,7 +199,7 @@ def test_edit_success_applies_locally_and_pushes_event(edit_client):
     manager.backend.apply_edit.assert_called_once_with(
         "alice", "message-1", "Dopo", is_mine=True
     )
-    push_event.assert_called_once_with(
+    assert frames == [
         {
             "type": "message_edit",
             "payload": {
@@ -202,4 +212,4 @@ def test_edit_success_applies_locally_and_pushes_event(edit_client):
                 "is_mine": True,
             },
         }
-    )
+    ]

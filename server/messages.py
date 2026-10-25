@@ -2,7 +2,8 @@
 
 SQLite read with cross-key read-union, intra/cross-key dedup, attachment and
 caption normalisation, quote-thumbnail resolution and group sender resolution.
-Moved verbatim from ``web/api.py``; no FastAPI/Starlette here.
+Also the edit/reaction row lookups and persistence. Moved verbatim from
+``web/api.py``; no FastAPI/Starlette here.
 """
 
 from __future__ import annotations
@@ -26,10 +27,13 @@ from models import (
     is_whatsapp_synthetic_media_text,
     pick_survivor_and_merge,
 )
+from server.api import ApiError
 from server.media import _IMAGE_EXTENSIONS, _VIDEO_EXTENSIONS, _attach_media_versions
 
 logger = logging.getLogger(__name__)
 
+#: Max length of an outgoing/edited message text.
+MAX_TEXT_LENGTH = 64 * 1024
 _MAX_MESSAGES_LIMIT = 2000
 _MESSAGES_LIMIT_SLACK = 50
 
@@ -996,3 +1000,165 @@ def messages_page(
         for message in result:
             message["quote_author"] = ""
     return result
+
+
+def _message_row_for_edit(
+    protocol: str,
+    contact_id: str,
+    message_id: str,
+    extra_keys: tuple[str, ...] = (),
+) -> dict[str, Any] | None:
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
+
+    keys = [contact_id, *(key for key in extra_keys if key)]
+    placeholders = ", ".join("?" for _ in keys)
+    with _DB_LOCK:
+        try:
+            connection = sqlite3.connect(backend.DB_FILE)
+            connection.row_factory = sqlite3.Row
+            try:
+                row = connection.execute(
+                    "SELECT id, msg_id, text, is_mine, timestamp, protocol, msg_type, "
+                    "status FROM messages "
+                    f"WHERE protocol = ? AND contact_number IN ({placeholders}) "
+                    "AND (msg_id = ? OR (? = 'signal' AND msg_id IS NULL "
+                    "AND timestamp = CAST(? AS INTEGER))) "
+                    "ORDER BY CASE WHEN msg_id = ? THEN 0 ELSE 1 END LIMIT 1",
+                    (
+                        protocol,
+                        *keys,
+                        message_id,
+                        protocol,
+                        message_id,
+                        message_id,
+                    ),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            logger.exception(
+                "Web edit lookup database error: protocol=%s contact=%s",
+                protocol,
+                contact_id,
+            )
+            raise ApiError("internal", "Database error") from None
+    return dict(row) if row else None
+
+
+def _message_row_for_reaction(
+    protocol: str, contact_id: str, message_id: str
+) -> dict[str, Any] | None:
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
+
+    with _DB_LOCK:
+        try:
+            connection = sqlite3.connect(backend.DB_FILE)
+            connection.row_factory = sqlite3.Row
+            try:
+                row = connection.execute(
+                    "SELECT id, msg_id, is_mine, timestamp, protocol FROM messages "
+                    "WHERE protocol = ? AND contact_number = ? AND "
+                    "(msg_id = ? "
+                    "OR (? = 'signal' AND timestamp = CAST(? AS INTEGER)) "
+                    "OR (? = 'signal' AND id = CAST(? AS INTEGER))) "
+                    "ORDER BY CASE WHEN msg_id = ? THEN 0 ELSE 1 END LIMIT 1",
+                    (
+                        protocol,
+                        contact_id,
+                        message_id,
+                        protocol,
+                        message_id,
+                        protocol,
+                        message_id,
+                        message_id,
+                    ),
+                ).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            logger.exception(
+                "Web reaction lookup database error: protocol=%s contact=%s",
+                protocol,
+                contact_id,
+            )
+            raise ApiError("internal", "Database error") from None
+    return dict(row) if row else None
+
+
+def _persist_message_edit(
+    protocol: str, contact_id: str, message_id: str, new_text: str
+) -> int:
+    import protocols.db as backend
+    from protocols.db import _DB_LOCK
+
+    with _DB_LOCK:
+        connection = sqlite3.connect(backend.DB_FILE)
+        try:
+            cursor = connection.execute(
+                "UPDATE messages SET text = ?, edited = 1 "
+                "WHERE protocol = ? AND contact_number = ? "
+                "AND (msg_id = ? OR (? = 'signal' AND msg_id IS NULL "
+                "AND timestamp = CAST(? AS INTEGER)))",
+                (
+                    new_text,
+                    protocol,
+                    contact_id,
+                    message_id,
+                    protocol,
+                    message_id,
+                ),
+            )
+            connection.commit()
+            return cursor.rowcount
+        finally:
+            connection.close()
+
+
+def _telegram_reaction_snapshot(
+    contact_id: str, message_id: str, reaction_emoji: str
+) -> list[dict[str, Any]]:
+    message = next(
+        (
+            item
+            for item in _messages("telegram", contact_id)
+            if str(item["id"]) == message_id
+        ),
+        {},
+    )
+    snapshot: list[dict[str, Any]] = []
+    for reaction in message.get("reactions", []):
+        count = int(reaction.get("count") or 0)
+        authors = [
+            author
+            for author in reaction.get("authors", [])
+            if author not in {"You", "Tu"}
+        ]
+        if reaction.get("is_mine"):
+            count -= 1
+        if count > 0:
+            snapshot.append(
+                {
+                    "emoji": str(reaction.get("emoji") or ""),
+                    "count": count,
+                    "is_mine": False,
+                    "authors": authors,
+                }
+            )
+
+    selected = next(
+        (item for item in snapshot if item["emoji"] == reaction_emoji), None
+    )
+    if selected is None:
+        selected = {
+            "emoji": reaction_emoji,
+            "count": 0,
+            "is_mine": False,
+            "authors": [],
+        }
+        snapshot.append(selected)
+    selected["count"] += 1
+    selected["is_mine"] = True
+    selected["authors"].append("You")
+    return snapshot
