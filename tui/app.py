@@ -35,7 +35,8 @@ from protocols import (
     TelegramBackend,
     WhatsAppBackend,
 )
-from server.bus import EventBus, Subscription
+from server.bus import EventBus
+from server.client import ChatClient, ClientSubscription, InProcessClient
 from server.core import ChatCore
 from tui.backend_connect import BackendConnectMixin
 from tui.chat_view import ChatViewMixin
@@ -155,7 +156,11 @@ class SignalTUI(
         # attributes below are aliases to the core's objects.
         self.bus = EventBus()
         self.core = ChatCore(self.bus)
-        self._core_sub: Subscription | None = None
+        # The TUI consumes core events (and, in later steps, operations)
+        # through the client; ``bus``/``core`` stay for the not yet migrated
+        # direct uses.
+        self.client: ChatClient = InProcessClient(self.core)
+        self._core_sub: ClientSubscription | None = None
         # Ctrl+C handler set by ``signal_tui.main``; ``on_mount`` installs it on
         # the running loop (None in tests and embedded use).
         self._sigint_callback: Callable[[], None] | None = None
@@ -356,7 +361,7 @@ class SignalTUI(
         self._polling_active = True
         # Subscribe BEFORE starting the core so no event is missed.  The poll
         # worker is the single bus consumer (the core owns the event pump).
-        self._core_sub = self.bus.subscribe()
+        self._core_sub = self.client.subscribe()
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
         self.core.start()
 
@@ -642,6 +647,7 @@ class SignalTUI(
     def on_exit_app(self):
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
+        self.client.close()
         self.core.stop()
         try:
             self._hires_executor.shutdown(wait=False)

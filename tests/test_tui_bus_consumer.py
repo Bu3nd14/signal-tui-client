@@ -17,7 +17,7 @@ CID = "+391234567890"
 def _app() -> SignalTUI:
     app = SignalTUI()
     app.call_from_thread = MagicMock()
-    app._core_sub = app.bus.subscribe()
+    app._core_sub = app.client.subscribe()
     app._polling_active = True
     return app
 
@@ -79,7 +79,7 @@ def test_gap_marks_list_dirty_and_triggers_full_flush():
     thread = _run_worker(app)
     try:
         # Force a GAP into the subscription the worker reads.
-        app._core_sub._push(
+        app._core_sub._sub._push(
             SimpleNamespace(seq=1, type=GAP, payload={"reason": "overflow"}, ts=0.0)
         )
         assert _wait(

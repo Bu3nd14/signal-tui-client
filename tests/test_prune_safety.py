@@ -291,6 +291,7 @@ class TestAppExitPrune:
         app._web_enabled = False
         # backend aliases delegate to the core (not built by object.__new__)
         app.core = MagicMock(telegram_backend=None)
+        app.client = MagicMock()
 
         with patch("protocols.db._prune_cache") as prune:
             SignalTUI.on_exit_app(app)

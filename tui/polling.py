@@ -1,4 +1,4 @@
-"""Bus consumer worker: applies core events to the TUI."""
+"""Event consumer worker: applies core events (from the client) to the TUI."""
 
 import logging
 import time
@@ -10,11 +10,11 @@ logger = logging.getLogger(__name__)
 
 class PollingMixin:
     def _poll_worker(self):
-        """Thread worker that consumes the core event bus.
+        """Thread worker that consumes the core events through ``self.client``.
 
         The event pump itself lives in ``ChatCore``: it polls the backends,
         does all domain handling and publishes core events.  This worker is
-        the single bus consumer of the TUI: every cycle it waits up to 0.1s
+        the single event consumer of the TUI: every cycle it waits up to 0.1s
         for an event, drains the rest of the batch and dispatches each event.
         ``backend_*`` events are applied on the UI thread; domain events go to
         the view handlers, which run on this worker thread and use
