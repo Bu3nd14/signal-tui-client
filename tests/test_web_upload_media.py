@@ -55,7 +55,9 @@ def test_store_upload_sanitizes_original_filename(monkeypatch, tmp_path):
 def test_store_upload_applies_kind_limit(monkeypatch, tmp_path):
     monkeypatch.setattr("web.uploads.upload_directory", lambda: tmp_path)
     monkeypatch.setitem(
-        __import__("web.uploads", fromlist=["_MAX_BYTES_BY_KIND"])._MAX_BYTES_BY_KIND,
+        __import__(
+            "server.uploads", fromlist=["_MAX_BYTES_BY_KIND"]
+        )._MAX_BYTES_BY_KIND,
         "image",
         8,
     )

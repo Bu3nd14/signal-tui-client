@@ -1689,7 +1689,7 @@ def test_send_multipart_cleanup_when_second_file_is_invalid_media(web_client):
 
 
 def test_send_multipart_cleanup_when_second_file_is_oversize(web_client):
-    from web import uploads as uploads_module
+    from server import uploads as uploads_module
 
     client, manager, db_file = web_client
     manager.contacts = [ChatContact("alice", "Alice", "signal")]

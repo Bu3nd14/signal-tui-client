@@ -14,17 +14,17 @@ from types import SimpleNamespace
 import pytest
 
 import web.api as web_api
-from web.api import (
-    _is_video_candidate,
-    _media_content_type,
-)
-from web.uploads import (
+from server.uploads import (
     UploadValidationError,
     _classify_upload,
     _mp4_has_video_track,
     _sniff_webm_kind,
-    _store_upload_sync,
 )
+from web.api import (
+    _is_video_candidate,
+    _media_content_type,
+)
+from web.uploads import _store_upload_sync
 
 # ── Fixture builder ───────────────────────────────────────────────────────────
 
