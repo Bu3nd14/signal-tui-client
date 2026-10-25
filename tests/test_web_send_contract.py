@@ -151,6 +151,29 @@ def test_json_text_send_matches_operation_and_publishes_message_frame(env):
     assert _frames(env) == [_MESSAGE_FRAME, _MESSAGE_FRAME]
 
 
+def test_request_body_cannot_select_local_frontend_modes(env):
+    """``optimistic`` / ``retry`` are operation knobs of local frontends: the
+    route drops them (JSON and multipart), so the send is the plain web one."""
+    body = _text(client_msg_id="knobs", optimistic={"timestamp": 5}, retry="nope")
+    json_response = env.client.post("/api/send", json=body, headers=AUTH)
+    form_response = env.client.post(
+        "/api/send",
+        data={**_text(client_msg_id="knobs2"), "optimistic": "{}", "retry": "0"},
+        files={"file": ("a.png", _PNG, "image/png")},
+        headers=AUTH,
+    )
+
+    assert json_response.status_code == 200
+    assert json_response.json() == {"ok": True}
+    assert form_response.status_code == 200
+    assert form_response.json() == {"ok": True}
+    # Plain web flavour: manager send (mirror path) + the web's own frame only.
+    assert [call[:3] for call in env.manager.send_calls] == [
+        ("signal", "alice", "Ciao")
+    ]
+    assert _frames(env) == [_MESSAGE_FRAME, _MESSAGE_FRAME]
+
+
 def test_duplicate_client_msg_id_is_idempotent_like_the_operation(env):
     first = env.client.post("/api/send", json=_text(client_msg_id="dup"), headers=AUTH)
     second = env.client.post("/api/send", json=_text(client_msg_id="dup"), headers=AUTH)

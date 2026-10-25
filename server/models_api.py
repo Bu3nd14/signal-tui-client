@@ -9,7 +9,14 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, Field, StrictBool, StrictStr
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+)
 
 from server.events_api import ContactWire
 
@@ -191,6 +198,36 @@ class AttachmentIn(BaseModel):
     rejected: Literal["too_large"] | None = None
 
 
+class OptimisticSend(BaseModel):
+    """A frontend that shows its message before the server confirms it.
+
+    Presence of this object (``MessagesSendRequest.optimistic``) selects the
+    *optimistic* flavour of ``messages.send`` (text only): the core seeds a
+    ``pending`` row in the chat cache, persists it BEFORE the network send,
+    bumps the contact's recency, publishes the legacy ``message`` frame, sends
+    through the contact's backend (no ``sent_mirror``: the pending row is the
+    local mirror), then moves the row to ``sent`` / ``failed`` and attaches the
+    server message id.  The frontend only draws its own bubble and reconciles
+    with the result.  ``timestamp`` is the client's millisecond timestamp: the
+    identity of the row until the echo arrives.  The other fields are display
+    metadata stored on the row as given (quote text and quoted-media
+    thumbnail); the quote the *wire* carries is the usual ``quote_*`` fields.
+
+    ``resend`` re-sends a ``failed`` row: nothing is seeded, the row goes
+    ``failed`` -> ``pending`` (``conflict`` when it is not failed) and the send
+    is attempted again.
+    """
+
+    timestamp: StrictInt
+    resend: StrictBool = False
+    quote_text: StrictStr | None = None
+    attachment_id: StrictStr | None = None
+    content_type: StrictStr | None = None
+    quote_attachment_id: StrictStr | None = None
+    quote_attachment_path: StrictStr | None = None
+    quote_content_type: StrictStr | None = None
+
+
 class MessagesSendRequest(BaseModel):
     # protocol / contact_id / text: any other type is "Invalid request" (legacy).
     # The remaining fields keep the legacy lenient handling (blank -> None, bad
@@ -208,6 +245,13 @@ class MessagesSendRequest(BaseModel):
     quote_attachment_id: Any = None
     batch_id: Any = None
     attachments: list[AttachmentIn] = Field(default_factory=list)
+    #: Retry transient backend errors with back-off (the web policy).  A caller
+    #: that wants exactly one attempt (the TUI, whose user retries by clicking
+    #: the failed bubble) passes ``False``.
+    retry: StrictBool = True
+    #: See :class:`OptimisticSend`.  Adapters must not forward it from
+    #: untrusted request bodies unless they mean to expose it.
+    optimistic: OptimisticSend | None = None
 
 
 class MessagesSendCheckRequest(MessagesSendRequest):

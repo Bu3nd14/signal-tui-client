@@ -183,6 +183,10 @@ def create_api_router() -> Any:
             raise HTTPException(status_code=400, detail="Invalid request") from None
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Invalid request")
+        # Operation-level knobs of local frontends (the TUI's optimistic send,
+        # its single-attempt policy): never settable from a web request.
+        payload.pop("optimistic", None)
+        payload.pop("retry", None)
 
         if is_multipart:
             # Form fields are strings: "" means absent, digits mean an int.  A

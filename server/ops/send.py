@@ -13,12 +13,15 @@ from typing import Any
 
 from server import messages as _domain
 from server.api import ApiError, ChatAPI, operation
+from server.domain import bump_recency
 from server.models_api import (
     AttachmentIn,
     MessagesSendCheckRequest,
     MessagesSendRequest,
+    OptimisticSend,
 )
 from server.ops.common import PROTOCOLS
+from server.outgoing import transition_outgoing_status
 from server.retry import (
     SEND_RETRY_MAX_ATTEMPTS,
     classify_send_error,
@@ -110,6 +113,8 @@ def _prepare(
         raise ApiError("invalid_request", "Too many attachments")
     if not slots_ok:
         raise _invalid()
+    if req.optimistic is not None and attachment_count:
+        raise _invalid()  # the optimistic flavour is text only
 
     # client_msg_id: opzionale con fallback server (client vecchi/tooling).
     client_msg_id_raw = req.client_msg_id
@@ -198,14 +203,19 @@ def _prepare(
             raise _invalid()
     if protocol == "signal" and quote_content_type is not None:
         if quote_attachment_id is None:
-            raise _invalid()
-        resolved = manager.get_attachment_path(protocol, quote_attachment_id)
-        path = Path(resolved) if resolved else None
-        quote_attachments = (
-            [f"{quote_content_type}:{path.name}:{path}"]
-            if path
-            else [quote_content_type]
-        )
+            if req.optimistic is None:
+                raise _invalid()
+            # A reply to media whose file id is unknown: the quote keeps its
+            # type but has no thumbnail (what the TUI always did).
+            quote_attachments = [quote_content_type]
+        else:
+            resolved = manager.get_attachment_path(protocol, quote_attachment_id)
+            path = Path(resolved) if resolved else None
+            quote_attachments = (
+                [f"{quote_content_type}:{path.name}:{path}"]
+                if path
+                else [quote_content_type]
+            )
 
     kwargs: dict[str, Any] = {
         "quote_timestamp": quote_timestamp,
@@ -248,18 +258,27 @@ def messages_send_check(api: ChatAPI, req: MessagesSendCheckRequest) -> dict[str
     return {"ok": True}
 
 
-@operation("messages.send", request=MessagesSendRequest, response=dict[str, bool])
-async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, bool]:
+@operation("messages.send", request=MessagesSendRequest, response=dict[str, Any])
+async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, Any]:
     """Send a text message, or attachments (the text captions the first one).
 
     Text sends are idempotent per ``(protocol, contact_id, client_msg_id)`` and
-    retried with backoff on transient backend errors (``send_retry`` frames);
-    attachment sends are neither deduplicated nor retried.  ``attachments`` are
-    local files stored by the adapter, which also deletes them afterwards.
+    retried with backoff on transient backend errors (``send_retry`` frames;
+    ``retry=false`` makes it a single attempt); attachment sends are neither
+    deduplicated nor retried.  ``attachments`` are local files stored by the
+    adapter, which also deletes them afterwards.
+
+    With ``optimistic`` (text only) the core also owns the sender's pending
+    row: it seeds and persists it before the network send, bumps the contact's
+    recency, then moves it to ``sent`` or ``failed`` and attaches the server
+    id.  The result is ``{ok, status, status_applied, message_id}``; on failure
+    the ``ApiError`` details carry ``status_applied`` and ``error``.
+
     Async: the backend calls run in worker threads and the retry back-off
     sleeps on the loop, so concurrent sends do not block each other.
     """
     attachments = req.attachments
+    opt = req.optimistic
     p = _prepare(
         api,
         req,
@@ -317,7 +336,18 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, boo
 
     succeeded = False
     message_id: str | None = None
+    failure: ApiError | None = None
+    last_error: str | None = None
+    # Optimistic flavour: True once the sender's row is ``pending`` (seeded or
+    # re-armed), i.e. a failure must move it to ``failed``.
+    row_pending = False
     try:
+        if opt is not None:
+            # A failure from here on (even while persisting) must not leave
+            # the cached row pending; a refused re-arm leaves it as it was.
+            row_pending = not opt.resend
+            await _begin_optimistic(backend, p, opt, contact.cache_key, api)
+            row_pending = True
         if attachments:
             # Sequential validation keeps error messages stable (the first
             # invalid file wins).
@@ -344,20 +374,31 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, boo
             # Ramo TESTO: retry con backoff esponenziale + jitter.
             # Nessun timeout aggiuntivo: i backend hanno timeout interni propri.
             rng = random.Random()
-            for attempt in range(1, SEND_RETRY_MAX_ATTEMPTS + 1):
+            max_attempts = SEND_RETRY_MAX_ATTEMPTS if req.retry else 1
+            for attempt in range(1, max_attempts + 1):
                 try:
-                    result = await asyncio.to_thread(
-                        manager.send_message_sync,
-                        protocol,
-                        contact_id,
-                        text,
-                        **kwargs,
-                    )
+                    started = time.perf_counter()
+                    if opt is None:
+                        result = await asyncio.to_thread(
+                            manager.send_message_sync,
+                            protocol,
+                            contact_id,
+                            text,
+                            **kwargs,
+                        )
+                    else:
+                        # Straight to the backend: no sent_mirror, the pending
+                        # row already is the local copy.
+                        result = await asyncio.to_thread(
+                            backend.send_message_sync, contact_id, text, **kwargs
+                        )
+                    _log_send_duration(protocol, contact_id, started)
                     if result is not None:
                         message_id = str(result)
                     succeeded = True
                     break
                 except Exception as exc:
+                    last_error = safe_error_text(exc)
                     classification = classify_send_error(protocol, exc)
                     if classification == "terminal":
                         logger.exception(
@@ -366,10 +407,10 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, boo
                             contact_id,
                         )
                         break
-                    if attempt == SEND_RETRY_MAX_ATTEMPTS:
+                    if attempt == max_attempts:
                         logger.exception(
                             "Send failed after %d attempts: protocol=%s contact=%s",
-                            SEND_RETRY_MAX_ATTEMPTS,
+                            max_attempts,
                             protocol,
                             contact_id,
                         )
@@ -398,33 +439,53 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, boo
                         }
                     )
                     await asyncio.sleep(delay)
-    except ApiError:
-        raise
-    except NotImplementedError:
+    except ApiError as exc:
+        failure = exc
+    except NotImplementedError as exc:
+        last_error = safe_error_text(exc)
         if attachments:
-            raise ApiError("not_supported", "Attachment send not supported") from None
+            failure = ApiError("not_supported", "Attachment send not supported")
+        else:
+            logger.exception(
+                "Web send failed: protocol=%s contact=%s", protocol, contact_id
+            )
+            failure = ApiError("backend_error", "Message send failed")
+    except Exception as exc:
+        last_error = safe_error_text(exc)
         logger.exception(
             "Web send failed: protocol=%s contact=%s", protocol, contact_id
         )
-        raise ApiError("backend_error", "Message send failed") from None
-    except Exception:
-        logger.exception(
-            "Web send failed: protocol=%s contact=%s", protocol, contact_id
-        )
-        raise ApiError("backend_error", "Message send failed") from None
+        failure = ApiError("backend_error", "Message send failed")
     finally:
         # B3/N2: mark_sent solo su successo, release in tutti gli altri casi
         # (incluso il 502 dopo i 3 tentativi), sempre vincolato al token.
         if registry_token is not None and registry_key is not None:
-            if succeeded:
+            if succeeded and failure is None:
                 registry.mark_sent(
                     registry_key, registry_token, message_id, int(time.time())
                 )
             else:
                 registry.release(registry_key, registry_token)
 
-    if not succeeded:
-        raise ApiError("backend_error", "Message send failed")
+    if failure is None and not succeeded:
+        failure = ApiError("backend_error", "Message send failed")
+    if failure is not None:
+        if opt is not None and row_pending:
+            applied = await asyncio.to_thread(
+                transition_outgoing_status,
+                backend,
+                protocol,
+                contact_id,
+                opt.timestamp,
+                text,
+                "failed",
+                ("pending",),
+            )
+            failure.details = {"status_applied": applied, "error": last_error}
+        raise failure from None
+
+    if opt is not None:
+        return await _finish_optimistic(backend, p, opt, message_id)
 
     api.publish_web_push(
         {
@@ -437,3 +498,148 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, boo
         }
     )
     return {"ok": True}
+
+
+def _log_send_duration(protocol: str, contact_id: str, started: float) -> None:
+    """The time a bubble stays grey is the backend send time: log it."""
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if elapsed_ms >= 1000.0:
+        logger.warning(
+            "send_message_sync slow: protocol=%s contact=%s %.0f ms",
+            protocol,
+            contact_id,
+            elapsed_ms,
+        )
+    else:
+        logger.debug(
+            "send_message_sync took %.1f ms (protocol=%s)", elapsed_ms, protocol
+        )
+
+
+async def _begin_optimistic(
+    backend: Any, p: _Prepared, opt: OptimisticSend, cache_key: str, api: ChatAPI
+) -> None:
+    """Seed + persist the pending row (or re-arm a failed one) before sending.
+
+    A new send
+    whose identity is already cached (same text within the dedup window) adds
+    nothing and persists nothing, as before; the contact is promoted anyway.
+    """
+    protocol, contact_id, text, ts = p.protocol, p.contact_id, p.text, opt.timestamp
+    bump_recency(backend, cache_key, ts)
+    if opt.resend:
+        rearmed = await asyncio.to_thread(
+            transition_outgoing_status,
+            backend,
+            protocol,
+            contact_id,
+            ts,
+            text,
+            "pending",
+            ("failed",),
+        )
+        if not rearmed:
+            raise ApiError(
+                "conflict",
+                "Message is not in a failed state",
+                details={"status_applied": False, "error": None},
+            )
+        return
+    data = {
+        "text": text,
+        "is_mine": True,
+        "sender": "You",
+        "timestamp": ts,
+        "quote_text": opt.quote_text,
+        "msg_type": "text",
+        "attachment_info": None,
+        "attachment_id": opt.attachment_id,
+        "content_type": opt.content_type,
+        "status": "pending",
+        "protocol": protocol,
+        "quote_timestamp": p.quote_timestamp,
+        "quote_author": p.quote_author,
+        "reply_to_message_id": p.reply_to_message_id,
+        # Quoted-media thumbnail metadata (display-only).
+        "quote_attachment_id": opt.quote_attachment_id,
+        "quote_attachment_path": opt.quote_attachment_path,
+        "quote_content_type": opt.quote_content_type,
+    }
+    # The cache seed must land in the contact's OWN backend cache, or the
+    # backend would not recognise the echo and queue it again (double bubble).
+    added = await asyncio.to_thread(backend.ingest_message, contact_id, data, ts, False)
+    logger.debug(
+        "optimistic ingest: added=%s protocol=%s contact=%r ts=%s text=%r",
+        added,
+        protocol,
+        contact_id,
+        ts,
+        text[:60],
+    )
+    if added is True:
+        # SQLite write BEFORE the network send, so the echo always finds the
+        # row to upgrade.
+        await asyncio.to_thread(backend._persist_message, contact_id, data, ts)
+        api.publish_web_push(
+            {
+                "type": "message",
+                "payload": {
+                    "id": data.get("id"),
+                    "protocol": protocol,
+                    "contact_id": contact_id,
+                    "timestamp": ts,
+                    "is_mine": True,
+                },
+            }
+        )
+
+
+async def _finish_optimistic(
+    backend: Any, p: _Prepared, opt: OptimisticSend, message_id: str | None
+) -> dict[str, Any]:
+    """``pending`` -> ``sent`` and the server id onto the cached row."""
+    protocol, contact_id, text, ts = p.protocol, p.contact_id, p.text, opt.timestamp
+    applied = await asyncio.to_thread(
+        transition_outgoing_status,
+        backend,
+        protocol,
+        contact_id,
+        ts,
+        text,
+        "sent",
+        ("pending",),
+    )
+    attached: str | None = None
+    if message_id:
+        # Attach the real id to the optimistic row so the echo matches by id
+        # and never rewrites the optimistic timestamp.
+        try:
+            await asyncio.to_thread(
+                backend.ingest_message,
+                contact_id,
+                {
+                    "id": message_id,
+                    "text": text,
+                    "is_mine": True,
+                    "sender": "You",
+                    "timestamp": ts,
+                    "quote_text": p.quote_message,
+                    "quote_timestamp": p.quote_timestamp,
+                    "quote_author": p.quote_author,
+                    "reply_to_message_id": p.reply_to_message_id,
+                },
+                ts,
+            )
+            attached = message_id
+        except Exception:
+            logger.exception(
+                "Attaching the server id failed: protocol=%s contact=%s",
+                protocol,
+                contact_id,
+            )
+    return {
+        "ok": True,
+        "status": "sent",
+        "status_applied": applied,
+        "message_id": attached,
+    }
