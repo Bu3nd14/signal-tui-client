@@ -24,6 +24,11 @@ from filename_utils import sanitize_filename
 #: Attachments accepted by a single send.
 MAX_ATTACHMENTS = 10
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+#: Gmail attachments are any file (not the media-kind policy above); the HTTP
+#: adapter needs the limits to size its multipart parsing and temp copies.
+GMAIL_MAX_ATTACHMENTS = 10
+GMAIL_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+GMAIL_MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024
 _MAX_BYTES_BY_KIND = {
     "image": MAX_UPLOAD_BYTES,
     "video": 100 * 1024 * 1024,
@@ -264,6 +269,8 @@ class UploadGuard:
     full.  ``max_bytes`` optionally caps this file (e.g. what remains of a
     request-wide budget).  Format problems (400) are not raised here: an
     incomplete header is not classifiable, :func:`validate_upload` decides.
+    ``media_limits=False`` (mail attachments are any file) applies ``max_bytes``
+    only.
     """
 
     def __init__(
@@ -272,7 +279,9 @@ class UploadGuard:
         max_bytes: int | None = None,
         declared_content_type: str | None = None,
         filename: str | None = None,
+        media_limits: bool = True,
     ) -> None:
+        self._media_limits = media_limits
         self._max_bytes = max_bytes
         self._declared = declared_content_type
         self._filename = filename
@@ -286,6 +295,8 @@ class UploadGuard:
         # reading, not after storing it all.
         if self._max_bytes is not None and self.total > self._max_bytes:
             raise UploadValidationError(413)
+        if not self._media_limits:
+            return  # not media (mail attachments): only the caller's cap applies
         if self.total > max(_MAX_BYTES_BY_KIND.values()):
             raise UploadValidationError(413)
         if len(self._header) < _SNIFF_BYTES:
@@ -328,15 +339,18 @@ def validate_upload(
     return ValidatedUpload(path, clean_name, mime_type, media_kind)
 
 
-def upload_directory() -> Path:
-    """Staging directory of adapter uploads (``<cache dir>/web-uploads``).
-
-    ``protocols.db.CACHE_DIR`` is read at call time, like the rest of the cache
-    layout, so adapters never need to import ``protocols`` for it.
-    """
+def cache_directory() -> Path:
+    """The cache directory (``protocols.db.CACHE_DIR``, read at call time, like
+    the rest of the cache layout, so adapters never need to import ``protocols``
+    for it)."""
     import protocols.db as backend
 
-    return Path(backend.CACHE_DIR) / "web-uploads"
+    return Path(backend.CACHE_DIR)
+
+
+def upload_directory() -> Path:
+    """Staging directory of adapter uploads (``<cache dir>/web-uploads``)."""
+    return cache_directory() / "web-uploads"
 
 
 # -- staging of local files (adapters whose clients name paths) -------------------
@@ -354,6 +368,7 @@ def stage_local_file(
     filename: str | None,
     content_type: str | None,
     max_bytes: int | None = None,
+    media_limits: bool = True,
 ) -> Path:
     """Copy a client-named local file into the upload directory; return the copy.
 
@@ -365,6 +380,8 @@ def stage_local_file(
     from that descriptor, so nothing can be swapped in between check and read.
     :class:`UploadGuard` cuts the copy off mid-way when a size limit is hit
     (``max_bytes`` caps this file, e.g. what is left of a total budget).
+    ``media_limits=False`` is for files that are not media (mail attachments):
+    only ``max_bytes`` applies, not the per-kind media limits.
 
     Raises ``UploadValidationError`` (413 over a limit; 400 for a path that is
     not an acceptable local regular file) and ``OSError`` on storage failures.
@@ -384,7 +401,10 @@ def stage_local_file(
         directory = upload_directory()
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         guard = UploadGuard(
-            max_bytes=max_bytes, declared_content_type=content_type, filename=filename
+            max_bytes=max_bytes,
+            declared_content_type=content_type,
+            filename=filename,
+            media_limits=media_limits,
         )
         suffix = Path(sanitize_filename(filename)).suffix.lower()
         with tempfile.NamedTemporaryFile(

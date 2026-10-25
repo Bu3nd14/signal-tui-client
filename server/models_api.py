@@ -513,3 +513,78 @@ class OpenAIKeyRequest(BaseModel):
     """Checked by the operation ('Chiave non valida')."""
 
     api_key: Any = None
+
+
+# -- gmail ----------------------------------------------------------------------
+
+
+def _none_as_empty(value: Any) -> Any:
+    return "" if value is None else value
+
+
+#: A form-like text field: absent/``null`` means empty (the legacy multipart
+#: handling); the operation validates the content.
+FormText = Annotated[str, BeforeValidator(_none_as_empty)]
+
+
+class GmailMessageRef(BaseModel):
+    """One message of a folder (``folder`` ``None``: the configured one)."""
+
+    uid: int
+    folder: str | None = None
+
+
+class GmailMessagesListRequest(BaseModel):
+    folder: str | None = None
+    offset: int = 0
+    limit: int = 50
+    refresh: StrictBool = False
+
+
+class GmailMessagesBulkDeleteRequest(BaseModel):
+    """``uids`` and ``folder`` are checked by the operation (own error texts)."""
+
+    uids: Any = None
+    folder: Any = None
+
+
+class GmailAttachmentRequest(GmailMessageRef):
+    index: int
+
+
+class GmailMessagesSendRequest(BaseModel):
+    """Compose and send a mail.  ``attachments`` are local files the adapter
+    stored (any file type; the operation enforces the Gmail limits)."""
+
+    to: FormText = ""
+    cc: FormText = ""
+    bcc: FormText = ""
+    subject: FormText = ""
+    text: FormText = ""
+    reply_to_uid: int | None = None
+    reply_to_folder: str | None = None
+    attachments: list[AttachmentIn] = Field(default_factory=list)
+
+
+class GmailMessagesSendCheckRequest(GmailMessagesSendRequest):
+    """``gmail.messages.send.check``: a send without its files (not stored yet),
+    like :class:`MessagesSendCheckRequest`."""
+
+    attachment_count: int = Field(default=0, ge=0)
+    slots_ok: bool = True
+
+
+class GmailImageRequest(BaseModel):
+    """``token``: the HMAC-signed value ``server.gmail.sign_image_url`` issued."""
+
+    token: str
+
+
+class GmailAttachmentOut(BlobOut):
+    """A downloaded mail attachment: a temporary blob plus its (safe) name.
+
+    The file is the caller's to delete once delivered; the core also prunes
+    stale ones (see ``server.gmail.write_blob``).
+    """
+
+    filename: str

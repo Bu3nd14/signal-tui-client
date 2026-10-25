@@ -963,10 +963,96 @@ def test_check_operation_never_sees_client_paths(env, png):
 
 def test_attachment_policy_covers_every_operation_with_attachments(env):
     """A new operation taking AttachmentIn must get an explicit decision."""
-    assert sa.attachment_operations(env.api) == {"messages.send", "messages.send.check"}
+    assert sa.attachment_operations(env.api) == {
+        "messages.send",
+        "messages.send.check",
+        "gmail.messages.send",
+        "gmail.messages.send.check",
+    }
     assert sa.attachment_operations(env.api) == (
         sa.STAGING_OPERATIONS | sa.IGNORED_ATTACHMENT_OPERATIONS
     )
+
+
+# -- Gmail attachments (mc-im6) -------------------------------------------------------
+
+
+@pytest.fixture
+def mail(monkeypatch):
+    from server import gmail
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_send(**kwargs: Any) -> str:
+        kwargs["attachments"] = list(kwargs["attachments"])
+        calls.append(kwargs)
+        return "<id@example.com>"
+
+    monkeypatch.setattr(gmail, "send_email", fake_send)
+    return calls
+
+
+def _mail(client: Rpc, *paths: Any, **extra: Any) -> dict:
+    attachments = [
+        p if isinstance(p, dict) else {"path": str(p), "filename": Path(p).name}
+        for p in paths
+    ]
+    return client.call(
+        "gmail.messages.send",
+        {"to": "a@example.com", "text": "hi", "attachments": attachments, **extra},
+    )
+
+
+def test_gmail_attachments_are_copied_read_and_cleaned_up(env, mail, tmp_path):
+    zipped = tmp_path / "archive.zip"
+    zipped.write_bytes(b"PK\x03\x04" + b"z" * 100)
+    # Not media: a "png" above the 20 MB media limit is a fine mail attachment.
+    big = tmp_path / "big.png"
+    big.write_bytes(_PNG + b"0" * (21 * 1024 * 1024))
+    reply = _mail(env.connect(), zipped, big)
+    assert reply["result"] == {"ok": True, "message_id": "<id@example.com>"}
+    (call,) = mail
+    assert [(n, len(d)) for n, d in call["attachments"]] == [
+        ("archive.zip", 104),
+        ("big.png", len(_PNG) + 21 * 1024 * 1024),
+    ]
+    assert zipped.read_bytes().startswith(b"PK")  # the client's file is untouched
+    assert _uploads(env) == []
+
+
+def test_gmail_attachment_checks_run_before_any_copy(env, mail, tmp_path, monkeypatch):
+    copies = []
+    monkeypatch.setattr(sa, "stage_local_file", lambda *a, **k: copies.append(a))
+    note = tmp_path / "n.txt"
+    note.write_text("x")
+    reply = _mail(env.connect(), *([note] * 11))
+    assert reply["error"]["data"] == {
+        "code": "invalid_request",
+        "message": "Troppi allegati",
+        "details": None,
+    }
+    assert copies == [] and mail == []
+
+
+def test_gmail_attachment_over_the_gmail_limit_is_too_large(env, mail, tmp_path):
+    big = tmp_path / "big.bin"
+    with big.open("wb") as handle:
+        handle.truncate(25 * 1024 * 1024 + 1)
+    reply = _mail(env.connect(), big)
+    assert reply["error"]["data"]["code"] == "too_large"
+    assert mail == [] and _uploads(env) == []
+
+
+def test_gmail_attachment_symlink_and_missing_paths_are_refused(env, mail, tmp_path):
+    target = tmp_path / "t.txt"
+    target.write_text("x")
+    link = tmp_path / "l.txt"
+    link.symlink_to(target)
+    client = env.connect()
+    for path in (link, tmp_path / "nope.txt", Path("relative.txt")):
+        reply = _mail(client, {"path": str(path), "filename": "x.txt"})
+        assert reply["error"]["data"]["code"] == "invalid_request", path
+    assert mail == [] and _uploads(env) == []
 
 
 def test_unknown_attachment_operation_blocks_startup(tmp_path, monkeypatch):
