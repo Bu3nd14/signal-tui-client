@@ -30,7 +30,6 @@ from server.uploads import (
     ALLOWED_EXTENSIONS,
     UploadGuard,
     UploadValidationError,  # noqa: F401  (re-export for callers/tests)
-    validate_upload,
 )
 
 #: Hard cap on the total bytes of a single multi-attachment request.
@@ -50,19 +49,6 @@ class TempUpload:
     @property
     def size(self) -> int:
         return self.path.stat().st_size
-
-    def cleanup(self) -> None:
-        self.path.unlink(missing_ok=True)
-
-
-@dataclass(frozen=True)
-class StoredUpload:
-    """A validated upload (``TempUpload`` + ``server.uploads`` verdict)."""
-
-    path: Path
-    filename: str
-    mime_type: str
-    media_kind: str
 
     def cleanup(self) -> None:
         self.path.unlink(missing_ok=True)
@@ -143,23 +129,5 @@ async def store_temp_upload(upload: Any, *, max_bytes: int | None = None) -> Tem
     """
     try:
         return await asyncio.to_thread(_copy_upload_sync, upload, max_bytes=max_bytes)
-    finally:
-        await upload.close()
-
-
-def _store_upload_sync(upload: Any, *, max_bytes: int | None = None) -> StoredUpload:
-    temp = _copy_upload_sync(upload, max_bytes=max_bytes)
-    try:
-        valid = validate_upload(temp.path, temp.filename, temp.content_type)
-    except Exception:
-        temp.cleanup()
-        raise
-    return StoredUpload(valid.path, valid.filename, valid.mime_type, valid.media_kind)
-
-
-async def store_upload(upload: Any, *, max_bytes: int | None = None) -> StoredUpload:
-    """Copy and validate in one step (copy + ``server.uploads.validate_upload``)."""
-    try:
-        return await asyncio.to_thread(_store_upload_sync, upload, max_bytes=max_bytes)
     finally:
         await upload.close()

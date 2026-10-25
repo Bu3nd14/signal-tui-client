@@ -219,7 +219,10 @@ class TestCacheOnlyLookup:
         backend = _wa_backend(book=[book])
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event"), TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push"),
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={
@@ -239,7 +242,7 @@ class TestCacheOnlyLookup:
         backend._rest.list_all_contacts = MagicMock()
         backend._lid_resolve_remote = MagicMock()
         to_thread = MagicMock()
-        monkeypatch.setattr("web.api.asyncio.to_thread", to_thread)
+        monkeypatch.setattr("server.ops.send.asyncio.to_thread", to_thread)
 
         assert backend.find_contact("393@c.us") is book
 
@@ -256,7 +259,10 @@ class TestCacheOnlyLookup:
         backend._lid_resolve_remote = MagicMock()
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event"), TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push"),
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={
@@ -354,7 +360,10 @@ class TestActiveChatRegression:
         backend.register_contact = MagicMock()
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event") as pushed, TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push") as pushed,
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={
@@ -380,7 +389,10 @@ class TestWhatsAppIdentity:
         backend = _wa_backend(book=[book], lid_map={})
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event") as pushed, TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push") as pushed,
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={
@@ -402,7 +414,10 @@ class TestWhatsAppIdentity:
         backend = _wa_backend(book=[book], lid_map={})
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event") as pushed, TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push") as pushed,
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 data={"protocol": "whatsapp", "contact_id": "393@c.us", "text": ""},
@@ -462,7 +477,10 @@ class TestWhatsAppIdentity:
         manager = _RecordingManager(backend)
 
         def send():
-            with patch("web.api.push_event"), TestClient(_app(manager)) as client:
+            with (
+                patch("server.api.ChatAPI.publish_web_push"),
+                TestClient(_app(manager)) as client,
+            ):
                 return client.post(
                     "/api/send",
                     json={
@@ -568,7 +586,10 @@ class TestTelegramBookOnlySend:
         backend._address_book_ts = time.monotonic()
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event") as pushed, TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push") as pushed,
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={

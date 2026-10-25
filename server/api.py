@@ -34,6 +34,8 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from server.send_registry import SendRegistry
+
 #: Neutral error codes; each adapter maps them to its own form (HTTP status,
 #: JSON-RPC error, exception).  ``backend_error`` is a backend that answered
 #: but failed (HTTP 502); ``backend_down`` is one that is missing/unavailable.
@@ -44,6 +46,8 @@ ERROR_CODES = (
     "forbidden",
     "too_large",
     "conflict",
+    "unprocessable",
+    "not_supported",
     "backend_down",
     "backend_error",
     "internal",
@@ -126,6 +130,9 @@ class ChatAPI:
 
     def __init__(self, host: ApiHost) -> None:
         self._host = host
+        #: Text-send idempotency claims; per-process state, one per ChatAPI
+        #: (``ChatCore`` owns exactly one ChatAPI).
+        self.send_registry = SendRegistry()
         _load_operations()
 
     # -- host access (used by handlers) -------------------------------------

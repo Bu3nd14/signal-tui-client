@@ -32,6 +32,7 @@ from server.retry import (
 )
 from server.send_registry import SendRegistry, build_fingerprint
 from tests.test_web_plugin import AUTH, FakeManager, make_app
+from web.ops import get_api
 
 _PNG_1X1 = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
@@ -43,7 +44,7 @@ _PNG_1X1 = b64decode(
 def _disable_ws_broadcaster(monkeypatch):
     """Tieni fuori dai test il fan-out WebSocket.
 
-    Diversi test mockano ``web.api.asyncio.sleep``; poiché ``web.api`` importa
+    Diversi test mockano ``server.ops.send.asyncio.sleep``; poiché ``web.api`` importa
     il modulo ``asyncio`` reale, la patch è globale e trasforma il loop del
     broadcaster (``web.ws._broadcast``) in uno spin senza yield che blocca
     ``TestClient``.  Il broadcaster non è sotto test qui.
@@ -256,8 +257,8 @@ def test_send_success_first_attempt_no_retry():
     manager = _manager()
     calls = _script_sends(manager, [])
     with (
-        patch("web.api.push_event") as pushed,
-        patch("web.api.compute_delay", return_value=0.0) as delay_mock,
+        patch("server.api.ChatAPI.publish_web_push") as pushed,
+        patch("server.ops.send.compute_delay", return_value=0.0) as delay_mock,
         TestClient(make_app(manager)) as client,
     ):
         response = _send_text(client, client_msg_id="cid-1")
@@ -273,8 +274,8 @@ def test_send_retries_twice_then_succeeds():
     refused = OSError(errno.ECONNREFUSED, "refused")
     calls = _script_sends(manager, [refused, refused])
     with (
-        patch("web.api.push_event") as pushed,
-        patch("web.api.compute_delay", return_value=0.0) as delay_mock,
+        patch("server.api.ChatAPI.publish_web_push") as pushed,
+        patch("server.ops.send.compute_delay", return_value=0.0) as delay_mock,
         TestClient(make_app(manager)) as client,
     ):
         response = _send_text(client, client_msg_id="cid-retry")
@@ -294,8 +295,8 @@ def test_send_terminal_error_does_not_retry():
     manager = _manager()
     calls = _script_sends(manager, [PermissionError("denied")])
     with (
-        patch("web.api.push_event") as pushed,
-        patch("web.api.compute_delay", return_value=0.0) as delay_mock,
+        patch("server.api.ChatAPI.publish_web_push") as pushed,
+        patch("server.ops.send.compute_delay", return_value=0.0) as delay_mock,
         TestClient(make_app(manager)) as client,
     ):
         response = _send_text(client, client_msg_id="cid-terminal")
@@ -311,8 +312,8 @@ def test_send_exhausts_retries_returns_502():
     refused = OSError(errno.ECONNREFUSED, "refused")
     calls = _script_sends(manager, [refused] * 5)
     with (
-        patch("web.api.push_event") as pushed,
-        patch("web.api.compute_delay", return_value=0.0) as delay_mock,
+        patch("server.api.ChatAPI.publish_web_push") as pushed,
+        patch("server.ops.send.compute_delay", return_value=0.0) as delay_mock,
         TestClient(make_app(manager)) as client,
     ):
         response = _send_text(client, client_msg_id="cid-exhaust")
@@ -330,8 +331,8 @@ def test_send_attachments_never_retries():
         side_effect=OSError(errno.ECONNREFUSED, "refused")
     )
     with (
-        patch("web.api.push_event") as pushed,
-        patch("web.api.compute_delay", return_value=0.0) as delay_mock,
+        patch("server.api.ChatAPI.publish_web_push") as pushed,
+        patch("server.ops.send.compute_delay", return_value=0.0) as delay_mock,
         TestClient(make_app(manager)) as client,
     ):
         response = client.post(
@@ -351,7 +352,7 @@ def test_send_without_client_msg_id_still_succeeds():
     manager = _manager()
     calls = _script_sends(manager, [])
     with (
-        patch("web.api.push_event"),
+        patch("server.api.ChatAPI.publish_web_push"),
         TestClient(make_app(manager)) as client,
     ):
         response = _send_text(client)
@@ -365,8 +366,8 @@ def test_send_client_msg_id_over_128_falls_back_to_uuid():
     refused = OSError(errno.ECONNREFUSED, "refused")
     calls = _script_sends(manager, [refused])
     with (
-        patch("web.api.push_event") as pushed,
-        patch("web.api.compute_delay", return_value=0.0),
+        patch("server.api.ChatAPI.publish_web_push") as pushed,
+        patch("server.ops.send.compute_delay", return_value=0.0),
         TestClient(make_app(manager)) as client,
     ):
         response = _send_text(client, client_msg_id=long_id)
@@ -433,8 +434,8 @@ def test_send_retry_survives_exploding_str_and_succeeds():
     manager = _manager()
     calls = _script_sends(manager, [_ExplodingRetryableError(errno.ECONNREFUSED, "x")])
     with (
-        patch("web.api.push_event"),
-        patch("web.api.asyncio.sleep", new_callable=AsyncMock),
+        patch("server.api.ChatAPI.publish_web_push"),
+        patch("server.ops.send.asyncio.sleep", new_callable=AsyncMock),
         TestClient(make_app(manager)) as client,
     ):
         response = _send_text(client, client_msg_id="cid-exploding")
@@ -487,8 +488,8 @@ def test_client_msg_id_fallback_variants(raw, expected_fallback):
     refused = OSError(errno.ECONNREFUSED, "refused")
     _script_sends(manager, [refused])
     with (
-        patch("web.api.push_event") as pushed,
-        patch("web.api.asyncio.sleep", new_callable=AsyncMock),
+        patch("server.api.ChatAPI.publish_web_push") as pushed,
+        patch("server.ops.send.asyncio.sleep", new_callable=AsyncMock),
         TestClient(make_app(manager)) as client,
     ):
         response = _send_text(client, client_msg_id=raw)
@@ -507,8 +508,8 @@ def test_send_retry_error_message_is_truncated_to_200_chars():
     manager = _manager()
     _script_sends(manager, [OSError(errno.ECONNREFUSED, "x" * 500)])
     with (
-        patch("web.api.push_event") as pushed,
-        patch("web.api.asyncio.sleep", new_callable=AsyncMock),
+        patch("server.api.ChatAPI.publish_web_push") as pushed,
+        patch("server.ops.send.asyncio.sleep", new_callable=AsyncMock),
         TestClient(make_app(manager)) as client,
     ):
         response = _send_text(client, client_msg_id="cid-long")
@@ -677,7 +678,7 @@ def test_send_duplicate_client_msg_id_is_idempotent():
     manager = _manager()
     calls = _script_sends(manager, [])
     with (
-        patch("web.api.push_event"),
+        patch("server.api.ChatAPI.publish_web_push"),
         TestClient(make_app(manager)) as client,
     ):
         first = _send_text(client, client_msg_id="cid-dup")
@@ -693,7 +694,7 @@ def test_send_same_client_msg_id_different_payload_conflicts_422():
     manager = _manager()
     calls = _script_sends(manager, [])
     with (
-        patch("web.api.push_event"),
+        patch("server.api.ChatAPI.publish_web_push"),
         TestClient(make_app(manager)) as client,
     ):
         first = _send_text(client, text="uno", client_msg_id="cid-conflict")
@@ -713,7 +714,7 @@ def test_send_registry_is_scoped_per_contact():
     )
     calls = _script_sends(manager, [])
     with (
-        patch("web.api.push_event"),
+        patch("server.api.ChatAPI.publish_web_push"),
         TestClient(make_app(manager)) as client,
     ):
         first = _send_text(client, contact_id="alice", client_msg_id="cid-shared")
@@ -729,14 +730,14 @@ def test_send_502_releases_inflight_claim():
     _script_sends(manager, [refused] * 5)
     app = make_app(manager)
     with (
-        patch("web.api.push_event"),
-        patch("web.api.compute_delay", return_value=0.0),
-        patch("web.api.asyncio.sleep", new_callable=AsyncMock),
+        patch("server.api.ChatAPI.publish_web_push"),
+        patch("server.ops.send.compute_delay", return_value=0.0),
+        patch("server.ops.send.asyncio.sleep", new_callable=AsyncMock),
         TestClient(app) as client,
     ):
         response = _send_text(client, client_msg_id="cid-release")
     assert response.status_code == 502
-    registry = app.state.send_registry
+    registry = get_api(app).send_registry
     assert registry.snapshot(("signal", "alice", "cid-release")) is None
 
 
@@ -745,11 +746,11 @@ def test_send_inflight_returns_409_without_registry_mutation():
     calls = _script_sends(manager, [])
     app = make_app(manager)
     with (
-        patch("web.api.push_event"),
+        patch("server.api.ChatAPI.publish_web_push"),
         TestClient(app) as client,
     ):
         _send_text(client, client_msg_id="cid-seed")
-        registry = app.state.send_registry
+        registry = get_api(app).send_registry
         key = ("signal", "alice", "cid-inflight")
         fingerprint = _fingerprint()
         outcome, _ = registry.claim_or_lookup(key, fingerprint)
@@ -768,7 +769,7 @@ def test_send_inflight_returns_409_without_registry_mutation():
 def test_send_attachments_are_not_deduplicated():
     manager = _manager()
     with (
-        patch("web.api.push_event"),
+        patch("server.api.ChatAPI.publish_web_push"),
         TestClient(make_app(manager)) as client,
     ):
         first = client.post(

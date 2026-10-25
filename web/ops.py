@@ -25,6 +25,8 @@ HTTP_STATUS: dict[str, int] = {
     "not_found": 404,
     "conflict": 409,
     "too_large": 413,
+    "unprocessable": 422,
+    "not_supported": 501,
     "internal": 500,
     "backend_error": 502,
     "backend_down": 503,

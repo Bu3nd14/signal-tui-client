@@ -4,8 +4,9 @@ from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
+from upload_harness import store_upload_sync as _store_upload_sync
 
-from web.uploads import UploadValidationError, _store_upload_sync
+from server.uploads import UploadValidationError
 
 
 def _upload(name: str, data: bytes):

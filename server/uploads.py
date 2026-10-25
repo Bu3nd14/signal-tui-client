@@ -17,6 +17,8 @@ from pathlib import Path
 
 from filename_utils import sanitize_filename
 
+#: Attachments accepted by a single send.
+MAX_ATTACHMENTS = 10
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 _MAX_BYTES_BY_KIND = {
     "image": MAX_UPLOAD_BYTES,

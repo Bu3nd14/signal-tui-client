@@ -116,6 +116,41 @@ class OkOut(BaseModel):
     ok: bool
 
 
+class AttachmentIn(BaseModel):
+    """A blob handle: a local file the adapter already stored for the operation.
+
+    ``filename`` / ``content_type`` are the client's claims (the operation
+    sanitizes the name and only uses the type as a hint).  ``rejected`` marks
+    a slot the adapter could not store (so errors are still reported in the
+    legacy order: earlier files are validated first); such a slot has no path.
+    The operation validates the file itself (kind, size, extension).
+    """
+
+    path: str = ""
+    filename: str | None = None
+    content_type: str | None = None
+    rejected: Literal["too_large"] | None = None
+
+
+class MessagesSendRequest(BaseModel):
+    # protocol / contact_id / text: any other type is "Invalid request" (legacy).
+    # The remaining fields keep the legacy lenient handling (blank -> None, bad
+    # types rejected by the operation *after* the attachment-count check), so
+    # they are ``Any`` here.
+    protocol: StrictStr | None = None
+    contact_id: StrictStr | None = None
+    text: StrictStr | None = None
+    client_msg_id: Any = None
+    quote_timestamp: Any = None
+    quote_author: Any = None
+    quote_message: Any = None
+    reply_to_message_id: Any = None
+    quote_content_type: Any = None
+    quote_attachment_id: Any = None
+    batch_id: Any = None
+    attachments: list[AttachmentIn] = Field(default_factory=list)
+
+
 # -- reactions ----------------------------------------------------------------
 
 

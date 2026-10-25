@@ -6,11 +6,8 @@ import json
 import logging
 import mimetypes
 import os
-import random
 import sqlite3
 import threading
-import time
-import uuid
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -23,27 +20,21 @@ from server.media import (
     _attachment_version,  # noqa: F401  (re-export)
 )
 from server.messages import (
-    MAX_TEXT_LENGTH,
     _cross_key_dedup_rows,  # noqa: F401  (re-export)
     _group_sender_resolver,  # noqa: F401  (re-export)
-    _messages,
+    _messages,  # noqa: F401  (re-export; patch server.messages._messages)
     _quoted_media_by_filename,  # noqa: F401  (re-export)
 )
+from server.models_api import AttachmentIn
 from server.ops.common import PROTOCOLS as _PROTOCOLS
-from server.retry import (
-    SEND_RETRY_MAX_ATTEMPTS,
-    classify_send_error,
-    compute_delay,
-    safe_error_text,
-)
-from server.send_registry import SendRegistry, build_fingerprint
-from web.bridge import push_event
+from server.uploads import MAX_ATTACHMENTS, UploadValidationError
+from web import uploads as uploads_module
 from web.ops import call_op
+from web.uploads import TempUpload, store_temp_upload
 
 logger = logging.getLogger(__name__)
 
-_MAX_TEXT_LENGTH = MAX_TEXT_LENGTH
-_MAX_ATTACHMENTS = 10
+_MAX_ATTACHMENTS = MAX_ATTACHMENTS
 _THUMB_WIDTHS = {96, 240, 480}
 _THUMB_CACHE_LIMIT = 500 * 1024 * 1024
 _THUMB_LOCKS: dict[Path, threading.Lock] = {}
@@ -238,6 +229,55 @@ def _thumbnail(path: Path, proto: str, attachment_id: str, width: int) -> Path |
             return None
 
 
+async def _store_attachments(
+    upload_files: list[Any], stored: list[TempUpload]
+) -> list[AttachmentIn]:
+    """Copy multipart files to temp files; return blob handles for the operation.
+
+    Appends each temp file to *stored* (the caller deletes them).  A file over
+    the request-wide byte budget is not an error here: its slot (and the rest)
+    is marked ``rejected`` so the operation reports problems in file order.
+    Files are not stored at all when there are too many (the operation answers
+    "Too many attachments"); a field that is not a file gets an empty handle.
+    """
+    attachments: list[AttachmentIn] = []
+    store = len(upload_files) <= MAX_ATTACHMENTS
+    rejected = False
+    total_stored_bytes = 0
+    for upload_file in upload_files:
+        if not hasattr(upload_file, "read"):
+            attachments.append(AttachmentIn())
+            continue
+        if not store:
+            attachments.append(AttachmentIn())
+            continue
+        if rejected:
+            attachments.append(AttachmentIn(rejected="too_large"))
+            continue
+        try:
+            # The request-wide byte cap is enforced WHILE each file is stored
+            # (each file gets the remaining budget), so a chunked request
+            # cannot write far beyond _MAX_TOTAL_BYTES before being rejected.
+            temp_upload = await store_temp_upload(
+                upload_file,
+                max_bytes=uploads_module._MAX_TOTAL_BYTES - total_stored_bytes,
+            )
+        except UploadValidationError:
+            rejected = True
+            attachments.append(AttachmentIn(rejected="too_large"))
+            continue
+        stored.append(temp_upload)
+        total_stored_bytes += temp_upload.size
+        attachments.append(
+            AttachmentIn(
+                path=str(temp_upload.path),
+                filename=temp_upload.filename,
+                content_type=temp_upload.content_type,
+            )
+        )
+    return attachments
+
+
 def create_api_router() -> Any:
     """Build the FastAPI router without making FastAPI a core dependency."""
     from fastapi import APIRouter, HTTPException, Request
@@ -245,9 +285,6 @@ def create_api_router() -> Any:
     from starlette.exceptions import HTTPException as StarletteHTTPException
 
     router = APIRouter(prefix="/api")
-    # Registry di idempotenza in-memory, scoped al processo (§8). Applicato
-    # SOLO al ramo testo: gli allegati restano legacy e non deduplicati.
-    registry = SendRegistry()
 
     @router.get("/emoji")
     async def emojis(request: Request) -> JSONResponse:
@@ -262,6 +299,11 @@ def create_api_router() -> Any:
 
     @router.post("/send")
     async def send(request: Request) -> dict[str, bool]:
+        """Transport only: CSRF/size checks, body parsing, uploads -> temp files.
+
+        Everything else (validation, idempotency, retry, the backend calls and
+        the ``/ws`` frames) is the ``messages.send`` operation.
+        """
         origin = request.headers.get("origin")
         if origin:
             origin_host = urlsplit(origin).netloc.lower()
@@ -277,8 +319,7 @@ def create_api_router() -> Any:
         upload_files: list[Any] = []
         try:
             if is_multipart:
-                from web.uploads import _MAX_TOTAL_BYTES
-
+                _MAX_TOTAL_BYTES = uploads_module._MAX_TOTAL_BYTES
                 content_length = request.headers.get("content-length")
                 if (
                     content_length
@@ -312,345 +353,39 @@ def create_api_router() -> Any:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="Invalid request")
 
-        protocol = payload.get("protocol")
-        contact_id = payload.get("contact_id")
-        text = payload.get("text")
-        if protocol not in _PROTOCOLS:
-            raise HTTPException(status_code=400, detail="Invalid request")
-        if not isinstance(contact_id, str) or not contact_id.strip():
-            raise HTTPException(status_code=400, detail="Invalid request")
-        if not isinstance(text, str) or len(text) > _MAX_TEXT_LENGTH:
-            raise HTTPException(status_code=400, detail="Invalid request")
-        if not upload_files and not text.strip():
-            raise HTTPException(status_code=400, detail="Invalid request")
-        if len(upload_files) > _MAX_ATTACHMENTS:
-            raise HTTPException(status_code=400, detail="Too many attachments")
-        if any(not hasattr(upload_file, "read") for upload_file in upload_files):
-            raise HTTPException(status_code=400, detail="Invalid request")
-
-        # client_msg_id: opzionale con fallback server (client vecchi/tooling).
-        client_msg_id_raw = payload.get("client_msg_id")
-        if (
-            isinstance(client_msg_id_raw, str)
-            and client_msg_id_raw.strip()
-            and len(client_msg_id_raw) <= 128
-        ):
-            client_msg_id = client_msg_id_raw.strip()
-        else:
-            client_msg_id = str(uuid.uuid4())
-
-        quote_timestamp = payload.get("quote_timestamp")
-        quote_author = payload.get("quote_author")
-        quote_message = payload.get("quote_message")
-        reply_to_message_id = payload.get("reply_to_message_id")
-        quote_content_type = (
-            payload.get("quote_content_type") if protocol == "signal" else None
-        )
-        quote_attachment_id = (
-            payload.get("quote_attachment_id") if protocol == "signal" else None
-        )
         if is_multipart:
-            quote_author = quote_author or None
-            reply_to_message_id = reply_to_message_id or None
-            quote_content_type = quote_content_type or None
-            quote_attachment_id = quote_attachment_id or None
+            # Form fields are strings: "" means absent, digits mean an int.  A
+            # non-numeric value is passed through for the operation to reject.
+            quote_timestamp = payload.get("quote_timestamp")
             if quote_timestamp == "":
-                quote_timestamp = None
+                payload["quote_timestamp"] = None
             elif quote_timestamp is not None:
                 try:
-                    quote_timestamp = int(quote_timestamp)
+                    payload["quote_timestamp"] = int(quote_timestamp)
                 except (TypeError, ValueError):
-                    raise HTTPException(
-                        status_code=400, detail="Invalid request"
-                    ) from None
-        if isinstance(quote_author, str):
-            quote_author = quote_author.strip() or None
-        if isinstance(quote_content_type, str):
-            quote_content_type = quote_content_type.strip() or None
-        if isinstance(quote_attachment_id, str):
-            quote_attachment_id = quote_attachment_id.strip() or None
-        if isinstance(quote_message, str):
-            stripped_quote_message = quote_message.strip()
-            quote_message = (
-                stripped_quote_message
-                if stripped_quote_message or quote_content_type
-                else None
-            )
-        if isinstance(reply_to_message_id, str):
-            reply_to_message_id = reply_to_message_id.strip() or None
-        if isinstance(quote_timestamp, bool) or (
-            quote_timestamp is not None and not isinstance(quote_timestamp, int)
-        ):
-            raise HTTPException(status_code=400, detail="Invalid request")
-        if any(
-            value is not None and not isinstance(value, str)
-            for value in (
-                quote_author,
-                quote_message,
-                reply_to_message_id,
-                quote_content_type,
-                quote_attachment_id,
-            )
-        ):
-            raise HTTPException(status_code=400, detail="Invalid request")
-        is_reply = any(
-            value is not None
-            for value in (
-                quote_timestamp,
-                quote_author,
-                quote_message,
-                reply_to_message_id,
-                quote_content_type,
-                quote_attachment_id,
-            )
-        )
-        if protocol == "telegram" and is_reply:
-            try:
-                if int(reply_to_message_id) <= 0:
-                    raise ValueError
-            except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="Invalid request") from None
-        if protocol == "whatsapp" and is_reply and not reply_to_message_id:
-            raise HTTPException(status_code=400, detail="Invalid request")
+                    pass
 
-        manager = request.app.state.manager
-        backend = manager.get(protocol)
-        if backend is None:
-            raise HTTPException(status_code=404, detail="Not Found")
-
-        contact = backend.find_contact(contact_id)
-        if contact is None:
-            raise HTTPException(status_code=404, detail="Not Found")
-
-        # Contatto book-only (non ancora in self.contacts): registralo prima
-        # del send così gli eventi successivi lo risolvono.  Il backend
-        # WhatsApp crea da sé l'alias @lid → contatto @c.us.
-        is_known = any(str(c.id) == contact.id for c in backend.contacts)
-        if not is_known:
-            contact.extras["ghost"] = True
-            backend.register_contact(contact)
-        elif contact.extras.get("ghost"):
-            # Ghost book-only già registrato: ritenta l'alias @lid.  Il primo
-            # invio può averlo saltato se la cache LID era vuota; la cache può
-            # popolarsi dopo.  Idempotente (setdefault), zero rete.
-            backend.register_contact(contact)
-
-        quote_attachments = None
-        if protocol == "signal" and quote_attachment_id is not None:
-            contact_attachment_ids = {
-                message["attachment"]["attachment_id"]
-                for message in _messages(protocol, contact_id)
-                if message["attachment"] is not None
-            }
-            if quote_attachment_id not in contact_attachment_ids:
-                raise HTTPException(status_code=400, detail="Invalid request")
-        if protocol == "signal" and quote_content_type is not None:
-            if quote_attachment_id is None:
-                raise HTTPException(status_code=400, detail="Invalid request")
-            resolved = manager.get_attachment_path(protocol, quote_attachment_id)
-            path = Path(resolved) if resolved else None
-            quote_attachments = (
-                [f"{quote_content_type}:{path.name}:{path}"]
-                if path
-                else [quote_content_type]
-            )
-
-        kwargs = {
-            "quote_timestamp": quote_timestamp,
-            "quote_author": quote_author,
-            "quote_message": quote_message,
-        }
-        if protocol == "signal" and quote_attachments is not None:
-            kwargs["quote_attachments"] = quote_attachments
-        if protocol in {"whatsapp", "telegram"} and reply_to_message_id is not None:
-            kwargs["reply_to_message_id"] = reply_to_message_id
-
-        # Idempotenza (solo ramo testo, N7): claim atomico scoped al contatto.
-        request.app.state.send_registry = registry
-        registry_key: tuple[str, str, str] | None = None
-        registry_token: str | None = None
-        if not upload_files:
-            registry_key = (protocol, contact_id, client_msg_id)
-            fingerprint = build_fingerprint(
-                protocol=protocol,
-                contact_id=contact_id,
-                text=text,
-                quote_timestamp=quote_timestamp,
-                quote_author=quote_author,
-                quote_message=quote_message,
-                reply_to_message_id=reply_to_message_id,
-                quote_content_type=quote_content_type,
-                quote_attachment_id=quote_attachment_id,
-            )
-            outcome, value = registry.claim_or_lookup(registry_key, fingerprint)
-            if outcome == "sent":
-                if value.get("fingerprint") != fingerprint:
-                    raise HTTPException(
-                        status_code=422, detail="Client message id conflict"
-                    )
-                return {"ok": True, "duplicate": True}
-            if outcome == "inflight":
-                # Un altro handler sta inviando: retryable lato client.  Nessuna
-                # mutazione del registry (N2).
-                raise HTTPException(status_code=409, detail="Send in progress")
-            registry_token = value
-
-        uploads: list[Any] = []
-        succeeded = False
-        message_id: str | None = None
+        stored: list[TempUpload] = []
         try:
-            if upload_files:
-                from web.uploads import (
-                    _MAX_TOTAL_BYTES,
-                    UploadValidationError,
-                    store_upload,
+            try:
+                attachments = await _store_attachments(upload_files, stored)
+            except Exception:
+                logger.exception(
+                    "Web upload store failed: protocol=%s contact=%s",
+                    payload.get("protocol"),
+                    payload.get("contact_id"),
                 )
-
-                # Sequential validation keeps error messages stable (the
-                # first invalid file wins) and lets the finally block clean
-                # up every stored upload when a later one fails.  The
-                # request-wide byte cap is enforced WHILE each file is
-                # stored (each file gets the remaining budget), so a
-                # chunked request cannot write far beyond _MAX_TOTAL_BYTES
-                # before being rejected.
-                total_stored_bytes = 0
-                for upload_file in upload_files:
-                    try:
-                        uploads.append(
-                            await store_upload(
-                                upload_file,
-                                max_bytes=_MAX_TOTAL_BYTES - total_stored_bytes,
-                            )
-                        )
-                    except UploadValidationError as exc:
-                        detail = (
-                            "Upload too large"
-                            if exc.status_code == 413
-                            else "Unsupported media type"
-                        )
-                        raise HTTPException(
-                            status_code=exc.status_code, detail=detail
-                        ) from None
-                    total_stored_bytes += uploads[-1].path.stat().st_size
-                batch_id = payload.get("batch_id")
-                if not isinstance(batch_id, str) or not batch_id.strip():
-                    batch_id = None
-                await asyncio.to_thread(
-                    manager.send_attachments_sync,
-                    protocol,
-                    contact_id,
-                    [upload.path for upload in uploads],
-                    batch_id=batch_id,
-                    # Product default: the single text field captions the
-                    # first attachment only.
-                    captions=[text or None] + [None] * (len(uploads) - 1),
-                    mime_types=[upload.mime_type for upload in uploads],
-                    media_kinds=[upload.media_kind for upload in uploads],
-                    filenames=[upload.filename for upload in uploads],
-                    **kwargs,
-                )
-                succeeded = True
-            else:
-                # Ramo TESTO: retry con backoff esponenziale + jitter.
-                # Nessun timeout aggiuntivo: i backend hanno timeout interni propri.
-                rng = random.Random()
-                for attempt in range(1, SEND_RETRY_MAX_ATTEMPTS + 1):
-                    try:
-                        result = await asyncio.to_thread(
-                            manager.send_message_sync,
-                            protocol,
-                            contact_id,
-                            text,
-                            **kwargs,
-                        )
-                        if result is not None:
-                            message_id = str(result)
-                        succeeded = True
-                        break
-                    except Exception as exc:
-                        classification = classify_send_error(protocol, exc)
-                        if classification == "terminal":
-                            logger.exception(
-                                "Terminal send error, no retry: protocol=%s contact=%s",
-                                protocol,
-                                contact_id,
-                            )
-                            break
-                        if attempt == SEND_RETRY_MAX_ATTEMPTS:
-                            logger.exception(
-                                "Send failed after %d attempts: protocol=%s contact=%s",
-                                SEND_RETRY_MAX_ATTEMPTS,
-                                protocol,
-                                contact_id,
-                            )
-                            break
-                        delay = compute_delay(attempt, rng)
-                        logger.info(
-                            "Send retry %d/%d in %.1fs: protocol=%s contact=%s error=%s",
-                            attempt + 1,
-                            SEND_RETRY_MAX_ATTEMPTS,
-                            delay,
-                            protocol,
-                            contact_id,
-                            exc,
-                        )
-                        push_event(
-                            {
-                                "type": "send_retry",
-                                "payload": {
-                                    "client_msg_id": client_msg_id,
-                                    "protocol": protocol,
-                                    "contact_id": contact_id,
-                                    "attempt": attempt + 1,
-                                    "max_attempts": SEND_RETRY_MAX_ATTEMPTS,
-                                    "error": safe_error_text(exc),
-                                },
-                            }
-                        )
-                        await asyncio.sleep(delay)
-        except HTTPException:
-            raise
-        except NotImplementedError:
-            if upload_files:
                 raise HTTPException(
-                    status_code=501, detail="Attachment send not supported"
+                    status_code=502, detail="Message send failed"
                 ) from None
-            logger.exception(
-                "Web send failed: protocol=%s contact=%s", protocol, contact_id
+            # ``attachments`` are ours: never trust one from the request body.
+            return await call_op(
+                request, "messages.send", {**payload, "attachments": attachments}
             )
-            raise HTTPException(status_code=502, detail="Message send failed") from None
-        except Exception:
-            logger.exception(
-                "Web send failed: protocol=%s contact=%s", protocol, contact_id
-            )
-            raise HTTPException(status_code=502, detail="Message send failed") from None
         finally:
-            for upload in uploads:
-                upload.cleanup()
-            # B3/N2: mark_sent solo su successo, release in tutti gli altri casi
-            # (incluso il 502 dopo i 3 tentativi), sempre vincolato al token.
-            if registry_token is not None and registry_key is not None:
-                if succeeded:
-                    registry.mark_sent(
-                        registry_key, registry_token, message_id, int(time.time())
-                    )
-                else:
-                    registry.release(registry_key, registry_token)
-
-        if not succeeded:
-            raise HTTPException(status_code=502, detail="Message send failed")
-
-        push_event(
-            {
-                "type": "message",
-                "payload": {
-                    "protocol": protocol,
-                    "contact_id": contact_id,
-                    "is_mine": True,
-                },
-            }
-        )
-        return {"ok": True}
+            # Temp files live only for this request, whatever the outcome.
+            for temp_upload in stored:
+                temp_upload.cleanup()
 
     @router.get("/status")
     async def backend_status(request: Request) -> dict[str, bool]:

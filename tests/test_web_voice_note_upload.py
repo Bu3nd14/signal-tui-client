@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from upload_harness import store_upload_sync as _store_upload_sync
 
 import web.api as web_api
 from server.uploads import (
@@ -24,7 +25,6 @@ from web.api import (
     _is_video_candidate,
     _media_content_type,
 )
-from web.uploads import _store_upload_sync
 
 # ── Fixture builder ───────────────────────────────────────────────────────────
 
