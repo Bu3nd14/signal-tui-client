@@ -57,7 +57,35 @@ class BackendConnectMixin:
         ):
             self._select_contact(self.contacts[0])
 
-    def _on_backend_ready(self, proto: str) -> None:
+    def _prefetch_backend_ready(self, proto: str) -> tuple[dict | None, list | None]:
+        """Worker thread: fetch the ``backend_ready`` data off the UI thread.
+
+        ``messages.snapshot`` validates and copies the whole protocol cache
+        (~0.3 s for tens of thousands of rows): doing it here keeps the UI
+        thread free.  A failed call yields ``None`` so the UI-thread merge
+        logs it and degrades exactly as before.
+        """
+        snapshot: dict | None = None
+        contacts: list | None = None
+        try:
+            snapshot = self.client.call("messages.snapshot", {"protocol": proto})
+        except ApiError:
+            logger.warning("messages.snapshot failed for %s", proto, exc_info=True)
+            snapshot = {}
+        try:
+            wire = self.client.call("contacts.for_protocol", {"protocol": proto})
+            contacts = [contact_from_wire(w) for w in wire]
+        except ApiError:
+            logger.warning("contacts.for_protocol failed for %s", proto, exc_info=True)
+            contacts = []
+        return snapshot, contacts
+
+    def _on_backend_ready(
+        self,
+        proto: str,
+        snapshot: dict | None = None,
+        contacts: list[ChatContact] | None = None,
+    ) -> None:
         """UI thread: merge atomico di cache e contatti da UN backend.
 
         Chiamato via ``call_from_thread`` dopo che un backend ha completato
@@ -68,8 +96,9 @@ class BackendConnectMixin:
         Contatti e cache messaggi arrivano dalle operazioni
         ``contacts.for_protocol`` e ``messages.snapshot`` (copie wire).
         """
-        self._merge_ready_backend_cache(proto)
-        contacts = self._fetch_protocol_contacts(proto)
+        self._merge_ready_backend_cache(proto, snapshot)
+        if contacts is None:
+            contacts = self._fetch_protocol_contacts(proto)
         self._merge_backend_contacts(contacts)
 
         self._sync_last_ts()
@@ -124,7 +153,9 @@ class BackendConnectMixin:
             if newest:
                 old.last_message_ts = newest
 
-    def _merge_ready_backend_cache(self, proto: str) -> None:
+    def _merge_ready_backend_cache(
+        self, proto: str, snapshot: dict | None = None
+    ) -> None:
         """Merge the core's message cache of *proto* into the UI cache.
 
         The rows come from the ``messages.snapshot`` operation (canonical cache
@@ -132,11 +163,12 @@ class BackendConnectMixin:
         merge here is the view-side reconciliation with the UI cache, which
         also holds optimistic rows the core does not know yet.
         """
-        try:
-            snapshot = self.client.call("messages.snapshot", {"protocol": proto})
-        except ApiError:
-            logger.warning("messages.snapshot failed for %s", proto, exc_info=True)
-            return
+        if snapshot is None:
+            try:
+                snapshot = self.client.call("messages.snapshot", {"protocol": proto})
+            except ApiError:
+                logger.warning("messages.snapshot failed for %s", proto, exc_info=True)
+                return
 
         # ── Merge cache (incrementale, no clear, idempotente) ──
         # Il core non attende più questo merge (evento asincrono) e l'operazione

@@ -180,8 +180,10 @@ class _BackendConnectStub:
     def _mark_backend_done(self, proto: str) -> None:
         self._pending_backends.discard(proto)
 
-    def _merge_ready_backend_cache(self, proto: str) -> None:
-        BackendConnectMixin._merge_ready_backend_cache(self, proto)  # type: ignore[arg-type]
+    def _merge_ready_backend_cache(
+        self, proto: str, snapshot: dict | None = None
+    ) -> None:
+        BackendConnectMixin._merge_ready_backend_cache(self, proto, snapshot)  # type: ignore[arg-type]
 
     def _fetch_protocol_contacts(self, proto: str) -> list[ChatContact]:
         return BackendConnectMixin._fetch_protocol_contacts(self, proto)  # type: ignore[arg-type]

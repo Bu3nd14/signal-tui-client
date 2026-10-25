@@ -54,7 +54,12 @@ class PollingMixin:
     def _dispatch_bus_event(self, event: Event) -> None:
         """Route one bus event; never raises (a bad event must not stop the loop)."""
         try:
-            if event.type.startswith("backend_"):
+            if event.type == "backend_ready":
+                # Fetch the heavy ready data here (worker), merge on the UI thread.
+                proto = event.payload["protocol"]
+                snapshot, contacts = self._prefetch_backend_ready(proto)
+                self.call_from_thread(self._on_backend_ready, proto, snapshot, contacts)
+            elif event.type.startswith("backend_"):
                 self.call_from_thread(self._dispatch_core_event, event)
             elif event.type == GAP:
                 # Lost events: we cannot know what changed -> full flush.
