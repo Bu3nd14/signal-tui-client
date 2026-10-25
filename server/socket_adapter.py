@@ -929,6 +929,8 @@ def start(
             adapter.sync_pool.shutdown(wait=False, cancel_futures=True)
             adapter.aux_pool.shutdown(wait=False, cancel_futures=True)
             with contextlib.suppress(Exception):
+                loop.run_until_complete(adapter.api.close_loop_resources())
+            with contextlib.suppress(Exception):
                 loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
             handle.loop = None

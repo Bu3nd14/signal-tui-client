@@ -128,21 +128,11 @@ WEB_SERVER_ALLOWLIST = {
 WEB_FORBIDDEN_ROOTS = {"protocols", "tui", "transcription", "signal_tui", "textual"}
 
 
-#: TEMPORARY, narrow exemption (bead mc-im6; design doc §13).  Gmail is in the
-#: core now (``server/gmail.py``, ``gmail.*`` operations); the one thing left is
-#: the web server's shutdown, which still reaches into the core directly.
-#: ``test_gmail_exemption_is_exact`` keeps this list from growing silently.
-GMAIL_IMPORT_EXEMPTIONS: dict[str, set[str]] = {
-    "web/server.py": {"server.link_preview", "server.gmail"},
-}
-
-
 def _web_violations() -> list[str]:
     found = []
     for path in sorted((ROOT / "web").rglob("*.py")):
         bad = set()
-        exempt = GMAIL_IMPORT_EXEMPTIONS.get(str(path.relative_to(ROOT)), set())
-        for name in _imported_modules(path) - exempt:
+        for name in _imported_modules(path):
             root = name.split(".")[0]
             if (
                 root in WEB_FORBIDDEN_ROOTS
@@ -157,28 +147,6 @@ def _web_violations() -> list[str]:
 
 def test_web_only_imports_the_api_surface():
     assert _web_violations() == []
-
-
-def test_gmail_exemption_is_exact():
-    """Every exempted import is really used, and ``server/gmail.py`` takes only
-    ``config`` from ``protocols`` (no database, no backends)."""
-    for rel, names in GMAIL_IMPORT_EXEMPTIONS.items():
-        assert names <= _imported_modules(ROOT / rel), (rel, names)
-    tree = ast.parse((ROOT / "server" / "gmail.py").read_text(encoding="utf-8"))
-    taken = {
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module == "protocols"
-        for alias in node.names
-    }
-    assert taken == {"config"}
-    assert not any(
-        isinstance(node, ast.Import)
-        and any(a.name.split(".")[0] == "protocols" for a in node.names)
-        or isinstance(node, ast.ImportFrom)
-        and (node.module or "").startswith("protocols.")
-        for node in ast.walk(tree)
-    )
 
 
 def test_web_allowlist_has_no_unused_entries():

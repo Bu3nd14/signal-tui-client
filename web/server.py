@@ -191,28 +191,12 @@ def start_web_server(
                         loop.run_until_complete(
                             asyncio.gather(monitor, return_exceptions=True)
                         )
-                    try:
-                        from server.link_preview import close_shared_session
-
-                        loop.run_until_complete(
-                            asyncio.wait_for(
-                                close_shared_session(),
-                                timeout=_SHARED_SESSION_CLOSE_TIMEOUT_S,
-                            )
-                        )
-                    except Exception:
-                        logger.debug(
-                            "Shared HTTP session close failed at shutdown",
-                            exc_info=True,
-                        )
-                    try:
-                        from server.gmail import close_imap_pool
-
-                        close_imap_pool()
-                    except Exception:
-                        logger.debug(
-                            "IMAP pool close failed at shutdown", exc_info=True
-                        )
+                    # Loop-bound core resources (the shared HTTP session) must
+                    # close on this loop; the IMAP pool is closed by the core
+                    # (``ChatCore.shutdown``), not by a view of it.
+                    loop.run_until_complete(
+                        api.close_loop_resources(_SHARED_SESSION_CLOSE_TIMEOUT_S)
+                    )
                     loop.run_until_complete(loop.shutdown_asyncgens())
                 finally:
                     loop.close()

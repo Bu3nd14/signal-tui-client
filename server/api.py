@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -39,6 +40,8 @@ from server.send_registry import SendRegistry
 
 #: Seconds between the ``server.shutdown`` acknowledgement and the hook.
 SHUTDOWN_DELAY_S = 0.2
+
+logger = logging.getLogger(__name__)
 
 #: Neutral error codes; each adapter maps them to its own form (HTTP status,
 #: JSON-RPC error, exception).  ``backend_error`` is a backend that answered
@@ -173,6 +176,35 @@ class ChatAPI:
         if reconnect is None:
             raise ApiError("not_supported", "This server cannot reconnect backends")
         reconnect(protocols)
+
+    # -- core resources -----------------------------------------------------
+
+    async def close_loop_resources(self, timeout: float = 2.0) -> None:
+        """Close what is bound to the *running* event loop: the shared HTTP
+        session of the link previews and the Gmail image proxy.
+
+        An adapter that runs operations on its own loop (the web adapter, the
+        socket adapter) awaits this on that loop, as the last thing before the
+        loop closes; a session owned by another loop is left to its owner.
+        Best effort: never raises.
+        """
+        from server import link_preview
+
+        try:
+            await asyncio.wait_for(link_preview.close_shared_session(), timeout)
+        except Exception:
+            logger.debug("Shared HTTP session close failed", exc_info=True)
+
+    def close_resources(self) -> None:
+        """Release the thread-safe resources the operations hold (the Gmail
+        IMAP pool and temporary blobs).  ``ChatCore.shutdown`` calls it once the
+        adapters have stopped; idempotent and best effort."""
+        from server import gmail
+
+        try:
+            gmail.close_resources()
+        except Exception:
+            logger.debug("Gmail resources close failed", exc_info=True)
 
     def request_shutdown(self, delay: float = SHUTDOWN_DELAY_S) -> None:
         """Run :attr:`shutdown_hook` shortly from now on its own thread.

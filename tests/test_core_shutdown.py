@@ -141,3 +141,41 @@ def test_a_failing_transcription_init_does_not_stop_the_core(core):
     with patch("server.core.signal_enabled", return_value=False):
         core.start()
     core._done.assert_called()
+
+
+def test_shutdown_closes_the_api_resources_after_the_adapters(core):
+    """The Gmail IMAP pool is closed once the adapters can no longer call it."""
+    calls: list[str] = []
+    _record(core, calls)
+    core.api.close_resources = lambda: calls.append("resources")  # type: ignore[method-assign]
+    with patch("protocols.db._prune_cache", side_effect=lambda: calls.append("prune")):
+        core.shutdown(lambda: calls.append("adapters"))
+    assert calls == ["stop", "adapters", "resources", "telegram", "prune"]
+
+
+def test_close_resources_closes_the_imap_pool_and_wipes_blobs(core):
+    from server import gmail
+
+    blob = gmail.write_blob(b"secret attachment")
+    with (
+        patch.object(gmail, "close_imap_pool") as close_pool,
+        patch("protocols.db._prune_cache"),
+    ):
+        core.shutdown()
+        core.api.close_resources()  # idempotent
+    close_pool.assert_called()
+    assert not blob.exists()
+
+
+def test_a_failing_resource_close_does_not_skip_the_rest(core):
+    from server import gmail
+
+    calls: list[str] = []
+    telegram = _record(core, calls)
+    with (
+        patch.object(gmail, "close_imap_pool", side_effect=RuntimeError("pool")),
+        patch("protocols.db._prune_cache", side_effect=lambda: calls.append("prune")),
+    ):
+        core.shutdown()
+    telegram.disconnect_sync.assert_called_once()
+    assert calls == ["stop", "telegram", "prune"]

@@ -234,9 +234,15 @@ def test_loop_isolation_creates_per_loop_sessions_and_skips_cross_loop_close(
         # Replacing the session of another loop must not close it.
         assert not first.closed
 
-        # A close issued on the wrong loop is skipped: the owner keeps its session.
+        # A close issued on the wrong loop is skipped: the owner keeps its session
+        # (and it stays registered, so its own loop can still close it).
         loop1.run_until_complete(lp.close_shared_session())
         assert not second.closed
+        assert lp._shared_session is second
+        loop2.run_until_complete(lp.close_shared_session())
+        assert second.closed
+        assert lp._shared_session is None
+        second, second_resolver = loop2.run_until_complete(create())
 
         # The next creation on loop1 is a fresh session, not the old one.
         third, _third_resolver = loop1.run_until_complete(create())
@@ -409,7 +415,7 @@ async def test_concurrent_fetches_share_session_and_respect_connector_limit(
 # ── Server shutdown wiring ───────────────────────────────────────────────────
 
 
-def test_web_server_shutdown_closes_session_and_imap_pool_on_same_loop(monkeypatch):
+def test_web_server_shutdown_closes_the_shared_session_on_the_web_loop(monkeypatch):
     import web.server as server_mod
 
     calls: list[tuple[str, asyncio.AbstractEventLoop, bool, bool]] = []
@@ -422,6 +428,8 @@ def test_web_server_shutdown_closes_session_and_imap_pool_on_same_loop(monkeypat
         loop = asyncio.get_event_loop()
         calls.append(("imap", loop, loop.is_running(), loop.is_closed()))
 
+    # The web adapter only calls the API; it neither imports nor closes the
+    # IMAP pool (the core does, see tests/test_core_shutdown.py).
     class _FakeConfig:
         def __init__(self, *args, **kwargs):
             self.args = args
@@ -455,13 +463,37 @@ def test_web_server_shutdown_closes_session_and_imap_pool_on_same_loop(monkeypat
     finally:
         server_mod._active_server = None
 
-    assert [call[0] for call in calls] == ["shared", "imap"]
-    shared_loop = calls[0][1]
-    imap_loop = calls[1][1]
-    assert shared_loop is imap_loop
-    # close_shared_session runs inside run_until_complete; close_imap_pool runs
-    # synchronously afterwards, both before loop.close().
-    assert calls[0][2] is True
-    assert calls[1][2] is False
-    assert calls[0][3] is False
-    assert calls[1][3] is False
+    assert [call[0] for call in calls] == ["shared"]
+    _name, _loop, running, closed = calls[0]
+    # close_shared_session runs inside run_until_complete, before loop.close().
+    assert running is True
+    assert closed is False
+
+
+def test_api_close_loop_resources_closes_on_the_running_loop_and_never_raises(
+    monkeypatch,
+):
+    seen: list[asyncio.AbstractEventLoop] = []
+
+    async def closing() -> None:
+        seen.append(asyncio.get_running_loop())
+
+    async def failing() -> None:
+        raise RuntimeError("boom")
+
+    async def hanging() -> None:
+        await asyncio.sleep(30)
+
+    api = api_for(SimpleNamespace())
+
+    async def run() -> asyncio.AbstractEventLoop:
+        monkeypatch.setattr(lp, "close_shared_session", closing)
+        await api.close_loop_resources()
+        monkeypatch.setattr(lp, "close_shared_session", failing)
+        await api.close_loop_resources()
+        monkeypatch.setattr(lp, "close_shared_session", hanging)
+        await api.close_loop_resources(timeout=0.05)
+        return asyncio.get_running_loop()
+
+    loop = asyncio.run(run())
+    assert seen == [loop]

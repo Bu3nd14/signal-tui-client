@@ -314,14 +314,16 @@ async def close_shared_session() -> None:
         session = _shared_session
         resolver = _shared_resolver
         owner = _shared_session_loop
-        _shared_session = _shared_resolver = _shared_session_loop = None
         if session is None:
             return
         if owner is not loop:
+            # Leave it to its owner: with two adapters, each closes on its
+            # own loop, and the first one must not orphan the other's session.
             logger.debug(
                 "link preview: shared session owned by another loop; skip close"
             )
             return
+        _shared_session = _shared_resolver = _shared_session_loop = None
         try:
             if not session.closed:
                 await session.close()

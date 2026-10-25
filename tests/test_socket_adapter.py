@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import socket
@@ -972,6 +973,25 @@ def test_attachment_policy_covers_every_operation_with_attachments(env):
     assert sa.attachment_operations(env.api) == (
         sa.STAGING_OPERATIONS | sa.IGNORED_ATTACHMENT_OPERATIONS
     )
+
+
+def test_stopping_closes_loop_bound_resources_on_the_adapter_loop(
+    tmp_path, monkeypatch
+):
+    """The shared HTTP session is bound to the loop that made it: the adapter
+    closes it on its own loop through the API, before the loop is closed."""
+    monkeypatch.setattr(backend_db, "CACHE_DIR", tmp_path / "cache")
+    api = api_for(_Manager(), EventBus())
+    seen: list[tuple[bool, bool]] = []
+
+    async def fake_close(timeout: float = 2.0) -> None:
+        loop = asyncio.get_running_loop()
+        seen.append((loop.is_running(), loop.is_closed()))
+
+    monkeypatch.setattr(api, "close_loop_resources", fake_close)
+    handle = sa.start(api, None, tmp_path / "run" / "server.sock")
+    sa.stop(handle)
+    assert seen == [(True, False)]
 
 
 # -- Gmail attachments (mc-im6) -------------------------------------------------------

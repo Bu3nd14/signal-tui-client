@@ -1,5 +1,11 @@
 # Design — Fase 1 rendering HTML Gmail (CSS inline sicuro + layout tabellare)
 
+> **Nota (mc-im6):** il servizio Gmail descritto qui come `web/gmail.py` ora vive in
+> `server/gmail.py` (core) e le sue funzioni sono esposte come operazioni `gmail.*`
+> (`server/ops/gmail.py`); `web/gmail_api.py` si limita a tradurle in HTTP. I percorsi
+> `web/gmail.py` e i numeri di riga qui sotto descrivono il codice com'era al momento
+> del design. Vedi `docs/DESIGN_CLIENT_SERVER_SPLIT.md` §13.
+
 Data: 2026-10-24 · Branch: `master` (pulito) · Stato: **rev. 6** (post red-team round 6: idempotenza cap testo/attr via worst-case, border-radius longhand/no-space) · Ambito: solo reader HTML Gmail (`web/gmail.py`, `web/static/gmail.css`/`gmail.js`, `tests/test_gmail_html.py`, `requirements-web.txt`/`requirements-dev.txt`, `install.sh`, `README.md`, `docs/DESIGN_GMAIL_POC.md`).
 
 > **Fase 1 only.** Niente iframe, niente `<style>`, niente classi/id, niente rendering browser-side, nessun cambio REST/UX. Il toggle HTML/testo resta invariato. Nessuna modifica a P2/P3 Gmail. Fast track **non** attiva: gate red team obbligatorio.

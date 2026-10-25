@@ -207,6 +207,7 @@ class ChatCore(DynamicAddressBookMixin):
                 stop_adapters()
             except Exception:
                 logger.exception("Adapter stop failed (non-fatal)")
+        self.api.close_resources()  # Gmail IMAP pool / temp blobs
         try:
             self.api.transcription.stop()
         except Exception:

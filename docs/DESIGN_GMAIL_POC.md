@@ -1,5 +1,11 @@
 # Design POC — Integrazione Gmail nella Web UI
 
+> **Nota (mc-im6):** il servizio Gmail descritto qui come `web/gmail.py` ora vive in
+> `server/gmail.py` (core) e le sue funzioni sono esposte come operazioni `gmail.*`
+> (`server/ops/gmail.py`); `web/gmail_api.py` si limita a tradurle in HTTP. I percorsi
+> `web/gmail.py` e i numeri di riga qui sotto descrivono il codice com'era al momento
+> del design. Vedi `docs/DESIGN_CLIENT_SERVER_SPLIT.md` §13.
+
 Data: 2026-10-23 · Stato: proposta da implementare · Ambito: POC single-user, sola lettura/scrittura via IMAP/SMTP.
 
 ---
