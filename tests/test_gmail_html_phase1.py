@@ -18,11 +18,13 @@ declaration.
 from __future__ import annotations
 
 import html
+import math
 import re
 import sys
 import time
 from contextlib import contextmanager
 from email.message import EmailMessage
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -1580,3 +1582,403 @@ def test_gmail_shaped_corpus_stays_safe_and_idempotent(name: str, raw: bytes) ->
     ):
         assert forbidden not in lowered, (name, forbidden)
     assert _sanitize(cleaned) == cleaned
+
+
+# ---------------------------------------------------------------------------
+# 12. Branch coverage for scanner/tag parser and CSS validator internals
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "start", "expected_end"),
+    [
+        ('<a title="a>b">', 1, 15),
+        ("<a title='x>", 1, 12),
+        ("<p", 1, 2),
+    ],
+)
+def test_find_tag_end_honours_quotes_and_unterminated_tags(
+    raw: str, start: int, expected_end: int
+) -> None:
+    assert gmail._find_tag_end(raw, start) == expected_end
+
+
+def test_parse_tag_rejects_empty_and_unterminated_names() -> None:
+    assert gmail._parse_tag("<", 0) is None
+    assert gmail._parse_tag("<div ", 1) is None
+    assert gmail._parse_tag("<div a", 1) is None
+    assert gmail._parse_tag('<div a="x>', 1) is None
+
+
+def test_parse_tag_handles_self_closing_and_odd_attribute_spacing() -> None:
+    assert gmail._parse_tag("<br/>", 1) == ("br", [], 5, True)
+
+    parsed = gmail._parse_tag("<div a = 'x'>", 1)
+    assert parsed is not None
+    name, attributes, end, self_closing = parsed
+    assert (name, end, self_closing) == ("div", 13, False)
+    assert [(attr.name, attr.value, attr.quote) for attr in attributes] == [
+        ("a", "x", "'")
+    ]
+
+    parsed = gmail._parse_tag('<div a= "x">', 1)
+    assert parsed is not None
+    assert parsed[1][0].value == "x"
+
+    # A stray '=' becomes an empty attribute name and must not loop forever.
+    parsed = gmail._parse_tag("<div ==x>", 1)
+    assert parsed is not None
+    assert [attr.name for attr in parsed[1]] == ["x"]
+
+
+def test_parse_tag_keeps_boolean_attributes() -> None:
+    parsed = gmail._parse_tag("<div hidden>x</div>", 1)
+
+    assert parsed is not None
+    attributes = parsed[1]
+    assert [(attr.name, attr.value, attr.quote) for attr in attributes] == [
+        ("hidden", None, None)
+    ]
+
+
+def test_find_raw_text_close_reports_missing_and_mismatched_closers() -> None:
+    assert gmail._find_raw_text_close("plain text", 0, "script") == -1
+    assert gmail._find_raw_text_close("</styles></style>", 0, "style") == 9
+    assert gmail._find_raw_text_close("</script", 0, "script") == 0
+
+
+def test_render_img_tag_quotes_unquoted_values_and_keeps_boolean_attrs() -> None:
+    attributes = [
+        gmail._ScannedAttribute(
+            name="src", lower_name="src", value="https://e/x", quote=None
+        ),
+        gmail._ScannedAttribute(name="alt", lower_name="alt", value='a"b', quote=None),
+        gmail._ScannedAttribute(
+            name="hidden", lower_name="hidden", value=None, quote=None
+        ),
+    ]
+
+    assert (
+        gmail._render_img_tag(attributes, self_closing=True)
+        == '<img data-src="https://e/x" alt="a&quot;b" hidden/>'
+    )
+
+
+def test_pre_scan_handles_doctype_and_processing_instructions() -> None:
+    assert gmail._pre_scan_html("<!DOCTYPE html><p>x</p>") == "<!DOCTYPE html><p>x</p>"
+    assert (
+        gmail._pre_scan_html('<?xml version="1.0"?><p>x</p>')
+        == '<?xml version="1.0"?><p>x</p>'
+    )
+    assert _sanitize("<!DOCTYPE html><?xml version='1.0'?><p>x</p>") == "<p>x</p>"
+
+
+def test_pre_scan_keeps_malformed_less_than_as_text() -> None:
+    assert gmail._pre_scan_html("a < b") == "a < b"
+    assert _sanitize("a < b") == "a &lt; b"
+
+
+def test_pre_scan_handles_unclosed_raw_text_and_depth() -> None:
+    assert gmail._pre_scan_html("<script>x</script") == "<script>x</script"
+    assert (
+        gmail._pre_scan_html("<script>x</script><p>y</p>")
+        == "<script>x</script><p>y</p>"
+    )
+
+
+def test_cdata_text_cap_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gmail, "_HTML_MAX_TEXT_CHARS", 4)
+
+    assert _sanitize("<![CDATA[abcdef]]>") == ""
+
+
+def test_unclosed_raw_text_cap_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gmail, "_HTML_MAX_TEXT_CHARS", 4)
+
+    assert _sanitize("<script>abcdef") == ""
+
+
+def test_closed_raw_text_cap_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gmail, "_HTML_MAX_TEXT_CHARS", 4)
+
+    assert _sanitize("<script>abcdef</script>") == ""
+
+
+def test_malformed_less_than_text_cap_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gmail, "_HTML_MAX_TEXT_CHARS", 2)
+
+    assert _sanitize("a < b") == ""
+
+
+def test_text_safety_control_and_format_characters() -> None:
+    assert gmail._text_is_safe("a\tb")
+    assert not gmail._text_is_safe("a\x01b")
+    assert not gmail._text_is_safe("a\u200db")
+
+
+def test_unknown_token_type_is_rejected() -> None:
+    assert gmail._token_is_safe(SimpleNamespace(type="not-a-css-token")) is False
+
+
+def test_strip_whitespace_skips_leading_whitespace() -> None:
+    tokens = tinycss2.parse_component_value_list("  red")
+
+    stripped = gmail._strip_whitespace(tokens)
+
+    assert len(stripped) == 1
+    assert stripped[0].type == "ident"
+
+
+def test_finite_number_and_dimension_helpers_reject_bad_values() -> None:
+    ident = tinycss2.parse_component_value_list("red")[0]
+
+    assert gmail._finite_number(ident) is None
+    assert gmail._finite_number(SimpleNamespace(type="number", value=math.inf)) is None
+    assert gmail._dimension_px(ident) is None
+    assert (
+        gmail._dimension_px(
+            SimpleNamespace(type="dimension", unit="px", value=math.inf)
+        )
+        is None
+    )
+
+    # Invalid textual representation falls back to the parsed numeric value.
+    assert (
+        gmail._dimension_px(
+            SimpleNamespace(
+                type="dimension", unit="px", value=1.5, representation="nope"
+            )
+        )
+        == 1.5
+    )
+
+
+def test_length_value_number_and_percentage_boundaries() -> None:
+    one = tinycss2.parse_component_value_list("1")[0]
+    zero = tinycss2.parse_component_value_list("0")[0]
+    over = tinycss2.parse_component_value_list("101%")[0]
+
+    assert gmail._length_value(one, minimum=0, maximum=2) is None
+    assert gmail._length_value(zero, minimum=1, maximum=2) is None
+    assert gmail._length_value(over, allow_percent=True) is None
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "color:rgb(1,2)",
+        "color:rgb(1,2 3)",
+        "color:rgba(0,0,0,foo)",
+        "color:rgba(0,0,0,101%)",
+        "color:rgba(0,0,0,1.5)",
+        "color:rgba(0,0,0,red)",
+        "color:rgb(a,b,c)",
+        "color:rgb(101%,0%,0%)",
+        "color:rgb(256,0,0)",
+        "color:rgb(red,0,0)",
+        "hsl(10%,0%,0%)",
+        "color:hsl(0,0,0)",
+        "color:hsl(0,101%,0%)",
+        "color:notacolor",
+        "color:#12",
+        "display:2",
+        "font-family:12",
+        'font-family:"a<b"',
+        'font-family:,"Arial"',
+        "font-family:" + ("a" * 128) + " b",
+        "font-size:1 2",
+        "font-weight:1 2",
+        "font-weight:99",
+        "font-weight:400.5",
+        "font-weight:50%",
+        "line-height:1 2",
+        "letter-spacing:1 2",
+        "letter-spacing:10%",
+        "vertical-align:1 2",
+        "width:1 2",
+        "margin:1px 2px 3px 4px 5px",
+        "padding:1px 2px 3px 4px 5px",
+        "border-width:1px 2px 3px 4px 5px",
+        "border-style:solid nope",
+        "border-style:solid 1px",
+        "border-color:red nope",
+        "border-color:1px",
+        "border:1px solid red extra",
+        "border:1px 2px solid",
+        "border:solid dashed red",
+        "border:red blue",
+        "border:1px solid 10%",
+        "border-spacing:1px 2px 3px",
+        "text-decoration:underline overline line-through blink",
+        "text-decoration:1px",
+        "text-decoration:blink",
+        "text-decoration:none underline",
+        "border-radius:101%",
+        "border-radius:auto",
+    ],
+)
+def test_css_validator_invalid_values(declaration: str) -> None:
+    assert gmail._sanitize_style(declaration) is None
+
+
+@pytest.mark.parametrize(
+    ("declaration", "expected"),
+    [
+        ("border-style:solid dashed", "border-style:solid dashed"),
+        ("border-color:red #fff", "border-color:red #fff"),
+        ("border-width:thin", "border-width:thin"),
+        ("border-width:1px 2px", "border-width:1px 2px"),
+        ("vertical-align:10px", "vertical-align:10px"),
+        ("border:1px solid red", "border:1px solid red"),
+        ("border:solid red 2px", "border:solid red 2px"),
+        ("border:red", "border:red"),
+        ("border-spacing:1px 2px", "border-spacing:1px 2px"),
+        ("text-decoration:underline overline", "text-decoration:underline overline"),
+        ("padding:1px 2px 3px 4px", "padding:1px 2px 3px 4px"),
+        ("margin:auto 0 10% -2px", "margin:auto 0 10% -2px"),
+    ],
+)
+def test_css_validator_valid_values(declaration: str, expected: str) -> None:
+    assert gmail._sanitize_style(declaration) == expected
+
+
+def test_parse_color_rejects_non_color_function() -> None:
+    token = tinycss2.parse_component_value_list("linear-gradient(red, blue)")[0]
+
+    assert gmail._parse_color(token) is None
+
+
+def test_style_property_names_mirror_validator_table() -> None:
+    names = gmail._style_property_names()
+
+    assert "color" in names
+    assert "border-top-left-radius" in names
+    assert names == frozenset(gmail._STYLE_VALIDATORS)
+
+
+def test_sanitize_style_parser_exception_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(value: str, **kwargs: object) -> list[object]:
+        raise RuntimeError("parser failed")
+
+    monkeypatch.setattr(tinycss2, "parse_declaration_list", boom)
+
+    assert gmail._sanitize_style("color:red") is None
+
+
+def test_sanitize_style_revalidates_serialized_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(gmail._STYLE_VALIDATORS, "color", lambda tokens: "red\x01")
+
+    assert gmail._sanitize_style("color:red") is None
+
+
+def test_sanitize_style_rejects_unencodable_serialized_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(gmail._STYLE_VALIDATORS, "color", lambda tokens: "\ud800")
+    monkeypatch.setattr(gmail, "_text_is_safe", lambda text: True)
+
+    assert gmail._sanitize_style("color:red") is None
+
+
+def test_overlong_unvalidated_attribute_is_removed() -> None:
+    cleaned = _sanitize('<a href="https://e" title="' + ("x" * 2_049) + '">x</a>')
+
+    assert "title=" not in cleaned
+    assert ">x</a>" in cleaned
+
+
+def test_nh3_non_string_result_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nh3
+
+    monkeypatch.setattr(nh3, "clean", lambda *args, **kwargs: None)
+
+    assert _sanitize("<p>x</p>") == ""
+
+
+def test_nh3_unencodable_result_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nh3
+
+    monkeypatch.setattr(nh3, "clean", lambda *args, **kwargs: "\ud800")
+
+    assert _sanitize("<p>x</p>") == ""
+
+
+def test_second_pre_scan_empty_result_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    def fake_pre_scan(raw: str) -> str:
+        calls["count"] += 1
+        return raw if calls["count"] == 1 else ""
+
+    monkeypatch.setattr(gmail, "_pre_scan_html", fake_pre_scan)
+
+    assert _sanitize("<p>x</p>") == ""
+
+
+def test_second_pre_scan_exception_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"count": 0}
+
+    def fake_pre_scan(raw: str) -> str:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return raw
+        raise RuntimeError("output scan failed")
+
+    monkeypatch.setattr(gmail, "_pre_scan_html", fake_pre_scan)
+
+    assert _sanitize("<p>x</p>") == ""
+
+
+def test_pre_scan_appends_unclosed_raw_text() -> None:
+    assert gmail._pre_scan_html("<script>nope") == "<script>nope"
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "color:rgb(1, 2 3, 4)",
+        "color:rgba(0,0,0,10px)",
+        "color:rgb(10px,0,0)",
+        "color:hsl(10px,0%,0%)",
+        r'font-family:"a\3c b"',
+        "border-style:solid dashed dotted double solid",
+        "border-color:red green blue black white",
+    ],
+)
+def test_css_validator_additional_invalid_values(declaration: str) -> None:
+    assert gmail._sanitize_style(declaration) is None
+
+
+@pytest.mark.parametrize(
+    ("declaration", "expected"),
+    [
+        ("color:rgba(0,0,0,50%)", "color:rgba(0, 0, 0, 50%)"),
+        ("color:rgb(100%,0%,0%)", "color:rgb(100%, 0%, 0%)"),
+    ],
+)
+def test_css_validator_additional_valid_values(declaration: str, expected: str) -> None:
+    assert gmail._sanitize_style(declaration) == expected
+
+
+def test_text_safety_accepts_non_ascii_letters() -> None:
+    assert gmail._text_is_safe("àèìòù €")
+
+
+def test_font_family_validator_rejects_unsafe_token_directly() -> None:
+    tokens = tinycss2.parse_component_value_list('"a<b"')
+
+    assert gmail._validate_font_family(tokens) is None
