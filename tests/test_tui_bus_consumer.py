@@ -1,4 +1,4 @@
-"""TUI poll worker as the single bus consumer + test-only ``_handle_event``."""
+"""TUI poll worker as the single bus consumer + the bus-consumer step."""
 
 from __future__ import annotations
 
@@ -6,6 +6,9 @@ import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+
+import pytest
+from event_harness import feed
 
 from models import PROTOCOL_SIGNAL, ChatContact, ChatEvent
 from server.bus import GAP
@@ -97,39 +100,38 @@ def test_gap_marks_list_dirty_and_triggers_full_flush():
     assert app._contact_list_dirty is False
 
 
-def test_handle_event_publishes_on_bus_without_double_dispatch():
+def test_feed_publishes_on_bus_and_applies_view_once():
     app = _app()
     sub = app.bus.subscribe()
-    thread = _run_worker(app)
-    try:
-        event = ChatEvent(
-            type="typing",
-            protocol=PROTOCOL_SIGNAL,
-            contact_id=CID,
-            payload={"action": "STARTED"},
-        )
-        app._view_typing = MagicMock(wraps=app._view_typing)
-        assert app._handle_event(event) is True
-        # Give the worker time to see (and skip) the published event.
-        assert _wait(lambda: not app._compat_payload_ids)
-        time.sleep(0.3)
-    finally:
-        _stop(app, thread)
+    event = ChatEvent(
+        type="typing",
+        protocol=PROTOCOL_SIGNAL,
+        contact_id=CID,
+        payload={"action": "STARTED"},
+    )
+    app._view_typing = MagicMock(wraps=app._view_typing)
+    assert feed(app, event) is True
     assert app._view_typing.call_count == 1
     published = sub.drain()
     assert [e.type for e in published] == ["typing"]
     assert published[0].payload["action"] == "STARTED"
 
 
-def test_handle_event_returns_false_when_core_produces_nothing():
+def test_feed_returns_false_when_core_produces_nothing():
     app = _app()
-    assert app._handle_event(ChatEvent("mystery", PROTOCOL_SIGNAL, CID)) is False
+    assert feed(app, ChatEvent("mystery", PROTOCOL_SIGNAL, CID)) is False
     assert (
-        app._handle_event(
-            ChatEvent("typing", PROTOCOL_SIGNAL, CID, payload={"action": "nope"})
-        )
+        feed(app, ChatEvent("typing", PROTOCOL_SIGNAL, CID, payload={"action": "nope"}))
         is False
     )
+
+
+def test_feed_does_not_swallow_view_errors():
+    app = _app()
+    app._view_typing = MagicMock(side_effect=RuntimeError("boom"))
+    event = ChatEvent("typing", PROTOCOL_SIGNAL, CID, payload={"action": "STARTED"})
+    with pytest.raises(RuntimeError):
+        feed(app, event)
 
 
 def test_pump_to_view_end_to_end():

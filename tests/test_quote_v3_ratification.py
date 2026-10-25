@@ -7,12 +7,11 @@ from __future__ import annotations
 
 import sqlite3
 
-from event_harness import EventApp, legacy_frames
+from event_harness import EventApp, feed, legacy_frames
 
 from models import ChatContact, ChatEvent
 from protocols import db as db_mod
 from protocols.signal import SignalBackend
-from tui.events import EventHandlingMixin
 from tui.unread_reply import UnreadReplyMixin
 
 CONTACT = "+391234567890"
@@ -108,11 +107,11 @@ def test_r2_incoming_changed_adds_no_db_row_and_no_ui_cache_entry():
     contact = ChatContact(id=CONTACT, display_name="Mario", protocol="signal")
     app = _app(backend, contact)
 
-    assert EventHandlingMixin._handle_event(app, _event(_incoming(), contact))
+    assert feed(app, _event(_incoming(), contact))
     assert _db_row_count() == 1
     assert len(app._cache[contact.cache_key]) == 1
 
-    assert EventHandlingMixin._handle_event(app, _event(_enriched(), contact))
+    assert feed(app, _event(_enriched(), contact))
 
     assert _db_row_count() == 1
     assert len(app._cache[contact.cache_key]) == 1
@@ -129,13 +128,13 @@ def test_r3_incoming_changed_keeps_unread_unchanged_in_ui_and_db():
     host = _UnreadHost([contact], app._cache)
 
     # Primo arrivo: riga DB + cache UI + unread = 1.
-    EventHandlingMixin._handle_event(app, _event(_incoming(), contact))
+    feed(app, _event(_incoming(), contact))
     assert host._recompute_unread(contact.cache_key) is True
     assert host._unread_counts[contact.cache_key] == 1
     assert db_mod._count_unread() == {CONTACT: 1}
 
     # Echo arricchito ("changed"): unread resta 1 su entrambi i lati.
-    EventHandlingMixin._handle_event(app, _event(_enriched(), contact))
+    feed(app, _event(_enriched(), contact))
 
     assert host._recompute_unread(contact.cache_key) is False
     assert host._unread_counts[contact.cache_key] == 1
@@ -251,9 +250,9 @@ def test_r6_changed_echo_pushes_web_event_exactly_once():
     event = _event(_enriched(), contact)
 
     sub = app.bus.subscribe()
-    EventHandlingMixin._handle_event(app, event)
+    feed(app, event)
     assert len(legacy_frames(sub.drain())) == 1
 
     # Secondo echo no-op: nessun secondo push.
-    EventHandlingMixin._handle_event(app, event)
+    feed(app, event)
     assert legacy_frames(sub.drain()) == []

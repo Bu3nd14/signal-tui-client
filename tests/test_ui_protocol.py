@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from event_harness import feed
+
 from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_WHATSAPP,
@@ -998,7 +1000,7 @@ class TestContactListFlush:
         )
 
         with patch.object(app, "call_from_thread"):
-            handled = app._handle_event(event)
+            handled = feed(app, event)
 
         assert handled is True
         assert app._contact_list_dirty is True

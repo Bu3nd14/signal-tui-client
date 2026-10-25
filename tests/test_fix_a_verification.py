@@ -16,13 +16,12 @@ from __future__ import annotations
 import logging
 import sqlite3
 
-from event_harness import EventApp, legacy_frames
+from event_harness import EventApp, feed, legacy_frames
 
 from models import ChatContact, ChatEvent
 from protocols import db
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
-from tui.events import EventHandlingMixin
 
 
 def _telegram_echo(message_id: str, attachment_id: str | None) -> dict:
@@ -260,7 +259,7 @@ def _assert_echo_first_merge_pushes(backend, protocol, contact_id, echo):
     )
 
     sub = app.bus.subscribe()
-    assert EventHandlingMixin._handle_event(app, event) is True
+    assert feed(app, event) is True
 
     # One web frame for the "changed" echo (the TUI itself never pushes).
     frames = legacy_frames(sub.drain())
@@ -300,7 +299,7 @@ def test_mirror_first_echo_does_not_push_duplicate():
     )
 
     sub = app.bus.subscribe()
-    assert EventHandlingMixin._handle_event(app, event) is True
+    assert feed(app, event) is True
 
     # Unchanged duplicate -> no push, no double bubble.
     assert legacy_frames(sub.drain()) == []

@@ -13,7 +13,6 @@ from models import (
     PROTOCOL_SIGNAL,
     PROTOCOL_WHATSAPP,
     ChatContact,
-    ChatEvent,
     contact_cache_key,
     protocol_emoji,
     protocol_name,
@@ -78,31 +77,6 @@ def _merge_cached_messages(dest: list[dict], src: list[dict]) -> None:
 
 
 class EventHandlingMixin:
-    def _handle_event(self, raw: ChatEvent) -> bool:
-        """TEST-ONLY compatibility entry point for a raw backend ``ChatEvent``.
-
-        Production code must NOT call this: the core pump (``ChatCore``)
-        processes raw events and the poll worker consumes the resulting core
-        events from the bus.  This wrapper runs ``core.process(raw)``,
-        publishes each result on ``self.bus`` (so bus/web consumers observe
-        it) and applies the view handler directly, returning ``True`` when
-        the event was handled (i.e. the core produced events).
-
-        The published events are marked so the poll worker does not apply
-        their view handlers a second time.
-        """
-        results = self.core.process(raw)
-        handled = False
-        skip: dict[int, dict] = self.__dict__.setdefault("_compat_payload_ids", {})
-        for etype, payload in results:
-            # Before publish (the worker may be racing); the payload itself is
-            # kept as the value so its id cannot be reused while marked.
-            skip[id(payload)] = payload
-            event = self.bus.publish(etype, payload)
-            if self._dispatch_view_event(event):
-                handled = True
-        return handled
-
     def _dispatch_view_event(self, event: Event) -> bool:
         """Apply the view-side effects of a domain core event."""
         handler = {

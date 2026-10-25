@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from client_harness import api_for
+from event_harness import feed
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -36,6 +37,7 @@ from protocols.whatsapp import WhatsAppBackend
 from server.bus import EventBus
 from server.core import ChatCore
 from tui.events import EventHandlingMixin
+from tui.polling import PollingMixin
 from web.api import create_api_router
 from web.legacy_events import to_legacy
 
@@ -43,6 +45,10 @@ _PNG_1X1 = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
     "+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+class _ViewHost(EventHandlingMixin, PollingMixin):
+    pass
 
 
 class _MinimalBackend(ChatBackend):
@@ -520,7 +526,7 @@ class TestWhatsAppIdentity:
         backend.register_contact(book)
         backend.ingest_message = MagicMock(return_value=True)
 
-        harness = EventHandlingMixin()
+        harness = _ViewHost()
         harness.bus = EventBus()
         harness.core = ChatCore(harness.bus)
         harness.manager = SimpleNamespace(get=lambda protocol: backend)
@@ -551,7 +557,7 @@ class TestWhatsAppIdentity:
             },
         )
         sub = harness.bus.subscribe()
-        assert harness._handle_event(event) is True
+        assert feed(harness, event) is True
 
         assert backend.ingest_message.call_args.args[0] == "393@c.us"
         frames = [to_legacy(e) for e in sub.drain()]

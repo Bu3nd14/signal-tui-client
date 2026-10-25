@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from event_harness import EventApp, legacy_frames
+from event_harness import EventApp, feed, legacy_frames
 
 from models import PROTOCOL_SIGNAL, ChatContact, ChatEvent
 from protocols.base import ChatBackend
@@ -76,7 +76,7 @@ def test_reaction_dispatch_without_backend_support_returns_false(app_for_test):
     app_for_test.core.manager.get.return_value = object()
     app_for_test._contact_list_dirty = False
 
-    assert app_for_test._handle_event(_reaction_event()) is False
+    assert feed(app_for_test, _reaction_event()) is False
     assert app_for_test._contact_list_dirty is False
 
 
@@ -90,7 +90,7 @@ def test_reaction_dispatch_applies_without_marking_contact_dirty(
     app._contact_list_dirty = False
     event = _reaction_event()
 
-    assert app._handle_event(event) is True
+    assert feed(app, event) is True
     backend.apply_reaction.assert_called_once_with(event.contact_id, event.payload)
     assert app._contact_list_dirty is False
 
@@ -99,7 +99,7 @@ def test_reaction_dispatch_unknown_backend_returns_false(app_for_test):
     app_for_test.core.manager.get.return_value = None
     app_for_test._contact_list_dirty = False
 
-    assert app_for_test._handle_event(_reaction_event()) is False
+    assert feed(app_for_test, _reaction_event()) is False
     assert app_for_test._contact_list_dirty is False
 
 
@@ -171,9 +171,8 @@ def test_reaction_event_does_not_push_when_web_is_disabled():
 
 
 def app_for_mixin(app, event):
-    from tui.events import EventHandlingMixin
 
-    return EventHandlingMixin._handle_event(app, event)
+    return feed(app, event)
 
 
 class _MinimalBackend(ChatBackend):

@@ -33,7 +33,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from event_harness import legacy_frames
+from event_harness import feed, legacy_frames
 
 import protocols.db as backend_mod
 from models import (
@@ -278,13 +278,14 @@ class TestSendPersistOffthread:
             "attachment_id": None,
             "contact": contact,
         }
-        app._handle_event(
+        feed(
+            app,
             ChatEvent(
                 type="message",
                 protocol=PROTOCOL_SIGNAL,
                 contact_id=contact.id,
                 payload=echo_payload,
-            )
+            ),
         )
 
         # No duplicate bubble and no duplicate DB row.
@@ -310,7 +311,8 @@ class TestSendPersistOffthread:
             assert legacy_frames(sub.drain()) == []
             _run_workers(app)
 
-            app._handle_event(
+            feed(
+                app,
                 ChatEvent(
                     type="message",
                     protocol=PROTOCOL_SIGNAL,
@@ -327,7 +329,7 @@ class TestSendPersistOffthread:
                         "attachment_id": None,
                         "contact": contact,
                     },
-                )
+                ),
             )
 
         # The TUI no longer calls push_event: exactly one legacy frame reaches
@@ -529,13 +531,14 @@ class TestSendPersistOffthread:
             "quote_content_type": "image/png",
         }
 
-        handled = app._handle_event(
+        handled = feed(
+            app,
             ChatEvent(
                 type="message",
                 protocol=PROTOCOL_SIGNAL,
                 contact_id=contact.id,
                 payload=payload,
-            )
+            ),
         )
 
         assert handled is True

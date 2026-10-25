@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from client_harness import api_for
-from event_harness import EventApp, legacy_frames
+from event_harness import EventApp, feed, legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -18,7 +18,6 @@ from protocols.signal import SignalBackend
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
 from server.messages import _messages
-from tui.events import EventHandlingMixin
 from web.api import create_api_router
 
 
@@ -519,7 +518,7 @@ def test_push_on_attachment_upgrade():
     )
 
     sub = app.bus.subscribe()
-    assert EventHandlingMixin._handle_event(app, event)
+    assert feed(app, event)
 
     assert len(legacy_frames(sub.drain())) == 1
     assert app._cache == {}
@@ -545,7 +544,7 @@ def test_receipt_event_pushes_normalized_web_update():
     )
 
     sub = app.bus.subscribe()
-    assert EventHandlingMixin._handle_event(app, event)
+    assert feed(app, event)
 
     assert legacy_frames(sub.drain()) == [
         {
@@ -581,7 +580,7 @@ def test_receipt_event_does_not_push_when_web_is_disabled():
 
     sub = app.bus.subscribe()
     with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_event(app, event)
+        assert feed(app, event)
 
     # No web server is attached to the bus: nothing is pushed to the web.
     push_event.assert_not_called()
@@ -610,7 +609,7 @@ def test_edit_event_pushes_web_update():
     )
 
     sub = app.bus.subscribe()
-    assert EventHandlingMixin._handle_event(app, event)
+    assert feed(app, event)
 
     assert legacy_frames(sub.drain()) == [
         {
@@ -639,7 +638,7 @@ def test_edit_event_does_not_push_when_web_is_disabled():
 
     sub = app.bus.subscribe()
     with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_event(app, event)
+        assert feed(app, event)
 
     # No web server is attached to the bus: nothing is pushed to the web.
     push_event.assert_not_called()

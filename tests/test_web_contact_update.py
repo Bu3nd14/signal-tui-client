@@ -15,16 +15,19 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from event_harness import feed
+
 from models import PROTOCOL_WHATSAPP, ChatContact, ChatEvent, contact_cache_key
 from protocols.whatsapp import WhatsAppBackend
 from server.bus import EventBus
 from server.core import ChatCore
 from server.events_api import contact_to_wire
 from tui.events import EventHandlingMixin
+from tui.polling import PollingMixin
 from web.legacy_events import to_legacy
 
 
-class _App(EventHandlingMixin):
+class _App(EventHandlingMixin, PollingMixin):
     """Harness minimale: espone solo gli attributi toccati dai handler."""
 
     def __init__(self, backend, contacts=None, *, web_enabled=False):
@@ -67,7 +70,7 @@ def test_dispatcher_routes_contact_update():
     event = _contact_update_event(contact)
 
     with patch.object(app, "_view_contact_update", return_value=True) as handler:
-        assert app._handle_event(event) is True
+        assert feed(app, event) is True
 
     handler.assert_called_once()
     core_event = handler.call_args[0][0]
@@ -84,7 +87,7 @@ def test_contact_update_marks_dirty_and_pushes_web():
 
     sub = app.bus.subscribe()
     with patch("web.bridge.push_event") as push:
-        assert app._handle_event(event) is True
+        assert feed(app, event) is True
 
     assert app._contact_list_dirty is True
     assert contact_cache_key(PROTOCOL_WHATSAPP, "1@lid") in app._dirty_contact_keys
@@ -108,7 +111,7 @@ def test_contact_update_without_web_does_not_push():
     contact = ChatContact(id="1@lid", display_name="Giulia", protocol=PROTOCOL_WHATSAPP)
 
     with patch("web.bridge.push_event") as push:
-        assert app._handle_event(_contact_update_event(contact)) is True
+        assert feed(app, _contact_update_event(contact)) is True
 
     # No web server is attached to the bus: nothing is pushed to the web.
     push.assert_not_called()
@@ -140,7 +143,7 @@ def test_materialized_contact_is_added_to_tui_list_on_message():
         },
     )
 
-    assert app._handle_event(event) is True
+    assert feed(app, event) is True
     assert [c.cache_key for c in app.contacts] == [materialized.cache_key]
     assert app.contacts[0].display_name == "Giulia"
     assert app._contact_list_dirty is True
@@ -161,7 +164,7 @@ def test_materialized_contact_is_added_to_tui_list_on_sent_mirror():
         payload={"id": "x", "timestamp": 5000},
     )
 
-    assert app._handle_event(event) is True
+    assert feed(app, event) is True
     assert [c.cache_key for c in app.contacts] == [materialized.cache_key]
     assert app.contacts[0].display_name == "Luca"
 
@@ -187,7 +190,7 @@ def test_placeholder_is_registered_with_backend():
         },
     )
 
-    assert app._handle_event(event) is True
+    assert feed(app, event) is True
     backend.register_contact.assert_called_once()
     placeholder = backend.register_contact.call_args[0][0]
     assert placeholder.cache_key == contact_cache_key(PROTOCOL_WHATSAPP, "999@lid")

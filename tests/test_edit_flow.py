@@ -29,6 +29,8 @@ from textual.widgets import Static
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from event_harness import feed
+
 from models import PROTOCOL_SIGNAL, ChatEvent
 from ui_components import MessageTextArea, MessageWidget
 
@@ -379,7 +381,7 @@ async def test_incoming_edit_chat_open_updates_widget_no_new_bubble(
         with patch.object(
             app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
         ):
-            handled = app._handle_event(event)
+            handled = feed(app, event)
         await pilot.pause()
 
         assert handled is True
@@ -446,7 +448,7 @@ async def test_incoming_edit_chat_closed_updates_cache_only(
         with patch.object(
             app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
         ):
-            handled = app._handle_event(event)
+            handled = feed(app, event)
         await pilot.pause()
 
         assert handled is True

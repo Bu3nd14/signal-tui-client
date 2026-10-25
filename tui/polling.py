@@ -24,7 +24,6 @@ class PollingMixin:
         sub = self._core_sub
         if sub is None:
             return
-        skip_ids: dict[int, dict] = self.__dict__.setdefault("_compat_payload_ids", {})
         try:
             while self._polling_active:
                 try:
@@ -36,10 +35,6 @@ class PollingMixin:
                     for event in events:
                         if not self._polling_active:
                             return
-                        if id(event.payload) in skip_ids:
-                            # Already applied by the test-only ``_handle_event``.
-                            skip_ids.pop(id(event.payload), None)
-                            continue
                         self._dispatch_bus_event(event)
 
                     self._expire_typing()
@@ -54,21 +49,27 @@ class PollingMixin:
     def _dispatch_bus_event(self, event: Event) -> None:
         """Route one bus event; never raises (a bad event must not stop the loop)."""
         try:
-            if event.type == "backend_ready":
-                # Fetch the heavy ready data here (worker), merge on the UI thread.
-                proto = event.payload["protocol"]
-                snapshot, contacts = self._prefetch_backend_ready(proto)
-                self.call_from_thread(self._on_backend_ready, proto, snapshot, contacts)
-            elif event.type.startswith("backend_"):
-                self.call_from_thread(self._dispatch_core_event, event)
-            elif event.type == GAP:
-                # Lost events: we cannot know what changed -> full flush.
-                logger.debug("Core event bus gap: %s", event.payload)
-                self._contact_list_dirty = True
-            else:
-                self._dispatch_view_event(event)
+            self._route_bus_event(event)
         except Exception:
             logger.debug("Core event dispatch failed", exc_info=True)
+
+    def _route_bus_event(self, event: Event) -> bool:
+        """Apply one bus event to the TUI; ``True`` when something handled it."""
+        if event.type == "backend_ready":
+            # Fetch the heavy ready data here (worker), merge on the UI thread.
+            proto = event.payload["protocol"]
+            snapshot, contacts = self._prefetch_backend_ready(proto)
+            self.call_from_thread(self._on_backend_ready, proto, snapshot, contacts)
+            return True
+        if event.type.startswith("backend_"):
+            self.call_from_thread(self._dispatch_core_event, event)
+            return True
+        if event.type == GAP:
+            # Lost events: we cannot know what changed -> full flush.
+            logger.debug("Core event bus gap: %s", event.payload)
+            self._contact_list_dirty = True
+            return True
+        return self._dispatch_view_event(event)
 
     def _expire_typing(self) -> None:
         # Typing timeout: a STARTED without a STOPPED within

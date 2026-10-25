@@ -25,6 +25,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from event_harness import feed
+
 from models import PROTOCOL_SIGNAL, ChatContact, contact_cache_key
 from protocols.rpc import _process_typing
 from signal_tui import SignalTUI
@@ -116,11 +118,11 @@ class TestSignalTUITyping:
         return app
 
     def _dispatch(self, app, envelope: dict) -> None:
-        """Convert an envelope to ChatEvents and route them through _handle_event."""
+        """Convert an envelope to ChatEvents and route them through feed."""
         events = app.core.signal_backend.envelope_to_event(envelope)
         for event in events:
             with patch.object(app, "call_from_thread"):
-                app._handle_event(event)
+                feed(app, event)
 
     def _cache_key(self) -> str:
         return contact_cache_key(PROTOCOL_SIGNAL, "+391234567890")
