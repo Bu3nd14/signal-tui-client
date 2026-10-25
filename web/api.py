@@ -2060,42 +2060,13 @@ def create_api_router() -> Any:
     async def messages_read(
         request: Request, payload: dict[str, Any]
     ) -> dict[str, str]:
-        proto = str(payload.get("protocol") or "").strip()
-        contact_id = str(payload.get("contact_id") or "").strip()
-        if proto not in ("signal", "whatsapp", "telegram") or not contact_id:
-            raise HTTPException(status_code=400, detail="Invalid request")
-        manager = request.app.state.manager
-        try:
-            # Come il TUI: mark-read del backend (remoto, es. WAHA) + persistenza
-            # read=1 in SQLite (da cui la web UI calcola i badge non letti).
-            await manager.mark_read(proto, contact_id)
-        except Exception:
-            logger.warning(
-                "web mark-read failed proto=%s contact_id=%s",
-                proto,
-                contact_id,
-                exc_info=True,
-            )
-        return {"status": "ok"}
+        return await call_op(request, "chats.mark_read", payload)
 
     @router.post("/chats/archive")
     async def chats_archive(
         request: Request, payload: dict[str, Any]
     ) -> dict[str, bool]:
-        proto = str(payload.get("protocol") or "").strip()
-        contact_id = str(payload.get("contact_id") or "").strip()
-        archived = payload.get("archived")
-        if proto != "whatsapp" or not contact_id or not isinstance(archived, bool):
-            raise HTTPException(status_code=400, detail="Invalid request")
-        backend = request.app.state.manager.get(proto)
-        if backend is None or not hasattr(backend, "set_chat_archived_sync"):
-            raise HTTPException(status_code=503, detail="Backend unavailable")
-        ok = await asyncio.to_thread(
-            backend.set_chat_archived_sync, contact_id, archived
-        )
-        if not ok:
-            raise HTTPException(status_code=502, detail="Archive failed")
-        return {"archived": archived}
+        return await call_op(request, "chats.archive", payload)
 
     @router.post("/messages/edit")
     async def messages_edit(

@@ -159,3 +159,107 @@ def test_contacts_book_matches_operation(no_db, params):
 def test_contacts_book_requires_q():
     client, _ = make(_contacts_manager())
     assert client.get("/api/contacts/book", headers=AUTH).status_code == 422
+
+
+READ = {"protocol": "signal", "contact_id": "+1"}
+
+
+def test_messages_read_matches_operation_and_marks_read():
+    manager = Manager()
+    client, api = make(manager)
+    response = client.post("/api/messages/read", json=READ, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == api.call_json("chats.mark_read", READ) == {"status": "ok"}
+    assert manager.read_calls == [("signal", "+1")] * 2
+
+
+def test_messages_read_strips_and_swallows_backend_errors():
+    manager = Manager()
+
+    async def boom(protocol, contact_id):
+        raise RuntimeError("down")
+
+    manager.mark_read = boom
+    client, _ = make(manager)
+    response = client.post(
+        "/api/messages/read",
+        json={"protocol": " signal ", "contact_id": " +1 "},
+        headers=AUTH,
+    )
+    assert (response.status_code, response.json()) == (200, {"status": "ok"})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"protocol": "signal"},
+        {"protocol": "irc", "contact_id": "x"},
+        {"protocol": "signal", "contact_id": "  "},
+        {"protocol": None, "contact_id": 5},
+    ],
+)
+def test_messages_read_invalid_is_400(payload):
+    client, _ = make(Manager())
+    response = client.post("/api/messages/read", json=payload, headers=AUTH)
+    assert (response.status_code, response.json()) == (
+        400,
+        {"detail": "Invalid request"},
+    )
+
+
+ARCHIVE = {"protocol": "whatsapp", "contact_id": "1@c.us", "archived": True}
+
+
+def test_chats_archive_matches_operation():
+    calls = []
+
+    def archive(contact_id, archived):
+        calls.append((contact_id, archived))
+        return True
+
+    client, api = make(Manager({"whatsapp": Backend(set_chat_archived_sync=archive)}))
+    response = client.post("/api/chats/archive", json=ARCHIVE, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == api.call_json("chats.archive", ARCHIVE)
+    assert response.json() == {"archived": True}
+    assert calls == [("1@c.us", True)] * 2
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**ARCHIVE, "protocol": "signal"},
+        {**ARCHIVE, "contact_id": ""},
+        {**ARCHIVE, "archived": "yes"},
+        {**ARCHIVE, "archived": 1},
+        {"protocol": "whatsapp", "contact_id": "1@c.us"},
+    ],
+)
+def test_chats_archive_invalid_is_400(payload):
+    client, _ = make(
+        Manager({"whatsapp": Backend(set_chat_archived_sync=lambda *a: 1)})
+    )
+    response = client.post("/api/chats/archive", json=payload, headers=AUTH)
+    assert (response.status_code, response.json()) == (
+        400,
+        {"detail": "Invalid request"},
+    )
+
+
+@pytest.mark.parametrize(
+    "backends, status, detail",
+    [
+        ({}, 503, "Backend unavailable"),
+        ({"whatsapp": Backend()}, 503, "Backend unavailable"),
+        (
+            {"whatsapp": Backend(set_chat_archived_sync=lambda *a: False)},
+            502,
+            "Archive failed",
+        ),
+    ],
+)
+def test_chats_archive_backend_errors(backends, status, detail):
+    client, _ = make(Manager(backends))
+    response = client.post("/api/chats/archive", json=ARCHIVE, headers=AUTH)
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
