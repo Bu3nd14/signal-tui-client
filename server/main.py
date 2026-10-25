@@ -134,13 +134,12 @@ def serve(
             port = args.web_port if args.web_port is not None else web_port()
             token = web_token()
             web_handle = start_web_server(
-                core.manager,
+                core.api,
                 port,
                 token,
                 host=host,
                 require_auth=not args.web_no_auth,
                 bus=bus,
-                api=core.api,
             )
             if web_handle is None or web_handle.status == "down":
                 logger.error("Web adapter failed to start (see log); exiting")

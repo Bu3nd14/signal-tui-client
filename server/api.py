@@ -137,6 +137,11 @@ class ChatAPI:
         from server.link import LinkService
 
         self.link = LinkService(lambda: self.manager)
+        #: Cloud transcription service (core state; ``ChatCore`` starts and
+        #: stops it, see :mod:`server.transcribe`).
+        from server.transcribe import TranscriptionHost
+
+        self.transcription = TranscriptionHost()
         _load_operations()
 
     # -- host access (used by handlers) -------------------------------------

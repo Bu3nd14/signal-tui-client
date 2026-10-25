@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from client_harness import api_for
 from event_harness import legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -37,7 +38,7 @@ def edit_client(monkeypatch, tmp_path):
     _init_db()
     manager = EditManager()
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager, EventBus())
     install_auth(app, TOKEN)
     app.include_router(create_api_router())
     with TestClient(app) as client:
@@ -182,7 +183,7 @@ def test_edit_success_applies_locally_and_pushes_event(edit_client):
     client, manager, db_file = edit_client
     _insert_message(db_file, timestamp=4321)
 
-    bus = EventBus()
+    bus = client.app.state.api.bus
     sub = bus.subscribe()
     init_bridge(bus)
     try:

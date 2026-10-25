@@ -9,6 +9,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -47,7 +48,7 @@ class Manager:
 
 def make(manager):
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     install_auth(app, TOKEN)
     app.include_router(create_api_router())
     return TestClient(app), get_api(app)

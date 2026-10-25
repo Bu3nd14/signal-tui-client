@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -43,7 +44,7 @@ def _client(
         get=lambda protocol: backend if protocol == "whatsapp" else None
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return TestClient(app)
 
@@ -168,7 +169,7 @@ def test_avatar_download_failure_does_not_poison_negative_cache(monkeypatch, tmp
 
 def test_avatar_missing_backend_returns_no_photo(monkeypatch, tmp_path):
     client = _client(monkeypatch, tmp_path, FakeRest(_AVATAR_URL))
-    client.app.state.manager = SimpleNamespace(get=lambda protocol: None)
+    client.app.state.api = api_for(SimpleNamespace(get=lambda protocol: None))
 
     assert client.get(_avatar_request()).status_code == 404
 
@@ -303,7 +304,7 @@ def _signal_client(backend) -> TestClient:
         get=lambda protocol: backend if protocol == "signal" else None
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return TestClient(app)
 
@@ -442,7 +443,7 @@ def _telegram_client(
         get=lambda protocol: backend if protocol == "telegram" else None
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return TestClient(app)
 

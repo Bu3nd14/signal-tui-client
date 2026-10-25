@@ -5,6 +5,7 @@ from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from client_harness import api_for
 from event_harness import legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -105,8 +106,9 @@ def test_reaction_endpoint_validates_sends_persists_and_pushes(tmp_path):
     manager = SimpleNamespace(
         get=lambda protocol: signal if protocol == "signal" else None
     )
+    bus = EventBus()
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager, bus)
     app.include_router(create_api_router())
 
     with patch.object(backend, "DB_FILE", db_file):
@@ -120,7 +122,6 @@ def test_reaction_endpoint_validates_sends_persists_and_pushes(tmp_path):
             protocol="signal",
             msg_id="1234",
         )
-        bus = EventBus()
         sub = bus.subscribe()
         init_bridge(bus)
         try:

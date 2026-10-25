@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -154,7 +155,7 @@ def _messages_client(monkeypatch, tmp_path) -> TestClient:
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     manager = SimpleNamespace(get=lambda _proto: None, list_contacts=list)
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return TestClient(app)
 
@@ -203,7 +204,7 @@ def test_media_endpoint_ignores_version_param(monkeypatch, tmp_path):
         )
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
     with TestClient(app) as client:

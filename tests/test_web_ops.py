@@ -6,6 +6,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
@@ -38,7 +39,7 @@ def client(monkeypatch):
         return Out(thread=threading.current_thread().name)
 
     app = FastAPI()
-    app.state.manager = SimpleNamespace()
+    app.state.api = api_for(SimpleNamespace())
 
     @app.get("/{name}")
     async def route(request: Request, name: str, code: str = ""):
@@ -68,12 +69,14 @@ def test_sync_handler_runs_off_the_loop_thread_and_async_on_it(client):
     assert sync_thread != async_thread
 
 
-def test_get_api_prefers_explicit_state_and_caches(monkeypatch):
-    monkeypatch.setattr(api_module, "_REGISTRY", {})
+def test_get_api_returns_the_api_the_app_was_given():
+    app = FastAPI()
+    app.state.api = api = api_for(SimpleNamespace())
+    assert isinstance(api, ChatAPI) and get_api(app) is api
+
+
+def test_web_adapter_has_no_manager_fallback():
     app = FastAPI()
     app.state.manager = SimpleNamespace()
-    built = get_api(app)
-    assert isinstance(built, ChatAPI) and get_api(app) is built
-    explicit = ChatAPI(SimpleNamespace(manager=app.state.manager, bus=None))
-    app.state.api = explicit
-    assert get_api(app) is explicit
+    with pytest.raises(AttributeError):
+        get_api(app)

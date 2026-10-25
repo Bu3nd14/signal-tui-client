@@ -9,6 +9,7 @@ from unittest.mock import patch
 from urllib.parse import quote
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -30,7 +31,7 @@ def web_client(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     _init_db()
     app = FastAPI()
-    app.state.manager = SimpleNamespace(get_attachment_path=lambda *_args: None)
+    app.state.api = api_for(SimpleNamespace(get_attachment_path=lambda *_args: None))
     install_auth(app, TOKEN)
     app.include_router(create_api_router())
     with TestClient(app) as client:

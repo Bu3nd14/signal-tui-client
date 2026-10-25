@@ -1,13 +1,11 @@
 """REST API for contacts, persisted messages, media, and message sending."""
 
 import asyncio
-import json
 import logging
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from server.api import ApiError
 from server.media import (
     _attach_media_versions,  # noqa: F401  (re-export)
     _attachment_version,  # noqa: F401  (re-export)
@@ -19,10 +17,9 @@ from server.messages import (
     _quoted_media_by_filename,  # noqa: F401  (re-export)
 )
 from server.models_api import AttachmentIn
-from server.ops.common import PROTOCOLS as _PROTOCOLS
 from server.uploads import MAX_ATTACHMENTS, UploadValidationError
 from web import uploads as uploads_module
-from web.ops import call_op, get_api
+from web.ops import call_op
 from web.uploads import TempUpload, store_temp_upload
 
 logger = logging.getLogger(__name__)
@@ -293,86 +290,39 @@ def create_api_router() -> Any:
         )
 
     @router.post("/transcribe")
-    def transcribe(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
-        proto = payload.get("protocol")
-        attachment_id = payload.get("attachment_id")
-        if proto not in _PROTOCOLS or not isinstance(attachment_id, str):
-            raise HTTPException(status_code=400, detail="Invalid request")
-        attachment_id = attachment_id.strip()
-        if not attachment_id:
-            raise HTTPException(status_code=400, detail="Invalid request")
-
-        service = getattr(request.app.state, "transcription_service", None)
-        if service is None:
-            raise HTTPException(status_code=503, detail="Trascrizione non configurata")
-        current = service.status(proto, attachment_id)
-        if current is not None and current["status"] == "ok":
-            return {"status": "done", "text": current.get("text", "")}
-        if current is not None and current["status"] == "pending":
-            return {"status": "pending"}
-
-        try:
-            blob = get_api(request.app).call_json(
-                "media.attachment", {"protocol": proto, "attachment_id": attachment_id}
-            )
-        except ApiError:
-            raise HTTPException(
-                status_code=404, detail="Allegato non trovato"
-            ) from None
-        service.submit(proto, attachment_id, Path(blob["path"]))
-        return {"status": "pending"}
+    async def transcribe(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+        return await call_op(
+            request,
+            "transcribe.submit",
+            {
+                "protocol": payload.get("protocol"),
+                "attachment_id": payload.get("attachment_id"),
+            },
+        )
 
     @router.post("/config/openai-key")
-    def save_openai_key(request: Request, payload: dict[str, Any]) -> dict[str, str]:
-        api_key = payload.get("api_key")
-        if not isinstance(api_key, str):
-            raise HTTPException(status_code=400, detail="Chiave non valida")
-        api_key = api_key.strip()
-        if not api_key or not api_key.startswith("sk-"):
-            raise HTTPException(status_code=400, detail="Chiave non valida")
-
-        from protocols.config import PROJECT_DIR, _load_config
-
-        config_path = PROJECT_DIR / "config.json"
-        data = _load_config()
-        data["openai_api_key"] = api_key
-        try:
-            with config_path.open("w", encoding="utf-8") as config_file:
-                json.dump(data, config_file, indent=2)
-                config_file.write("\n")
-        except OSError:
-            logger.exception("Impossibile salvare la configurazione OpenAI")
-            raise HTTPException(
-                status_code=500, detail="Errore di salvataggio"
-            ) from None
-
-        try:
-            from web.server import _init_transcription_service
-
-            _init_transcription_service(request.app)
-        except Exception:
-            logger.exception("Impossibile inizializzare la trascrizione OpenAI")
-            raise HTTPException(
-                status_code=500, detail="Errore di inizializzazione"
-            ) from None
-        return {"status": "ok"}
+    async def save_openai_key(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, str]:
+        return await call_op(
+            request, "config.set_openai_key", {"api_key": payload.get("api_key")}
+        )
 
     @router.get("/transcribe/config")
-    def transcription_config(request: Request) -> dict[str, bool]:
-        service = getattr(request.app.state, "transcription_service", None)
-        return {"enabled": service is not None}
+    async def transcription_config(request: Request) -> dict[str, bool]:
+        return await call_op(request, "transcribe.config")
 
     @router.get("/transcribe/{proto}/{attachment_id:path}")
-    def transcription_status(
+    async def transcription_status(
         request: Request,
         proto: Literal["signal", "whatsapp", "telegram"],
         attachment_id: str,
     ) -> dict[str, Any]:
-        service = getattr(request.app.state, "transcription_service", None)
-        if service is None:
-            raise HTTPException(status_code=503, detail="Trascrizione non configurata")
-        current = service.status(proto, attachment_id)
-        return current if current is not None else {"status": "unknown"}
+        return await call_op(
+            request,
+            "transcribe.status",
+            {"protocol": proto, "attachment_id": attachment_id},
+        )
 
     @router.get("/messages")
     async def messages(

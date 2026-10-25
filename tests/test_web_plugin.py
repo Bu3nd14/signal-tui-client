@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import quote
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -135,7 +136,7 @@ def make_app(manager, *, required: bool = True):
     from web.ws import install_websocket
 
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.state.websocket_connections = set()
     install_auth(app, TOKEN, required=required)
     app.include_router(create_api_router())
@@ -2539,7 +2540,7 @@ def test_occupied_port_degrades_to_down_without_raising():
     listener.bind(("127.0.0.1", 0))
     listener.listen()
     port = listener.getsockname()[1]
-    handle = start_web_server(FakeManager(), port=port, token=TOKEN)
+    handle = start_web_server(api_for(FakeManager()), port=port, token=TOKEN)
     assert handle is not None
     deadline = time.monotonic() + 2
     while handle.status == "starting" and time.monotonic() < deadline:
@@ -2557,7 +2558,7 @@ def test_clean_start_and_stop_web_server():
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
-    handle = start_web_server(FakeManager(), port=port, token=TOKEN)
+    handle = start_web_server(api_for(FakeManager()), port=port, token=TOKEN)
     assert handle is not None
     deadline = time.monotonic() + 2
     while handle.status == "starting" and time.monotonic() < deadline:
@@ -2577,7 +2578,7 @@ def test_start_web_server_requires_token_by_default(monkeypatch: pytest.MonkeyPa
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
-    assert start_web_server(FakeManager(), port=port, token="") is None
+    assert start_web_server(api_for(FakeManager()), port=port, token="") is None
 
 
 def test_start_web_server_no_auth_works_without_a_token():
@@ -2587,7 +2588,9 @@ def test_start_web_server_no_auth_works_without_a_token():
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
-    handle = start_web_server(FakeManager(), port=port, token="", require_auth=False)
+    handle = start_web_server(
+        api_for(FakeManager()), port=port, token="", require_auth=False
+    )
     try:
         assert handle is not None
         deadline = time.monotonic() + 2
@@ -2609,7 +2612,7 @@ def test_health_reports_auth_required_flag():
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
     probe.close()
-    handle = start_web_server(FakeManager(), port=port, token=TOKEN)
+    handle = start_web_server(api_for(FakeManager()), port=port, token=TOKEN)
     try:
         deadline = time.monotonic() + 2
         while handle.status == "starting" and time.monotonic() < deadline:

@@ -2,9 +2,8 @@
 
 Routes parse the request, call :func:`call_op` and return the result; every
 domain decision lives in the operation (``server/ops``).  The ``ChatAPI`` is
-``app.state.api`` when the server was started with one (``megachat serve``);
-otherwise it is built lazily around ``app.state.manager`` (tests, legacy
-``start_web_server(manager)``), publishing on the bridge's active bus.
+``app.state.api``: the one ``start_web_server`` was given (``core.api``).  The
+adapter has no manager and no other way to reach the core.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ from typing import Any
 from pydantic import BaseModel
 
 from server.api import ApiError, ChatAPI
-from web.bridge import get_bus
 
 #: ``ApiError.code`` -> HTTP status.
 HTTP_STATUS: dict[str, int] = {
@@ -33,28 +31,9 @@ HTTP_STATUS: dict[str, int] = {
 }
 
 
-class _ManagerHost:
-    """Minimal ``ApiHost`` around a bare manager; the bus is the bridge's."""
-
-    def __init__(self, manager: Any) -> None:
-        self.manager = manager
-
-    @property
-    def bus(self) -> Any:
-        return get_bus()
-
-
 def get_api(app: Any) -> ChatAPI:
-    """The ``ChatAPI`` for *app* (see module docstring)."""
-    state = app.state
-    api = getattr(state, "api", None)
-    manager = getattr(state, "manager", None)
-    if api is not None and manager is None:
-        return api
-    if api is None or api.manager is not manager:
-        api = ChatAPI(_ManagerHost(manager))
-        state.api = api
-    return api
+    """The ``ChatAPI`` the server was started with (``app.state.api``)."""
+    return app.state.api
 
 
 async def call_op(

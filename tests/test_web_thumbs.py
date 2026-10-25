@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import quote
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -27,7 +28,7 @@ def _client(monkeypatch, tmp_path: Path, files: dict[str, Path]) -> TestClient:
         get_attachment_path=lambda _proto, attachment_id: files.get(attachment_id),
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return TestClient(app)
 

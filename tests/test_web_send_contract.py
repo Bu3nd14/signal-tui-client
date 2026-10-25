@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from client_harness import api_for
 from event_harness import legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -94,10 +95,10 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(backend_db, "CACHE_DIR", tmp_path)
     manager = _Manager()
     app = FastAPI()
-    app.state.manager = manager
+    bus = EventBus()
+    app.state.api = api_for(manager, bus)
     install_auth(app, "contract-secret")
     app.include_router(create_api_router())
-    bus = EventBus()
     sub = bus.subscribe()
     init_bridge(bus)
     uploads = tmp_path / "web-uploads"

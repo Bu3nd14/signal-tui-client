@@ -471,3 +471,28 @@ class ClientLogRequest(BaseModel):
 
 class StatusOut(BaseModel):
     status: str
+
+
+# -- transcription / OpenAI key -----------------------------------------------
+
+
+class TranscribeSubmitRequest(BaseModel):
+    """Both fields are checked by the operation ('Invalid request')."""
+
+    protocol: Any = None
+    attachment_id: Any = None
+
+
+class TranscribeStatusRequest(BaseModel):
+    protocol: Literal["signal", "whatsapp", "telegram"]
+    attachment_id: str
+
+
+class TranscribeConfigOut(BaseModel):
+    enabled: bool
+
+
+class OpenAIKeyRequest(BaseModel):
+    """Checked by the operation ('Chiave non valida')."""
+
+    api_key: Any = None

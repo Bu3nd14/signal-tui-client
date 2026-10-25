@@ -64,3 +64,15 @@ def run_workers(app) -> None:
     """Run every scheduled ``run_worker`` callable inline."""
     for call in app.run_worker.call_args_list:
         call.args[0]()
+
+
+def api_for(manager: Any, bus: Any = None) -> ChatAPI:
+    """A real ``ChatAPI`` over a fake core around *manager* (see ``client_for``).
+
+    The web adapter only ever receives an API; tests that build a FastAPI app
+    or start the web server give it this instead of a manager.  Pass an
+    ``EventBus`` to observe the frames operations publish.
+    """
+    core = SimpleNamespace(manager=manager, bus=bus)
+    core.api = ChatAPI(core)
+    return core.api

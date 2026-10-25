@@ -17,4 +17,5 @@ from server.ops import (  # noqa: F401
     meta,
     reactions,
     send,
+    transcribe,
 )

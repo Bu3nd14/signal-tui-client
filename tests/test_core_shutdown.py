@@ -108,3 +108,37 @@ def test_sigint_stops_the_web_adapter(core):
     ):
         app.shutdown_from_signal()
     stop_web.assert_called_once_with(app._web_server)
+
+
+def test_shutdown_stops_the_transcription_service_after_the_adapters(core):
+    calls: list[str] = []
+    _record(core, calls)
+    service = MagicMock()
+    service.stop.side_effect = lambda: calls.append("transcription")
+    core.api.transcription.service = service
+    with patch("protocols.db._prune_cache", side_effect=lambda: calls.append("prune")):
+        core.shutdown(lambda: calls.append("adapters"))
+    assert calls == ["stop", "adapters", "transcription", "telegram", "prune"]
+    assert core.api.transcription.service is None
+
+
+def test_start_initializes_the_transcription_service(core):
+    core._start_pump = MagicMock()  # type: ignore[method-assign]
+    core.start_address_book_refresh = MagicMock()  # type: ignore[method-assign]
+    core._spawn = MagicMock()  # type: ignore[method-assign]
+    core._done = MagicMock()  # type: ignore[method-assign]
+    core.api.transcription.init = MagicMock()  # type: ignore[method-assign]
+    with patch("server.core.signal_enabled", return_value=False):
+        core.start()
+    core.api.transcription.init.assert_called_once_with()
+
+
+def test_a_failing_transcription_init_does_not_stop_the_core(core):
+    core._start_pump = MagicMock()  # type: ignore[method-assign]
+    core.start_address_book_refresh = MagicMock()  # type: ignore[method-assign]
+    core._spawn = MagicMock()  # type: ignore[method-assign]
+    core._done = MagicMock()  # type: ignore[method-assign]
+    core.api.transcription.init = MagicMock(side_effect=RuntimeError("no key"))  # type: ignore[method-assign]
+    with patch("server.core.signal_enabled", return_value=False):
+        core.start()
+    core._done.assert_called()

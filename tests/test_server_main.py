@@ -164,7 +164,7 @@ def test_shutdown_order(lock_file, fake_backends):
     assert kwargs["host"] == "0.0.0.0"
     assert kwargs["require_auth"] is True
     assert isinstance(kwargs["bus"], EventBus)
-    assert kwargs["api"] is core.api
+    assert args[0] is core.api
 
 
 def test_shutdown_failures_are_non_fatal(lock_file, fake_backends):

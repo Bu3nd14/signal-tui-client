@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from client_harness import api_for
 from event_harness import EventApp, legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -51,7 +52,7 @@ def test_messages_refreshes_only_telegram_history(protocol, expected_calls):
         list_contacts=MagicMock(return_value=[]),
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
     with patch("server.messages._messages", return_value=[]), TestClient(app) as client:
@@ -72,7 +73,7 @@ def test_messages_refreshes_whatsapp_history_when_refresh_requested():
         list_contacts=MagicMock(return_value=[]),
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
     with patch("server.messages._messages", return_value=[]), TestClient(app) as client:
@@ -91,7 +92,7 @@ def test_messages_refresh_without_fetch_history_is_safe():
         list_contacts=MagicMock(return_value=[]),
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
     with patch("server.messages._messages", return_value=[]), TestClient(app) as client:

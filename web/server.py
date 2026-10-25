@@ -31,55 +31,20 @@ class WebServerHandle:
 _active_server: WebServerHandle | None = None
 
 
-def _init_transcription_service(app: Any) -> Any:
-    from transcription import store
-    from transcription.client import CloudTranscriptionClient
-    from transcription.config import (
-        get_openai_api_key,
-        get_transcription_base_url,
-        get_transcription_language,
-        get_transcription_model,
-        get_transcription_timeout,
-    )
-    from transcription.service import TranscriptionService
-
-    current = getattr(app.state, "transcription_service", None)
-    if current is not None:
-        current.stop()
-    app.state.transcription_service = None
-
-    api_key = get_openai_api_key()
-    if not api_key:
-        logger.info("Trascrizione cloud OpenAI disattivata")
-        return None
-
-    client = CloudTranscriptionClient(
-        api_key,
-        base_url=get_transcription_base_url(),
-        model=get_transcription_model(),
-        language=get_transcription_language(),
-        timeout=get_transcription_timeout(),
-    )
-    service = TranscriptionService(client, store)
-    app.state.transcription_service = service
-    logger.info("Trascrizione cloud OpenAI attiva")
-    return service
-
-
 def start_web_server(
-    manager: Any,
+    api: ChatAPI,
     port: int = 4242,
     token: str | None = None,
     *,
     host: str = "127.0.0.1",
     require_auth: bool = True,
     bus: EventBus | None = None,
-    api: ChatAPI | None = None,
 ) -> WebServerHandle | None:
     """Start uvicorn on a dedicated thread and event loop.
 
-    *api* is the server API the routes call (``core.api`` under ``megachat
-    serve``); when omitted, ``web.ops.get_api`` builds one around *manager*.
+    *api* is the server API every route calls (``core.api``): the adapter has
+    no other access to the core.  *bus* is the event bus ``/ws`` and ``/ws/v2``
+    stream from (default ``api.bus``).
 
     *require_auth* set to ``False`` (``--web-no-auth``) drops the Bearer
     token requirement entirely — every REST/media/WebSocket request is
@@ -112,13 +77,9 @@ def start_web_server(
         return None
 
     app = FastAPI()
-    app.state.manager = manager
-    if api is not None:
-        app.state.api = api
+    app.state.api = api
     app.state.token = token
     app.state.websocket_connections = set()
-
-    _init_transcription_service(app)
 
     from web.api import create_api_router
     from web.auth import install_auth
@@ -126,7 +87,9 @@ def start_web_server(
     from web.uploads import prepare_upload_directory
     from web.ws import install_websocket
 
-    app.state.bus = init_bridge(bus)
+    # The bus /ws and /ws/v2 stream from: the caller's, else the API's, else a
+    # private one (an API stand-in without a bus still gets heartbeats).
+    app.state.bus = init_bridge(bus or api.bus or EventBus())
     install_auth(app, token, required=require_auth)
     app.include_router(create_api_router())
     install_websocket(app, token, required=require_auth)

@@ -292,13 +292,12 @@ class SignalTUI(
             from web.server import start_web_server
 
             self._web_server = start_web_server(
-                self.core.manager,
+                self.core.api,
                 self._web_port,
                 self._web_token,
                 host=self._web_host,
                 require_auth=not self._web_no_auth,
                 bus=self.bus,
-                api=self.core.api,
             )
             if self._web_server is not None:
                 # Only the web-signal-tui-bg shell alias used to print the

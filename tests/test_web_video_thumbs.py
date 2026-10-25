@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from urllib.parse import quote
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -39,7 +40,7 @@ def _client(monkeypatch, tmp_path: Path, files: dict[str, Path]) -> TestClient:
         get_attachment_path=lambda _proto, attachment_id: files.get(attachment_id)
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return TestClient(app)
 
@@ -230,7 +231,7 @@ def test_whatsapp_media_endpoint_uses_chunk_without_full_download(
         get_attachment_path=MagicMock(side_effect=AssertionError("full download")),
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
     response = TestClient(app).get("/api/media/whatsapp/video.mp4?w=480")
@@ -268,7 +269,7 @@ def test_chunk_failure_falls_back_to_complete_file(monkeypatch, tmp_path):
         get_attachment_path=MagicMock(return_value=complete),
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
     response = TestClient(app).get("/api/media/telegram/tgref%3A42%3A99?w=240")
@@ -290,7 +291,7 @@ def test_insufficient_chunk_without_complete_file_returns_422(monkeypatch, tmp_p
         get_attachment_path=lambda *_args: None,
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
     response = TestClient(app).get("/api/media/whatsapp/video.mp4?w=480")

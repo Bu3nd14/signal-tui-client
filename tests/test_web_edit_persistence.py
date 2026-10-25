@@ -4,6 +4,7 @@ import sqlite3
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -37,7 +38,7 @@ def test_web_edit_persists_when_message_is_not_in_backend_cache(monkeypatch, tmp
 
     manager = Manager()
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     install_auth(app, TOKEN)
     app.include_router(create_api_router())
     with TestClient(app) as client:

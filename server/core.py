@@ -148,6 +148,10 @@ class ChatCore(DynamicAddressBookMixin):
         """Start the event pump and the connect workers (same gating as the
         old TUI ``on_mount``)."""
         self._start_pump()
+        try:
+            self.api.transcription.init()
+        except Exception:
+            logger.exception("Transcription service init failed (non-fatal)")
         # Only connect backends that are already linked (skip slow daemon
         # startup for unlinked accounts — they connect after Ctrl+L link).
         if signal_enabled():
@@ -203,6 +207,10 @@ class ChatCore(DynamicAddressBookMixin):
                 stop_adapters()
             except Exception:
                 logger.exception("Adapter stop failed (non-fatal)")
+        try:
+            self.api.transcription.stop()
+        except Exception:
+            logger.debug("Stopping transcription on exit failed", exc_info=True)
         telegram = self.telegram_backend
         if telegram is not None:
             try:

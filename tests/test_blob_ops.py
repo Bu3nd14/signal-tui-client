@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from urllib.parse import quote
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -37,7 +38,7 @@ def media(monkeypatch, tmp_path: Path):
         get=lambda _proto: None,
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     with TestClient(app) as client:
         yield SimpleNamespace(

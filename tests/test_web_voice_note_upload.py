@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from client_harness import api_for
 from upload_harness import store_upload_sync as _store_upload_sync
 
 import server.media as server_media
@@ -378,7 +379,7 @@ def test_media_endpoint_serves_webm_by_persisted_kind(
         get_attachment_path=lambda _proto, aid: source if aid == attachment_id else None
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
     response = TestClient(app).get(f"/api/media/signal/{attachment_id}{query}")

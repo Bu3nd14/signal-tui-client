@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -38,9 +39,8 @@ def make_app(manager, service=None):
     from web.auth import install_auth
 
     app = FastAPI()
-    app.state.manager = manager
-    if service is not None:
-        app.state.transcription_service = service
+    app.state.api = api_for(manager)
+    app.state.api.transcription.service = service
     install_auth(app, TOKEN)
     app.include_router(create_api_router())
     return app

@@ -26,6 +26,7 @@ from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -111,7 +112,7 @@ class _RecordingManager:
 
 def _app(manager) -> FastAPI:
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return app
 
