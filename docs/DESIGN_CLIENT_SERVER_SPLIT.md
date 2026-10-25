@@ -1,6 +1,6 @@
 # Design — Client/server split (TUI ↔ server core)
 
-Status: agreed. Phase 0 done (see §8); Phase 1 next.
+Status: agreed. Phase 1 done; Phase 2 next (see §8, §9, §10).
 
 ## 1. Problem
 
@@ -241,3 +241,70 @@ attachment paths (`messages.send` trusts `AttachmentIn.path`).
   `{"seq","type","payload","ts"}` for every bus event, replays from the ring
   buffer, sends a `gap` event (`reason` `buffer` or `overflow`) when the client
   must resync, and `{"type":"heartbeat"}` when idle. `/ws` is unchanged.
+
+## 10. Phase 1 outcome
+
+What exists now:
+
+- `server/client.py` — `ChatClient` (`call`, `acall`, `subscribe(since)`,
+  `close`) and `InProcessClient(core)`, the only transport so far. The TUI
+  talks to the core through `self.client` alone: it reads no backend, no
+  manager and no SQLite (`tests/test_tui_no_backend_access.py`).
+- `server/events_api.py` — one pydantic model per bus event (`EVENT_MODELS`),
+  `ChatCore.process()` returns JSON-serializable wire payloads
+  (`ContactWire` instead of `ChatContact`); a test guard asserts
+  `json.dumps` on every published event.
+- Operations added in Phase 1 (on top of §8): `media.*` and `contacts.avatar`
+  (blobs: `BlobOut` = local path + type/size/version), `contacts.for_protocol|
+  register|address_book|touch|check_number`, `messages.window|snapshot`,
+  optimistic `messages.send` (`client_msg_id`, no `sent_mirror`, single
+  attempt) and view-only edit/reaction on top of `messages.edit`/`reactions.set`,
+  `download.serve_*`, `link.*` (device link service owned by `ChatAPI.link`),
+  `server.config`, `links.preview|preview_image`, `server.client_log`,
+  `transcribe.*`, `config.set_openai_key`.
+- `/ws/v2` streams the typed bus events with `since` resume and `gap`; `/ws`
+  keeps the legacy frames.
+- Import rules are enforced by tests (§9): `web/` sees only the API, `tui/`
+  imports neither `protocols` nor `web`, `server/` imports neither `tui` nor
+  `web` (except lazily in `main.py`).
+- No test-only plumbing in production: `SignalTUI._handle_event`, the
+  `_compat_payload_ids` skip list in the poll worker and `web/bridge.py` are
+  gone. Tests feed raw backend events with `tests/event_harness.feed(app, raw)`:
+  `core.process(raw)` -> publish on `app.bus` -> the app's own consumer step
+  (`PollingMixin._route_bus_event`, the one the poll worker calls). View errors
+  propagate there (the worker's `_dispatch_bus_event` wrapper logs them).
+
+Decisions:
+
+- `web/bridge.py` (a process-global bus) was removed; the web app and
+  `/ws` take the bus from `app.state.bus` (`start_web_server(..., bus)`, else
+  `api.bus`), and route handlers publish through `ChatAPI.publish_web_push`.
+- `publish_web_push` / the `web_push` event keep their names: the legacy
+  `/ws` frames depend on them and renaming gains nothing. Typed events for the
+  same changes already exist on `/ws/v2`; `web_push` goes away with `/ws`
+  (Phase 3).
+- The TUI cache stays row-for-row what the backend cache held
+  (`messages.window`/`snapshot` return core cache rows, not `messages.page`
+  rows), so optimistic rows and merge rules remain view-side.
+- Contact objects in the TUI are copies of wire contacts; the core keeps
+  backend-owned recency in sync (`bump_recency`, `sync_recency`).
+
+Sync operations still called on the TUI UI thread (Phase 2 must make them
+non-blocking, cached or prefetched, as each becomes a socket round trip):
+
+- `link.status`, `link.cancel`, `link.reconnect`;
+- `download.serve_attachment`, `download.serve_text`
+  (`on_image_widget_image_clicked`, `_start_download`);
+- `server.config` (thumbnail sizes in `chat_view`, picker settings at
+  `on_mount`);
+- `contacts.for_protocol`, `contacts.register` (WhatsApp loads the LID cache
+  from disk);
+- `messages.snapshot` at `backend_ready` (about 0.28s per 45k cached messages
+  for validation); `link.start|poll|finalize|submit_2fa` already run in
+  `to_thread` but need per-call timeouts server side.
+
+Open follow-ups: `mc-7kp` (socket adapter must confine or copy client-supplied
+attachment paths), `mc-1t1` (unclosed sqlite connections in the test suite),
+`mc-cvp` (isolate the `test_install_script` background alias from the real
+lock file), `mc-kke` (convert handover/disaster-recovery scripts to
+`megachat serve`).
