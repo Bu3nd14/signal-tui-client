@@ -4,7 +4,7 @@ import logging
 
 from textual.widgets import TextArea
 
-from contact_picker import ContactPickerScreen
+from contact_picker import ContactPickerScreen, configure_picker
 from device_link_screen import DeviceLinkPickerScreen
 from emoji_picker import (
     EmojiCompletionWidget,
@@ -20,6 +20,18 @@ logger = logging.getLogger("signal_tui")
 
 
 class PickerMixin:
+    def _configure_picker(self) -> None:
+        """Take the picker options (result cap, preferred protocol) from the
+        server's ``server.config``; the defaults stay when it cannot answer."""
+        try:
+            config = self.client.call("server.config")
+            configure_picker(
+                max_results=int(config["picker_max_results"]),
+                preferred_backend=str(config["picker_preferred_backend"]),
+            )
+        except Exception:
+            logger.debug("server.config unavailable; picker defaults", exc_info=True)
+
     def _is_emoji_picker_open(self) -> bool:
         """Check if the emoji picker modal screen is currently active."""
         return isinstance(self.screen, EmojiPickerScreen)

@@ -322,3 +322,14 @@ def validate_upload(
     if suffix not in _EXTENSIONS_BY_MIME.get(mime_type, set()):
         raise UploadValidationError(400)
     return ValidatedUpload(path, clean_name, mime_type, media_kind)
+
+
+def upload_directory() -> Path:
+    """Staging directory of adapter uploads (``<cache dir>/web-uploads``).
+
+    ``protocols.db.CACHE_DIR`` is read at call time, like the rest of the cache
+    layout, so adapters never need to import ``protocols`` for it.
+    """
+    import protocols.db as backend
+
+    return Path(backend.CACHE_DIR) / "web-uploads"

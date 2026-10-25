@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import ClassVar
+from typing import Any, ClassVar, Protocol
 
 from textual.app import App
 from textual.binding import Binding
@@ -57,6 +57,28 @@ from ui_components import (
 logger = logging.getLogger(__name__)
 
 
+class WebAdapter(Protocol):
+    """What the TUI needs to host the web adapter next to its core.
+
+    Supplied by the composition root (``signal_tui``) so that ``tui`` never
+    imports ``web``: ``start`` is ``web.server.start_web_server``, ``stop``
+    is ``web.server.stop_web_server``.
+    """
+
+    def start(
+        self,
+        api: Any,
+        port: int,
+        token: str,
+        *,
+        host: str,
+        require_auth: bool,
+        bus: EventBus,
+    ) -> Any: ...
+
+    def stop(self, handle: Any) -> None: ...
+
+
 class SignalTUI(
     App,
     ChatViewMixin,
@@ -99,6 +121,7 @@ class SignalTUI(
         web_host: str = "127.0.0.1",
         web_token: str = "",
         web_no_auth: bool = False,
+        web_adapter: WebAdapter | None = None,
     ):
         super().__init__()
         # Terminal image backend detected in ``signal_tui`` before ``run()``.
@@ -114,6 +137,9 @@ class SignalTUI(
         self._web_token = web_token
         self._web_no_auth = web_no_auth
         self._web_server = None
+        # The embedded web adapter is injected by the composition root
+        # (``signal_tui``): the TUI itself never imports ``web``.
+        self._web_adapter = web_adapter
 
         # Native kitty image rendering state (phase 2).  The renderer is created
         # in ``on_mount`` when the terminal supports it; placements are reconciled
@@ -288,17 +314,20 @@ class SignalTUI(
         """On startup, start poll worker and backend connections in parallel."""
         self._chat_log = self.query_one("#chat-log", Vertical)
         self._install_sigint_on_loop()
+        self._configure_picker()
         if self._web_enabled:
-            from web.server import start_web_server
-
-            self._web_server = start_web_server(
-                self.core.api,
-                self._web_port,
-                self._web_token,
-                host=self._web_host,
-                require_auth=not self._web_no_auth,
-                bus=self.bus,
-            )
+            adapter = self._web_adapter
+            if adapter is None:
+                logger.error("Web UI enabled but no web adapter was provided")
+            else:
+                self._web_server = adapter.start(
+                    self.core.api,
+                    self._web_port,
+                    self._web_token,
+                    host=self._web_host,
+                    require_auth=not self._web_no_auth,
+                    bus=self.bus,
+                )
             if self._web_server is not None:
                 # Only the web-signal-tui-bg shell alias used to print the
                 # Bearer token; a plain `python3 signal_tui.py --web` launch
@@ -624,10 +653,9 @@ class SignalTUI(
 
     def _stop_web_adapter(self) -> None:
         """Stop the embedded web adapter (the core's shutdown hook)."""
-        if self._web_enabled:
-            from web.server import stop_web_server
-
-            stop_web_server(self._web_server)
+        adapter = self._web_adapter
+        if self._web_enabled and adapter is not None:
+            adapter.stop(self._web_server)
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Gate the global Ctrl+W / Ctrl+U / Ctrl+A filters while a picker is open.

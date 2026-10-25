@@ -9,7 +9,7 @@ These tests cover:
 
 * the pure helpers in ``models`` (``_cross_key_message_equivalent`` and
   ``dedup_cross_key``);
-* the web read-union (``web.api._cross_key_dedup_rows`` / ``_messages``);
+* the web read-union (``server.messages._cross_key_dedup_rows`` / ``_messages``);
 * the TUI cache merge (``ChatViewMixin._merge_window_rows`` fed by ``messages.window``, and
   ``BackendConnectMixin._on_backend_ready``).
 
@@ -36,9 +36,9 @@ from models import (
     contact_storage_keys,
     dedup_cross_key,
 )
+from server.messages import _cross_key_dedup_rows, _messages
 from tui.backend_connect import BackendConnectMixin
 from tui.chat_view import ChatViewMixin
-from web.api import _cross_key_dedup_rows, _messages
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 

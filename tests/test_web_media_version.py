@@ -21,12 +21,9 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import protocols.rpc as signal_rpc
+from server.media import _attach_media_versions, _attachment_version
 from server.thumbnails import _thumbnail
-from web.api import (
-    _attach_media_versions,
-    _attachment_version,
-    create_api_router,
-)
+from web.api import create_api_router
 
 
 def _signal_root(tmp_path: Path) -> Path:

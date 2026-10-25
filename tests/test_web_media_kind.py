@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 
-from web.api import _messages
+from server.messages import _messages
 
 
 def _run_node(source: str) -> None:

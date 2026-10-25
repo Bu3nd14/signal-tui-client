@@ -461,7 +461,7 @@ def test_quote_video_resolver_path_timestamp_and_filename(web_client):
 
 def test_quote_filename_fallback_ignores_unknown_names_and_future():
     """Nessun nome file → nessuna risoluzione; allegati futuri esclusi."""
-    from web.api import _quoted_media_by_filename
+    from server.messages import _quoted_media_by_filename
 
     assert _quoted_media_by_filename("signal", "alice", "solo testo", 2000) is None
     assert (

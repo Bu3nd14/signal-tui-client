@@ -30,6 +30,7 @@ from server.uploads import (
     ALLOWED_EXTENSIONS,
     UploadGuard,
     UploadValidationError,  # noqa: F401  (re-export for callers/tests)
+    upload_directory,
 )
 
 #: Hard cap on the total bytes of a single multi-attachment request.
@@ -52,12 +53,6 @@ class TempUpload:
 
     def cleanup(self) -> None:
         self.path.unlink(missing_ok=True)
-
-
-def upload_directory() -> Path:
-    import protocols.db as backend
-
-    return Path(backend.CACHE_DIR) / "web-uploads"
 
 
 def ensure_upload_directory() -> Path:

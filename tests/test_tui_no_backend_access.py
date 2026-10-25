@@ -1,8 +1,8 @@
 """The TUI reaches backends only through the server API (operations/events).
 
-P1.7 will turn this into an import rule for ``tui`` and ``web``; until then
-this guards what P1.6 moved: no ``protocols`` imports in ``tui/`` or the link
-screen, and no backend attributes on the app.
+The import rule itself lives in ``test_server_import_rules.py``; this adds the
+attribute-level guard: no backend attributes (``manager``, ``*_backend``) on the
+app, and no ``protocols`` imports in ``tui/`` or the root UI modules.
 """
 
 from __future__ import annotations
@@ -11,14 +11,19 @@ import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-FILES = sorted((ROOT / "tui").glob("*.py")) + [ROOT / "device_link_screen.py"]
+FILES = sorted((ROOT / "tui").glob("*.py")) + [
+    ROOT / name
+    for name in (
+        "contact_picker.py",
+        "emoji_picker.py",
+        "device_link_screen.py",
+        "ui_components.py",
+    )
+]
 
 BACKEND_ATTRS = {"manager", "signal_backend", "whatsapp_backend", "telegram_backend"}
 #: (file, attribute access) still allowed, with the reason.
-ALLOWED = {
-    # the embedded web adapter is still started with the core's manager
-    ("app.py", "core.manager"),
-}
+ALLOWED: set[tuple[str, str]] = set()
 
 
 def _dotted(node: ast.AST) -> str:

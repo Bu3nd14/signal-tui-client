@@ -6,16 +6,6 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from server.media import (
-    _attach_media_versions,  # noqa: F401  (re-export)
-    _attachment_version,  # noqa: F401  (re-export)
-)
-from server.messages import (
-    _cross_key_dedup_rows,  # noqa: F401  (re-export)
-    _group_sender_resolver,  # noqa: F401  (re-export)
-    _messages,  # noqa: F401  (re-export; patch server.messages._messages)
-    _quoted_media_by_filename,  # noqa: F401  (re-export)
-)
 from server.models_api import AttachmentIn
 from server.uploads import MAX_ATTACHMENTS, UploadValidationError
 from web import uploads as uploads_module

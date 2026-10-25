@@ -82,6 +82,7 @@ def test_sigint_shuts_the_core_down_once(core):
     app.client = MagicMock()
     app._hires_executor = MagicMock()
     app._web_enabled = False
+    app._web_adapter = None
     app.exit = MagicMock()  # type: ignore[method-assign]
     core.stop = MagicMock()  # type: ignore[method-assign]
     with patch("protocols.db._prune_cache") as prune:
@@ -100,14 +101,12 @@ def test_sigint_stops_the_web_adapter(core):
     app.core = core
     app._web_enabled = True
     app._web_server = object()
+    app._web_adapter = MagicMock()
     app.exit = MagicMock()  # type: ignore[method-assign]
     core.stop = MagicMock()  # type: ignore[method-assign]
-    with (
-        patch("protocols.db._prune_cache"),
-        patch("web.server.stop_web_server") as stop_web,
-    ):
+    with patch("protocols.db._prune_cache"):
         app.shutdown_from_signal()
-    stop_web.assert_called_once_with(app._web_server)
+    app._web_adapter.stop.assert_called_once_with(app._web_server)
 
 
 def test_shutdown_stops_the_transcription_service_after_the_adapters(core):

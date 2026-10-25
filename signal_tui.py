@@ -3,6 +3,11 @@ Signal TUI Client — Textual interface integrated with signal-cli via JSON-RPC.
 
 Thin entry point: single-instance lock, crash logging, and process startup.
 The application itself lives in the ``tui`` package (see ``tui.app.SignalTUI``).
+
+Composition root: this module runs before the core exists, so it is the one UI
+module allowed to import ``protocols.config`` (startup settings: image protocol,
+web options) and ``web`` (it hands the embedded web adapter to the TUI).
+``tests/test_server_import_rules.py`` documents and enforces that exception.
 """
 
 import argparse
@@ -166,6 +171,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Native image cell size: %r", initial_cell_size)
 
     enable_web = args.web if args.web is not None else web_enabled()
+    web_adapter = None
+    if enable_web:
+        # Composition root: the only place that wires the web adapter into the
+        # TUI process (``tui`` itself must not import ``web``).
+        from types import SimpleNamespace
+
+        from web.server import start_web_server, stop_web_server
+
+        web_adapter = SimpleNamespace(start=start_web_server, stop=stop_web_server)
     app = SignalTUI(
         image_support=image_support,
         initial_cell_size=initial_cell_size,
@@ -174,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         web_host=args.web_host if args.web_host is not None else web_host(),
         web_token=web_token(),
         web_no_auth=args.web_no_auth,
+        web_adapter=web_adapter,
     )
 
     def _handle_sigint(sig, frame):

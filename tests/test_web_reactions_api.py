@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from protocols.db import _add_message_to_cache, _apply_reaction_delta
-from web.api import _messages
+from server.messages import _messages
 
 
 def _message(

@@ -10,13 +10,15 @@ from client_harness import StubClient, client_for
 
 from models import DEFAULT_THUMBNAIL_MAX_COLS, DEFAULT_THUMBNAIL_MAX_LINES
 from tui.chat_view import ChatViewMixin
+from tui.pickers import PickerMixin
 
 
 def test_op_returns_configured_limits(monkeypatch):
     monkeypatch.setenv("THUMBNAIL_MAX_LINES", "20")
     monkeypatch.setenv("THUMBNAIL_MAX_COLS", "80")
     out = client_for(MagicMock()).call("server.config")
-    assert out == {"thumbnail_max_lines": 20, "thumbnail_max_cols": 80}
+    assert out["thumbnail_max_lines"] == 20
+    assert out["thumbnail_max_cols"] == 80
 
 
 def test_op_defaults_match_model_constants(monkeypatch, tmp_path):
@@ -54,6 +56,47 @@ def test_tui_falls_back_to_defaults_and_retries():
 
 def test_chat_view_has_no_backend_imports():
     tree = ast.parse(Path("tui/chat_view.py").read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            assert not (node.module or "").startswith("protocols"), node.lineno
+
+
+def test_op_returns_picker_options(monkeypatch, tmp_path):
+    monkeypatch.setenv("PICKER_MAX_RESULTS", "7")
+    monkeypatch.setenv("PICKER_PREFERRED_BACKEND", " telegram ")
+    out = client_for(MagicMock()).call("server.config")
+    assert out["picker_max_results"] == 7
+    assert out["picker_preferred_backend"] == "telegram"
+
+
+def test_tui_configures_the_picker_from_the_server():
+    import contact_picker
+
+    class _App(PickerMixin):
+        pass
+
+    app = _App()
+    app.client = StubClient(
+        {
+            "thumbnail_max_lines": 1,
+            "thumbnail_max_cols": 2,
+            "picker_max_results": 9,
+            "picker_preferred_backend": "signal",
+        }
+    )
+    try:
+        app._configure_picker()
+        assert contact_picker._SETTINGS.max_results == 9
+        assert contact_picker._SETTINGS.preferred_backend == "signal"
+        app.client = StubClient(RuntimeError("down"))
+        app._configure_picker()  # keeps the previous settings
+        assert contact_picker._SETTINGS.max_results == 9
+    finally:
+        contact_picker.configure_picker()
+
+
+def test_contact_picker_has_no_protocols_import():
+    tree = ast.parse(Path("contact_picker.py").read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             assert not (node.module or "").startswith("protocols"), node.lineno

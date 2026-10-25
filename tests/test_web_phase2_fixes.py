@@ -17,8 +17,9 @@ from models import ChatContact, ChatEvent
 from protocols.signal import SignalBackend
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
+from server.messages import _messages
 from tui.events import EventHandlingMixin
-from web.api import _messages, create_api_router
+from web.api import create_api_router
 
 
 def _db(monkeypatch, tmp_path: Path) -> Path:

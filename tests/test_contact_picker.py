@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from textual.widgets import Input, ListView, Static
@@ -19,6 +19,7 @@ from contact_picker import (
     BackendChoiceScreen,
     ContactPickerScreen,
     PickerEntry,
+    configure_picker,
     contact_sort_key,
     entry_default_contact,
     group_by_person,
@@ -395,10 +396,11 @@ class TestEntryDefaultContact:
         sig = _contact("+391", "A", PROTOCOL_SIGNAL, phone="391", ts=300)
         tg = _contact("391", "C", PROTOCOL_TELEGRAM, phone="391", ts=10)
         entry = group_by_person([sig, tg])[0]
-        with patch(
-            "contact_picker.get_picker_preferred_backend", return_value="telegram"
-        ):
+        try:
+            configure_picker(preferred_backend="telegram")
             assert entry_default_contact(entry) is tg
+        finally:
+            configure_picker()
 
 
 class TestSearchEntries:

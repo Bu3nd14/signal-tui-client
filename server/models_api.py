@@ -58,6 +58,10 @@ class ServerConfigOut(BaseModel):
 
     thumbnail_max_lines: int
     thumbnail_max_cols: int
+    #: Rendered results of the contact picker.
+    picker_max_results: int = 50
+    #: Protocol the picker prefers for a person on several, ``""`` = most recent.
+    picker_preferred_backend: str = ""
 
 
 # ``server.status`` returns ``dict[str, bool]`` (protocol -> connected).

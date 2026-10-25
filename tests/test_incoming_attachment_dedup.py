@@ -21,7 +21,7 @@ import sqlite3
 
 from models import attachment_display_name
 from protocols import db
-from web.api import _messages
+from server.messages import _messages
 
 CONTACT = "125593484054624@lid"
 MSG_ID = "true_125593484054624@lid_ABC"
