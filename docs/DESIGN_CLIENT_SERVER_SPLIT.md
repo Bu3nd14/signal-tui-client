@@ -1,6 +1,6 @@
 # Design — Client/server split (TUI ↔ server core)
 
-Status: agreed, Phase 0 in progress.
+Status: agreed. Phase 0 done (see §8); Phase 1 next.
 
 ## 1. Problem
 
@@ -179,3 +179,44 @@ Each phase ships on its own with the full test suite green.
 - Large test surface (≈150 test files) relies on calling TUI handlers
   directly; Phase 0 keeps compatibility wrappers so tests change only where
   behaviour moves.
+
+## 8. Phase 0 outcome
+
+What exists now:
+
+- `server/bus.py` — `EventBus` (seq, replay buffer, `subscribe(since)`, GAP).
+- `server/core.py` — `ChatCore`: backends, connect workers, the single event
+  pump, domain handling (`process()`), address-book refresh; `core.api` is the
+  `ChatAPI`.
+- `server/api.py` + `server/models_api.py` + `server/ops/` — operation
+  registry. Operations: `emoji.list`, `reactions.available`, `server.status`,
+  `contacts.list`, `contacts.book`, `chats.mark_read`, `chats.archive`,
+  `messages.page`, `messages.edit`, `reactions.set`, `messages.send`,
+  `messages.send.check`.
+- `server/main.py`, `megachat.py`, `python -m server` — headless
+  `megachat serve`; `launcher server start` uses it instead of tmux.
+- `web/` JSON routes above are translations onto operations (`web/ops.py`
+  `call_op`); `/ws` frames come from the bus via `web/legacy_events.py`.
+  Contract tests compare every migrated route with its operation.
+
+Decisions taken during Phase 0:
+
+- `messages.page` returns `list[dict]`, not a strict model: rows carry
+  optional keys and the SPA relies on exact JSON equality.
+- Uploads: policy (kinds, per-kind limits, count) is domain
+  (`server/uploads.py`); temp storage and the request-wide byte cap are
+  transport (`web/uploads.py`).
+- `messages.send.check` is a side-effect-free pre-check the HTTP adapter runs
+  before storing uploads, so rejected requests do no upload I/O. The
+  `client_msg_id` claim applies to text-only sends, as before.
+- New error codes beyond §3.2: `backend_error` (502), `unprocessable` (422),
+  `not_supported` (501).
+- Operations still publish the legacy `/ws` frames as `web_push` events
+  (`ChatAPI.publish_web_push`); typed events replace them in Phase 1.
+
+Still REST-only (Phase 1/2, blob handles): media, quote-media, avatar,
+link-preview, transcribe, config, log routes. The TUI still calls backends
+directly for its own send/edit/load paths (Phase 1, `ChatClient`).
+
+Notes for Phase 2: the socket adapter must confine or copy client-supplied
+attachment paths (`messages.send` trusts `AttachmentIn.path`).
