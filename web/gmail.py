@@ -14,13 +14,16 @@ import hashlib
 import hmac
 import imaplib
 import logging
+import math
 import mimetypes
+import os
 import re
 import secrets
 import smtplib
 import socket
 import threading
 import time
+import unicodedata
 from collections import OrderedDict
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,6 +34,7 @@ from email import message_from_bytes
 from email.header import decode_header, make_header
 from email.message import EmailMessage, Message
 from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datetime
+from fractions import Fraction
 from functools import lru_cache
 from html.parser import HTMLParser
 from typing import Any
@@ -51,6 +55,18 @@ _MAX_LIMIT = 200
 _MAX_BULK_DELETE = 200
 _LIST_WINDOW = 200
 _MAX_HTML_CHARS = 1_000_000
+_HTML_MAX_TAGS = 8_000
+_HTML_MAX_STYLE_ATTRS = 400
+_HTML_MAX_TEXT_CHARS = 1_000_000
+_HTML_MAX_OUTPUT_CHARS = 1_000_000
+_HTML_MAX_DEPTH = 128
+_HTML_MAX_ATTRS_PER_TAG = 256
+_HTML_MAX_ATTR_LEN = 16_384
+_ATTR_VALUE_MAX_LEN = 2_048
+_IMAGE_URL_MAX_LEN = 4_096
+_STYLE_MAX_LEN = 1_024
+_STYLE_SERIALIZED_MAX = 2_048
+_STYLE_MAX_DECLS = 32
 _GMAIL_LIST_CACHE_TTL_S = 15
 _INBOX_CACHE_MAX_ENTRIES = 16
 _LIST_FETCH_ITEM = (
@@ -75,8 +91,9 @@ _IMAP_POOL_ENABLED = True
 _POOL_FP_KEY = secrets.token_bytes(32)
 
 # Conservative allow-list for rendered email HTML.  Remote images are not
-# allowed (tracking pixels), CSS/classes are stripped, and only safe URL
-# schemes survive; nh3 removes scripts and event handlers.
+# loaded (tracking pixels); inline CSS is re-serialized from a strict
+# property/value allow-list, while <style> and classes are stripped.  Only
+# safe URL schemes survive; nh3 removes scripts and event handlers.
 _ALLOWED_HTML_TAGS = frozenset(
     {
         "a",
@@ -133,15 +150,42 @@ _ALLOWED_HTML_TAGS = frozenset(
     }
 )
 _ALLOWED_HTML_ATTRIBUTES = {
+    "*": {"style"},
     "a": {"href", "title"},
-    "col": {"span"},
-    "colgroup": {"span"},
-    "img": {"alt", "data-src", "height", "width"},
+    "col": {"align", "bgcolor", "span", "valign", "width"},
+    "colgroup": {"align", "bgcolor", "span", "valign", "width"},
+    "img": {"align", "alt", "data-src", "height", "width"},
     "li": {"value"},
     "ol": {"start"},
-    "table": {"align", "width"},
-    "td": {"align", "colspan", "rowspan", "valign", "width"},
-    "th": {"align", "colspan", "rowspan", "scope", "valign", "width"},
+    "table": {
+        "align",
+        "bgcolor",
+        "border",
+        "cellpadding",
+        "cellspacing",
+        "height",
+        "width",
+    },
+    "td": {
+        "align",
+        "bgcolor",
+        "colspan",
+        "height",
+        "rowspan",
+        "valign",
+        "width",
+    },
+    "th": {
+        "align",
+        "bgcolor",
+        "colspan",
+        "height",
+        "rowspan",
+        "scope",
+        "valign",
+        "width",
+    },
+    "tr": {"align", "bgcolor", "height", "valign"},
 }
 _CLEAN_CONTENT_TAGS = {
     "base",
@@ -162,10 +206,8 @@ _CLEAN_CONTENT_TAGS = {
 }
 
 _FOLDER_RE = re.compile(r"^[A-Za-z0-9._/\- ]+$")
-_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE | re.DOTALL)
-_IMG_SRC_RE = re.compile(
-    r"""\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>`=]+))""",
-    re.IGNORECASE,
+_SIGNED_IMAGE_RE = re.compile(
+    r"^/gmail-image\?token=([A-Za-z0-9_-]+)\.([0-9a-f]{32})(?:&v=\d+)?$"
 )
 _SAFE_IMAGE_DATA_RE = re.compile(
     r"^data:image/(?:png|jpe?g|gif|webp);base64,", re.IGNORECASE
@@ -1521,38 +1563,1334 @@ def verify_image_token(token: str) -> str:
         return ""
 
 
-def _defer_image_sources(html: str) -> str:
-    """Move ``img src`` to ``data-src`` so images load only on user action."""
+def _find_tag_end(raw: str, start: int) -> int:
+    """Return the index just past ``>``, honouring quoted attribute values."""
+    quote = ""
+    index = start
+    length = len(raw)
+    while index < length:
+        char = raw[index]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char == ">":
+            return index + 1
+        index += 1
+    return length
 
-    def replace_tag(match: re.Match[str]) -> str:
-        tag = match.group(0)
 
-        def replace_src(src: re.Match[str]) -> str:
-            value = src.group(1) or src.group(2) or src.group(3) or ""
+@dataclass(frozen=True)
+class _ScannedAttribute:
+    name: str
+    lower_name: str
+    value: str | None
+    quote: str | None
+
+
+def _parse_tag(
+    raw: str, start: int
+) -> tuple[str, list[_ScannedAttribute], int, bool] | None:
+    """Parse one tag starting after ``<``; return name, attributes, end, slash."""
+    length = len(raw)
+    index = start
+    name_start = index
+    while index < length and (raw[index].isalnum() or raw[index] in ":-"):
+        index += 1
+    if index == name_start:
+        return None
+    name = raw[name_start:index].lower()
+    attributes: list[_ScannedAttribute] = []
+    self_closing = False
+    while index < length:
+        while index < length and raw[index] in " \t\n\r\f":
+            index += 1
+        if index >= length:
+            return None
+        if raw[index] == ">":
+            return name, attributes, index + 1, self_closing
+        if raw[index] == "/" and index + 1 < length and raw[index + 1] == ">":
+            return name, attributes, index + 2, True
+        attr_start = index
+        while index < length and raw[index] not in " \t\n\r\f/>=":
+            index += 1
+        if index == attr_start:
+            index += 1
+            continue
+        attr_name = raw[attr_start:index]
+        while index < length and raw[index] in " \t\n\r\f":
+            index += 1
+        value: str | None = None
+        quote: str | None = None
+        if index < length and raw[index] == "=":
+            index += 1
+            while index < length and raw[index] in " \t\n\r\f":
+                index += 1
+            if index < length and raw[index] in "\"'":
+                quote = raw[index]
+                index += 1
+                value_start = index
+                value_end = raw.find(quote, index)
+                if value_end == -1:
+                    return None
+                value = raw[value_start:value_end]
+                index = value_end + 1
+            else:
+                value_start = index
+                while index < length and raw[index] not in " \t\n\r\f>":
+                    index += 1
+                value = raw[value_start:index]
+        attributes.append(
+            _ScannedAttribute(
+                name=attr_name,
+                lower_name=attr_name.lower(),
+                value=value,
+                quote=quote,
+            )
+        )
+    return None
+
+
+def _find_raw_text_close(raw: str, start: int, name: str) -> int:
+    index = start
+    length = len(raw)
+    while True:
+        index = raw.find("</", index)
+        if index == -1:
+            return -1
+        name_start = index + 2
+        name_end = name_start
+        while name_end < length and (raw[name_end].isalnum() or raw[name_end] in ":-"):
+            name_end += 1
+        if raw[name_start:name_end].lower() == name and (
+            name_end >= length or raw[name_end] in " \t\n\r\f/>"
+        ):
+            return index
+        index += 2
+
+
+def _render_img_tag(attributes: list[_ScannedAttribute], self_closing: bool) -> str:
+    has_data_src = any(attr.lower_name == "data-src" for attr in attributes)
+    pieces = ["<img"]
+    for attr in attributes:
+        name = attr.name
+        value = attr.value
+        quote = attr.quote
+        if attr.lower_name == "src" and not has_data_src:
+            name = "data-src"
+        if value is not None and quote is None:
             value = value.replace('"', "&quot;")
-            return f'data-src="{value}"'
+            quote = '"'
+        pieces.append(" ")
+        pieces.append(name)
+        if value is not None:
+            pieces.append("=")
+            pieces.append(quote or "")
+            pieces.append(value)
+            pieces.append(quote or "")
+    pieces.append("/>" if self_closing else ">")
+    return "".join(pieces)
 
-        return _IMG_SRC_RE.sub(replace_src, tag)
 
-    return _IMG_TAG_RE.sub(replace_tag, html)
+_OPTIONAL_END_TAGS = frozenset(
+    {
+        "caption",
+        "colgroup",
+        "dd",
+        "dt",
+        "li",
+        "optgroup",
+        "option",
+        "p",
+        "rp",
+        "rt",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "tr",
+    }
+)
+
+
+def _pre_scan_html(raw: str) -> str:
+    """Linear, quote-aware scan with complexity caps and image deferral.
+
+    Any cap violation is fail-closed (``""``).  The scanner never backtracks
+    and understands comments, CDATA, raw-text elements, void tags, unquoted
+    attributes and ``<`` characters in text.
+    """
+    length = len(raw)
+    out: list[str] = []
+    index = 0
+    tag_count = 0
+    style_count = 0
+    text_chars = 0
+    depth = 0
+    void_tags = {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "source",
+        "track",
+        "wbr",
+    }
+    raw_text_tags = {"script", "style", "textarea", "title"}
+    while index < length:
+        if raw[index] != "<":
+            end = raw.find("<", index)
+            if end == -1:
+                end = length
+            text_chars += end - index
+            if text_chars > _HTML_MAX_TEXT_CHARS:
+                return ""
+            out.append(raw[index:end])
+            index = end
+            continue
+        if raw.startswith("<!--", index):
+            end = raw.find("-->", index + 4)
+            end = length if end == -1 else end + 3
+            out.append(raw[index:end])
+            index = end
+            continue
+        if raw.startswith("<![CDATA[", index):
+            end = raw.find("]]>", index + 9)
+            end = length if end == -1 else end + 3
+            text_chars += max(0, end - index - 12)
+            if text_chars > _HTML_MAX_TEXT_CHARS:
+                return ""
+            out.append(raw[index:end])
+            index = end
+            continue
+        if raw.startswith("<!", index) or raw.startswith("<?", index):
+            end = _find_tag_end(raw, index + 2)
+            out.append(raw[index:end])
+            index = end
+            continue
+        closing = raw.startswith("</", index)
+        parsed = _parse_tag(raw, index + (2 if closing else 1))
+        if parsed is None:
+            text_chars += 1
+            if text_chars > _HTML_MAX_TEXT_CHARS:
+                return ""
+            out.append("<")
+            index += 1
+            continue
+        name, attributes, end, self_closing = parsed
+        if not closing:
+            if len(attributes) > _HTML_MAX_ATTRS_PER_TAG:
+                return ""
+            for attr in attributes:
+                attr_length = len(attr.name)
+                if attr.value is not None:
+                    attr_length += 1 + len(attr.value)
+                if attr_length > _HTML_MAX_ATTR_LEN:
+                    return ""
+                if attr.lower_name == "style":
+                    style_count += 1
+                    if style_count > _HTML_MAX_STYLE_ATTRS:
+                        return ""
+            if name != "tbody":
+                tag_count += 1
+                if tag_count > _HTML_MAX_TAGS:
+                    return ""
+                if name not in void_tags and name not in _OPTIONAL_END_TAGS:
+                    depth += 1
+                    if depth > _HTML_MAX_DEPTH:
+                        return ""
+            if name == "img":
+                has_data_src = any(attr.lower_name == "data-src" for attr in attributes)
+                has_src = any(attr.lower_name == "src" for attr in attributes)
+                if has_src and not has_data_src:
+                    out.append(_render_img_tag(attributes, self_closing))
+                else:
+                    out.append(raw[index:end])
+            else:
+                out.append(raw[index:end])
+            index = end
+            if name in raw_text_tags:
+                close_start = _find_raw_text_close(raw, index, name)
+                if close_start == -1:
+                    text_chars += length - index
+                    if text_chars > _HTML_MAX_TEXT_CHARS:
+                        return ""
+                    out.append(raw[index:])
+                    index = length
+                else:
+                    text_chars += close_start - index
+                    if text_chars > _HTML_MAX_TEXT_CHARS:
+                        return ""
+                    out.append(raw[index:close_start])
+                    close_parsed = _parse_tag(raw, close_start + 2)
+                    if close_parsed is None:
+                        index = close_start
+                    else:
+                        _, _, close_end, _ = close_parsed
+                        out.append(raw[close_start:close_end])
+                        if name not in _OPTIONAL_END_TAGS and depth > 0:
+                            depth -= 1
+                        index = close_end
+            continue
+        out.append(raw[index:end])
+        if name not in void_tags and name not in _OPTIONAL_END_TAGS and depth > 0:
+            depth -= 1
+        index = end
+    return "".join(out)
 
 
 def _safe_image_source(value: str) -> bool:
-    value = value.strip()
-    return value.startswith(("http://", "https://")) or bool(
-        _SAFE_IMAGE_DATA_RE.match(value)
-    )
+    value = value.strip().lower()
+    return value.startswith(("http://", "https://"))
 
 
-def _html_attribute_filter(tag: str, attribute: str, value: str) -> str | None:
-    if tag != "img" or attribute != "data-src":
-        return value
+def _filter_image_src(value: str) -> str | None:
     value = value.strip()
+    signed = _SIGNED_IMAGE_RE.fullmatch(value)
+    if signed:
+        token = f"{signed.group(1)}.{signed.group(2)}"
+        return value if verify_image_token(token) else None
     if _SAFE_IMAGE_DATA_RE.match(value):
         return value
+    if len(value) > _IMAGE_URL_MAX_LEN:
+        return None
     if _safe_image_source(value):
         return sign_image_url(value)
     return None
+
+
+_NAMED_COLORS = frozenset(
+    {
+        "aliceblue",
+        "antiquewhite",
+        "aqua",
+        "aquamarine",
+        "azure",
+        "beige",
+        "bisque",
+        "black",
+        "blanchedalmond",
+        "blue",
+        "blueviolet",
+        "brown",
+        "burlywood",
+        "cadetblue",
+        "chartreuse",
+        "chocolate",
+        "coral",
+        "cornflowerblue",
+        "cornsilk",
+        "crimson",
+        "cyan",
+        "darkblue",
+        "darkcyan",
+        "darkgoldenrod",
+        "darkgray",
+        "darkgreen",
+        "darkgrey",
+        "darkkhaki",
+        "darkmagenta",
+        "darkolivegreen",
+        "darkorange",
+        "darkorchid",
+        "darkred",
+        "darksalmon",
+        "darkseagreen",
+        "darkslateblue",
+        "darkslategray",
+        "darkslategrey",
+        "darkturquoise",
+        "darkviolet",
+        "deeppink",
+        "deepskyblue",
+        "dimgray",
+        "dimgrey",
+        "dodgerblue",
+        "firebrick",
+        "floralwhite",
+        "forestgreen",
+        "fuchsia",
+        "gainsboro",
+        "ghostwhite",
+        "gold",
+        "goldenrod",
+        "gray",
+        "green",
+        "greenyellow",
+        "grey",
+        "honeydew",
+        "hotpink",
+        "indianred",
+        "indigo",
+        "ivory",
+        "khaki",
+        "lavender",
+        "lavenderblush",
+        "lawngreen",
+        "lemonchiffon",
+        "lightblue",
+        "lightcoral",
+        "lightcyan",
+        "lightgoldenrodyellow",
+        "lightgray",
+        "lightgreen",
+        "lightgrey",
+        "lightpink",
+        "lightsalmon",
+        "lightseagreen",
+        "lightskyblue",
+        "lightslategray",
+        "lightslategrey",
+        "lightsteelblue",
+        "lightyellow",
+        "lime",
+        "limegreen",
+        "linen",
+        "magenta",
+        "maroon",
+        "mediumaquamarine",
+        "mediumblue",
+        "mediumorchid",
+        "mediumpurple",
+        "mediumseagreen",
+        "mediumslateblue",
+        "mediumspringgreen",
+        "mediumturquoise",
+        "mediumvioletred",
+        "midnightblue",
+        "mintcream",
+        "mistyrose",
+        "moccasin",
+        "navajowhite",
+        "navy",
+        "oldlace",
+        "olive",
+        "olivedrab",
+        "orange",
+        "orangered",
+        "orchid",
+        "palegoldenrod",
+        "palegreen",
+        "paleturquoise",
+        "palevioletred",
+        "papayawhip",
+        "peachpuff",
+        "peru",
+        "pink",
+        "plum",
+        "powderblue",
+        "purple",
+        "rebeccapurple",
+        "red",
+        "rosybrown",
+        "royalblue",
+        "saddlebrown",
+        "salmon",
+        "sandybrown",
+        "seagreen",
+        "seashell",
+        "sienna",
+        "silver",
+        "skyblue",
+        "slateblue",
+        "slategray",
+        "slategrey",
+        "snow",
+        "springgreen",
+        "steelblue",
+        "tan",
+        "teal",
+        "thistle",
+        "tomato",
+        "transparent",
+        "turquoise",
+        "violet",
+        "wheat",
+        "white",
+        "whitesmoke",
+        "yellow",
+        "yellowgreen",
+    }
+)
+_GLOBAL_KEYWORDS = frozenset({"inherit", "initial", "unset", "revert"})
+_COLOR_FUNCTIONS = frozenset({"rgb", "rgba", "hsl", "hsla"})
+_ABSOLUTE_UNITS = {
+    "px": Fraction(1),
+    "pt": Fraction(4, 3),
+    "pc": Fraction(16),
+    "in": Fraction(96),
+    "cm": Fraction(96, 1) / Fraction("2.54"),
+    "mm": Fraction(96, 1) / Fraction("25.4"),
+    "q": Fraction(96, 1) / Fraction("101.6"),
+}
+_REJECTED_TOKEN_TYPES = frozenset(
+    {
+        "at-keyword",
+        "bad-string",
+        "bad-url",
+        "[] block",
+        "{} block",
+        "url",
+    }
+)
+_REJECTED_LITERALS = frozenset({"!", ";", "<", ">", "{", "}", "[", "]", ":"})
+
+
+def _text_is_safe(text: str) -> bool:
+    if "<" in text or ">" in text:
+        return False
+    for char in text:
+        code = ord(char)
+        if code < 0x20:
+            if char not in "\t\n\r\f":
+                return False
+        elif code < 0x7F:
+            continue
+        elif code < 0xA0:
+            return False
+        else:
+            if 0xFDD0 <= code <= 0xFDEF or (code & 0xFFFE) == 0xFFFE:
+                return False
+            category = unicodedata.category(char)
+            if category in {"Cc", "Cf", "Cs"}:
+                return False
+    return True
+
+
+def _token_is_safe(token: Any) -> bool:
+    token_type = token.type
+    if token_type == "whitespace":
+        return True
+    if token_type in _REJECTED_TOKEN_TYPES:
+        return False
+    if token_type == "ident":
+        return (
+            token.lower_value not in _GLOBAL_KEYWORDS
+            and not token.lower_value.startswith("--")
+            and _text_is_safe(token.value)
+        )
+    if token_type in {"string", "hash"}:
+        return _text_is_safe(token.value)
+    if token_type == "literal":
+        return token.value not in _REJECTED_LITERALS and _text_is_safe(token.value)
+    if token_type in {"number", "percentage"}:
+        return math.isfinite(token.value)
+    if token_type == "dimension":
+        return math.isfinite(token.value) and _text_is_safe(token.unit)
+    if token_type == "function":
+        return token.lower_name in _COLOR_FUNCTIONS and all(
+            _token_is_safe(item) for item in token.arguments
+        )
+    return False
+
+
+def _tokens_are_safe(tokens: list[Any]) -> bool:
+    return all(_token_is_safe(token) for token in tokens)
+
+
+def _strip_whitespace(tokens: list[Any]) -> list[Any]:
+    start = 0
+    end = len(tokens)
+    while start < end and tokens[start].type == "whitespace":
+        start += 1
+    while end > start and tokens[end - 1].type == "whitespace":
+        end -= 1
+    return tokens[start:end]
+
+
+def _split_whitespace(tokens: list[Any]) -> list[list[Any]]:
+    return [[token] for token in tokens if token.type != "whitespace"]
+
+
+def _split_literal(tokens: list[Any], literal: str) -> list[list[Any]]:
+    parts: list[list[Any]] = []
+    current: list[Any] = []
+    for token in tokens:
+        if token.type == "literal" and token.value == literal:
+            parts.append(current)
+            current = []
+        else:
+            current.append(token)
+    parts.append(current)
+    return parts
+
+
+def _single_token(tokens: list[Any]) -> Any | None:
+    stripped = _strip_whitespace(tokens)
+    if len(stripped) != 1:
+        return None
+    return stripped[0]
+
+
+def _serialize(token: Any) -> str:
+    return token.serialize()
+
+
+def _finite_number(token: Any) -> float | None:
+    if token.type not in {"number", "percentage"}:
+        return None
+    value = token.value
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _dimension_px(token: Any) -> Fraction | None:
+    if token.type != "dimension":
+        return None
+    factor = _ABSOLUTE_UNITS.get(token.unit.lower())
+    if factor is None:
+        return None
+    value = token.value
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    try:
+        number = Fraction(token.representation)
+    except (ValueError, ZeroDivisionError):
+        number = Fraction(value)
+    return number * factor
+
+
+def _length_value(
+    token: Any,
+    *,
+    minimum: Fraction | int = 0,
+    maximum: Fraction | int = 0,
+    allow_percent: bool = False,
+    percent_min: int = 0,
+    percent_max: int = 100,
+    allow_auto: bool = False,
+) -> str | None:
+    if token.type == "ident" and allow_auto and token.lower_value == "auto":
+        return "auto"
+    if token.type == "dimension":
+        pixels = _dimension_px(token)
+        if pixels is None or pixels < minimum or pixels > maximum:
+            return None
+        return _serialize(token)
+    if token.type == "number":
+        value = _finite_number(token)
+        if value is None or value != 0:
+            return None
+        if not minimum <= 0 <= maximum:
+            return None
+        return _serialize(token)
+    if token.type == "percentage" and allow_percent:
+        value = _finite_number(token)
+        if value is None or not percent_min <= value <= percent_max:
+            return None
+        return _serialize(token)
+    return None
+
+
+def _color_function(token: Any) -> str | None:
+    parts = _split_literal(token.arguments, ",")
+    name = token.lower_name
+    expected = 4 if name in {"rgba", "hsla"} else 3
+    if len(parts) != expected:
+        return None
+    values: list[str] = []
+    for position, part in enumerate(parts):
+        component = _single_token(part)
+        if component is None:
+            return None
+        if position == 3:
+            value = _finite_number(component)
+            if value is None:
+                return None
+            if component.type == "percentage":
+                if not 0 <= value <= 100:
+                    return None
+            elif component.type == "number":
+                if not 0 <= value <= 1:
+                    return None
+            else:
+                return None
+            values.append(_serialize(component))
+            continue
+        if name in {"rgb", "rgba"}:
+            value = _finite_number(component)
+            if value is None:
+                return None
+            if component.type == "percentage":
+                if not 0 <= value <= 100:
+                    return None
+            elif component.type == "number":
+                if not 0 <= value <= 255:
+                    return None
+            else:
+                return None
+            values.append(_serialize(component))
+            continue
+        if position == 0:
+            value = _finite_number(component)
+            if value is None or component.type != "number":
+                return None
+            values.append(_serialize(component))
+        else:
+            value = _finite_number(component)
+            if value is None or component.type != "percentage":
+                return None
+            if not 0 <= value <= 100:
+                return None
+            values.append(_serialize(component))
+    return f"{name}({', '.join(values)})"
+
+
+def _parse_color(token: Any) -> str | None:
+    if token.type == "ident":
+        if token.lower_value in _NAMED_COLORS:
+            return _serialize(token)
+        if token.lower_value == "currentcolor":
+            return _serialize(token)
+        return None
+    if token.type == "hash":
+        if re.fullmatch(
+            r"(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})",
+            token.value,
+        ):
+            return _serialize(token)
+        return None
+    if token.type == "function" and token.lower_name in _COLOR_FUNCTIONS:
+        return _color_function(token)
+    return None
+
+
+def _validate_color(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    return _parse_color(token)
+
+
+def _keyword_validator(choices: frozenset[str]) -> Any:
+    def validate(tokens: list[Any]) -> str | None:
+        token = _single_token(tokens)
+        if token is None or token.type != "ident":
+            return None
+        if token.lower_value not in choices:
+            return None
+        return _serialize(token)
+
+    return validate
+
+
+def _validate_font_family(tokens: list[Any]) -> str | None:
+    families = _split_literal(tokens, ",")
+    if not 1 <= len(families) <= 8:
+        return None
+    rendered: list[str] = []
+    for family in families:
+        serialized_words: list[str] = []
+        value_words: list[str] = []
+        for token in family:
+            if token.type == "whitespace":
+                continue
+            if token.type not in {"ident", "string"}:
+                return None
+            if not _text_is_safe(token.value):
+                return None
+            if len(token.value) > 128:
+                return None
+            serialized_words.append(_serialize(token))
+            value_words.append(token.value)
+        if not value_words:
+            return None
+        if len(" ".join(value_words)) > 128:
+            return None
+        rendered.append(" ".join(serialized_words))
+    return ", ".join(rendered)
+
+
+def _validate_font_size(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    if token.type == "ident":
+        allowed = {
+            "xx-small",
+            "x-small",
+            "small",
+            "medium",
+            "large",
+            "x-large",
+            "xx-large",
+        }
+        return _serialize(token) if token.lower_value in allowed else None
+    return _length_value(token, minimum=0, maximum=48)
+
+
+def _validate_font_weight(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    if token.type == "ident":
+        allowed = {"normal", "bold", "bolder", "lighter"}
+        return _serialize(token) if token.lower_value in allowed else None
+    if token.type == "number":
+        value = _finite_number(token)
+        if value is None or not 100 <= value <= 900:
+            return None
+        if token.int_value is None:
+            return None
+        return _serialize(token)
+    return None
+
+
+def _validate_line_height(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    if token.type == "ident" and token.lower_value == "normal":
+        return "normal"
+    if token.type == "number":
+        value = _finite_number(token)
+        if value is None or not 1 <= value <= 3:
+            return None
+        return _serialize(token)
+    return _length_value(token, minimum=1, maximum=200)
+
+
+def _validate_letter_spacing(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    if token.type == "ident" and token.lower_value == "normal":
+        return "normal"
+    if token.type == "number":
+        value = _finite_number(token)
+        return _serialize(token) if value == 0 else None
+    if token.type != "dimension":
+        return None
+    pixels = _dimension_px(token)
+    if pixels is None or abs(pixels) > 8:
+        return None
+    return _serialize(token)
+
+
+def _validate_vertical_align(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    if token.type == "ident":
+        allowed = {
+            "baseline",
+            "top",
+            "middle",
+            "bottom",
+            "sub",
+            "super",
+            "text-top",
+            "text-bottom",
+        }
+        return _serialize(token) if token.lower_value in allowed else None
+    return _length_value(token, minimum=-128, maximum=128)
+
+
+def _validate_size(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    return _length_value(
+        token, minimum=0, maximum=1600, allow_percent=True, allow_auto=True
+    )
+
+
+def _validate_margin(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= 4:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        if len(component) != 1:
+            return None
+        value = _length_value(
+            component[0],
+            minimum=-256,
+            maximum=256,
+            allow_percent=True,
+            percent_min=-100,
+            percent_max=100,
+            allow_auto=True,
+        )
+        if value is None:
+            return None
+        rendered.append(value)
+    return " ".join(rendered)
+
+
+def _validate_padding(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= 4:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        if len(component) != 1:
+            return None
+        value = _length_value(
+            component[0],
+            minimum=0,
+            maximum=256,
+            allow_percent=True,
+        )
+        if value is None:
+            return None
+        rendered.append(value)
+    return " ".join(rendered)
+
+
+def _border_width_value(token: Any) -> str | None:
+    if token.type == "ident" and token.lower_value in {
+        "thin",
+        "medium",
+        "thick",
+    }:
+        return _serialize(token)
+    return _length_value(token, minimum=0, maximum=8)
+
+
+def _validate_border_width(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= 4:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        if len(component) != 1:
+            return None
+        value = _border_width_value(component[0])
+        if value is None:
+            return None
+        rendered.append(value)
+    return " ".join(rendered)
+
+
+_BORDER_STYLES = frozenset(
+    {
+        "none",
+        "hidden",
+        "dotted",
+        "dashed",
+        "solid",
+        "double",
+        "groove",
+        "ridge",
+        "inset",
+        "outset",
+    }
+)
+
+
+def _validate_border_style(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= 4:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        token = _single_token(component)
+        if token is None or token.type != "ident":
+            return None
+        if token.lower_value not in _BORDER_STYLES:
+            return None
+        rendered.append(_serialize(token))
+    return " ".join(rendered)
+
+
+def _validate_border_color(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= 4:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        token = _single_token(component)
+        if token is None:
+            return None
+        color = _parse_color(token)
+        if color is None:
+            return None
+        rendered.append(color)
+    return " ".join(rendered)
+
+
+def _validate_border(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= 3:
+        return None
+    found = {"width": False, "style": False, "color": False}
+    rendered: list[str] = []
+    for component in components:
+        token = _single_token(component)
+        if token is None:
+            return None
+        width = _border_width_value(token)
+        if width is not None:
+            if found["width"]:
+                return None
+            found["width"] = True
+            rendered.append(width)
+            continue
+        if token.type == "ident" and token.lower_value in _BORDER_STYLES:
+            if found["style"]:
+                return None
+            found["style"] = True
+            rendered.append(_serialize(token))
+            continue
+        color = _parse_color(token)
+        if color is not None:
+            if found["color"]:
+                return None
+            found["color"] = True
+            rendered.append(color)
+            continue
+        return None
+    return " ".join(rendered)
+
+
+def _validate_border_spacing(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= 2:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        token = _single_token(component)
+        if token is None:
+            return None
+        value = _length_value(token, minimum=0, maximum=32)
+        if value is None:
+            return None
+        rendered.append(value)
+    return " ".join(rendered)
+
+
+def _validate_text_decoration(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= 3:
+        return None
+    allowed = {"none", "underline", "overline", "line-through"}
+    rendered: list[str] = []
+    for component in components:
+        token = _single_token(component)
+        if token is None or token.type != "ident":
+            return None
+        if token.lower_value not in allowed:
+            return None
+        rendered.append(_serialize(token))
+    if "none" in rendered and len(rendered) > 1:
+        return None
+    return " ".join(rendered)
+
+
+def _radius_value(token: Any) -> str | None:
+    if token.type == "number":
+        value = _finite_number(token)
+        return _serialize(token) if value == 0 else None
+    if token.type == "dimension":
+        pixels = _dimension_px(token)
+        if pixels is None or not 0 <= pixels <= 64:
+            return None
+        return _serialize(token)
+    if token.type == "percentage":
+        value = _finite_number(token)
+        if value is None or not 0 <= value <= 100:
+            return None
+        return _serialize(token)
+    return None
+
+
+def _radius_group(tokens: list[Any], maximum: int) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= maximum:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        token = _single_token(component)
+        if token is None:
+            return None
+        value = _radius_value(token)
+        if value is None:
+            return None
+        rendered.append(value)
+    return " ".join(rendered)
+
+
+def _validate_border_radius(tokens: list[Any]) -> str | None:
+    parts = _split_literal(tokens, "/")
+    if len(parts) > 2:
+        return None
+    rendered: list[str] = []
+    for part in parts:
+        group = _radius_group(part, 4)
+        if group is None:
+            return None
+        rendered.append(group)
+    return " / ".join(rendered)
+
+
+def _validate_border_radius_longhand(tokens: list[Any]) -> str | None:
+    if any(token.type == "literal" and token.value == "/" for token in tokens):
+        return None
+    return _radius_group(tokens, 2)
+
+
+def _style_property_names() -> frozenset[str]:
+    return frozenset(_STYLE_VALIDATORS)
+
+
+_STYLE_VALIDATORS = {
+    "color": _validate_color,
+    "background-color": _validate_color,
+    "font-family": _validate_font_family,
+    "font-size": _validate_font_size,
+    "font-style": _keyword_validator(frozenset({"normal", "italic", "oblique"})),
+    "font-weight": _validate_font_weight,
+    "font-variant": _keyword_validator(frozenset({"normal", "small-caps"})),
+    "line-height": _validate_line_height,
+    "letter-spacing": _validate_letter_spacing,
+    "text-align": _keyword_validator(
+        frozenset({"left", "right", "center", "justify", "start", "end"})
+    ),
+    "text-decoration": _validate_text_decoration,
+    "text-transform": _keyword_validator(
+        frozenset({"none", "capitalize", "uppercase", "lowercase"})
+    ),
+    "white-space": _keyword_validator(frozenset({"normal", "pre-wrap", "pre-line"})),
+    "word-break": _keyword_validator(frozenset({"normal", "break-all", "break-word"})),
+    "overflow-wrap": _keyword_validator(frozenset({"break-word", "anywhere"})),
+    "margin": _validate_margin,
+    "margin-top": _validate_margin,
+    "margin-right": _validate_margin,
+    "margin-bottom": _validate_margin,
+    "margin-left": _validate_margin,
+    "padding": _validate_padding,
+    "padding-top": _validate_padding,
+    "padding-right": _validate_padding,
+    "padding-bottom": _validate_padding,
+    "padding-left": _validate_padding,
+    "border": _validate_border,
+    "border-width": _validate_border_width,
+    "border-style": _validate_border_style,
+    "border-color": _validate_border_color,
+    "border-spacing": _validate_border_spacing,
+    "border-radius": _validate_border_radius,
+    "border-collapse": _keyword_validator(frozenset({"collapse", "separate"})),
+    "table-layout": _keyword_validator(frozenset({"auto", "fixed"})),
+    "vertical-align": _validate_vertical_align,
+    "width": _validate_size,
+    "height": _validate_size,
+    "float": _keyword_validator(frozenset({"left", "right", "none"})),
+    "display": _keyword_validator(
+        frozenset(
+            {
+                "block",
+                "inline",
+                "inline-block",
+                "none",
+                "list-item",
+                "table",
+                "table-row",
+                "table-cell",
+                "table-row-group",
+                "table-header-group",
+                "table-footer-group",
+                "table-column",
+                "table-column-group",
+                "inline-table",
+            }
+        )
+    ),
+}
+for _side in ("top", "right", "bottom", "left"):
+    _STYLE_VALIDATORS[f"border-{_side}"] = _validate_border
+    _STYLE_VALIDATORS[f"border-{_side}-width"] = _validate_border_width
+    _STYLE_VALIDATORS[f"border-{_side}-style"] = _validate_border_style
+    _STYLE_VALIDATORS[f"border-{_side}-color"] = _validate_border_color
+for _corner in ("top-left", "top-right", "bottom-right", "bottom-left"):
+    _STYLE_VALIDATORS[f"border-{_corner}-radius"] = _validate_border_radius_longhand
+del _side, _corner
+
+
+@lru_cache(maxsize=1)
+def _warn_missing_tinycss2() -> None:
+    logger.warning("tinycss2 non installato: stili inline disabilitati")
+
+
+def _sanitize_style(value: str) -> str | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _STYLE_MAX_LEN
+        or not _text_is_safe(value)
+    ):
+        return None
+    try:
+        import tinycss2
+    except Exception:  # noqa: BLE001 - optional dependency may fail to import
+        _warn_missing_tinycss2()
+        return None
+    try:
+        declarations = tinycss2.parse_declaration_list(
+            value, skip_comments=True, skip_whitespace=False
+        )
+    except Exception:  # noqa: BLE001 - malformed CSS is fail-closed
+        return None
+    rendered: list[str] = []
+    count = 0
+    for declaration in declarations:
+        if declaration.type == "whitespace":
+            continue
+        if declaration.type != "declaration":
+            continue
+        count += 1
+        if count > _STYLE_MAX_DECLS:
+            return None
+        name = declaration.lower_name
+        validator = _STYLE_VALIDATORS.get(name)
+        if validator is None:
+            continue
+        tokens = _strip_whitespace(declaration.value)
+        if not tokens or not _tokens_are_safe(tokens):
+            continue
+        try:
+            serialized = validator(tokens)
+        except Exception:  # noqa: BLE001, S112 - validators must be total
+            continue
+        if serialized is None:
+            continue
+        rendered.append(f"{name}:{serialized}")
+    if not rendered:
+        return None
+    result = ";".join(rendered)
+    if len(result) > _STYLE_SERIALIZED_MAX:
+        return None
+    if not _text_is_safe(result):
+        return None
+    try:
+        result.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return result
+
+
+def _legacy_int(value: str, minimum: int, maximum: int) -> str | None:
+    value = value.strip()
+    if not re.fullmatch(r"-?[0-9]+", value):
+        return None
+    number = int(value)
+    if not minimum <= number <= maximum:
+        return None
+    return str(number)
+
+
+def _legacy_size(value: str, maximum: int) -> str | None:
+    value = value.strip()
+    percent = re.fullmatch(r"([0-9]+)%", value)
+    if percent:
+        number = int(percent.group(1))
+        return f"{number}%" if 0 <= number <= 100 else None
+    return _legacy_int(value, 0, maximum)
+
+
+def _legacy_bgcolor(value: str) -> str | None:
+    value = value.strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?", value):
+        return value.lower()
+    return None
+
+
+def _legacy_enum(*choices: str) -> Any:
+    allowed = frozenset(choices)
+
+    def validate(value: str) -> str | None:
+        value = value.strip().lower()
+        return value if value in allowed else None
+
+    return validate
+
+
+def _legacy_int_validator(minimum: int, maximum: int) -> Any:
+    def validate(value: str) -> str | None:
+        return _legacy_int(value, minimum, maximum)
+
+    return validate
+
+
+def _legacy_size_validator(maximum: int) -> Any:
+    def validate(value: str) -> str | None:
+        return _legacy_size(value, maximum)
+
+    return validate
+
+
+_LEGACY_ATTR_VALIDATORS = {
+    ("table", "border"): _legacy_int_validator(0, 50),
+    ("table", "cellpadding"): _legacy_int_validator(0, 50),
+    ("table", "cellspacing"): _legacy_int_validator(0, 50),
+    ("table", "bgcolor"): _legacy_bgcolor,
+    ("table", "width"): _legacy_size_validator(10_000),
+    ("table", "height"): _legacy_size_validator(2_000),
+    ("table", "align"): _legacy_enum("left", "right", "center", "justify"),
+    ("tr", "bgcolor"): _legacy_bgcolor,
+    ("tr", "height"): _legacy_size_validator(2_000),
+    ("tr", "align"): _legacy_enum("left", "right", "center", "justify"),
+    ("tr", "valign"): _legacy_enum("top", "middle", "bottom", "baseline"),
+    ("td", "bgcolor"): _legacy_bgcolor,
+    ("td", "height"): _legacy_size_validator(2_000),
+    ("td", "align"): _legacy_enum("left", "right", "center", "justify"),
+    ("td", "valign"): _legacy_enum("top", "middle", "bottom", "baseline"),
+    ("td", "colspan"): _legacy_int_validator(1, 100),
+    ("td", "rowspan"): _legacy_int_validator(1, 100),
+    ("td", "width"): _legacy_size_validator(10_000),
+    ("th", "bgcolor"): _legacy_bgcolor,
+    ("th", "height"): _legacy_size_validator(2_000),
+    ("th", "align"): _legacy_enum("left", "right", "center", "justify"),
+    ("th", "valign"): _legacy_enum("top", "middle", "bottom", "baseline"),
+    ("th", "colspan"): _legacy_int_validator(1, 100),
+    ("th", "rowspan"): _legacy_int_validator(1, 100),
+    ("th", "width"): _legacy_size_validator(10_000),
+    ("th", "scope"): _legacy_enum("row", "col", "rowgroup", "colgroup"),
+    ("col", "span"): _legacy_int_validator(1, 100),
+    ("col", "width"): _legacy_size_validator(10_000),
+    ("col", "bgcolor"): _legacy_bgcolor,
+    ("col", "align"): _legacy_enum("left", "right", "center", "justify"),
+    ("col", "valign"): _legacy_enum("top", "middle", "bottom", "baseline"),
+    ("colgroup", "span"): _legacy_int_validator(1, 100),
+    ("colgroup", "width"): _legacy_size_validator(10_000),
+    ("colgroup", "bgcolor"): _legacy_bgcolor,
+    ("colgroup", "align"): _legacy_enum("left", "right", "center", "justify"),
+    ("colgroup", "valign"): _legacy_enum("top", "middle", "bottom", "baseline"),
+    ("ol", "start"): _legacy_int_validator(-10_000, 10_000),
+    ("li", "value"): _legacy_int_validator(-10_000, 10_000),
+    ("img", "width"): _legacy_size_validator(10_000),
+    ("img", "height"): _legacy_size_validator(2_000),
+    ("img", "align"): _legacy_enum("left", "right", "top", "middle", "bottom"),
+}
+
+
+def _html_attribute_filter(tag: str, attribute: str, value: str) -> str | None:
+    try:
+        normalized_tag = tag.lower()
+        normalized_attribute = attribute.lower()
+        if normalized_attribute == "style":
+            if os.environ.get("GMAIL_HTML_STYLES", "1").strip() == "0":
+                return None
+            return _sanitize_style(value)
+        validator = _LEGACY_ATTR_VALIDATORS.get((normalized_tag, normalized_attribute))
+        if validator is not None:
+            return validator(value)
+        if normalized_tag == "img" and normalized_attribute == "data-src":
+            return _filter_image_src(value)
+        if len(value) > _ATTR_VALUE_MAX_LEN:
+            return None
+        return value
+    except Exception:  # noqa: BLE001 - callback must never fail open
+        return None
 
 
 def sanitize_html(raw: str) -> str:
@@ -1562,9 +2900,14 @@ def sanitize_html(raw: str) -> str:
     without sanitizing would allow event handlers or scripts to steal the web
     UI Bearer token from ``localStorage``.  ``nh3`` removes disallowed tags,
     attributes, URL schemes and CSS; remote images are dropped on purpose to
-    avoid tracking pixels.
+    avoid tracking pixels.  Inline CSS is re-serialized from a strict
+    allow-list with ``tinycss2``.
     """
     if not raw or len(raw) > _MAX_HTML_CHARS:
+        return ""
+    try:
+        raw.encode("utf-8")
+    except UnicodeEncodeError:
         return ""
     try:
         import nh3
@@ -1572,8 +2915,15 @@ def sanitize_html(raw: str) -> str:
         logger.warning("nh3 non installato: rendering HTML disabilitato")
         return ""
     try:
-        return nh3.clean(
-            _defer_image_sources(raw),
+        scanned = _pre_scan_html(raw)
+    except Exception:
+        logger.warning("Scansione HTML fallita", exc_info=True)
+        return ""
+    if not scanned:
+        return ""
+    try:
+        result = nh3.clean(
+            scanned,
             tags=set(_ALLOWED_HTML_TAGS),
             clean_content_tags=set(_CLEAN_CONTENT_TAGS),
             attributes=_ALLOWED_HTML_ATTRIBUTES,
@@ -1582,10 +2932,25 @@ def sanitize_html(raw: str) -> str:
             url_relative="deny",
             link_rel="noopener noreferrer",
             strip_comments=True,
+            filter_style_properties=set(_STYLE_VALIDATORS),
         )
     except Exception:
         logger.warning("Sanitizzazione HTML fallita", exc_info=True)
         return ""
+    if not isinstance(result, str):
+        return ""
+    try:
+        result.encode("utf-8")
+    except UnicodeEncodeError:
+        return ""
+    if len(result) > _HTML_MAX_OUTPUT_CHARS:
+        return ""
+    try:
+        if not _pre_scan_html(result):
+            return ""
+    except Exception:  # noqa: BLE001 - output must fail closed
+        return ""
+    return result
 
 
 def _extract_html(message: Message) -> str:

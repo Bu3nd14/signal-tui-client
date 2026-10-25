@@ -6,3 +6,5 @@ aiohttp>=3.14.1,<4
 httpx2
 # Sanitizzatore HTML per il reader Gmail (Rust/ammonia, wheel precompilate).
 nh3>=0.3.7,<0.4
+# CSS inline del reader Gmail (parser/serializzatore Python puro).
+tinycss2>=1.5.1,<2

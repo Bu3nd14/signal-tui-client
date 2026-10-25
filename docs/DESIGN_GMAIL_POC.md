@@ -11,7 +11,7 @@ Data: 2026-10-23 · Stato: proposta da implementare · Ambito: POC single-user, 
 2. Lettura inbox, apertura email, invio nuova email, risposta (reply), download e upload allegati.
 3. Nuova tab "Gmail" nella web UI, senza rompere le tre tab esistenti.
 4. Integrazione diretta nel progetto (non plugin), single-account, config da `.env`.
-5. Zero DB/migrations. Unica dipendenza aggiuntiva: `nh3` (sanitizzazione HTML), installata da `requirements-web.txt`.
+5. Zero DB/migrations. Dipendenze aggiuntive: `nh3` (sanitizzazione HTML) e `tinycss2` (CSS inline con allow-list), installate da `requirements-web.txt`.
 
 **Non-obiettivi (esclusi esplicitamente)**
 Threading avanzato, ricerca server-side, label/cartelle multiple, notifiche/push, sincronizzazione bidirezionale, multi-account, OAuth/refresh-token, bozze, firma HTML, calendario. La cartella è fissa `INBOX` (parametrizzabile ma non gestita come UI).
@@ -50,7 +50,7 @@ Threading avanzato, ricerca server-side, label/cartelle multiple, notifiche/push
 | D4 | Tutte le chiamate bloccanti via **`asyncio.to_thread`** (Python 3.12, verificato disponibile) | Non blocca l'event loop uvicorn (stesso pattern già usato in `api.py`/`uploads.py`). |
 | D5 | **Timeout** via `socket.setdefaulttimeout`/`timeout=` sui costruttori (30s default, override env) | Evita richieste appese. |
 | D6 | **TLS obbligatorio**: IMAP `IMAP4_SSL` (993), SMTP `starttls()` (587). Nessun fallback plaintext | Sicurezza: credenziali mai in chiaro. |
-| D7 | **HTML email sanitizzato server-side con `nh3`**, più `text` come fallback. Allow-list di tag/attributi, niente script/style/iframe/event handler, soli link `http`/`https`/`mailto` con `rel="noopener noreferrer"` e URL relativi scartati. Le immagini vengono rinviate (`data-src`, niente `src`) e caricate solo dal bottone **Mostra immagini**. Il client può commutare HTML/Testo. | Rendering fedele senza XSS/tracking automatico: l'HTML è controllato dal mittente e il Bearer token sta in `localStorage`. |
+| D7 | **HTML email sanitizzato server-side con `nh3` + `tinycss2`**, più `text` come fallback. Allow-list di tag/attributi; CSS inline sicuro preservato (allow-list proprietà/valori, niente `url()`/`position`/`var()`/`calc()`), mentre `<style>`, classi/id, script, iframe, CSS esterno ed event handler sono rimossi. Attributi tabellari legacy preservati; link solo `http`/`https`/`mailto` con `rel="noopener noreferrer"` e URL relativi scartati. Le immagini vengono rinviate (`data-src`, niente `src`) e caricate solo dal bottone **Mostra immagini**. Il client può commutare HTML/Testo. | Rendering più fedele senza XSS/tracking automatico: l'HTML è controllato dal mittente e il Bearer token sta in `localStorage`. L'assenza di `<style>`/classi può ridurre la fedeltà sulle email che dipendono da CSS esterno. Vedi `DESIGN_GMAIL_HTML_PHASE1.md`. |
 | D8 | **Identificazione messaggi: `UID` + `UIDVALIDITY` + `folder`**. Il client passa `uid` e `folder`; la risposta porta `uidvalidity` (il client la confronta, la usa per invalidare stato locale). | UID è la chiave stabile IMAP; UIDVALIDITY rileva i reset di folder. |
 | D9 | **Reply/threading**: `In-Reply-To` + `References` dal `Message-ID` dell'originale; **quoting** plain-text con prefisso `> `. | Threading corretto senza DB. |
 | D10 | **Nessuna persistenza/cache** (IMAP è la fonte). | POC: niente DB, niente migrations. |
@@ -145,7 +145,7 @@ Tutti gli endpoint sono **già protetti** dal middleware Bearer (path `/api/*`).
 ### 5.2 Componenti UI (`#gmail-view`)
 - **Toolbar**: titolo + stato (`configurato`/`non configurato`/`errore`), bottone "Ricarica", "Scrivi".
 - **Lista messaggi** (colonna sinistra, responsive): righe con mittente, oggetto, data, badge allegati e **distinzione letto/non letto** (grassetto + badge "Non letto"; conteggio "N non letti" nel riepilogo), **senza filtro** unread. **Paginazione locale** su una finestra di 200 messaggi ordinati per data (50 per pagina).
-- **Lettore** (pannello destro): header (From/To/Date/Oggetto), corpo **HTML sanitizzato** (toggle **Testo**), **Mostra immagini** on-demand (le immagini remote non vengono caricate automaticamente), link aperti in nuova tab con `noopener noreferrer`, elenco allegati con download.
+- **Lettore** (pannello destro): header (From/To/Date/Oggetto), corpo **HTML sanitizzato** con CSS inline sicuro e attributi tabellari legacy preservati (`<style>`/classi/script/iframe rimossi), toggle **Testo**, **Mostra immagini** on-demand (le immagini remote non vengono caricate automaticamente), link aperti in nuova tab con `noopener noreferrer`, elenco allegati con download.
 - **Compose/Reply**: form (To/CC/BCC/Oggetto/Corpo), allegati (file picker), modalità reply (riempie To+Oggetto `Re:`; il quote lo aggiunge il backend). Invio multipart. Pulsante **Elimina** con conferma → Cestino.
 - **Selezione multipla**: bottone "Seleziona" a destra del riepilogo; solo allora compaiono le checkbox di riga e il bottone "Elimina" accanto ad "Annulla" (nessuna barra separata). "Annulla" esce dalla modalità selezione e svuota la selezione. Il delete bulk usa un unico endpoint e un solo `EXPUNGE`.
 - **Stati**: loading (spinner), errore (banner con messaggio redattato), non configurato (istruzioni `.env`).
@@ -158,13 +158,14 @@ Tutti gli endpoint sono **già protetti** dal middleware Bearer (path `/api/*`).
 **Creare**
 | File | Contenuto |
 |------|-----------|
-| `web/gmail.py` | Trasporto IMAP/SMTP + parsing MIME (funzioni sync, no FastAPI): `imap_connect`, `fetch_message_list`, `fetch_message`, `fetch_attachment`, `send_email`, `mark_read`; validazioni header/folder; strip HTML→text. |
+| `web/gmail.py` | Trasporto IMAP/SMTP + parsing MIME (funzioni sync, no FastAPI): `imap_connect`, `fetch_message_list`, `fetch_message`, `fetch_attachment`, `send_email`, `mark_read`; validazioni header/folder; strip HTML→text; sanitizzazione HTML (`nh3`) e CSS inline (`tinycss2`). |
 | `web/gmail_api.py` | `create_gmail_router()` con gli endpoint §4; wrappa ogni chiamata in `asyncio.to_thread`; mappa eccezioni in `HTTPException` senza leak. |
 | `web/static/gmail.js` | Controller/vista dedicata (stato separato, render lista/lettore/compose, allegati, stati). |
 | `web/static/gmail.css` | Stili `#gmail-view`, `.gmail-active`, responsive. |
 | `tests/test_gmail_config.py` | Getter config, `gmail_enabled()` (env/`.env`/config.json). |
 | `tests/test_gmail_parse.py` | Parsing MIME (plain-text, HTML→text, header injection, sanitize filename, quoting). |
-| `tests/test_gmail_html.py` | Sanitizzazione HTML: script/event handler/style/iframe/immagini remote rimossi, link sicuri, tabelle, cap dimensione. |
+| `tests/test_gmail_html.py` | Sanitizzazione HTML: script/event handler, `<style>`, classi, iframe e immagini remote rimossi; link sicuri, tabelle e cap dimensione. |
+| `tests/test_gmail_html_phase1.py` | Fase 1 CSS inline: allow-list proprietà/valori, attributi tabellari legacy, immagini differite/firmate, cap anti-DoS e idempotenza. |
 | `tests/test_gmail_api.py` | Endpoint con `monkeypatch` di `imaplib.IMAP4_SSL`/`smtplib.SMTP` + `TestClient` (httpx2 già presente). |
 
 **Modificare**
@@ -193,7 +194,7 @@ Tutti gli endpoint sono **già protetti** dal middleware Bearer (path `/api/*`).
 | Rischio | Mitigazione |
 |---------|-------------|
 | **Header injection** (To/Subject) | Validazione esplicita `\r`/`\n` rifiutati; `From` fisso server-side; test dedicati. |
-| **XSS via HTML email** | Sanitizzazione server-side con `nh3` (allow-list, no script/style/iframe/event handler, URL scheme limitati, URL relativi negati); il client parsea l'output già sanitizzato in modo inerte (`DOMParser`). Immagini remote solo su click (tracking esplicito). Toggle Testo disponibile. |
+| **XSS via HTML email** | Sanitizzazione server-side con `nh3` + `tinycss2` (allow-list tag/attributi; `<style>`/classi/script/iframe/event handler rimossi; CSS inline ri-serializzato da allow-list proprietà/valori senza `url()`/`position`/`var()`/`calc()`; URL scheme limitati e URL relativi negati); il client parsea l'output già sanitizzato in modo inerte (`DOMParser`). Immagini remote solo su click (tracking esplicito). Toggle Testo disponibile. |
 | **Path traversal allegati** | Download per `uid`+`index` (mai path/filename forniti dal client); nome file `sanitize_filename`; niente scrittura su disco da input utente per il download. |
 | **Blocco event loop** (IMAP/SMTP bloccanti) | Tutto in `asyncio.to_thread` + timeout socket; connessione-per-richiesta. |
 | **Leak credenziali / errori IMAP** | Password mai in risposta/log; errori mappati a 502/503 generici senza traceback con segreti. |
@@ -206,12 +207,12 @@ Tutti gli endpoint sono **già protetti** dal middleware Bearer (path `/api/*`).
 
 **Automatici (fast track)**
 - `ruff check` e `ruff format --check` passano sui file nuovi/modificati.
-- `pytest tests/test_gmail_config.py tests/test_gmail_parse.py tests/test_gmail_html.py tests/test_gmail_api.py` verde.
+- `pytest tests/test_gmail_config.py tests/test_gmail_parse.py tests/test_gmail_html.py tests/test_gmail_html_phase1.py tests/test_gmail_api.py` verde.
 - `python -c "import web.gmail_api"` non fallisce e **non** importa FastAPI a livello di `web/gmail.py`.
 
 **Manuali (con App Password reale, account Gmail dedicato)**
 1. Con `GMAIL_ADDRESS`/`GMAIL_APP_PASSWORD` in `.env`, la tab "Gmail" appare e `/api/gmail/status` → `configured:true`.
-2. La lista inbox mostra messaggi recenti con paginazione; apertura email mostra corpo plain-text e allegati.
+2. La lista inbox mostra messaggi recenti con paginazione; apertura email mostra corpo HTML sanitizzato (CSS inline sicuro se presente) con toggle Testo, e allegati.
 3. Download allegato produce file integro con nome sanitizzato.
 4. Invio nuova email → appare in Posta inviata; reply a una mail ricevuta → thread corretto (`In-Reply-To`/`References`), quoting `>`.
 5. Invio con 1+ allegati → ricevuti integri; allegato >25MB o >10 file → 413/400.
