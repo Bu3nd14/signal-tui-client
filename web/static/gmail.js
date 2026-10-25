@@ -719,9 +719,10 @@
     const hasHtml = html.trim() !== "";
     const mode = hasHtml && state.renderMode === "html" ? "html" : "text";
     if (mode === "html") {
-      // html is sanitized server-side by nh3 (allow-list, no scripts/styles,
-      // no remote images, only http/https/mailto links). Parse it inertly and
-      // move the resulting nodes instead of assigning raw markup.
+      // html is sanitized server-side by nh3 (allow-list, scripts removed,
+      // inline styles re-serialized from a strict CSS allow-list, no remote
+      // images, only http/https/mailto links). Parse it inertly and move the
+      // resulting nodes instead of assigning raw markup.
       const parsed = new DOMParser().parseFromString(html, "text/html");
       const content = document.createElement("div");
       content.className = "gmail-html-content";
