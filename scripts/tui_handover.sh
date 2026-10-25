@@ -76,7 +76,7 @@ lock_pid() {
 # remoto di to_server (e in launcher/handover.py).
 tui_start() {
     local dir="$1"
-    ( cd "$dir" && nohup .venv/bin/python megachat.py serve --web-port 4242 --web-host 0.0.0.0 </dev/null >>"$SERVE_LOG" 2>&1 & )
+    ( ( cd "$dir" && exec nohup .venv/bin/python megachat.py serve --web-port 4242 --web-host 0.0.0.0 ) </dev/null >>"$SERVE_LOG" 2>&1 & )
     for _ in $(seq 1 30); do
         if lock_pid >/dev/null && (exec 3<>/dev/tcp/127.0.0.1/4242) 2>/dev/null; then
             ok "Server avviato (megachat serve) in $dir"

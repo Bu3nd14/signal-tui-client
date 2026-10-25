@@ -967,7 +967,7 @@ class TestAliasIsolation:
         token = json.loads((tmp_path / "config.json").read_text())["web"]["token"]
         assert result.returncode == 0, result.stderr
         assert result.stdout.count(f"token: {token}") == 2
-        assert "TUI bg fermata." in result.stdout
+        assert "Server bg fermato." in result.stdout
         # The server is no longer hosted in tmux: only the stop alias still
         # kills a legacy session, and nothing creates one.
         assert not tmux_state.exists()

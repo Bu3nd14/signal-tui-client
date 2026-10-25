@@ -644,8 +644,15 @@ def test_socket_is_never_group_or_world_accessible_under_a_loose_umask(tmp_path)
 def test_foreign_uid_peer_is_refused(env, monkeypatch):
     monkeypatch.setattr(sa, "_peer_uid", lambda _sock: os.geteuid() + 1)
     client = env.connect()
-    client.request("server.ping")
-    assert client.recv() is None  # closed without an answer
+    # The server drops the connection as soon as it sees the peer uid, so the
+    # write may already hit a closed socket (EPIPE) or the read a reset: every
+    # outcome is "closed without an answer", none may be a response.
+    try:
+        client.request("server.ping")
+        reply = client.recv()
+    except (BrokenPipeError, ConnectionResetError):
+        reply = None
+    assert reply is None  # closed without an answer
 
 
 def test_same_uid_peer_is_accepted_and_uid_is_read_from_the_kernel(env):

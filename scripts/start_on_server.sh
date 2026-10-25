@@ -65,12 +65,13 @@ start_all() {
     info "Avvio il server headless (megachat serve) con Web UI su 0.0.0.0:4242..."
     # Riavvio: ferma l'istanza in corso (lock pid, SIGINT) prima di riprendere il lock.
     stop_serve || die "Il server (pid $(lock_pid)) non si ferma: non ne avvio un altro. Controlla: tail -50 /tmp/signal-tui.log"
-    ( cd "$PROJECT_DIR" && nohup .venv/bin/python megachat.py serve --web-port 4242 --web-host 0.0.0.0 </dev/null >>"$SERVE_LOG" 2>&1 & )
+    ( ( cd "$PROJECT_DIR" && exec nohup .venv/bin/python megachat.py serve --web-port 4242 --web-host 0.0.0.0 ) </dev/null >>"$SERVE_LOG" 2>&1 & )
 
     for _ in $(seq 1 30); do
         if lock_pid >/dev/null && (exec 3<>/dev/tcp/127.0.0.1/4242) 2>/dev/null; then
             ok "Server attivo — Web UI su http://$(hostname -I 2>/dev/null | awk '{print $1}'):4242"
-            token="$("$PROJECT_DIR/.venv/bin/python" -c 'import json,sys;print(json.load(open(sys.argv[1]))["web"]["token"])' "$PROJECT_DIR/config.json")"
+            # Solo informativo: env var o config.json; non deve mai far fallire l'avvio.
+            token="${SIGNAL_TUI_WEB_TOKEN:-$("$PROJECT_DIR/.venv/bin/python" -c 'import json,sys;print(json.load(open(sys.argv[1]))["web"]["token"])' "$PROJECT_DIR/config.json" 2>/dev/null || echo "(non configurato)")}"
             echo "   Token Web UI: $token"
             echo "   Log:          tail -f /tmp/signal-tui.log"
             echo "   Stop:         $0 stop"
