@@ -12,6 +12,10 @@ This module must not import FastAPI, Starlette, Textual, ``tui`` or ``web``.
 
 from __future__ import annotations
 
+import os
+import stat
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -333,3 +337,90 @@ def upload_directory() -> Path:
     import protocols.db as backend
 
     return Path(backend.CACHE_DIR) / "web-uploads"
+
+
+# -- staging of local files (adapters whose clients name paths) -------------------
+
+#: Total bytes one request may stage (disk-protection cap, like the HTTP one).
+MAX_STAGED_TOTAL_BYTES = 250 * 1024 * 1024
+#: Staged files older than this are removed by :func:`prune_upload_directory`.
+STAGED_MAX_AGE_SECONDS = 60 * 60
+_COPY_CHUNK = 256 * 1024
+
+
+def stage_local_file(
+    source: str,
+    *,
+    filename: str | None,
+    content_type: str | None,
+    max_bytes: int | None = None,
+) -> Path:
+    """Copy a client-named local file into the upload directory; return the copy.
+
+    For adapters whose clients pass *paths* (the Unix socket, mc-7kp): the
+    operation must only see files the server owns, never a path it was talked
+    into.  *source* must be absolute; it is opened with ``O_NOFOLLOW`` (a
+    symlink as last component is refused) and ``O_NONBLOCK`` (a FIFO cannot
+    hang us), and the open descriptor must be a regular file; the copy is read
+    from that descriptor, so nothing can be swapped in between check and read.
+    :class:`UploadGuard` cuts the copy off mid-way when a size limit is hit
+    (``max_bytes`` caps this file, e.g. what is left of a total budget).
+
+    Raises ``UploadValidationError`` (413 over a limit; 400 for a path that is
+    not an acceptable local regular file) and ``OSError`` on storage failures.
+    The caller deletes the returned file when done.
+    """
+    if not isinstance(source, str) or not source or not os.path.isabs(source):
+        raise UploadValidationError(400)
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(source, flags)
+    except OSError:
+        raise UploadValidationError(400) from None
+    temporary_path: Path | None = None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise UploadValidationError(400)
+        directory = upload_directory()
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        guard = UploadGuard(
+            max_bytes=max_bytes, declared_content_type=content_type, filename=filename
+        )
+        suffix = Path(sanitize_filename(filename)).suffix.lower()
+        with tempfile.NamedTemporaryFile(
+            dir=directory,
+            prefix="upload-",
+            suffix=suffix if suffix in ALLOWED_EXTENSIONS else "",
+            delete=False,
+        ) as out:
+            temporary_path = Path(out.name)
+            os.chmod(temporary_path, 0o600)
+            while chunk := os.read(fd, _COPY_CHUNK):
+                guard.feed(chunk)
+                out.write(chunk)
+        staged, temporary_path = temporary_path, None
+        return staged
+    finally:
+        os.close(fd)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def prune_upload_directory(*, now: float | None = None) -> None:
+    """Delete staged files (not symlinks) older than :data:`STAGED_MAX_AGE_SECONDS`
+    (leftovers of a crashed server); a missing directory is fine."""
+    cutoff = (time.time() if now is None else now) - STAGED_MAX_AGE_SECONDS
+    try:
+        entries = list(upload_directory().iterdir())
+    except OSError:
+        return
+    for path in entries:
+        try:
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and path.stat().st_mtime < cutoff
+            ):
+                path.unlink()
+        except OSError:
+            continue

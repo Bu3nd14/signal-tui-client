@@ -283,3 +283,58 @@ def test_nobody_imports_the_removed_web_bridge():
             if any(m == "web.bridge" or m.startswith("web.bridge.") for m in modules):
                 offenders.append(str(path.relative_to(ROOT)))
     assert offenders == []
+
+
+# -- the Unix-socket adapter -------------------------------------------------------
+
+#: ``server`` modules the socket adapter may import: the API itself, the bus it
+#: streams, the request models it stages attachments for, the upload policy and
+#: the version constants.  Never ``protocols``, ``web``, ``tui``, ``textual`` or
+#: ``fastapi``, nor any other core module.
+SOCKET_ADAPTER_SERVER_ALLOWLIST = {
+    "server.api",
+    "server.bus",
+    "server.models_api",
+    "server.uploads",
+    "server.version",
+}
+SOCKET_ADAPTER_THIRD_PARTY = {"pydantic"}
+
+
+def test_socket_adapter_imports_only_the_api_surface():
+    modules = _imported_modules(ROOT / "server" / "socket_adapter.py")
+    roots = {m.split(".")[0] for m in modules}
+    assert roots & (WEB_FORBIDDEN_ROOTS | {"web", "fastapi", "starlette"}) == set()
+    foreign = roots - {"server"} - set(sys.stdlib_module_names)
+    assert foreign <= SOCKET_ADAPTER_THIRD_PARTY, sorted(foreign)
+    server_modules = {m for m in modules if m.split(".")[0] == "server"}
+    assert server_modules <= SOCKET_ADAPTER_SERVER_ALLOWLIST, sorted(
+        server_modules - SOCKET_ADAPTER_SERVER_ALLOWLIST
+    )
+
+
+def test_socket_adapter_allowlist_has_no_unused_entries():
+    modules = _imported_modules(ROOT / "server" / "socket_adapter.py")
+    assert SOCKET_ADAPTER_SERVER_ALLOWLIST <= modules, sorted(
+        SOCKET_ADAPTER_SERVER_ALLOWLIST - modules
+    )
+
+
+def test_socket_adapter_imports_without_ui_or_protocols_loaded():
+    import subprocess
+
+    code = (
+        "import sys, server.socket_adapter;"
+        "bad = sorted(m for m in sys.modules if m.split('.')[0] in "
+        "{'web','tui','textual','fastapi','starlette','protocols','transcription',"
+        "'signal_tui'});"
+        "print(bad); sys.exit(1 if bad else 0)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
