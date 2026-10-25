@@ -7,12 +7,17 @@ import logging
 import random
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from server import messages as _domain
 from server.api import ApiError, ChatAPI, operation
-from server.models_api import AttachmentIn, MessagesSendRequest
+from server.models_api import (
+    AttachmentIn,
+    MessagesSendCheckRequest,
+    MessagesSendRequest,
+)
 from server.ops.common import PROTOCOLS
 from server.retry import (
     SEND_RETRY_MAX_ATTEMPTS,
@@ -63,30 +68,47 @@ async def _validate_attachments(
     return validated
 
 
-@operation("messages.send", request=MessagesSendRequest, response=dict[str, bool])
-async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, bool]:
-    """Send a text message, or attachments (the text captions the first one).
+@dataclass
+class _Prepared:
+    """A fully validated send request (everything the old route checked)."""
 
-    Text sends are idempotent per ``(protocol, contact_id, client_msg_id)`` and
-    retried with backoff on transient backend errors (``send_retry`` frames);
-    attachment sends are neither deduplicated nor retried.  ``attachments`` are
-    local files stored by the adapter, which also deletes them afterwards.
-    Async: the backend calls run in worker threads and the retry back-off
-    sleeps on the loop, so concurrent sends do not block each other.
+    protocol: str
+    contact_id: str
+    text: str
+    client_msg_id: str
+    kwargs: dict[str, Any]
+    quote_timestamp: Any
+    quote_author: Any
+    quote_message: Any
+    reply_to_message_id: Any
+    quote_content_type: Any
+    quote_attachment_id: Any
+    backend: Any
+    contact: Any
+
+
+def _prepare(
+    api: ChatAPI, req: MessagesSendRequest, attachment_count: int, slots_ok: bool
+) -> _Prepared:
+    """Cheap validation, in the legacy precedence order; no side effects.
+
+    Payload checks (attachment count and slot sanity included), quote/reply
+    fields, backend + contact lookup (404), Signal quote resolution.  Needs no
+    stored file, so the HTTP adapter runs it (``messages.send.check``) before
+    spending I/O on uploads.
     """
     protocol, contact_id, text = req.protocol, req.contact_id, req.text
-    attachments = req.attachments
     if protocol not in PROTOCOLS:
         raise _invalid()
     if not isinstance(contact_id, str) or not contact_id.strip():
         raise _invalid()
     if not isinstance(text, str) or len(text) > _domain.MAX_TEXT_LENGTH:
         raise _invalid()
-    if not attachments and not text.strip():
+    if not attachment_count and not text.strip():
         raise _invalid()
-    if len(attachments) > MAX_ATTACHMENTS:
+    if attachment_count > MAX_ATTACHMENTS:
         raise ApiError("invalid_request", "Too many attachments")
-    if any(not a.path and a.rejected is None for a in attachments):
+    if not slots_ok:
         raise _invalid()
 
     # client_msg_id: opzionale con fallback server (client vecchi/tooling).
@@ -165,19 +187,6 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, boo
     if contact is None:
         raise ApiError("not_found", "Not Found")
 
-    # Contatto book-only (non ancora in self.contacts): registralo prima
-    # del send così gli eventi successivi lo risolvono.  Il backend
-    # WhatsApp crea da sé l'alias @lid → contatto @c.us.
-    is_known = any(str(c.id) == contact.id for c in backend.contacts)
-    if not is_known:
-        contact.extras["ghost"] = True
-        backend.register_contact(contact)
-    elif contact.extras.get("ghost"):
-        # Ghost book-only già registrato: ritenta l'alias @lid.  Il primo
-        # invio può averlo saltato se la cache LID era vuota; la cache può
-        # popolarsi dopo.  Idempotente (setdefault), zero rete.
-        backend.register_contact(contact)
-
     quote_attachments = None
     if protocol == "signal" and quote_attachment_id is not None:
         contact_attachment_ids = {
@@ -207,6 +216,76 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, boo
         kwargs["quote_attachments"] = quote_attachments
     if protocol in {"whatsapp", "telegram"} and reply_to_message_id is not None:
         kwargs["reply_to_message_id"] = reply_to_message_id
+
+    return _Prepared(
+        protocol=protocol,
+        contact_id=contact_id,
+        text=text,
+        client_msg_id=client_msg_id,
+        kwargs=kwargs,
+        quote_timestamp=quote_timestamp,
+        quote_author=quote_author,
+        quote_message=quote_message,
+        reply_to_message_id=reply_to_message_id,
+        quote_content_type=quote_content_type,
+        quote_attachment_id=quote_attachment_id,
+        backend=backend,
+        contact=contact,
+    )
+
+
+@operation(
+    "messages.send.check", request=MessagesSendCheckRequest, response=dict[str, bool]
+)
+def messages_send_check(api: ChatAPI, req: MessagesSendCheckRequest) -> dict[str, bool]:
+    """Validate a send before its attachments are stored; sends nothing.
+
+    Raises exactly what ``messages.send`` would for the same request before it
+    looks at any file.  Takes no registry claim: only text sends (no
+    attachments, so nothing to store) are idempotent.
+    """
+    _prepare(api, req, req.attachment_count, req.slots_ok)
+    return {"ok": True}
+
+
+@operation("messages.send", request=MessagesSendRequest, response=dict[str, bool])
+async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, bool]:
+    """Send a text message, or attachments (the text captions the first one).
+
+    Text sends are idempotent per ``(protocol, contact_id, client_msg_id)`` and
+    retried with backoff on transient backend errors (``send_retry`` frames);
+    attachment sends are neither deduplicated nor retried.  ``attachments`` are
+    local files stored by the adapter, which also deletes them afterwards.
+    Async: the backend calls run in worker threads and the retry back-off
+    sleeps on the loop, so concurrent sends do not block each other.
+    """
+    attachments = req.attachments
+    p = _prepare(
+        api,
+        req,
+        len(attachments),
+        all(a.path or a.rejected is not None for a in attachments),
+    )
+    protocol, contact_id, text = p.protocol, p.contact_id, p.text
+    client_msg_id, kwargs, manager = p.client_msg_id, p.kwargs, api.manager
+    backend, contact = p.backend, p.contact
+    quote_timestamp, quote_author = p.quote_timestamp, p.quote_author
+    quote_message, reply_to_message_id = p.quote_message, p.reply_to_message_id
+    quote_content_type = p.quote_content_type
+    quote_attachment_id = p.quote_attachment_id
+
+    # Contatto book-only (non ancora in self.contacts): registralo prima
+    # del send così gli eventi successivi lo risolvono.  Il backend
+    # WhatsApp crea da sé l'alias @lid → contatto @c.us.
+    is_known = any(str(c.id) == contact.id for c in backend.contacts)
+    if not is_known:
+        contact.extras["ghost"] = True
+        backend.register_contact(contact)
+    elif contact.extras.get("ghost"):
+        # Ghost book-only già registrato: ritenta l'alias @lid.  Il primo
+        # invio può averlo saltato se la cache LID era vuota; la cache può
+        # popolarsi dopo.  Idempotente (setdefault), zero rete.
+        backend.register_contact(contact)
 
     # Idempotenza (solo ramo testo, N7): claim atomico scoped al contatto.
     registry = api.send_registry

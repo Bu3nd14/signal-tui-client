@@ -365,6 +365,19 @@ def create_api_router() -> Any:
                 except (TypeError, ValueError):
                     pass
 
+        if upload_files:
+            # Cheap rejections (400/404) before any upload touches the disk.
+            await call_op(
+                request,
+                "messages.send.check",
+                {
+                    **payload,
+                    "attachments": [],
+                    "attachment_count": len(upload_files),
+                    "slots_ok": all(hasattr(f, "read") for f in upload_files),
+                },
+            )
+
         stored: list[TempUpload] = []
         try:
             try:

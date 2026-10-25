@@ -566,3 +566,159 @@ def test_multipart_quote_timestamp_form_conversion(env):
 def test_operation_registered_with_schema(env):
     schema = env.api.json_schema()["messages.send"]
     assert "attachments" in schema["request"]["properties"]
+
+
+# ── validate before storing uploads (mc-mbm.10) ───────────────────────────────
+
+
+@pytest.fixture
+def store_spy(monkeypatch):
+    """Count the uploads the route copies to temp files."""
+    import web.api as web_api
+
+    calls: list[object] = []
+    real = web_api.store_temp_upload
+
+    async def spy(upload_file, **kwargs):
+        calls.append(upload_file)
+        return await real(upload_file, **kwargs)
+
+    monkeypatch.setattr(web_api, "store_temp_upload", spy)
+    return calls
+
+
+_PNG_FILE = ("a.png", _PNG, "image/png")
+_ELEVEN = [(f"{i}.png", _PNG, "image/png") for i in range(11)]
+
+# (fields, files, expected status, expected detail): each fails before any
+# upload is stored; the order of simultaneous errors is the legacy one.
+_PRESTORE_REJECTS = [
+    pytest.param({"protocol": "irc"}, [_PNG_FILE], 400, "Invalid request", id="proto"),
+    pytest.param({"contact_id": "  "}, [_PNG_FILE], 400, "Invalid request", id="blank"),
+    pytest.param(
+        {"text": "x" * (64 * 1024 + 1)}, [_PNG_FILE], 400, "Invalid request", id="long"
+    ),
+    pytest.param({}, _ELEVEN, 400, "Too many attachments", id="too-many"),
+    pytest.param(
+        {"quote_timestamp": "abc"}, [_PNG_FILE], 400, "Invalid request", id="ts"
+    ),
+    pytest.param(
+        {"protocol": "whatsapp", "quote_author": "x"},
+        [_PNG_FILE],
+        400,
+        "Invalid request",
+        id="whatsapp-reply",
+    ),
+    pytest.param(
+        {"protocol": "telegram", "quote_author": "x", "reply_to_message_id": "0"},
+        [_PNG_FILE],
+        400,
+        "Invalid request",
+        id="telegram-reply",
+    ),
+    pytest.param(
+        {"quote_attachment_id": "nope"}, [_PNG_FILE], 400, "Invalid request", id="sig"
+    ),
+    pytest.param({"contact_id": "nobody"}, [_PNG_FILE], 404, "Not Found", id="nobody"),
+    # Precedence between simultaneous errors (legacy order).
+    pytest.param(
+        {"protocol": "irc"}, _ELEVEN, 400, "Invalid request", id="proto>count"
+    ),
+    pytest.param(
+        {"quote_timestamp": "abc"}, _ELEVEN, 400, "Too many attachments", id="count>ts"
+    ),
+    pytest.param(
+        {"contact_id": "nobody"}, _ELEVEN, 400, "Too many attachments", id="count>404"
+    ),
+    pytest.param(
+        {"contact_id": "nobody", "quote_timestamp": "abc"},
+        [_PNG_FILE],
+        400,
+        "Invalid request",
+        id="ts>404",
+    ),
+]
+
+
+@pytest.mark.parametrize("fields,files,status,detail", _PRESTORE_REJECTS)
+def test_rejected_multipart_never_stores_uploads(
+    env, store_spy, fields, files, status, detail
+):
+    for protocol in ("telegram", "whatsapp"):
+        env.manager.backend.contacts.append(ChatContact("alice", "Alice", protocol))
+    response = _multipart(env, files, **fields)
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+    assert store_spy == []
+    assert _leftover_uploads(env) == []
+    assert env.manager.attachments_calls == []
+
+
+def test_missing_backend_with_files_never_stores_uploads(env, store_spy):
+    env.manager.missing.add("signal")
+    response = _multipart(env, [_PNG_FILE])
+    assert (response.status_code, response.json()) == (404, {"detail": "Not Found"})
+    assert store_spy == []
+    assert _leftover_uploads(env) == []
+
+
+def test_non_file_field_named_file_never_stores_uploads(env, store_spy):
+    response = env.client.post(
+        "/api/send",
+        data={"protocol": "signal", "contact_id": "alice", "text": "", "file": "x"},
+        headers=AUTH,
+    )
+    assert response.status_code == 400
+    assert store_spy == []
+
+
+def test_form_field_named_attachments_cannot_break_the_check(env, store_spy):
+    response = _multipart(env, [_PNG_FILE], attachments="junk", attachment_count="0")
+    assert response.status_code == 200
+    assert len(store_spy) == 1
+    assert env.manager.attachments_calls[0]["n"] == 1
+
+
+def test_duplicate_and_inflight_text_sends_store_nothing(env, store_spy):
+    # Only text sends are idempotent, so there is nothing to store for a replay
+    # or an in-flight duplicate; the route must not touch the upload dir.
+    first = env.client.post("/api/send", json=_text(client_msg_id="k"), headers=AUTH)
+    replay = env.client.post("/api/send", json=_text(client_msg_id="k"), headers=AUTH)
+    assert (first.json(), replay.json()) == (
+        {"ok": True},
+        {"ok": True, "duplicate": True},
+    )
+    other = env.client.post(
+        "/api/send", json=_text(client_msg_id="k", text="x"), headers=AUTH
+    )
+    assert other.status_code == 422
+    assert store_spy == []
+    assert not env.uploads.exists() or list(env.uploads.iterdir()) == []
+
+
+def test_failed_upload_store_takes_no_claim_and_sends_nothing(env, monkeypatch):
+    import web.api as web_api
+
+    async def boom(upload_file, **kwargs):
+        raise OSError(errno.ENOSPC, "disk full")
+
+    monkeypatch.setattr(web_api, "store_temp_upload", boom)
+    response = _multipart(env, [_PNG_FILE], client_msg_id="same")
+    assert (response.status_code, response.json()) == (
+        502,
+        {"detail": "Message send failed"},
+    )
+    assert env.manager.attachments_calls == []
+    # No registry entry was left behind: the same id is free for a text send.
+    retry = env.client.post("/api/send", json=_text(client_msg_id="same"), headers=AUTH)
+    assert retry.json() == {"ok": True}
+
+
+def test_check_operation_is_registered_and_sends_nothing(env):
+    assert env.api.call_json(
+        "messages.send.check", {**_text(), "attachment_count": 1}
+    ) == {"ok": True}
+    with pytest.raises(ApiError) as exc:
+        env.api.call("messages.send.check", {**_text(), "attachment_count": 11})
+    assert exc.value.message == "Too many attachments"
+    assert env.manager.send_calls == [] and env.manager.attachments_calls == []
+    assert _frames(env) == []

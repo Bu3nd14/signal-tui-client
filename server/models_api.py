@@ -151,6 +151,17 @@ class MessagesSendRequest(BaseModel):
     attachments: list[AttachmentIn] = Field(default_factory=list)
 
 
+class MessagesSendCheckRequest(MessagesSendRequest):
+    """``messages.send.check``: a send without its files (they are not stored yet).
+
+    ``attachment_count`` is the number of file slots the adapter will fill;
+    ``slots_ok`` is False when one of them is not a file at all.
+    """
+
+    attachment_count: int = Field(default=0, ge=0)
+    slots_ok: bool = True
+
+
 # -- reactions ----------------------------------------------------------------
 
 
