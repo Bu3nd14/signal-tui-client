@@ -124,7 +124,7 @@ def test_edit_returns_500_for_database_lookup_error(edit_client):
     client, manager, _ = edit_client
 
     with patch(
-        "web.api.sqlite3.connect",
+        "sqlite3.connect",
         side_effect=sqlite3.OperationalError("database unavailable"),
     ):
         response = client.post("/api/messages/edit", json=_payload(), headers=AUTH)

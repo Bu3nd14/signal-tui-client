@@ -47,6 +47,20 @@ def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     return cache_dir
 
 
+@pytest.fixture
+def open_media_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let ``media.*`` operations hand out any path a test's fake manager returns.
+
+    The real operations confine attachments to the protocol's media root; tests
+    of *callers* (TUI, adapters) that return arbitrary tmp files from a fake
+    manager open the root.  Confinement itself is covered by
+    ``tests/test_blob_ops.py``.
+    """
+    monkeypatch.setattr(
+        "server.media._allowed_media_root", lambda _manager, _proto: Path("/")
+    )
+
+
 @pytest.fixture(autouse=True)
 def bus_wire_guard(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
     """Every event published on any ``EventBus`` must be JSON-serializable.

@@ -12,10 +12,11 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import protocols.rpc as signal_rpc
-import web.api as web_api
-from web import video_thumbs
-from web.api import _is_video_candidate, create_api_router
-from web.video_thumbs import _mp4_has_moov, _video_thumbnail
+import server.media as server_media
+from server import video_thumbs
+from server.media import _is_video_candidate
+from server.video_thumbs import _mp4_has_moov, _video_thumbnail
+from web.api import create_api_router
 
 
 def _box(box_type: bytes, payload: bytes = b"", *, large: bool = False) -> bytes:
@@ -116,7 +117,7 @@ def test_is_video_candidate_uses_content_type_and_extension(monkeypatch, tmp_pat
         "document.pdf": "application/pdf",
     }
     monkeypatch.setattr(
-        web_api,
+        server_media,
         "_attachment_content_type",
         lambda _proto, attachment_id: content_types[attachment_id],
     )
@@ -246,7 +247,9 @@ def test_chunk_failure_falls_back_to_complete_file(monkeypatch, tmp_path):
     complete.write_bytes(b"complete")
     monkeypatch.setattr("protocols.telegram._media_dir", lambda: media_root)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr(web_api, "_attachment_content_type", lambda *_args: "video/mp4")
+    monkeypatch.setattr(
+        server_media, "_attachment_content_type", lambda *_args: "video/mp4"
+    )
     monkeypatch.setattr(video_thumbs, "_ffmpeg_executable", lambda: "/usr/bin/ffmpeg")
     calls = []
 

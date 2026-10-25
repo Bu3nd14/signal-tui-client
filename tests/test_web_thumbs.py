@@ -73,7 +73,7 @@ def test_non_thumbnail_media_and_invalid_width_serve_original(monkeypatch, tmp_p
         response = client.get(_url(path.name))
         assert response.content == path.read_bytes()
         assert response.headers["cache-control"] == "private, max-age=86400"
-    with patch("web.video_thumbs._video_thumbnail", return_value=None):
+    with patch("server.video_thumbs._video_thumbnail", return_value=None):
         response = client.get(_url(video.name))
     assert response.status_code == 422
     assert response.json() == {"detail": "Video thumbnail unavailable"}

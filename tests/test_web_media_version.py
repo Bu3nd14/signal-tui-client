@@ -20,10 +20,10 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 import protocols.rpc as signal_rpc
+from server.thumbnails import _thumbnail
 from web.api import (
     _attach_media_versions,
     _attachment_version,
-    _thumbnail,
     create_api_router,
 )
 
@@ -218,7 +218,7 @@ def test_media_endpoint_ignores_version_param(monkeypatch, tmp_path):
 
 def test_thumbnail_invalidates_on_size_change_with_same_mtime(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr("web.api._attachment_content_type", lambda *_args: None)
+    monkeypatch.setattr("server.media._attachment_content_type", lambda *_args: None)
     root = _signal_root(tmp_path)
     source = root / "photo.png"
     Image.new("RGB", (800, 600), "#3a7bac").save(source)

@@ -16,7 +16,7 @@ from models import PROTOCOL_SIGNAL, ChatContact
 from protocols import rpc as rpc_module
 from protocols.rpc import resolve_avatar_path
 from protocols.signal import SignalBackend
-from web import avatar_cache
+from server import avatar_cache
 from web.api import create_api_router
 
 _JPEG = b"\xff\xd8\xff\xe0fake-jpeg"

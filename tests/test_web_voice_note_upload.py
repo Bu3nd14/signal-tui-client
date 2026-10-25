@@ -14,16 +14,13 @@ from types import SimpleNamespace
 import pytest
 from upload_harness import store_upload_sync as _store_upload_sync
 
-import web.api as web_api
+import server.media as server_media
+from server.media import _is_video_candidate, _media_content_type
 from server.uploads import (
     UploadValidationError,
     _classify_upload,
     _mp4_has_video_track,
     _sniff_webm_kind,
-)
-from web.api import (
-    _is_video_candidate,
-    _media_content_type,
 )
 
 # ── Fixture builder ───────────────────────────────────────────────────────────
@@ -284,7 +281,7 @@ def test_media_content_type_prefer_audio_only_for_webm(
 
 def test_is_video_candidate_rejects_audio_content_type(monkeypatch, tmp_path):
     monkeypatch.setattr(
-        web_api, "_attachment_content_type", lambda *_args: "audio/webm"
+        server_media, "_attachment_content_type", lambda *_args: "audio/webm"
     )
     assert not _is_video_candidate(tmp_path / "voice.webm", "signal", "voice.webm")
 
@@ -292,14 +289,14 @@ def test_is_video_candidate_rejects_audio_content_type(monkeypatch, tmp_path):
 def test_is_video_candidate_rejects_audio_media_kind_without_content_type(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setattr(web_api, "_attachment_content_type", lambda *_args: None)
-    monkeypatch.setattr(web_api, "_attachment_media_kind", lambda *_args: "audio")
+    monkeypatch.setattr(server_media, "_attachment_content_type", lambda *_args: None)
+    monkeypatch.setattr(server_media, "_attachment_media_kind", lambda *_args: "audio")
     assert not _is_video_candidate(tmp_path / "voice.webm", "signal", "voice.webm")
 
 
 def test_is_video_candidate_keeps_video_webm_and_mp4(monkeypatch, tmp_path):
-    monkeypatch.setattr(web_api, "_attachment_content_type", lambda *_args: None)
-    monkeypatch.setattr(web_api, "_attachment_media_kind", lambda *_args: "video")
+    monkeypatch.setattr(server_media, "_attachment_content_type", lambda *_args: None)
+    monkeypatch.setattr(server_media, "_attachment_media_kind", lambda *_args: "video")
     assert _is_video_candidate(tmp_path / "clip.webm", "signal", "clip.webm")
     assert _is_video_candidate(tmp_path / "clip.mp4", "signal", "clip.mp4")
 

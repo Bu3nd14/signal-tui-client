@@ -69,7 +69,7 @@ def _video_thumbnail(
 
     from PIL import Image
 
-    from web.api import _prune_thumb_cache, _thumb_lock, _web_thumb_dir
+    from server.thumbnails import _prune_thumb_cache, _thumb_lock, _web_thumb_dir
 
     try:
         primitive = cache_identity or f"{path}|{path.stat().st_mtime_ns}|{width}"
@@ -213,7 +213,7 @@ def _chunk_video_thumbnail(
 
 
 def _cached_thumbnail(proto: str, digest: str) -> Path | None:
-    from web.api import _thumb_lock, _web_thumb_dir
+    from server.thumbnails import _thumb_lock, _web_thumb_dir
 
     thumb = _web_thumb_dir(proto) / f"{digest}.jpg"
     with _thumb_lock(thumb):

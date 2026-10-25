@@ -162,6 +162,61 @@ class MessagesSendCheckRequest(MessagesSendRequest):
     slots_ok: bool = True
 
 
+# -- media / blobs --------------------------------------------------------------
+
+
+class BlobOut(BaseModel):
+    """A blob handle: a file on the server machine and what is known about it.
+
+    Both adapters run next to the server, so the handle is a local ``path``:
+    HTTP streams it, the TUI reads it.  Blob operations only return files they
+    own or have confined to a media root.  ``version`` is the cache-busting
+    token ``<mtime_ns>-<size>``; ``immutable`` is true when the file is
+    content-addressed (a generated thumbnail) and may be cached forever.
+    """
+
+    path: str
+    content_type: str | None = None
+    size: int | None = None
+    version: str | None = None
+    immutable: bool = False
+
+
+class MediaAttachmentRequest(BaseModel):
+    protocol: str
+    attachment_id: str
+
+
+class MediaThumbnailRequest(MediaAttachmentRequest):
+    width: int  # one of server.thumbnails.THUMB_WIDTHS, checked by the operation
+
+
+class MediaQuoteRequest(BaseModel):
+    protocol: str
+    message_row_id: int
+    width: int | None = None
+
+
+class MediaQuotedAttachmentRequest(BaseModel):
+    """The quoted message of a reply, as the reply knows it."""
+
+    protocol: str
+    contact_key: str
+    quote_timestamp: int | None = None
+    reply_to_message_id: str | None = None
+    quote_text: str = ""
+    content_type: str | None = None
+
+
+class MediaQuotedAttachmentOut(BaseModel):
+    attachment_id: str | None = None
+
+
+class ContactsAvatarRequest(BaseModel):
+    protocol: str
+    contact_id: str
+
+
 # -- reactions ----------------------------------------------------------------
 
 

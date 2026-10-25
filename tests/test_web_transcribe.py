@@ -91,7 +91,11 @@ def test_post_returns_404_when_attachment_cannot_be_resolved():
     service.submit.assert_not_called()
 
 
-def test_post_submits_resolved_attachment(tmp_path: Path):
+def test_post_submits_resolved_attachment(tmp_path: Path, monkeypatch):
+    # The attachment must sit inside the protocol's media root (confinement).
+    monkeypatch.setattr(
+        "server.media._allowed_media_root", lambda _manager, _proto: tmp_path.resolve()
+    )
     audio = tmp_path / "audio.ogg"
     audio.write_bytes(b"audio")
     service = MagicMock()
@@ -106,7 +110,9 @@ def test_post_submits_resolved_attachment(tmp_path: Path):
 
     assert response.status_code == 200
     assert response.json() == {"status": "pending"}
-    service.submit.assert_called_once_with("telegram", "folder/audio-3", audio)
+    service.submit.assert_called_once_with(
+        "telegram", "folder/audio-3", audio.resolve()
+    )
 
 
 @pytest.mark.parametrize(

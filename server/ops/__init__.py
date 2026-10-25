@@ -9,6 +9,7 @@ from server.ops import (  # noqa: F401
     chats,
     contacts,
     edit,
+    media,
     messages,
     meta,
     reactions,

@@ -181,7 +181,7 @@ def test_quote_media_requires_bearer(web_client):
 def test_quote_media_database_error_returns_500(web_client):
     client, _, _ = web_client
 
-    with patch("web.api.sqlite3.connect", side_effect=sqlite3.OperationalError):
+    with patch("server.media.sqlite3.connect", side_effect=sqlite3.OperationalError):
         response = client.get("/api/quote-media/signal/1", headers=AUTH)
 
     assert response.status_code == 500
