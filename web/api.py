@@ -144,46 +144,6 @@ def _is_whatsapp_synthetic_text(
     return is_whatsapp_synthetic_media_text(text, attachment_id=attachment_id)
 
 
-def _unread_counts() -> dict[tuple[str, str], int]:
-    import protocols.db as backend
-    from protocols.db import _DB_LOCK
-
-    with _DB_LOCK:
-        try:
-            connection = sqlite3.connect(backend.DB_FILE)
-            try:
-                rows = connection.execute(
-                    "SELECT protocol, contact_number, COUNT(*) FROM messages "
-                    "WHERE is_mine = 0 AND read = 0 "
-                    "GROUP BY protocol, contact_number"
-                ).fetchall()
-            finally:
-                connection.close()
-        except sqlite3.Error:
-            return {}
-    return {(row[0], row[1]): row[2] for row in rows}
-
-
-def _contact_payload(
-    contact: Any, unread: dict[tuple[str, str], int]
-) -> dict[str, Any]:
-    """Serializza un contatto nel formato usato dalla web UI."""
-    extras = dict(contact.extras)
-    return {
-        "id": str(contact.id),
-        "display_name": str(contact.display_name),
-        "protocol": str(contact.protocol),
-        "extras": extras,
-        "last_message_ts": int(extras.get("last_message_ts", 0) or 0),
-        # Read-union: somma gli unread di tutte le chiavi alias dello stesso
-        # contatto WhatsApp (storico DB diviso fra @c.us e @lid).
-        "unread": sum(
-            unread.get((contact.protocol, key), 0)
-            for key in contact_storage_keys(contact)
-        ),
-    }
-
-
 def _message_edit_id(row: sqlite3.Row | dict[str, Any]) -> str | None:
     if (
         not row["is_mine"]
@@ -1861,49 +1821,14 @@ def create_api_router() -> Any:
         return await call_op(request, "server.status")
 
     @router.get("/contacts")
-    def contacts(request: Request, q: str | None = None) -> list[dict[str, Any]]:
-        manager = request.app.state.manager
-        # Riallinea il badge "non letti" WhatsApp allo stato reale (telefono
-        # incluso) prima di calcolare i conteggi: leggere sul telefono non
-        # tocca il DB locale finché non lo facciamo qui. Best-effort/throttled
-        # (vedi WhatsAppBackend.reconcile_unread), nessun impatto per gli
-        # altri protocolli o se il metodo non esiste.
-        reconcile = getattr(manager.get("whatsapp"), "reconcile_unread", None)
-        if reconcile is not None:
-            try:
-                reconcile()
-            except Exception:
-                logger.debug("WhatsApp unread reconcile failed", exc_info=True)
-        unread = _unread_counts()
-        contacts = manager.list_contacts()
-        query = (q or "").strip()
-        if query:
-            # Riusa la ricerca del picker TUI (substring case-insensitive su
-            # nome/id/telefono) sulle chat attive (risposta rapida).
-            from contact_picker import (
-                search_contacts,  # lazy: evitare import TUI all'avvio
-            )
-
-            contacts = search_contacts(contacts, query)
-        return [_contact_payload(contact, unread) for contact in contacts]
+    async def contacts(request: Request, q: str | None = None) -> list[dict[str, Any]]:
+        return await call_op(request, "contacts.list", {"q": q})
 
     @router.get("/contacts/book")
-    def contacts_book(
+    async def contacts_book(
         request: Request, q: str, force: bool = False
     ) -> list[dict[str, Any]]:
-        unread = _unread_counts()
-        manager = request.app.state.manager
-        query = (q or "").strip()
-        if not query:
-            return []
-        # Rubrica completa aggregata (come il picker TUI, in background):
-        # lenta, il client la chiama dopo aver già mostrato i risultati delle chat.
-        # ``force`` è disponibile ma non passato dal frontend di default per non
-        # martellare WAHA a ogni keystroke.
-        from contact_picker import search_contacts  # lazy: evitare import TUI all'avvio
-
-        contacts = search_contacts(manager.list_address_book_sync(force=force), query)
-        return [_contact_payload(contact, unread) for contact in contacts]
+        return await call_op(request, "contacts.book", {"q": q, "force": force})
 
     @router.get("/contact-avatar")
     async def contact_avatar(request: Request, proto: str, contact_id: str) -> Any:

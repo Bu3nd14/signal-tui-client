@@ -36,6 +36,7 @@ from models import (
     protocol_emoji,
 )
 from protocols.config import get_picker_max_results, get_picker_preferred_backend
+from server.domain import search_contacts  # noqa: F401  (moved; re-exported)
 
 logger = logging.getLogger(__name__)
 
@@ -185,46 +186,6 @@ def contact_sort_key(c: ChatContact) -> tuple:
 
 
 # ─── Search helpers ──────────────────────────────────────────────────────────
-
-
-def search_contacts(
-    contacts: list[ChatContact], query: str, max_results: int = 50
-) -> list[ChatContact]:
-    """Filter *contacts* by *query* (case-insensitive) on name, id or phone.
-
-    A contact matches if the query is a substring of its display name, its
-    contact id (e.g. phone number) or its normalized ``extras["phone"]``.
-    The query is stripped; an empty query returns all contacts (up to
-    ``max_results``).
-
-    Parameters
-    ----------
-    contacts:
-        The full list of contacts to search.
-    query:
-        The search string typed by the user.
-    max_results:
-        Maximum number of results to return (default 50).
-
-    Returns
-    -------
-    list[ChatContact]
-        The matching contacts, in their original order.
-    """
-    q = query.strip().lower()
-    if not q:
-        return contacts[:max_results]
-
-    results: list[ChatContact] = []
-    for contact in contacts:
-        name = contact.display_name.lower()
-        cid = contact.id.lower()
-        phone = contact.phone.lower()
-        if q in name or q in cid or q in phone:
-            results.append(contact)
-            if len(results) >= max_results:
-                break
-    return results
 
 
 def search_entries(
