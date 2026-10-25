@@ -20,7 +20,7 @@ from aiohttp import web as aioweb
 from client_harness import api_for
 
 import server.link_preview as lp
-from web import gmail
+from server import gmail
 
 PAGE = "<html><head><title>t</title></head><body>x</body></html>"
 

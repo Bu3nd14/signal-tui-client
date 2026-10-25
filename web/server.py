@@ -206,7 +206,7 @@ def start_web_server(
                             exc_info=True,
                         )
                     try:
-                        from web.gmail import close_imap_pool
+                        from server.gmail import close_imap_pool
 
                         close_imap_pool()
                     except Exception:

@@ -17,7 +17,7 @@ from contextlib import contextmanager
 import pytest
 
 from protocols import config
-from web import gmail
+from server import gmail
 
 
 @pytest.fixture(autouse=True)

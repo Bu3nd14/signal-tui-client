@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from web import gmail
+from server import gmail
 from web.gmail_api import create_gmail_image_router
 
 

@@ -7,7 +7,7 @@ import hashlib
 import pytest
 
 from protocols import config
-from web import gmail
+from server import gmail
 
 _ENV_VARS = (
     "GMAIL_ADDRESS",

@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from protocols import config
-from web import gmail
+from server import gmail
 from web.gmail_api import create_gmail_router
 
 _ENV_VARS = (

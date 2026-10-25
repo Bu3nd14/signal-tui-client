@@ -1,7 +1,7 @@
-"""Synchronous IMAP/SMTP transport and MIME parsing for the Gmail POC.
+"""Synchronous IMAP/SMTP transport and MIME parsing for the Gmail integration.
 
-This module deliberately does not import the web framework: it is a plain
-transport layer used from ``web.gmail_api`` through ``asyncio.to_thread``.
+Part of the core (bead mc-im6): it does not import any web framework; the
+``gmail.*`` operations (``server/ops/gmail.py``) call it from worker threads.
 IMAP connections are pooled; SMTP opens one connection per send.
 """
 

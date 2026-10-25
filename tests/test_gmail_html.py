@@ -6,7 +6,7 @@ import re
 from email.message import EmailMessage
 from urllib.parse import parse_qs, urlsplit
 
-from web import gmail
+from server import gmail
 
 
 def _image_sources(cleaned: str) -> list[str]:

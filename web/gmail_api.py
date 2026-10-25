@@ -13,7 +13,7 @@ from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
-from web import gmail
+from server import gmail
 
 logger = logging.getLogger(__name__)
 
