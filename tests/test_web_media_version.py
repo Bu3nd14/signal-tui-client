@@ -97,7 +97,7 @@ def test_attachment_version_telegram_rejects_tgref_and_outside(tmp_path):
 def test_attach_media_versions_is_best_effort_when_root_fails():
     messages = [{"attachment": {"attachment_id": "image.png"}}]
 
-    with patch("web.api._allowed_media_root", side_effect=OSError("mkdir negato")):
+    with patch("server.media._allowed_media_root", side_effect=OSError("mkdir negato")):
         _attach_media_versions(None, "whatsapp", messages)
 
     assert "version" not in messages[0]["attachment"]
