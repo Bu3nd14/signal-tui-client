@@ -170,7 +170,7 @@ def test_messages_endpoint_attaches_and_refreshes_versions(monkeypatch, tmp_path
     files = [_payload("image.png"), _payload("missing.png")]
     client = _messages_client(monkeypatch, tmp_path)
 
-    with patch("web.api._messages", return_value=files):
+    with patch("server.messages._messages", return_value=files):
         first = client.get(
             "/api/messages", params={"proto": "signal", "contact_id": "alice"}
         )
@@ -181,7 +181,7 @@ def test_messages_endpoint_attaches_and_refreshes_versions(monkeypatch, tmp_path
     assert "version" not in data[1]["attachment"]
 
     source.write_bytes(b"a-larger-overwrite")
-    with patch("web.api._messages", return_value=files):
+    with patch("server.messages._messages", return_value=files):
         second = client.get(
             "/api/messages", params={"proto": "signal", "contact_id": "alice"}
         )

@@ -54,7 +54,7 @@ def test_messages_refreshes_only_telegram_history(protocol, expected_calls):
     app.state.manager = manager
     app.include_router(create_api_router())
 
-    with patch("web.api._messages", return_value=[]), TestClient(app) as client:
+    with patch("server.messages._messages", return_value=[]), TestClient(app) as client:
         response = client.get(
             "/api/messages", params={"proto": protocol, "contact_id": "42"}
         )
@@ -75,7 +75,7 @@ def test_messages_refreshes_whatsapp_history_when_refresh_requested():
     app.state.manager = manager
     app.include_router(create_api_router())
 
-    with patch("web.api._messages", return_value=[]), TestClient(app) as client:
+    with patch("server.messages._messages", return_value=[]), TestClient(app) as client:
         response = client.get(
             "/api/messages",
             params={"proto": "whatsapp", "contact_id": "42", "refresh": "1"},
@@ -94,7 +94,7 @@ def test_messages_refresh_without_fetch_history_is_safe():
     app.state.manager = manager
     app.include_router(create_api_router())
 
-    with patch("web.api._messages", return_value=[]), TestClient(app) as client:
+    with patch("server.messages._messages", return_value=[]), TestClient(app) as client:
         response = client.get(
             "/api/messages",
             params={"proto": "whatsapp", "contact_id": "42", "refresh": "1"},

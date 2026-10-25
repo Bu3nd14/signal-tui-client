@@ -18,6 +18,7 @@ from urllib.parse import quote as url_quote
 from models import (
     MSG_TYPE_SYSTEM,
     attachment_display_name,
+    contact_storage_keys,
     dedup_cross_key,
     is_caption_like,
     is_duplicate_media_identity,
@@ -25,7 +26,7 @@ from models import (
     is_whatsapp_synthetic_media_text,
     pick_survivor_and_merge,
 )
-from server.media import _IMAGE_EXTENSIONS, _VIDEO_EXTENSIONS
+from server.media import _IMAGE_EXTENSIONS, _VIDEO_EXTENSIONS, _attach_media_versions
 
 logger = logging.getLogger(__name__)
 
@@ -915,3 +916,83 @@ def _group_sender_resolver(manager: Any, proto: str):
         return sender
 
     return resolve
+
+
+def messages_page(
+    manager: Any,
+    protocol: str,
+    contact_id: str,
+    *,
+    refresh: bool = False,
+    limit: int | None = None,
+    since: int | None = None,
+) -> list[dict[str, Any]]:
+    """One chat's messages for presentation (the ``messages.page`` operation).
+
+    Canonicalizes *contact_id* first (a WhatsApp ghost ``@c.us`` id opens the
+    history of the active ``@lid`` chat; the read-union still merges the DB
+    history split between the two keys), refreshes the remote history when
+    *refresh* is set or the protocol is Telegram (errors are logged and
+    swallowed), reads and dedups the rows, attaches media versions and
+    resolves group senders / quote authors.  Blocking: run in a worker thread.
+    """
+    get_backend = getattr(manager, "get", None)
+    backend = get_backend(protocol) if callable(get_backend) else None
+    find_contact = getattr(backend, "find_contact", None)
+    contact = find_contact(contact_id) if callable(find_contact) else None
+    canonical_id = contact.id if contact is not None else contact_id
+    if refresh or protocol == "telegram":
+        try:
+            fetch = getattr(backend, "fetch_history", None)
+            if fetch is not None and canonical_id:
+                refreshed = fetch(canonical_id, 20)
+                logger.debug(
+                    "%s history refresh: %s -> %d",
+                    protocol,
+                    canonical_id,
+                    len(refreshed),
+                )
+        except Exception:
+            logger.debug(
+                "%s history refresh failed: %s",
+                protocol,
+                canonical_id,
+                exc_info=True,
+            )
+    extra_keys = tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
+    result = _messages(
+        protocol, contact_id, extra_keys=extra_keys, limit=limit, since=since
+    )
+    _attach_media_versions(manager, protocol, result)
+    is_group = contact_id.endswith("@g.us")
+    if not is_group:
+        try:
+            for known in manager.list_contacts():
+                if str(known.id) == contact_id and known.protocol == protocol:
+                    is_group = bool(known.extras.get("is_group"))
+                    break
+        except (AttributeError, TypeError):
+            is_group = False
+    if is_group:
+        resolver = _group_sender_resolver(manager, protocol)
+        for message in result:
+            message["is_group"] = True
+            message["sender"] = resolver(message.get("sender") or "")
+            qa = message.get("quote_author") or ""
+            resolved_qa = resolver(qa)
+            if qa and resolved_qa.endswith(("@lid", "@c.us")):
+                # L'autore della quote non risolto: il messaggio quotato
+                # nella stessa chat ha il sender (spesso già un nome,
+                # es. pushname) — lo usiamo come autore.
+                quoted_sender = _quoted_sender(
+                    protocol, contact_id, message.get("quote_timestamp")
+                )
+                if quoted_sender:
+                    resolved_qa = resolver(quoted_sender)
+            message["quote_author"] = resolved_qa
+    else:
+        # Chat 1:1: l'autore della quote è sempre il contatto (o noi) —
+        # ridondante, e il valore grezzo potrebbe essere un @lid.
+        for message in result:
+            message["quote_author"] = ""
+    return result

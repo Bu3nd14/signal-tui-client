@@ -7,7 +7,7 @@ single transport (e.g. HTTP ``protocol`` vs ``proto``) never appear here.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, Field, StrictBool
 
@@ -87,3 +87,17 @@ class ChatsArchiveRequest(BaseModel):
 
 class ChatsArchiveOut(BaseModel):
     archived: bool
+
+
+# -- messages -----------------------------------------------------------------
+
+
+class MessagesPageRequest(BaseModel):
+    protocol: Literal["signal", "whatsapp", "telegram"]
+    contact_id: str
+    refresh: bool = False
+    limit: int | None = None  # 1..MAX_MESSAGES_LIMIT, checked by the operation
+    since: int | None = None
+
+
+# ``messages.page`` returns ``list[dict[str, Any]]`` (see server/ops/messages.py).

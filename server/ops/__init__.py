@@ -5,4 +5,4 @@ each declaring ``@operation(...)`` handlers whose request/response models live
 in :mod:`server.models_api`.
 """
 
-from server.ops import chats, contacts, meta  # noqa: F401
+from server.ops import chats, contacts, messages, meta  # noqa: F401

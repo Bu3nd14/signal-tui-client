@@ -22,17 +22,15 @@ from server.media import (
     _IMAGE_EXTENSIONS,
     _VIDEO_EXTENSIONS,
     _allowed_media_root,
-    _attach_media_versions,
+    _attach_media_versions,  # noqa: F401  (re-export)
     _attachment_version,  # noqa: F401  (re-export)
 )
 from server.messages import (
-    _MAX_MESSAGES_LIMIT,
     _cross_key_dedup_rows,  # noqa: F401  (re-export)
-    _group_sender_resolver,
+    _group_sender_resolver,  # noqa: F401  (re-export)
     _message_edit_id,
     _messages,
     _quoted_media_by_filename,  # noqa: F401  (re-export)
-    _quoted_sender,
 )
 from server.ops.common import PROTOCOLS as _PROTOCOLS
 from web.bridge import push_event
@@ -992,76 +990,17 @@ def create_api_router() -> Any:
         limit: int | None = None,
         since: int | None = None,
     ) -> list[dict[str, Any]]:
-        if limit is not None and not 1 <= limit <= _MAX_MESSAGES_LIMIT:
-            raise HTTPException(status_code=400, detail="Invalid limit")
-        # Canonicalizza PRIMA del fetch remoto: una richiesta con l'id del ghost
-        # (@c.us) apre lo storico sulla chat attiva (@lid), R-G.  La read-union
-        # poi unisce comunque lo storico DB diviso fra le due chiavi.
-        manager = request.app.state.manager
-        get_backend = getattr(manager, "get", None)
-        backend = get_backend(proto) if callable(get_backend) else None
-        find_contact = getattr(backend, "find_contact", None)
-        contact = find_contact(contact_id) if callable(find_contact) else None
-        canonical_id = contact.id if contact is not None else contact_id
-        if refresh or proto == "telegram":
-            try:
-                fetch = getattr(backend, "fetch_history", None)
-                if fetch is not None and canonical_id:
-                    refreshed = await asyncio.to_thread(fetch, canonical_id, 20)
-                    logger.debug(
-                        "%s history refresh: %s -> %d",
-                        proto,
-                        canonical_id,
-                        len(refreshed),
-                    )
-            except Exception:
-                logger.debug(
-                    "%s history refresh failed: %s",
-                    proto,
-                    canonical_id,
-                    exc_info=True,
-                )
-        extra_keys = (
-            tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
+        return await call_op(
+            request,
+            "messages.page",
+            {
+                "protocol": proto,
+                "contact_id": contact_id,
+                "refresh": refresh,
+                "limit": limit,
+                "since": since,
+            },
         )
-        result = _messages(
-            proto, contact_id, extra_keys=extra_keys, limit=limit, since=since
-        )
-        _attach_media_versions(manager, proto, result)
-        is_group = contact_id.endswith("@g.us")
-        if not is_group:
-            manager = request.app.state.manager
-            try:
-                for contact in manager.list_contacts():
-                    if str(contact.id) == contact_id and contact.protocol == proto:
-                        is_group = bool(contact.extras.get("is_group"))
-                        break
-            except (AttributeError, TypeError):
-                is_group = False
-        if is_group:
-            manager = request.app.state.manager
-            resolver = _group_sender_resolver(manager, proto)
-            for message in result:
-                message["is_group"] = True
-                message["sender"] = resolver(message.get("sender") or "")
-                qa = message.get("quote_author") or ""
-                resolved_qa = resolver(qa)
-                if qa and resolved_qa.endswith(("@lid", "@c.us")):
-                    # L'autore della quote non risolto: il messaggio quotato
-                    # nella stessa chat ha il sender (spesso già un nome,
-                    # es. pushname) — lo usiamo come autore.
-                    quoted_sender = _quoted_sender(
-                        proto, contact_id, message.get("quote_timestamp")
-                    )
-                    if quoted_sender:
-                        resolved_qa = resolver(quoted_sender)
-                message["quote_author"] = resolved_qa
-        else:
-            # Chat 1:1: l'autore della quote è sempre il contatto (o noi) —
-            # ridondante, e il valore grezzo potrebbe essere un @lid.
-            for message in result:
-                message["quote_author"] = ""
-        return result
 
     @router.post("/messages/read")
     async def messages_read(
