@@ -245,9 +245,15 @@ class BackendConnectMixin:
     def _reconnect_touched_backends(self, protocols: set[str]) -> None:
         """Reconnect only the backends whose link flow was actually started.
 
-        Delegates to :meth:`server.core.ChatCore.reconnect`.
+        Asks the server (``link.reconnect``); the connect workers run in the
+        core and report back through events.
         """
-        self.core.reconnect(protocols)
+        if not protocols:
+            return
+        try:
+            self.client.call("link.reconnect", {"protocols": sorted(protocols)})
+        except Exception:
+            logger.warning("link.reconnect failed", exc_info=True)
 
     def _dispatch_core_event(self, event: Event) -> None:
         """UI thread: applica un evento del core al TUI."""

@@ -194,6 +194,10 @@ class ChatCore(DynamicAddressBookMixin):
             self.stop()
         except Exception:
             logger.exception("Core stop failed (non-fatal)")
+        try:
+            self.api.link.cancel_all()
+        except Exception:
+            logger.debug("Cancelling device links on exit failed", exc_info=True)
         if stop_adapters is not None:
             try:
                 stop_adapters()

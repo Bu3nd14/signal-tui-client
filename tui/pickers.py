@@ -123,10 +123,12 @@ class PickerMixin:
 
     def _open_device_link(self) -> None:
         """Open the device link picker modal (Ctrl+L)."""
+        status = self.client.call("link.status")["protocols"]
         screen = DeviceLinkPickerScreen(
-            signal_number=self.signal_backend.user_number,
-            has_whatsapp=self.whatsapp_backend is not None,
-            has_telegram=self.telegram_backend is not None,
+            signal_number=status["signal"]["account"],
+            has_whatsapp=status["whatsapp"]["available"],
+            has_telegram=status["telegram"]["available"],
+            client=self.client,
         )
 
         def _on_done(_: object) -> None:

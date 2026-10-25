@@ -23,6 +23,9 @@ PROTOCOL_SIGNAL = "signal"
 PROTOCOL_WHATSAPP = "whatsapp"
 PROTOCOL_TELEGRAM = "telegram"
 
+#: Device name registered with signal-cli when the user does not choose one.
+DEFAULT_SIGNAL_DEVICE_NAME = "Signal-TUI-Client"
+
 #: Image thumbnail size limits (terminal lines / columns) used when the server
 #: does not say otherwise (``server.config`` carries the configured values).
 DEFAULT_THUMBNAIL_MAX_LINES = 12

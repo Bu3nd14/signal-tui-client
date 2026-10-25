@@ -18,6 +18,7 @@ from pydantic import (
     StrictStr,
 )
 
+from models import DEFAULT_SIGNAL_DEVICE_NAME
 from server.events_api import ContactWire
 
 
@@ -319,6 +320,93 @@ class MediaQuotedAttachmentOut(BaseModel):
 class ContactsAvatarRequest(BaseModel):
     protocol: str
     contact_id: str
+
+
+# -- device link --------------------------------------------------------------
+
+LinkProtocol = Literal["signal", "whatsapp", "telegram"]
+
+
+class LinkProtocolStatus(BaseModel):
+    """One protocol as the link flow sees it (no network I/O to compute it).
+
+    ``available``: the backend is configured/registered, so a link can start
+    (WhatsApp: WAHA configured; Telegram: API credentials set).  ``account`` is
+    the linked Signal number.  ``linked`` is ``None`` when it cannot be known
+    without asking the remote service (WhatsApp).
+    """
+
+    available: bool
+    account: str = ""
+    linked: bool | None = None
+
+
+class LinkStatusOut(BaseModel):
+    protocols: dict[str, LinkProtocolStatus]
+
+
+class LinkStartRequest(BaseModel):
+    protocol: LinkProtocol
+    #: Signal only: the number the user typed (picks the account when
+    #: ``signal-cli`` lists several).
+    phone: StrictStr = ""
+    #: Signal only: the device name shown in the phone's linked-devices list.
+    device_name: StrictStr = DEFAULT_SIGNAL_DEVICE_NAME
+
+
+class LinkQrOut(BaseModel):
+    """What to show for a pairing.
+
+    ``url``: a link to render as a QR code (``sgnl://link...``, ``tg://login``);
+    ``png``: a ready QR image (base64 in ``data``); ``text``: pre-rendered
+    text shown as it is; ``info`` / ``error``: a message instead of a QR.
+    """
+
+    kind: Literal["url", "png", "text", "info", "error"]
+    data: str
+
+
+class LinkStartOut(BaseModel):
+    qr: LinkQrOut
+
+
+class LinkProtocolRequest(BaseModel):
+    protocol: LinkProtocol
+
+
+class LinkPollOut(BaseModel):
+    """Progress of a started link.
+
+    ``state``: ``waiting``; ``finalize`` (Signal: ``signal-cli`` exited
+    successfully, call ``link.finalize``); ``done``.  ``needs_2fa`` (Telegram)
+    is true once, when the account asks for its password.  ``qr`` is a
+    refreshed code to show instead of the previous one.
+    """
+
+    state: Literal["waiting", "finalize", "done"]
+    needs_2fa: bool = False
+    qr: LinkQrOut | None = None
+
+
+class LinkFinalizeRequest(BaseModel):
+    protocol: Literal["signal"] = "signal"
+    phone: StrictStr = ""
+
+
+class LinkFinalizeOut(BaseModel):
+    account: str
+
+
+class Link2faRequest(BaseModel):
+    password: StrictStr
+
+
+class Link2faOut(BaseModel):
+    ok: bool
+
+
+class LinkReconnectRequest(BaseModel):
+    protocols: list[LinkProtocol]
 
 
 # -- download mode ------------------------------------------------------------

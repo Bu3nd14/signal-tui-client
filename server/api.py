@@ -133,6 +133,10 @@ class ChatAPI:
         #: Text-send idempotency claims; per-process state, one per ChatAPI
         #: (``ChatCore`` owns exactly one ChatAPI).
         self.send_registry = SendRegistry()
+        #: Device-link sessions (per-process state, like ``send_registry``).
+        from server.link import LinkService
+
+        self.link = LinkService(lambda: self.manager)
         _load_operations()
 
     # -- host access (used by handlers) -------------------------------------
@@ -144,6 +148,13 @@ class ChatAPI:
     @property
     def bus(self) -> Any:
         return self._host.bus
+
+    def reconnect(self, protocols: set[str]) -> None:
+        """Reconnect the given protocols' backends (the host's ``reconnect``)."""
+        reconnect = getattr(self._host, "reconnect", None)
+        if reconnect is None:
+            raise ApiError("not_supported", "This server cannot reconnect backends")
+        reconnect(protocols)
 
     def publish_web_push(self, event: dict[str, Any]) -> bool:
         """Publish a legacy ``/ws`` frame (until Phase 1 replaces them with

@@ -10,6 +10,7 @@ from server.ops import (  # noqa: F401
     contacts,
     download,
     edit,
+    link,
     media,
     messages,
     meta,

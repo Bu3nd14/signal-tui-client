@@ -542,10 +542,12 @@ class TestTuiDispatch:
         app._mark_backend_done.assert_not_called()
         app._on_backend_ready.assert_not_called()
 
-    def test_reconnect_delegates_to_core(self, app):
-        app.core = MagicMock()
+    def test_reconnect_goes_through_the_link_reconnect_operation(self, app):
+        from client_harness import StubClient
+
+        app.client = StubClient({"ok": True})
         app._reconnect_touched_backends({"signal"})
-        app.core.reconnect.assert_called_once_with({"signal"})
+        assert app.client.calls == [("link.reconnect", {"protocols": ["signal"]})]
 
     def test_backend_aliases_follow_core(self, app):
         marker = MagicMock()
