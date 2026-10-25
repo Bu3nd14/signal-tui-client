@@ -18,6 +18,7 @@ from urllib.parse import quote as url_quote
 
 from models import (
     MSG_TYPE_SYSTEM,
+    PROTOCOL_WHATSAPP,
     attachment_display_name,
     contact_storage_keys,
     dedup_cross_key,
@@ -922,6 +923,137 @@ def _group_sender_resolver(manager: Any, proto: str):
     return resolve
 
 
+def _resolve_chat(manager: Any, protocol: str, contact_id: str) -> tuple[Any, Any, str]:
+    """``(backend, contact, canonical_id)`` of a chat as the core knows it.
+
+    A WhatsApp ghost id (``@c.us``) resolves to the active ``@lid`` contact;
+    with no backend or no such contact the id is returned unchanged.
+    """
+    get_backend = getattr(manager, "get", None)
+    backend = get_backend(protocol) if callable(get_backend) else None
+    find_contact = getattr(backend, "find_contact", None)
+    contact = find_contact(contact_id) if callable(find_contact) else None
+    return backend, contact, (contact.id if contact is not None else contact_id)
+
+
+def _refresh_history(
+    backend: Any, protocol: str, canonical_id: str, limit: int
+) -> bool:
+    """Download the remote history of a chat into the backend (best effort).
+
+    Returns ``True`` when the backend fetched it; a backend without
+    ``fetch_history`` or a failing fetch (logged, swallowed) gives ``False``.
+    """
+    fetch = getattr(backend, "fetch_history", None)
+    if fetch is None or not canonical_id:
+        return False
+    try:
+        refreshed = fetch(canonical_id, limit)
+    except Exception:
+        logger.debug(
+            "%s history refresh failed: %s", protocol, canonical_id, exc_info=True
+        )
+        return False
+    logger.debug(
+        "%s history refresh: %s -> %s",
+        protocol,
+        canonical_id,
+        len(refreshed) if hasattr(refreshed, "__len__") else "?",
+    )
+    return True
+
+
+def _union_cache_rows(
+    cache: dict[str, list[dict[str, Any]]], contact: Any
+) -> list[dict[str, Any]]:
+    """The in-memory rows of *contact* across all its storage keys, deduped.
+
+    WhatsApp history can sit under the ``@c.us`` and the ``@lid`` key of one
+    chat; the rows are tagged with their key and collapsed with the same
+    cross-key dedup the persisted read-union uses (canonical key first).
+    """
+    tagged = [
+        (storage_key, row)
+        for storage_key in contact_storage_keys(contact)
+        for row in list(cache.get(storage_key, []))
+    ]
+    if not tagged:
+        return []
+    kept = dedup_cross_key(
+        tagged,
+        canonical_key=contact.id,
+        key_of=lambda pair: pair[0],
+        normalize=lambda pair: pair[1],
+    )
+    return [row for _key, row in kept]
+
+
+def messages_window(
+    manager: Any,
+    protocol: str,
+    contact_id: str,
+    *,
+    refresh: bool = False,
+    refresh_limit: int = 50,
+) -> tuple[list[dict[str, Any]], bool]:
+    """One chat's canonical rows from the core's in-memory cache (TUI shape).
+
+    The rows are the backend cache entries (``is_mine``, ``msg_type``, flat
+    attachment/quote fields, delivery ``status``, ``read``) including those not
+    persisted yet, unioned over the WhatsApp storage keys.  With *refresh* the
+    remote history is downloaded first; the second item says whether that
+    happened.  Blocking when refreshing: run in a worker thread.
+    """
+    backend, contact, canonical_id = _resolve_chat(manager, protocol, contact_id)
+    if backend is None:
+        return [], False
+    refreshed = (
+        _refresh_history(backend, protocol, canonical_id, refresh_limit)
+        if refresh
+        else False
+    )
+    cache = getattr(backend, "cache", None)
+    if contact is None or not isinstance(cache, dict):
+        rows = list(cache.get(canonical_id, [])) if isinstance(cache, dict) else []
+    else:
+        rows = _union_cache_rows(cache, contact)
+    return [dict(row) for row in rows], refreshed
+
+
+def messages_snapshot(manager: Any, protocol: str) -> dict[str, list[dict[str, Any]]]:
+    """Every chat's canonical rows of one protocol, keyed by contact id.
+
+    What a frontend mirrors when a backend becomes ready.  A WhatsApp chat
+    appears once, under its canonical id, with its storage-key union deduped;
+    cache keys no known contact owns are kept as they are.
+    """
+    get_backend = getattr(manager, "get", None)
+    backend = get_backend(protocol) if callable(get_backend) else None
+    cache = getattr(backend, "cache", None)
+    if not isinstance(cache, dict):
+        return {}
+    result: dict[str, list[dict[str, Any]]] = {}
+    if protocol == PROTOCOL_WHATSAPP:
+        key_owner: dict[str, Any] = {}
+        for contact in list(getattr(backend, "contacts", [])):
+            for storage_key in contact_storage_keys(contact):
+                key_owner.setdefault(storage_key, contact)
+        processed: set[str] = set()
+        for cid, rows in list(cache.items()):
+            owner = key_owner.get(cid)
+            if owner is None:
+                result[cid] = [dict(row) for row in list(rows)]
+            elif owner.id not in processed:
+                processed.add(owner.id)
+                result[owner.id] = [
+                    dict(row) for row in _union_cache_rows(cache, owner)
+                ]
+    else:
+        for cid, rows in list(cache.items()):
+            result[cid] = [dict(row) for row in list(rows)]
+    return result
+
+
 def messages_page(
     manager: Any,
     protocol: str,
@@ -940,29 +1072,9 @@ def messages_page(
     swallowed), reads and dedups the rows, attaches media versions and
     resolves group senders / quote authors.  Blocking: run in a worker thread.
     """
-    get_backend = getattr(manager, "get", None)
-    backend = get_backend(protocol) if callable(get_backend) else None
-    find_contact = getattr(backend, "find_contact", None)
-    contact = find_contact(contact_id) if callable(find_contact) else None
-    canonical_id = contact.id if contact is not None else contact_id
+    backend, contact, canonical_id = _resolve_chat(manager, protocol, contact_id)
     if refresh or protocol == "telegram":
-        try:
-            fetch = getattr(backend, "fetch_history", None)
-            if fetch is not None and canonical_id:
-                refreshed = fetch(canonical_id, 20)
-                logger.debug(
-                    "%s history refresh: %s -> %d",
-                    protocol,
-                    canonical_id,
-                    len(refreshed),
-                )
-        except Exception:
-            logger.debug(
-                "%s history refresh failed: %s",
-                protocol,
-                canonical_id,
-                exc_info=True,
-            )
+        _refresh_history(backend, protocol, canonical_id, 20)
     extra_keys = tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
     # Read from the canonical key: with a ghost id the extra keys are the ghost
     # itself, so reading by ``contact_id`` would skip the @lid history.

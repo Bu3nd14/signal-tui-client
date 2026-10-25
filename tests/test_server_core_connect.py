@@ -520,15 +520,13 @@ class TestTuiDispatch:
         app._dispatch_core_event(self._ev("backend_status", payload))
         app._status.assert_called_once_with("hi")
 
-    def test_ready_resolves_backend_via_manager(self, app):
-        backend = MagicMock()
+    def test_ready_passes_the_protocol_not_the_backend(self, app):
         app.manager = MagicMock()
-        app.manager.get.return_value = backend
         app._dispatch_core_event(
             self._ev("backend_ready", {"protocol": "x", "contacts": 1})
         )
-        app.manager.get.assert_called_once_with("x")
-        app._on_backend_ready.assert_called_once_with(backend)
+        app.manager.get.assert_not_called()
+        app._on_backend_ready.assert_called_once_with("x")
 
     def test_done(self, app):
         app._dispatch_core_event(

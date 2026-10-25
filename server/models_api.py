@@ -144,6 +144,24 @@ class MessagesPageRequest(BaseModel):
 # ``messages.page`` returns ``list[dict[str, Any]]`` (see server/ops/messages.py).
 
 
+class MessagesWindowRequest(BaseModel):
+    protocol: Literal["signal", "whatsapp", "telegram"]
+    contact_id: str
+    refresh: bool = False  # download the remote history first
+    refresh_limit: int = Field(default=50, ge=1, le=200)
+
+
+class MessagesWindowOut(BaseModel):
+    # Canonical cache rows (the TUI's message shape), oldest first as cached.
+    messages: list[dict[str, Any]]
+    # True when the history download ran and succeeded.
+    refreshed: bool
+
+
+class MessagesSnapshotRequest(BaseModel):
+    protocol: Literal["signal", "whatsapp", "telegram"]
+
+
 class MessagesEditRequest(BaseModel):
     # Strict str: a missing or non-string field is "Invalid request" (legacy).
     # Emptiness / protocol / length checks are done by the operation.

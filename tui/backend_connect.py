@@ -2,16 +2,7 @@
 
 import logging
 
-from models import (
-    PROTOCOL_WHATSAPP,
-    ChatContact,
-    contact_cache_key,
-    contact_storage_keys,
-    dedup_cross_key,
-)
-from protocols import (
-    ChatBackend,
-)
+from models import ChatContact, contact_cache_key
 from server.api import ApiError
 from server.bus import GAP, Event
 from server.events_api import contact_from_wire
@@ -66,7 +57,7 @@ class BackendConnectMixin:
         ):
             self._select_contact(self.contacts[0])
 
-    def _on_backend_ready(self, backend: ChatBackend) -> None:
+    def _on_backend_ready(self, proto: str) -> None:
         """UI thread: merge atomico di cache e contatti da UN backend.
 
         Chiamato via ``call_from_thread`` dopo che un backend ha completato
@@ -74,11 +65,10 @@ class BackendConnectMixin:
         ordine FIFO, i merge di backend multipli sono naturalmente serializzati
         senza bisogno di lock espliciti.
 
-        I contatti arrivano dall'operazione ``contacts.for_protocol`` (copie
-        wire); la cache messaggi viene ancora letta dal backend (P1.4).
+        Contatti e cache messaggi arrivano dalle operazioni
+        ``contacts.for_protocol`` e ``messages.snapshot`` (copie wire).
         """
-        proto = backend.protocol
-        self._merge_ready_backend_cache(backend)
+        self._merge_ready_backend_cache(proto)
         contacts = self._fetch_protocol_contacts(proto)
         self._merge_backend_contacts(contacts)
 
@@ -134,18 +124,23 @@ class BackendConnectMixin:
             if newest:
                 old.last_message_ts = newest
 
-    def _merge_ready_backend_cache(self, backend: ChatBackend) -> None:
-        """Merge messaggi ``backend.cache`` → cache UI.  TODO(P1.4): via ``messages.page``.
+    def _merge_ready_backend_cache(self, proto: str) -> None:
+        """Merge the core's message cache of *proto* into the UI cache.
 
-        Legge ancora direttamente il backend; il merge dei contatti è
-        separato (operazione).
+        The rows come from the ``messages.snapshot`` operation (canonical cache
+        rows, WhatsApp storage-key union already applied by the core).  The
+        merge here is the view-side reconciliation with the UI cache, which
+        also holds optimistic rows the core does not know yet.
         """
-        proto = backend.protocol
+        try:
+            snapshot = self.client.call("messages.snapshot", {"protocol": proto})
+        except ApiError:
+            logger.warning("messages.snapshot failed for %s", proto, exc_info=True)
+            return
 
         # ── Merge cache (incrementale, no clear, idempotente) ──
-        # Il core non attende più questo merge (evento asincrono): un worker
-        # (es. resync WhatsApp) può scrivere in backend.cache in parallelo,
-        # quindi si itera sempre su snapshot (list(...)).
+        # Il core non attende più questo merge (evento asincrono) e l'operazione
+        # restituisce una copia: nessun dict è condiviso col backend.
         # `_on_backend_ready` può girare più volte (avvio + device-link Ctrl+L,
         # che ri-connette tutti i backend).  Un dedup basato SOLO su `id`
         # ri-appenderebbe i messaggi senza id (Signal, optimistic send) ad ogni
@@ -163,7 +158,7 @@ class BackendConnectMixin:
                 ): m
                 for m in ui_msgs
             }
-            for m in list(msgs):  # snapshot: the core may still be ingesting
+            for m in msgs:
                 mid = m.get("id")
                 identity = (
                     bool(m.get("is_mine", False)),
@@ -212,42 +207,8 @@ class BackendConnectMixin:
                 by_identity[identity] = m
             ui_msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
 
-        if proto == PROTOCOL_WHATSAPP:
-            # Cache-union cross-key: un doppio JID WhatsApp (@c.us/@lid) può
-            # avere lo stesso messaggio fisico sotto entrambe le chiavi DB.
-            # Processiamo ogni contatto UNA volta: union delle sue chiavi
-            # storage, dedup cross-key, merge nella sola chiave canonica.
-            key_owner: dict[str, object] = {}
-            for contact in list(getattr(backend, "contacts", [])):
-                for storage_key in contact_storage_keys(contact):
-                    key_owner.setdefault(storage_key, contact)
-            processed: set[str] = set()
-            for cid, msgs in list(backend.cache.items()):
-                owner = key_owner.get(cid)
-                if owner is None:
-                    _merge_messages(contact_cache_key(proto, cid), msgs)
-                    continue
-                if owner.id in processed:
-                    continue
-                processed.add(owner.id)
-                tagged = [
-                    (storage_key, m)
-                    for storage_key in contact_storage_keys(owner)
-                    for m in list(backend.cache.get(storage_key, []))
-                ]
-                kept_pairs = dedup_cross_key(
-                    tagged,
-                    canonical_key=owner.id,
-                    key_of=lambda pair: pair[0],
-                    normalize=lambda pair: pair[1],
-                )
-                _merge_messages(
-                    contact_cache_key(proto, owner.id),
-                    [m for _key, m in kept_pairs],
-                )
-        else:
-            for cid, msgs in list(backend.cache.items()):
-                _merge_messages(contact_cache_key(proto, cid), msgs)
+        for cid, msgs in snapshot.items():
+            _merge_messages(contact_cache_key(proto, cid), msgs)
 
     def _reconnect_touched_backends(self, protocols: set[str]) -> None:
         """Reconnect only the backends whose link flow was actually started.
@@ -267,11 +228,7 @@ class BackendConnectMixin:
             else:
                 self._status(payload["text"])
         elif event.type == "backend_ready":
-            backend = self.manager.get(payload["protocol"])
-            if backend is not None:
-                self._on_backend_ready(backend)
-            else:
-                logger.debug("backend_ready for unknown protocol %s", payload)
+            self._on_backend_ready(payload["protocol"])
         elif event.type == "backend_done":
             self._mark_backend_done(payload["protocol"])
         elif event.type == GAP:

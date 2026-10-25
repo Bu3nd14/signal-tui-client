@@ -1,7 +1,7 @@
 """
-Fase 7 — Riconciliazione ``_merge_backend_cache`` edit-aware (unit).
+Fase 7 — Riconciliazione ``_merge_window_rows`` edit-aware (unit).
 
-Verifica che ``_merge_backend_cache`` riconosca un messaggio MODIFICATO come lo
+Verifica che ``_merge_window_rows`` riconosca un messaggio MODIFICATO come lo
 STESSO messaggio (il match per ``id`` ora precede il confronto sul testo in
 entrambe le direzioni, incoming inclusi) e che l'aggiornamento del testo
 avvenga in-place (``existing["text"]``, ``existing["edited"] = True``)
@@ -10,7 +10,7 @@ modifica il codice di produzione: documentiamo la semantica attuale.
 
 Approccio scelto (e motivazione)
 --------------------------------
-``_merge_backend_cache`` è un metodo di ``ChatViewMixin`` che tocca soltanto
+``_merge_window_rows`` è un metodo di ``ChatViewMixin`` che tocca soltanto
 ``self._cache``, ``contact.id`` / ``contact.cache_key`` e ``backend.cache``.
 Per isolarlo senza lanciare l'intera TUI (né ``App.run_test()``) costruiamo un
 piccolo *harness* che mixa ``ChatViewMixin`` con il solo attributo ``_cache``;
@@ -30,10 +30,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from client_harness import client_for
 
 from models import (
     PROTOCOL_SIGNAL,
@@ -46,7 +49,7 @@ from tui.chat_view import ChatViewMixin
 
 
 class _MergeHarness(ChatViewMixin):
-    """Minimal object exposing only the ``_cache`` used by ``_merge_backend_cache``."""
+    """Minimal object exposing only the ``_cache`` used by ``_merge_window_rows``."""
 
     def __init__(self, cache: dict | None = None) -> None:
         self._cache = cache if cache is not None else {}
@@ -89,11 +92,17 @@ def _merge(
     *,
     protocol: str = PROTOCOL_SIGNAL,
 ) -> tuple[_MergeHarness, ChatContact, bool]:
-    """Esegue ``_merge_backend_cache`` su un harness isolato e ritorna lo stato."""
+    """Esegue ``_merge_window_rows`` su un harness isolato e ritorna lo stato."""
     contact = ChatContact(id="+391234567890", display_name="Mario", protocol=protocol)
     harness = _MergeHarness({contact.cache_key: existing})
     backend = _FakeBackend(contact.id, incoming)
-    changed = harness._merge_backend_cache(contact, backend)
+    # The rows reach the merge the way the load worker gets them: through the
+    # ``messages.window`` operation of the core owning the backend cache.
+    client = client_for(SimpleNamespace(get=lambda _proto: backend))
+    window = client.call(
+        "messages.window", {"protocol": protocol, "contact_id": contact.id}
+    )
+    changed = harness._merge_window_rows(contact, window["messages"])
     return harness, contact, changed
 
 

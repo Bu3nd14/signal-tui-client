@@ -10,7 +10,7 @@ These tests cover:
 * the pure helpers in ``models`` (``_cross_key_message_equivalent`` and
   ``dedup_cross_key``);
 * the web read-union (``web.api._cross_key_dedup_rows`` / ``_messages``);
-* the TUI cache merge (``ChatViewMixin._merge_backend_cache`` and
+* the TUI cache merge (``ChatViewMixin._merge_window_rows`` fed by ``messages.window``, and
   ``BackendConnectMixin._on_backend_ready``).
 
 They also try to falsify the fix, documenting the two residual boundaries:
@@ -137,19 +137,35 @@ def _wa_contact(
 
 
 class _ChatViewStub:
-    """Minimal duck-type for ``ChatViewMixin._merge_backend_cache``."""
+    """Minimal duck-type for the TUI chat-loading path.
 
-    def __init__(self) -> None:
+    ``load`` does what ``_load_messages_worker`` does after the history
+    download: ask the core for the chat's window through the client and merge
+    the rows into the UI cache.
+    """
+
+    def __init__(self, backend: Any = None) -> None:
         self._cache: dict[str, list[dict]] = {}
         self.selected_contact = None
+        self.client = client_for(SimpleNamespace(get=lambda _proto: backend))
+
+    def _merge_window_rows(self, contact: ChatContact, rows: list[dict]) -> bool:
+        return ChatViewMixin._merge_window_rows(self, contact, rows)  # type: ignore[arg-type]
+
+    def load(self, contact: ChatContact) -> bool:
+        window = self.client.call(
+            "messages.window",
+            {"protocol": contact.protocol, "contact_id": contact.id, "refresh": True},
+        )
+        return self._merge_window_rows(contact, window["messages"])
 
 
 class _BackendConnectStub:
     """Minimal duck-type for ``BackendConnectMixin._on_backend_ready``."""
 
     def __init__(self, backend: Any) -> None:
-        # Contacts come from the core through the client (operation), the cache
-        # is still merged from the backend object.
+        # Contacts and messages come from the core through the client
+        # (operations over the fake manager).
         self.client = client_for(SimpleNamespace(get=lambda _proto: backend))
         self._cache: dict[str, list[dict]] = {}
         self.contacts: list[ChatContact] = []
@@ -164,8 +180,8 @@ class _BackendConnectStub:
     def _mark_backend_done(self, proto: str) -> None:
         self._pending_backends.discard(proto)
 
-    def _merge_ready_backend_cache(self, backend: Any) -> None:
-        BackendConnectMixin._merge_ready_backend_cache(self, backend)  # type: ignore[arg-type]
+    def _merge_ready_backend_cache(self, proto: str) -> None:
+        BackendConnectMixin._merge_ready_backend_cache(self, proto)  # type: ignore[arg-type]
 
     def _fetch_protocol_contacts(self, proto: str) -> list[ChatContact]:
         return BackendConnectMixin._fetch_protocol_contacts(self, proto)  # type: ignore[arg-type]
@@ -488,13 +504,15 @@ class TestMessagesReadUnion:
         assert [message["id"] for message in messages] == ["M1", "M2", "M3"]
 
 
-# ─── TUI: _merge_backend_cache ────────────────────────────────────────────────
+# ─── TUI: messages.window → _merge_window_rows ────────────────────────────────────────────────
 
 
 class TestMergeBackendCache:
     def test_cross_key_same_id_different_attachment_collapses(self):
         contact = _wa_contact("39123@lid", phone="39123")
         backend = SimpleNamespace(
+            find_contact=lambda _cid, contact=contact: contact,
+            fetch_history=lambda _cid, _limit: [],
             cache={
                 "39123@lid": [
                     _d(
@@ -512,11 +530,11 @@ class TestMergeBackendCache:
                         attachment_id="sent-a.png",
                     )
                 ],
-            }
+            },
         )
-        stub = _ChatViewStub()
+        stub = _ChatViewStub(backend)
 
-        changed = ChatViewMixin._merge_backend_cache(stub, contact, backend)
+        changed = stub.load(contact)
 
         assert changed is True
         merged = stub._cache[contact.cache_key]
@@ -526,6 +544,8 @@ class TestMergeBackendCache:
     def test_cross_key_id_divergence_identical_tuple_collapses(self):
         contact = _wa_contact("39123@lid", phone="39123")
         backend = SimpleNamespace(
+            find_contact=lambda _cid, contact=contact: contact,
+            fetch_history=lambda _cid, _limit: [],
             cache={
                 "39123@lid": [
                     _d(
@@ -543,11 +563,11 @@ class TestMergeBackendCache:
                         attachment_id="same.png",
                     )
                 ],
-            }
+            },
         )
-        stub = _ChatViewStub()
+        stub = _ChatViewStub(backend)
 
-        ChatViewMixin._merge_backend_cache(stub, contact, backend)
+        stub.load(contact)
 
         merged = stub._cache[contact.cache_key]
         assert len(merged) == 1
@@ -555,6 +575,8 @@ class TestMergeBackendCache:
     def test_same_key_multi_attachment_not_collapsed(self):
         contact = _wa_contact("39123@lid", phone="39123")
         backend = SimpleNamespace(
+            find_contact=lambda _cid, contact=contact: contact,
+            fetch_history=lambda _cid, _limit: [],
             cache={
                 "39123@lid": [
                     _d(
@@ -570,11 +592,11 @@ class TestMergeBackendCache:
                         attachment_id="f1.png",
                     ),
                 ]
-            }
+            },
         )
-        stub = _ChatViewStub()
+        stub = _ChatViewStub(backend)
 
-        ChatViewMixin._merge_backend_cache(stub, contact, backend)
+        stub.load(contact)
 
         merged = stub._cache[contact.cache_key]
         assert len(merged) == 2
@@ -583,6 +605,8 @@ class TestMergeBackendCache:
     def test_cross_key_distinct_messages_both_kept(self):
         contact = _wa_contact("39123@lid", phone="39123")
         backend = SimpleNamespace(
+            find_contact=lambda _cid, contact=contact: contact,
+            fetch_history=lambda _cid, _limit: [],
             cache={
                 "39123@lid": [
                     _d(
@@ -602,17 +626,17 @@ class TestMergeBackendCache:
                         timestamp=2000,
                     )
                 ],
-            }
+            },
         )
-        stub = _ChatViewStub()
+        stub = _ChatViewStub(backend)
 
-        ChatViewMixin._merge_backend_cache(stub, contact, backend)
+        stub.load(contact)
 
         merged = stub._cache[contact.cache_key]
         assert len(merged) == 2
 
 
-# ─── TUI: _on_backend_ready ───────────────────────────────────────────────────
+# ─── TUI: _on_backend_ready (messages.snapshot) ───────────────────────────────────────────────
 
 
 class TestOnBackendReady:
@@ -644,7 +668,7 @@ class TestOnBackendReady:
         )
         stub = _BackendConnectStub(backend)
 
-        BackendConnectMixin._on_backend_ready(stub, backend)
+        BackendConnectMixin._on_backend_ready(stub, backend.protocol)
 
         merged = stub._cache["whatsapp:39123@lid"]
         assert len(merged) == 1
@@ -680,7 +704,7 @@ class TestOnBackendReady:
         )
         stub = _BackendConnectStub(backend)
 
-        BackendConnectMixin._on_backend_ready(stub, backend)
+        BackendConnectMixin._on_backend_ready(stub, backend.protocol)
 
         merged = stub._cache["whatsapp:39123@lid"]
         assert len(merged) == 2
@@ -724,7 +748,7 @@ class TestOnBackendReady:
         )
         stub = _BackendConnectStub(backend)
 
-        BackendConnectMixin._on_backend_ready(stub, backend)
+        BackendConnectMixin._on_backend_ready(stub, backend.protocol)
 
         merged = stub._cache["whatsapp:39123@lid"]
         assert len(merged) == 2

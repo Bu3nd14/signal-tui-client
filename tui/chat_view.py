@@ -15,8 +15,6 @@ from models import (
     PROTOCOL_WHATSAPP,
     _prefer_display_sender,
     attachment_display_name,
-    contact_storage_keys,
-    dedup_cross_key,
     is_caption_like,
     is_media_quote_placeholder,
     is_whatsapp_synthetic_media_text,
@@ -1116,40 +1114,48 @@ class ChatViewMixin:
         # client — download the remote history on every open.  `fetch_history`
         # dedups internally via `ingest_message`, so already-known messages are
         # not duplicated.  Fails non-destructively.
-        backend = self.manager.get(contact.protocol)
-        fetch = getattr(backend, "fetch_history", None)
         cache_changed = False
-        if fetch is not None:
-            try:
-                # Wider window: `fetch_history` reconciles remote history with
-                # the DB (adds missing messages, upgrades entries without id).
-                # With limit=20 a DB missing messages could never be repaired
-                # because the 20 newest were already present.  Retry: WAHA can
-                # return [] right after boot even with a WORKING session, so
-                # retry a couple of times with a short pause.  Respects
-                # _is_stale() to avoid mounting into a stale selection.
-                _retry = 0
-                while True:
-                    fetch(contact.id, limit=50)
-                    _bm = getattr(backend, "cache", {}).get(contact.id, [])
-                    if _bm or _is_stale() or _retry >= 2:
-                        break
-                    _retry += 1
-                    time.sleep(0.8)
+        try:
+            # Wider window: the history download reconciles remote history
+            # with the DB (adds missing messages, upgrades entries without
+            # id).  With limit=20 a DB missing messages could never be
+            # repaired because the 20 newest were already present.  Retry:
+            # WAHA can return [] right after boot even with a WORKING
+            # session, so retry a couple of times with a short pause.
+            # Respects _is_stale() to avoid mounting into a stale selection.
+            _retry = 0
+            while True:
+                window = self.client.call(
+                    "messages.window",
+                    {
+                        "protocol": contact.protocol,
+                        "contact_id": contact.id,
+                        "refresh": True,
+                        "refresh_limit": 50,
+                    },
+                )
+                if not window["refreshed"]:
+                    # No history download (backend lacks it or it failed):
+                    # stay on the local cache.
+                    window = None
+                    break
+                if window["messages"] or _is_stale() or _retry >= 2:
+                    break
+                _retry += 1
+                time.sleep(0.8)
 
-                # fetch_history fills the BACKEND cache; merge only the
-                # genuinely new messages into the protocol-aware UI cache
-                # (never replace: the UI cache must not shrink).
-                cache_changed = self._merge_backend_cache(contact, backend)
+            if window is not None:
+                # The core's cache now holds the downloaded history; merge
+                # only the genuinely new messages into the protocol-aware UI
+                # cache (never replace: the UI cache must not shrink).
+                cache_changed = self._merge_window_rows(contact, window["messages"])
                 # I'm viewing them now: freshly downloaded messages must not
                 # inflate unread badges (already zeroed by _select_contact).
                 for msg in self._cache.get(contact.cache_key, []):
                     if not msg.get("is_mine"):
                         msg["read"] = True
-            except Exception as _e:  # fallback: stay on the local cache
-                logger.debug(
-                    "History fetch failed, staying on local cache", exc_info=True
-                )
+        except Exception as _e:  # fallback: stay on the local cache
+            logger.debug("History fetch failed, staying on local cache", exc_info=True)
 
         if _is_stale():
             return
@@ -1272,10 +1278,11 @@ class ChatViewMixin:
 
         return True
 
-    def _merge_backend_cache(self, contact, backend) -> bool:
-        """Merge ``backend.cache`` into the UI cache for *contact*, add-only.
+    def _merge_window_rows(self, contact, backend_msgs: list[dict]) -> bool:
+        """Merge the core's rows of *contact* into the UI cache, add-only.
 
-        ``fetch_history`` fills the BACKEND cache (keyed by raw id); this
+        *backend_msgs* are the ``messages.window`` rows (the core's cache of
+        the chat, WhatsApp storage keys already unioned and deduped); this
         mirrors only the genuinely new messages into the protocol-aware UI
         cache.  It never removes existing entries, so a backend cache that is
         temporarily smaller than the UI cache can not shrink the rendered
@@ -1290,25 +1297,8 @@ class ChatViewMixin:
         message's text was updated (an edit).  A status-only upgrade does NOT
         count as a change (nothing to re-render).
         """
-        # Cache-union cross-key: per un contatto WhatsApp il backend cache può
-        # avere lo storico sotto qualunque chiave alias della union (@c.us/@lid).
-        # Tracciamo la chiave sorgente e applichiamo la dedup cross-key (stesso
-        # msg_id a attachment diverso compreso) PRIMA del loop intra-chiave.
-        backend_cache = getattr(backend, "cache", {})
-        tagged: list[tuple[str, dict]] = [
-            (storage_key, m)
-            for storage_key in contact_storage_keys(contact)
-            for m in backend_cache.get(storage_key, [])
-        ]
-        if not tagged:
+        if not backend_msgs:
             return False
-        kept_pairs = dedup_cross_key(
-            tagged,
-            canonical_key=contact.id,
-            key_of=lambda pair: pair[0],
-            normalize=lambda pair: pair[1],
-        )
-        backend_msgs: list[dict] = [m for _key, m in kept_pairs]
 
         ui_key = contact.cache_key
         ui_msgs = self._cache.setdefault(ui_key, [])

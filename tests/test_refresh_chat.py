@@ -1037,7 +1037,7 @@ class TestRenderDedupSameSecond:
         assert image_widgets[0].attachment_path is None
         assert image_widgets[0].attachment_id == "img-001.jpg"
 
-    def test_merge_backend_cache_copies_quote_metadata(self):
+    def test_merge_window_rows_copies_quote_metadata(self):
         """Il twin backend ricco copia le chiavi quote mancanti (add-only)."""
         app = self._make_wa_app()
         contact = app.selected_contact
@@ -1066,7 +1066,14 @@ class TestRenderDedupSameSecond:
             ]
         }
 
-        app._merge_backend_cache(contact, backend)
+        backend.find_contact.return_value = contact
+        app.manager = MagicMock()
+        app.manager.get.return_value = backend
+        window = app.client.call(
+            "messages.window", {"protocol": contact.protocol, "contact_id": contact.id}
+        )
+
+        app._merge_window_rows(contact, window["messages"])
 
         entry = app._cache[contact.cache_key][0]
         assert entry["quote_attachment_id"] == "att-1"

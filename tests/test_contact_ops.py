@@ -236,7 +236,7 @@ class TestTuiSeeding:
         app = _app(_manager(signal=backend))
         app._pending_backends = {"signal"}
 
-        app._on_backend_ready(backend)
+        app._on_backend_ready(backend.protocol)
 
         (seeded,) = app.contacts
         assert seeded == anna and seeded is not anna
@@ -251,10 +251,10 @@ class TestTuiSeeding:
         anna = _contact(last_message_ts=1)
         backend = SimpleNamespace(protocol="signal", contacts=[anna], cache={})
         app = _app(_manager(signal=backend))
-        app._on_backend_ready(backend)
+        app._on_backend_ready(backend.protocol)
         anna.last_message_ts = 7
 
-        app._on_backend_ready(backend)
+        app._on_backend_ready(backend.protocol)
 
         assert len(app.contacts) == 1 and app.contacts[0].last_message_ts == 7
 
@@ -262,14 +262,14 @@ class TestTuiSeeding:
         anna = _contact(phone="1", last_message_ts=5)
         backend = SimpleNamespace(protocol="signal", contacts=[anna], cache={})
         app = _app(_manager(signal=backend))
-        app._on_backend_ready(backend)
+        app._on_backend_ready(backend.protocol)
         (seeded,) = app.contacts
         seeded.last_message_ts = 50  # newer on the TUI side
         # The backend refreshes its own contact in place (e.g. WhatsApp reconnect).
         anna.display_name = "Anna B"
         anna.extras.update(lid="9@lid", phone="2")
 
-        app._on_backend_ready(backend)
+        app._on_backend_ready(backend.protocol)
 
         assert app.contacts == [seeded] and app.contacts[0] is seeded
         assert seeded.display_name == "Anna B"
@@ -281,7 +281,7 @@ class TestTuiSeeding:
         app = _app(_manager())  # core knows no backend
         app._pending_backends = {"signal"}
 
-        app._on_backend_ready(backend)
+        app._on_backend_ready(backend.protocol)
 
         assert app.contacts == [] and app._pending_backends == set()
 

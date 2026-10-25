@@ -24,6 +24,8 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from client_harness import client_for
+
 import protocols.db as backend_mod
 from models import PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
 from protocols.whatsapp import WhatsAppBackend
@@ -218,7 +220,7 @@ class TestProcessReceiptPersistsById:
 class TestMergeUpdatesStatus:
     """🔄 Il merge della UI cache aggiorna lo status invece di un ``continue``."""
 
-    def test_merge_backend_cache_updates_status_higher_rank(self):
+    def test_merge_window_rows_updates_status_higher_rank(self):
         from tui.chat_view import ChatViewMixin
 
         mixin = ChatViewMixin()
@@ -248,7 +250,11 @@ class TestMergeUpdatesStatus:
             }
         )
 
-        changed = mixin._merge_backend_cache(contact, backend)
+        window = client_for(SimpleNamespace(get=lambda _proto: backend)).call(
+            "messages.window", {"protocol": contact.protocol, "contact_id": contact.id}
+        )
+
+        changed = mixin._merge_window_rows(contact, window["messages"])
 
         assert changed is False  # nothing appended
         assert mixin._cache[contact.cache_key][0]["status"] == "read"
@@ -294,7 +300,9 @@ class TestMergeUpdatesStatus:
             contacts=[],
         )
 
-        app._on_backend_ready(backend)
+        app.manager = SimpleNamespace(get=lambda _proto: backend)
+
+        app._on_backend_ready(backend.protocol)
 
         assert app._cache[key][0]["status"] == "read"
 

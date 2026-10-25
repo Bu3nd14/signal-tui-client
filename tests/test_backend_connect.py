@@ -43,7 +43,7 @@ def _ready(app: SignalTUI, backend: MagicMock) -> None:
     ``contacts.for_protocol`` operation, which reads ``manager.get(protocol)``."""
     app.manager = MagicMock()
     app.manager.get.return_value = backend
-    app._on_backend_ready(backend)
+    app._on_backend_ready(backend.protocol)
 
 
 def _make_backend(

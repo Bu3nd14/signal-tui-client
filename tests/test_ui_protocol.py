@@ -665,6 +665,7 @@ class TestWhatsAppHistoryLoad:
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
         app.manager = MagicMock()
         app.manager.get.return_value = backend
+        backend.find_contact.return_value = c
 
         # evita operazioni su widget reali; call_from_thread esegue sincronico
         app._make_message_widget = MagicMock()
@@ -675,7 +676,7 @@ class TestWhatsAppHistoryLoad:
         app._load_messages_worker()
 
         # fetch_history è stato chiamato con il jid del contatto
-        backend.fetch_history.assert_called_once_with("16660245291231@lid", limit=50)
+        backend.fetch_history.assert_called_once_with("16660245291231@lid", 50)
 
         # il cache UI è stato popolato dallo specchio del backend
         assert len(app._cache[c.cache_key]) == 2
@@ -716,6 +717,7 @@ class TestWhatsAppHistoryLoad:
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
         app.manager = MagicMock()
         app.manager.get.return_value = backend
+        backend.find_contact.return_value = c
 
         app._add_message = MagicMock()
         app._add_load_more_widget = MagicMock()
@@ -725,7 +727,7 @@ class TestWhatsAppHistoryLoad:
         app._load_messages_worker()
 
         # Nonostante il cache non vuoto, viene riscaricato lo storico remoto
-        backend.fetch_history.assert_called_once_with("16660245291231@lid", limit=50)
+        backend.fetch_history.assert_called_once_with("16660245291231@lid", 50)
 
         # il cache UI ora include anche il messaggio "da altro client"
         texts = [m["text"] for m in app._cache[c.cache_key]]
@@ -1075,6 +1077,7 @@ class TestWhatsAppLoadRetry:
         backend.fetch_history = MagicMock(side_effect=fake_fetch)
         app.manager = MagicMock()
         app.manager.get.return_value = backend
+        backend.find_contact.return_value = c
         app._make_message_widget = MagicMock()
         app._add_load_more_widget = MagicMock()
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
@@ -1132,6 +1135,7 @@ class TestWhatsAppMountOrdering:
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
         app.manager = MagicMock()
         app.manager.get.return_value = backend
+        backend.find_contact.return_value = c
         app._add_load_more_widget = MagicMock()
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
         app.query_one = MagicMock()  # per _clear_chat
@@ -1182,6 +1186,7 @@ class TestWhatsAppRenderFirst:
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
         app.manager = MagicMock()
         app.manager.get.return_value = backend
+        backend.find_contact.return_value = c
 
         app._add_load_more_widget = MagicMock()
         app._clear_chat = MagicMock()
@@ -1228,7 +1233,7 @@ class TestWhatsAppRenderFirst:
         # il cache è stato renderizzato PRIMA del fetch (paint istantaneo)
         assert order[0] == "gia in cache"
         # il fetch remoto è comunque avvenuto con limit=50
-        fetch.assert_called_once_with(c.id, limit=50)
+        fetch.assert_called_once_with(c.id, 50)
         # fase 2 (cache cambiato): full re-render ordinato con il nuovo messaggio
         assert order[-2:] == ["gia in cache", "nuovo"]
 

@@ -42,7 +42,7 @@ def _signal_stable_key(c: ChatContact) -> str:
 
 
 def _cache_find_existing(msgs: list[dict], m: dict) -> dict | None:
-    """Trova la voce equivalente a *m* in *msgs* (identità di ``_merge_backend_cache``)."""
+    """Trova la voce equivalente a *m* in *msgs* (identità di ``_merge_window_rows``)."""
     is_mine = bool(m.get("is_mine", False))
     text = m.get("text", "")
     ts = int(m.get("timestamp") or 0)
