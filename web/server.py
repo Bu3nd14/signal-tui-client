@@ -12,6 +12,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_SHARED_SESSION_CLOSE_TIMEOUT_S = 2.0
+
 
 @dataclass
 class WebServerHandle:
@@ -113,12 +115,15 @@ def start_web_server(
     from web.api import create_api_router
     from web.auth import install_auth
     from web.bridge import init_bridge
+    from web.gmail_api import create_gmail_image_router, create_gmail_router
     from web.uploads import prepare_upload_directory
     from web.ws import install_websocket
 
     init_bridge()
     install_auth(app, token, required=require_auth)
     app.include_router(create_api_router())
+    app.include_router(create_gmail_router())
+    app.include_router(create_gmail_image_router())
     install_websocket(app, token, required=require_auth)
 
     @app.get("/health")
@@ -215,6 +220,28 @@ def start_web_server(
                         monitor.cancel()
                         loop.run_until_complete(
                             asyncio.gather(monitor, return_exceptions=True)
+                        )
+                    try:
+                        from web.link_preview import close_shared_session
+
+                        loop.run_until_complete(
+                            asyncio.wait_for(
+                                close_shared_session(),
+                                timeout=_SHARED_SESSION_CLOSE_TIMEOUT_S,
+                            )
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Shared HTTP session close failed at shutdown",
+                            exc_info=True,
+                        )
+                    try:
+                        from web.gmail import close_imap_pool
+
+                        close_imap_pool()
+                    except Exception:
+                        logger.debug(
+                            "IMAP pool close failed at shutdown", exc_info=True
                         )
                     loop.run_until_complete(loop.shutdown_asyncgens())
                 finally:

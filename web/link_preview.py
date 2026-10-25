@@ -20,6 +20,7 @@ import re
 import socket
 import time
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urljoin, urlsplit
@@ -40,10 +41,19 @@ _ALLOWED_PORTS = {80, 443}
 _USER_AGENT = "Mozilla/5.0 (compatible; MegachatLinkPreview/1.0)"
 _TITLE_LIMIT = 200
 _DESCRIPTION_LIMIT = 300
+_SESSION_CONNECTOR_LIMIT = 8
 
 # url -> (expires_at, preview dict or None)
 _CACHE: OrderedDict[str, tuple[float, dict[str, Any] | None]] = OrderedDict()
 _INFLIGHT: dict[str, asyncio.Future] = {}
+
+# Shared HTTP session, bound to the loop that created it.  ``_closing`` blocks
+# new sessions while an in-flight close is running.
+_shared_session: Any | None = None
+_shared_session_loop: asyncio.AbstractEventLoop | None = None
+_shared_resolver: Any | None = None
+_closing = False
+_SHARED_SESSION_ENABLED = True
 
 
 class BlockedURLError(ValueError):
@@ -212,16 +222,27 @@ async def _get(
             length = response.content_length
             if length is not None and length > max_bytes:
                 raise BlockedURLError("response too large")
-            body = await response.content.read(max_bytes)
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise BlockedURLError("response too large")
+                chunks.append(chunk)
+            body = b"".join(chunks)
             return current, response.content_type or "", body, response.charset
     raise BlockedURLError("too many redirects")
 
 
-def _session() -> Any:
+def _make_session() -> tuple[Any, Any]:
     import aiohttp
 
-    return aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(resolver=_public_resolver(), limit=8),
+    resolver = _public_resolver()
+    session = aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(
+            resolver=resolver, limit=_SESSION_CONNECTOR_LIMIT
+        ),
+        cookie_jar=aiohttp.DummyCookieJar(),
         timeout=aiohttp.ClientTimeout(total=_TIMEOUT_SECONDS),
         headers={
             "User-Agent": _USER_AGENT,
@@ -229,10 +250,82 @@ def _session() -> Any:
         },
         trust_env=False,
     )
+    return session, resolver
+
+
+@asynccontextmanager
+async def _transient_session():
+    session, resolver = _make_session()
+    try:
+        yield session
+    finally:
+        try:
+            await session.close()
+        finally:
+            await resolver.close()
+
+
+def _get_or_create_shared_session() -> Any:
+    global _shared_resolver, _shared_session, _shared_session_loop
+
+    loop = asyncio.get_running_loop()
+    session = _shared_session
+    if session is not None and _shared_session_loop is loop and not session.closed:
+        return session
+    if _closing:
+        raise RuntimeError("shared session is closing")
+    if session is not None and _shared_session_loop is not loop:
+        logger.debug("link preview: replacing shared session owned by another loop")
+    session, resolver = _make_session()
+    _shared_resolver, _shared_session, _shared_session_loop = (
+        resolver,
+        session,
+        loop,
+    )
+    return session
+
+
+@asynccontextmanager
+async def shared_session():
+    if _closing:
+        raise RuntimeError("shared session is closing")
+    if not _SHARED_SESSION_ENABLED:
+        async with _transient_session() as session:
+            yield session
+        return
+    yield _get_or_create_shared_session()
+
+
+async def close_shared_session() -> None:
+    """Close the shared session/resolver on their owning loop; idempotent."""
+    global _closing, _shared_resolver, _shared_session, _shared_session_loop
+
+    _closing = True
+    try:
+        loop = asyncio.get_running_loop()
+        session = _shared_session
+        resolver = _shared_resolver
+        owner = _shared_session_loop
+        _shared_session = _shared_resolver = _shared_session_loop = None
+        if session is None:
+            return
+        if owner is not loop:
+            logger.debug(
+                "link preview: shared session owned by another loop; skip close"
+            )
+            return
+        try:
+            if not session.closed:
+                await session.close()
+        finally:
+            if resolver is not None:
+                await resolver.close()
+    finally:
+        _closing = False
 
 
 async def _fetch_preview_uncached(url: str) -> dict[str, Any] | None:
-    async with _session() as session:
+    async with shared_session() as session:
         final_url, content_type, body, charset = await _get(
             session, url, _MAX_HTML_BYTES
         )
@@ -339,7 +432,7 @@ async def get_preview_image(url: str) -> tuple[bytes, str] | None:
     if not image_url:
         return None
     try:
-        async with _session() as session:
+        async with shared_session() as session:
             _final, _type, body, _charset = await _get(
                 session, image_url, _MAX_IMAGE_BYTES
             )
@@ -347,6 +440,25 @@ async def get_preview_image(url: str) -> tuple[bytes, str] | None:
         logger.debug("link preview image failed for %s: %s", image_url, exc)
         return None
     # Trust the magic bytes, not the header: only raster formats (no SVG).
+    sniffed = _sniff_raster(body)
+    return (body, sniffed) if sniffed else None
+
+
+async def fetch_external_image(
+    url: str, max_bytes: int = _MAX_IMAGE_BYTES
+) -> tuple[bytes, str] | None:
+    """Fetch a public raster image through the SSRF-safe preview session.
+
+    Used by the Gmail image proxy: redirects and DNS answers are validated by
+    the same public-only resolver as link previews; SVG and non-image bodies
+    are rejected by magic-byte sniffing.
+    """
+    try:
+        async with shared_session() as session:
+            _final, _type, body, _charset = await _get(session, url, max_bytes)
+    except Exception as exc:  # noqa: BLE001 — proxy is best-effort
+        logger.debug("external image failed for %s: %s", url, exc)
+        return None
     sniffed = _sniff_raster(body)
     return (body, sniffed) if sniffed else None
 
