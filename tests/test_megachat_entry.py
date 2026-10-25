@@ -43,14 +43,14 @@ def test_serve_is_only_the_first_argument():
     tui.assert_called_once_with(["--debug", "serve"])
 
 
-def test_tui_main_refuses_when_lock_is_held(capsys):
+def test_in_process_tui_refuses_when_lock_is_held(capsys):
     import signal_tui
 
     with (
         patch("signal_tui.logging.basicConfig"),
         patch("signal_tui._acquire_lock", return_value=False),
     ):
-        assert signal_tui.main([]) == 1
+        assert signal_tui.main(["--in-process"]) == 1
     assert "already running" in capsys.readouterr().err
 
 

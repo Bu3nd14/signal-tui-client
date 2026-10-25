@@ -19,7 +19,9 @@ from pathlib import Path
 from . import whatsapp as whatsapp_mod
 from .common import PROJECT_DIR, command_exists, die, info, ok, port_listening
 
-LOCK_FILE = Path("/tmp/signal-tui.lock")
+# The instance lock belongs to the server (or to a ``megachat --in-process``
+# TUI); same location and override as ``server/lock.py``.
+LOCK_FILE = Path(os.environ.get("MEGACHAT_LOCK_FILE") or "/tmp/signal-tui.lock")
 SERVER_LOG = Path("/tmp/megachat-serve.log")
 SERVER_PORT = 4242
 #: Seconds to wait for the web adapter to listen after spawning the server.
@@ -59,6 +61,8 @@ def _spawn_server() -> subprocess.Popen:
 
 
 def _stop_tui() -> None:
+    """Stop the instance holding the lock (the server; SIGINT = clean stop)
+    and any legacy tmux session.  Attached TUIs just lose their connection."""
     if LOCK_FILE.exists():
         try:
             pid = int(LOCK_FILE.read_text().strip())
@@ -152,9 +156,9 @@ def start_all(*, docker_limits: bool = True) -> int:
 
 
 def stop_all() -> int:
-    info("Spegnimento TUI (SIGINT pulito)...")
+    info("Spegnimento server (SIGINT pulito)...")
     _stop_tui()
-    ok("TUI fermata")
+    ok("Server fermato")
 
     info("Spegnimento WAHA...")
     result = subprocess.run(
@@ -172,9 +176,9 @@ def stop_all() -> int:
 
 def status() -> int:
     if LOCK_FILE.exists():
-        print(f"TUI: ATTIVA (pid {LOCK_FILE.read_text().strip()})")
+        print(f"Server: ATTIVO (pid {LOCK_FILE.read_text().strip()})")
     else:
-        print("TUI: spenta")
+        print("Server: spento")
     print(
         "daemon signal-cli: attivo"
         if _pgrep("signal-cli.*daemon")

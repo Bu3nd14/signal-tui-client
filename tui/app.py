@@ -125,6 +125,7 @@ class SignalTUI(
         web_no_auth: bool = False,
         web_adapter: WebAdapter | None = None,
         client: ChatClient | None = None,
+        server_spawned: bool | None = None,
     ):
         super().__init__()
         # Terminal image backend detected in ``signal_tui`` before ``run()``.
@@ -178,15 +179,21 @@ class SignalTUI(
         # reacts to its bus events (see ``BackendConnectMixin``).  The backend
         # attributes below are aliases to the core's objects.
         self.bus = EventBus()
-        self.core = ChatCore(self.bus)
+        # Only an in-process TUI builds the core; with a remote client the
+        # backends live in the server and no ChatCore exists in this process.
+        self.core: ChatCore | None = ChatCore(self.bus) if client is None else None
         # The TUI consumes core events (and, in later steps, operations)
         # through the client; ``bus``/``core`` stay for the not yet migrated
         # direct uses.
         # With an injected ``client`` (a remote server) the TUI does not own the
         # core: it neither starts nor shuts it down and syncs from the server.
         self._owns_core = client is None
+        # Whether this TUI started the server it is attached to (True), found it
+        # already running (False), or owns an in-process core (None).  The exit
+        # dialog's default (Quit vs Detach) depends on it.
+        self.server_spawned = server_spawned
         self.client: ChatClient = (
-            InProcessClient(self.core) if client is None else client
+            InProcessClient(self._own_core()) if client is None else client
         )
         self._core_sub: ClientSubscription | None = None
         self._init_client_state()
@@ -301,6 +308,13 @@ class SignalTUI(
             yield Footer()
             yield StatusBar(id="status-bar")
 
+    def _own_core(self) -> ChatCore:
+        """The in-process core (only exists when the TUI owns it)."""
+        core = self.core
+        if core is None:
+            raise RuntimeError("this TUI is a client of a remote server: no core")
+        return core
+
     def _install_sigint_on_loop(self) -> None:
         """Move the Ctrl+C handler onto the asyncio loop.
 
@@ -332,7 +346,7 @@ class SignalTUI(
                 logger.error("Web UI enabled but no web adapter was provided")
             else:
                 self._web_server = adapter.start(
-                    self.core.api,
+                    self._own_core().api,
                     self._web_port,
                     self._web_token,
                     host=self._web_host,
@@ -364,7 +378,7 @@ class SignalTUI(
         self._core_sub = self.client.subscribe()
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
         if self._owns_core:
-            self.core.start()
+            self._own_core().start()
         else:
             # The server's backends are already up: no ``backend_ready`` will
             # come, so fetch contacts and chats the way a resync does.
@@ -660,13 +674,13 @@ class SignalTUI(
         # Stop, web adapter, Telegram disconnect and cache prune: one core
         # method, idempotent (the SIGINT handler may already have run it).
         if self._owns_core:
-            self.core.shutdown(self._stop_web_adapter)
+            self._own_core().shutdown(self._stop_web_adapter)
 
     def shutdown_from_signal(self) -> None:
         """Ctrl+C: stop polling, shut the core down, exit the app."""
         self._polling_active = False
         if self._owns_core:
-            self.core.shutdown(self._stop_web_adapter)
+            self._own_core().shutdown(self._stop_web_adapter)
         self.exit()
 
     def _stop_web_adapter(self) -> None:

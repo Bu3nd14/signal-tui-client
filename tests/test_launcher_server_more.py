@@ -66,7 +66,7 @@ class TestStatus:
         monkeypatch.setattr(server, "port_listening", lambda port: False)
         assert server.status() == 0
         out = capsys.readouterr().out
-        assert "TUI: spenta" in out
+        assert "Server: spento" in out
         assert "daemon signal-cli: spento" in out
         assert "WAHA: spento" in out
         assert "Web UI: spenta" in out
@@ -80,7 +80,7 @@ class TestStatus:
         monkeypatch.setattr(server, "port_listening", lambda port: True)
         assert server.status() == 0
         out = capsys.readouterr().out
-        assert "TUI: ATTIVA (pid 4242)" in out
+        assert "Server: ATTIVO (pid 4242)" in out
         assert "daemon signal-cli: attivo" in out
         assert "WAHA: attivo" in out
         assert "in ascolto su 4242" in out

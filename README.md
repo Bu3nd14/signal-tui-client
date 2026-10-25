@@ -432,8 +432,23 @@ password after scanning.
 ## Usage
 
 ```bash
-python3 signal_tui.py
+python3 megachat.py                  # the TUI: attach to a running server, or start one (see below)
+python3 signal_tui.py                # same thing
+python3 megachat.py --connect PATH   # attach to the server on this Unix socket; never start one
+python3 megachat.py --in-process     # debugging/tests: the chat core runs inside the TUI (no server)
+python3 megachat.py serve            # the headless server only (web UI, no TUI)
 ```
+
+The TUI is a client of the chat server. At startup it looks for a server on the Unix socket
+(`$MEGACHAT_SOCKET`, else `$XDG_RUNTIME_DIR/megachat/server.sock`, else
+`~/.local/state/megachat/server.sock`); if one answers it attaches, otherwise it starts
+`megachat serve` detached (same Python and checkout, no TUI, `--no-web` unless you pass `--web...`
+flags or `config.json` enables the web UI), waits for its socket (up to 30 s) and attaches. Closing
+the TUI (Ctrl+C or exit) only disconnects it: the server keeps running and any number of TUIs can
+attach to the same one. Web options (`--web`, `--web-port`, ...) are forwarded to a server the TUI
+starts; they are ignored, with a note, when it attaches to one already running. A spawned server's
+output goes to `/tmp/megachat-serve.log`, the server's own log to `/tmp/signal-tui.log` and the
+TUI's to `/tmp/megachat-tui.log`.
 
 The app starts the `signal-cli` daemon automatically on first launch (for Signal) and a webhook
 HTTP server for WhatsApp push events. See the subsections below for details on each area.
@@ -649,7 +664,7 @@ The automatic installer enables the Web UI in `config.json`, so a normal
 
 | Alias | What it does |
 |---|---|
-| `web-signal-tui` | Starts the TUI with the web server in the **foreground** on `0.0.0.0:4242` |
+| `web-signal-tui` | Starts the TUI with the web server on `0.0.0.0:4242`: attaches to a running server or starts one that keeps running after the TUI exits (stop it with `web-signal-tui-stop`) |
 | `web-signal-tui-bg` | Starts the headless server (`megachat serve`: core + web server, no TUI) as a **detached background process** and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN` |
 | `web-signal-tui-stop` | Cleanly stops the background server (SIGINT; also kills a legacy tmux `tui` session if one exists) and removes `/tmp/signal-tui.lock` |
 
@@ -673,11 +688,12 @@ python3 -m server --web-no-auth                # same entry point, no token (tru
 ```
 
 Options: `--debug`, `--web-port`, `--web-host`, `--web-no-auth`, `--no-web` (no client can connect
-yet; logs a warning). The TUI and the server share the single-instance lock
-(`/tmp/signal-tui.lock`), so only one of them runs at a time. `python3 launcher.py server
+yet; logs a warning). The server holds the single-instance lock (`/tmp/signal-tui.lock`, override
+with `$MEGACHAT_LOCK_FILE`); attached TUIs never take it, only `megachat --in-process` does (so it
+cannot run next to a server). `python3 launcher.py server
 start|stop|status` starts/stops it (together with WAHA) as a detached background process; its
 stdout/stderr go to `/tmp/megachat-serve.log`. `megachat.py` with any other arguments starts the TUI
-as before (`python3 signal_tui.py` keeps working).
+as before (`python3 signal_tui.py` keeps working). Stopping the server (`web-signal-tui-stop`, SIGINT to the lock pid) disconnects every attached TUI; they show a reconnect message and resync if a new server appears.
 
 ### Fast cycle (background + token)
 

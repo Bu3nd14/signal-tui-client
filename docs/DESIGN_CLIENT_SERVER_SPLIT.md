@@ -291,8 +291,44 @@ ones are served from a ring of the last 2000 events.
 
 - The TUI only knows `ChatClient` (socket transport in production,
   in-process transport in tests).
-- Startup: `--connect PATH` → use it; else a live socket → attach; else spawn
-  `megachat serve` detached, wait for the socket, attach.
+- Startup (`signal_tui.main`, logic in `server/attach.py`):
+  1. `--connect PATH` → `SocketClient.connect(PATH)`; if nothing answers, exit 1
+     with a message. Never spawns.
+  2. else a live server on the default socket path (`server/paths.py`:
+     `rpc.hello` answers) → attach. A server with another wire version is an
+     error (exit 1), not a reason to spawn.
+  3. else spawn `megachat serve --socket <path>` and attach as soon as its socket
+     answers (bounded: 30 s). The child is `sys.executable megachat.py serve`
+     in the same checkout, `start_new_session=True` (it survives the TUI and
+     its terminal; the TUI's Ctrl+C does not reach it), stdin `/dev/null`,
+     stdout/stderr appended to `/tmp/megachat-serve.log`, and a daemon thread
+     reaps it. Web: `--no-web`, unless the user passed `--web`/`--web-port`/
+     `--web-host`/`--web-no-auth` or `config.json` enables the web UI; then the
+     flags are passed through and the server serves the web UI (TUI-side web
+     flags are ignored, with a note, when attaching to an existing server).
+     `--debug` is passed through too. If the child exits before answering and
+     nobody holds the instance lock, exit 1 with its exit code and the tail of
+     its output; on timeout or Ctrl+C the child we spawned is sent SIGTERM.
+  4. `--in-process` (debugging/tests, mutually exclusive with `--connect`):
+     the TUI owns `ChatCore` + `InProcessClient`, the embedded web adapter and
+     the lock, as before Phase 2.
+  The TUI records whether it spawned the server (`SignalTUI.server_spawned`:
+  `True` spawned, `False` attached, `None` in-process); the exit dialog's
+  default depends on it (below). Until the dialog exists (P2.5) an attached or
+  spawned TUI just closes its client on Ctrl+C/exit and the server keeps
+  running; `--in-process` shuts its core down as before.
+- Lock: `/tmp/signal-tui.lock` (`$MEGACHAT_LOCK_FILE` overrides it) belongs to
+  whoever owns the backends: the server, or a `--in-process` TUI. An attached
+  TUI never takes it, so many TUIs share one server. Check-and-write is
+  serialised by an `flock` on `<lock>.guard`. Two TUIs started together may
+  each spawn a server; exactly one wins the lock, the loser exits ("already
+  running") and its TUI notices (the child exited while a live process holds
+  the lock), keeps waiting and attaches to the winner (`spawned=False`).
+  `launcher.py server stop`/`web-signal-tui-stop` still SIGINT the lock pid,
+  which now stops the server (attached TUIs reconnect-loop).
+- Logs: `megachat serve` and `--in-process` log to `/tmp/signal-tui.log`; the
+  TUI client logs to its own `/tmp/megachat-tui.log`; the output of a spawned
+  server (startup errors) is in `/tmp/megachat-serve.log`.
 - Exit dialog: **Detach** (disconnect only) / **Quit** (`server.shutdown`). If
   the TUI attached to a server it did not spawn, Detach is the default.
 - Optimistic send: client-generated `client_msg_id`, confirmed by the

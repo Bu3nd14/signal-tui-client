@@ -47,7 +47,8 @@ from emoji_picker import (
     replace_emoji_aliases,  # noqa: F401 (re-exported for test patching)
 )
 from protocols.config import image_protocol, web_enabled, web_host, web_port, web_token
-from server.lock import (  # noqa: F401 (re-exported for tests/profiling)
+from server.attach import AttachError, attach_or_spawn, serve_args_for_web
+from server.lock import (
     LOCK_FILE,
     _acquire_lock,
     _release_lock,
@@ -65,6 +66,13 @@ logger.addHandler(_link_fh)
 logger.setLevel(logging.DEBUG)
 
 
+#: The TUI's own log when it is a client.  The server logs to
+#: ``/tmp/signal-tui.log`` (``server.main.LOG_FILE``); ``--in-process`` keeps
+#: logging there, since the TUI is then the core.
+TUI_LOG_FILE = "/tmp/megachat-tui.log"
+CORE_LOG_FILE = "/tmp/signal-tui.log"
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line options for the TUI entry point."""
     parser = argparse.ArgumentParser(description="Signal TUI Client")
@@ -73,7 +81,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--web",
         action="store_true",
         default=None,
-        help="enable the optional read-only web UI",
+        help=(
+            "enable the optional read-only web UI (served by the server this "
+            "TUI starts; ignored with a note when attaching to a running one)"
+        ),
     )
     parser.add_argument("--web-port", type=int, help="web UI listen port")
     parser.add_argument(
@@ -88,10 +99,41 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "credential — only use on a trusted network or behind your own auth)"
         ),
     )
+    parser.add_argument(
+        "--connect",
+        metavar="PATH",
+        help="attach to the server on this Unix socket; never start one",
+    )
+    parser.add_argument(
+        "--in-process",
+        action="store_true",
+        help=(
+            "debugging/tests: run the chat core inside the TUI (takes the "
+            "instance lock, no server, no socket) instead of attaching to a "
+            "server"
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.connect and args.in_process:
+        parser.error("--connect and --in-process are mutually exclusive")
     if args.web_port is not None and not 1 <= args.web_port <= 65535:
         parser.error("--web-port must be between 1 and 65535")
     return args
+
+
+def _web_wanted(args: argparse.Namespace) -> bool:
+    """Whether the user wants the web UI: ``--web``, any ``--web-*`` option, or
+    (without ``--web``) ``config.json`` enabling it."""
+    return _web_flags_given(args) or web_enabled()
+
+
+def _web_flags_given(args: argparse.Namespace) -> bool:
+    return bool(
+        args.web
+        or args.web_port is not None
+        or args.web_host is not None
+        or args.web_no_auth
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -99,27 +141,70 @@ def main(argv: list[str] | None = None) -> int:
 
     args = _parse_args(argv)
 
-    # --debug: logging di livello DEBUG su /tmp/signal-tui.log (default INFO).
-    # Utile per la strumentazione (es. timing di send_message_sync) senza
-    # interferire con stderr usato da Textual per la TUI.
+    # --debug: logging di livello DEBUG (default INFO) su file, senza
+    # interferire con stderr usato da Textual per la TUI.  Il TUI client ha il
+    # suo log; con --in-process (il TUI e' il core) resta quello storico.
     level = logging.DEBUG if args.debug else logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        handlers=[logging.FileHandler("/tmp/signal-tui.log", mode="a")],
+        handlers=[
+            logging.FileHandler(
+                CORE_LOG_FILE if args.in_process else TUI_LOG_FILE, mode="a"
+            )
+        ],
     )
     import signal as signal_module
 
-    if not _acquire_lock():
-        print(
-            "❌ Signal TUI is already running (lock file /tmp/signal-tui.lock).",
-            file=sys.stderr,
+    client = None
+    server_spawned: bool | None = None
+    if args.in_process:
+        # The TUI owns the backends: it takes the instance lock itself.
+        if not _acquire_lock():
+            print(
+                f"❌ Megachat is already running (lock file {LOCK_FILE}).",
+                file=sys.stderr,
+            )
+            print(
+                "   If you're sure it's not running, delete the lock file and "
+                "try again.",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        # A client never takes the lock: it belongs to the server.
+        web_wanted = _web_wanted(args)
+        try:
+            attached = attach_or_spawn(
+                connect_path=args.connect,
+                serve_args=serve_args_for_web(
+                    web=web_wanted,
+                    web_port=args.web_port,
+                    web_host=args.web_host,
+                    web_no_auth=args.web_no_auth,
+                )
+                + (["--debug"] if args.debug else []),
+                notify=lambda msg: print(msg, file=sys.stderr, flush=True),
+            )
+        except AttachError as exc:
+            print(f"❌ {exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("Interrupted.", file=sys.stderr)
+            return 130
+        client = attached.client
+        server_spawned = attached.spawned
+        if _web_flags_given(args) and not attached.spawned:
+            print(
+                "ℹ️  Attached to a running server: the web options are "
+                "ignored (the server decides what it serves).",
+                file=sys.stderr,
+            )
+        logger.info(
+            "TUI client: %s server at %s",
+            "spawned" if attached.spawned else "attached to",
+            attached.path,
         )
-        print(
-            "   If you're sure it's not running, delete the lock file and try again.",
-            file=sys.stderr,
-        )
-        return 1
 
     # Detect the terminal image backend BEFORE ``app.run()``.  Any failure
     # degrades to CATIMG (current behaviour), never blocking startup.
@@ -170,7 +255,11 @@ def main(argv: list[str] | None = None) -> int:
             logger.debug("Cell-size pre-run detection failed", exc_info=True)
         logger.info("Native image cell size: %r", initial_cell_size)
 
-    enable_web = args.web if args.web is not None else web_enabled()
+    # Only the in-process TUI embeds the web adapter; with a server, the server
+    # serves the web UI.
+    enable_web = args.in_process and (
+        args.web if args.web is not None else web_enabled()
+    )
     web_adapter = None
     if enable_web:
         # Composition root: the only place that wires the web adapter into the
@@ -189,6 +278,8 @@ def main(argv: list[str] | None = None) -> int:
         web_token=web_token(),
         web_no_auth=args.web_no_auth,
         web_adapter=web_adapter,
+        client=client,
+        server_spawned=server_spawned,
     )
 
     def _handle_sigint(sig, frame):
@@ -206,8 +297,15 @@ def main(argv: list[str] | None = None) -> int:
     # it onto ``loop.add_signal_handler`` (see ``SignalTUI._sigint_callback``).
     signal_module.signal(signal_module.SIGINT, _handle_sigint)
     app._sigint_callback = lambda: _handle_sigint(signal_module.SIGINT, None)
-    app.run()
-    _release_lock()
+    try:
+        app.run()
+    finally:
+        if client is not None:
+            # An attached or spawned TUI only disconnects; the server keeps
+            # running (the Detach/Quit dialog is P2.5).
+            client.close()
+    if args.in_process:
+        _release_lock()
     return 0
 
 

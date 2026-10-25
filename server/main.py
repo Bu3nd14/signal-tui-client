@@ -3,9 +3,10 @@
 ``megachat serve`` replaces the "run the TUI inside tmux to keep the web UI
 alive" workaround.  It starts the Unix-socket adapter (the transport of the
 TUI client, design §4.2; ``--no-socket`` / ``--socket PATH``) and the web
-adapter (``--no-web``).  Until the TUI becomes a client of the server
-(Phase 2) the TUI and the server each run their own in-process core, so both
-take the same single-instance lock and are mutually exclusive.
+adapter (``--no-web``).  The server holds the single-instance lock
+(``server/lock.py``); TUIs attach to it as clients (``megachat``) and never
+take it, except ``megachat --in-process``, which runs its own core and is
+mutually exclusive with a server.
 
 This module must never import Textual or ``tui``.  ``web`` is imported lazily
 (only when the web adapter is enabled).
@@ -127,8 +128,8 @@ def serve(
             file=sys.stderr,
         )
         print(
-            "   Stop the TUI/server holding it, or delete the lock file if you "
-            "are sure nothing is running.",
+            "   A server (or a --in-process TUI) is already running; "
+            "delete the lock file only if you are sure nothing is.",
             file=sys.stderr,
         )
         return 1

@@ -212,8 +212,8 @@ install_aliases() {
 SIGNAL_TUI_DIR="__PROJECT_DIR__"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 _signal_tui_web_bg() {
-    local pid=""
-    [ -f /tmp/signal-tui.lock ] && pid="$(cat /tmp/signal-tui.lock)"
+    local pid="" lock="${MEGACHAT_LOCK_FILE:-/tmp/signal-tui.lock}"
+    [ -f "$lock" ] && pid="$(cat "$lock")"
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
         ( cd "$SIGNAL_TUI_DIR" && nohup .venv/bin/python megachat.py serve >/dev/null 2>&1 </dev/null & ) || return 1
     fi
@@ -222,15 +222,16 @@ _signal_tui_web_bg() {
     echo "Server bg attivo — token: $SIGNAL_TUI_WEB_TOKEN"
 }
 _signal_tui_web_stop() {
-    if [ -f /tmp/signal-tui.lock ]; then
-        kill -INT "$(cat /tmp/signal-tui.lock)" 2>/dev/null || true
+    local lock="${MEGACHAT_LOCK_FILE:-/tmp/signal-tui.lock}"
+    if [ -f "$lock" ]; then
+        kill -INT "$(cat "$lock")" 2>/dev/null || true
     fi
     for i in $(seq 1 12); do
-        [ ! -f /tmp/signal-tui.lock ] && break
+        [ ! -f "$lock" ] && break
         sleep 0.5
     done
     tmux kill-session -t tui 2>/dev/null || true
-    rm -f /tmp/signal-tui.lock
+    rm -f "$lock"
     echo "TUI bg fermata."
 }
 alias web-signal-tui-bg='_signal_tui_web_bg'

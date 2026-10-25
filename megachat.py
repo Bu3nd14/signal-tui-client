@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Megachat entry point.
 
-``megachat serve [...]`` runs the headless server (core + web adapter, no
-TUI); anything else starts the TUI with its usual flags.  The TUI is imported
-lazily so the serve path never loads Textual.
+``megachat serve [...]`` runs the headless server (core + socket + web
+adapter, no TUI).  Anything else starts the TUI, which attaches to a running
+server or spawns ``megachat serve`` (``--connect PATH`` attaches to a given
+socket, ``--in-process`` runs the core inside the TUI; design §5).  The TUI is
+imported lazily so the serve path never loads Textual.
 """
 
 import sys

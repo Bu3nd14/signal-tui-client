@@ -56,6 +56,16 @@ def isolate_server_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
     return path
 
 
+@pytest.fixture(autouse=True)
+def isolate_instance_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Child processes (spawned servers, shell aliases) resolve the instance
+    lock from this: the real ``/tmp/signal-tui.lock`` is never touched.
+    (In-process code reads ``server.lock.LOCK_FILE``, which tests patch.)"""
+    path = tmp_path / "signal-tui.lock"
+    monkeypatch.setenv("MEGACHAT_LOCK_FILE", str(path))
+    return path
+
+
 @pytest.fixture
 def open_media_root(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let ``media.*`` operations hand out any path a test's fake manager returns.

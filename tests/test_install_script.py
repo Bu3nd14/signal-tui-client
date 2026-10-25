@@ -930,6 +930,8 @@ class TestAliasIsolation:
             **os.environ,
             "HOME": str(home),
             "SHELL": "/bin/bash",
+            # Never read or remove the real /tmp/signal-tui.lock (mc-cvp).
+            "MEGACHAT_LOCK_FILE": str(tmp_path / "signal-tui.lock"),
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
         }
         install = subprocess.run(
