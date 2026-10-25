@@ -47,15 +47,18 @@ def messages_edit(api: ChatAPI, req: MessagesEditRequest) -> OkOut:
     try:
         edited = manager.edit_message_sync(protocol, contact_id, message_id, new_text)
         if not edited:
-            raise RuntimeError("Backend rejected message edit")
+            raise RuntimeError("edit rejected by server")
         updated_rows = _domain._persist_message_edit(
             protocol, contact_id, message_id, new_text
         )
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Web edit failed: protocol=%s contact=%s", protocol, contact_id
         )
-        raise ApiError("backend_error", "Message edit failed") from None
+        # The cause is for local frontends (the web only shows the message).
+        raise ApiError(
+            "backend_error", "Message edit failed", details={"error": str(exc)}
+        ) from None
 
     if updated_rows == 0:
         logger.debug(

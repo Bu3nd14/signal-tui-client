@@ -3,6 +3,7 @@
 import logging
 
 from models import PROTOCOL_SIGNAL
+from server.api import ApiError
 from ui_components import MessageTextArea, MessageWidget
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,11 @@ class EditMessageMixin:
         )
 
     def _apply_local_edit(self, snap: dict, new_text: str) -> None:
-        """Ottimistico: cache UI + cache backend + DB + identity sets + widget."""
+        """Ottimistico, solo vista: cache UI + identity sets + widget.
+
+        Il core applica l'edit (backend, SQLite, cache chat) solo dopo il
+        successo di ``messages.edit``: nulla di backend/DB sul thread UI.
+        """
         entry = next(
             (
                 m
@@ -127,11 +132,6 @@ class EditMessageMixin:
         if entry is not None:
             entry["text"] = new_text
             entry["edited"] = True
-        backend = self.manager.get(snap["protocol"])
-        if backend is not None:
-            backend.apply_edit(
-                snap["contact_id"], snap["message_id"], new_text, is_mine=True
-            )
         self._rewrite_message_identity(
             snap["protocol"],
             snap["cache_key"],
@@ -159,29 +159,28 @@ class EditMessageMixin:
         # _seen_timestamps NON si tocca: il timestamp non cambia mai.
 
     def _edit_message_worker(self, snap: dict, old_text: str, new_text: str) -> None:
-        """Worker thread: invio edit al backend, rollback completo su errore."""
-        backend = self.manager.get(snap["protocol"])
-        if backend is None:
-            self.call_from_thread(
-                self._restore_local_edit,
-                snap,
-                old_text,
-                f"no backend for {snap['protocol']}",
-            )
-            return
+        """Worker thread: ``messages.edit``, rollback della vista su errore."""
         try:
-            ok = backend.edit_message_sync(
-                snap["contact_id"], snap["message_id"], new_text
+            self.client.call(
+                "messages.edit",
+                {
+                    "protocol": snap["protocol"],
+                    "contact_id": snap["contact_id"],
+                    "message_id": snap["message_id"],
+                    "new_text": new_text,
+                },
             )
-        except Exception as e:  # noqa: BLE001
-            self.call_from_thread(self._restore_local_edit, snap, old_text, str(e))
+        except Exception as e:
+            logger.warning("messages.edit failed", exc_info=True)
+            details = e.details if isinstance(e, ApiError) else None
+            error = (
+                details.get("error")
+                if isinstance(details, dict) and details.get("error")
+                else (e.message if isinstance(e, ApiError) else str(e))
+            )
+            self.call_from_thread(self._restore_local_edit, snap, old_text, error)
             return
-        if not ok:
-            self.call_from_thread(
-                self._restore_local_edit, snap, old_text, "edit rejected by server"
-            )
-        else:
-            self.call_from_thread(self._status, "✏️ Message edited")
+        self.call_from_thread(self._status, "✏️ Message edited")
 
     def _restore_local_edit(self, snap: dict, old_text: str, error: str) -> None:
         """UI thread: ripristino completo del testo originale."""
@@ -197,15 +196,6 @@ class EditMessageMixin:
         if entry is not None:
             entry["text"] = old_text
             entry["edited"] = False
-        backend = self.manager.get(snap["protocol"])
-        if backend is not None:
-            backend.apply_edit(
-                snap["contact_id"],
-                snap["message_id"],
-                old_text,
-                is_mine=True,
-                mark_edited=False,
-            )
         self._rewrite_message_identity(
             snap["protocol"],
             snap["cache_key"],
