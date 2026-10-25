@@ -964,8 +964,10 @@ def messages_page(
                 exc_info=True,
             )
     extra_keys = tuple(contact_storage_keys(contact)[1:]) if contact is not None else ()
+    # Read from the canonical key: with a ghost id the extra keys are the ghost
+    # itself, so reading by ``contact_id`` would skip the @lid history.
     result = _messages(
-        protocol, contact_id, extra_keys=extra_keys, limit=limit, since=since
+        protocol, canonical_id, extra_keys=extra_keys, limit=limit, since=since
     )
     _attach_media_versions(manager, protocol, result)
     is_group = contact_id.endswith("@g.us")

@@ -211,6 +211,9 @@ def test_whatsapp_ghost_id_is_canonicalized_and_unioned():
     assert response.status_code == 200
     # Refresh runs on the ACTIVE (@lid) chat, not the ghost id.
     assert fetched == [(canonical, 20)]
+    # Reading by the ghost id must union both keys too: the refresh just wrote
+    # the live history under @lid, which a ghost-only read would hide.
+    assert [m["text"] for m in response.json()] == ["old", "new"]
     assert response.json() == api.call_json(
         "messages.page", op_args("whatsapp", alias, refresh=True)
     )
