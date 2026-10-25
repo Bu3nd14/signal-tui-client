@@ -83,8 +83,13 @@ def _temp_suffix(raw_filename: str | None) -> str:
     return suffix if suffix in ALLOWED_EXTENSIONS else ""
 
 
-def _copy_upload_sync(upload: Any, *, max_bytes: int | None = None) -> TempUpload:
-    """Copy *upload* to a private temp file, applying the size guard mid-copy."""
+def _copy_upload_sync(
+    upload: Any, *, max_bytes: int | None = None, media_limits: bool = True
+) -> TempUpload:
+    """Copy *upload* to a private temp file, applying the size guard mid-copy.
+
+    ``media_limits=False`` is for files that are not media (mail attachments):
+    only ``max_bytes`` applies."""
     directory = ensure_upload_directory()
     temporary_path: Path | None = None
     raw_filename = getattr(upload, "filename", None)
@@ -93,6 +98,7 @@ def _copy_upload_sync(upload: Any, *, max_bytes: int | None = None) -> TempUploa
         max_bytes=max_bytes,
         declared_content_type=declared_content_type,
         filename=raw_filename,
+        media_limits=media_limits,
     )
     try:
         with tempfile.NamedTemporaryFile(
@@ -115,7 +121,9 @@ def _copy_upload_sync(upload: Any, *, max_bytes: int | None = None) -> TempUploa
         raise
 
 
-async def store_temp_upload(upload: Any, *, max_bytes: int | None = None) -> TempUpload:
+async def store_temp_upload(
+    upload: Any, *, max_bytes: int | None = None, media_limits: bool = True
+) -> TempUpload:
     """Copy *upload* to a temp file; closes the upload.
 
     ``max_bytes`` caps this single file (e.g. what remains of the request-wide
@@ -123,6 +131,8 @@ async def store_temp_upload(upload: Any, *, max_bytes: int | None = None) -> Tem
     ``UploadValidationError`` before the whole file is on disk.
     """
     try:
-        return await asyncio.to_thread(_copy_upload_sync, upload, max_bytes=max_bytes)
+        return await asyncio.to_thread(
+            _copy_upload_sync, upload, max_bytes=max_bytes, media_limits=media_limits
+        )
     finally:
         await upload.close()

@@ -128,24 +128,11 @@ WEB_SERVER_ALLOWLIST = {
 WEB_FORBIDDEN_ROOTS = {"protocols", "tui", "transcription", "signal_tui", "textual"}
 
 
-#: TEMPORARY, narrow exemption (bead mc-im6; design doc §13).  Gmail is a
-#: web-only integration that predates the split and talks to IMAP/SMTP itself.
-#: Until it moves into the core behind operations, exactly these web modules
-#: may import exactly these names, and nothing else:
-#:
-#: * ``server/gmail.py`` moved into the core (mc-im6 step 1) and may use
-#:   ``protocols.config``; the web modules below still import it directly
-#:   until the operations land.
-#: * ``web/gmail_api.py`` - ``server.link_preview`` (``fetch_external_image``):
-#:                          the Gmail image proxy reuses the SSRF-safe fetcher.
-#: * ``web/server.py``    - ``server.link_preview`` (``close_shared_session``):
-#:                          the adapter closes that shared HTTP session on its
-#:                          own event loop at shutdown (the Gmail image proxy
-#:                          and ``links.preview*`` share it).
-#:
+#: TEMPORARY, narrow exemption (bead mc-im6; design doc §13).  Gmail is in the
+#: core now (``server/gmail.py``, ``gmail.*`` operations); the one thing left is
+#: the web server's shutdown, which still reaches into the core directly.
 #: ``test_gmail_exemption_is_exact`` keeps this list from growing silently.
 GMAIL_IMPORT_EXEMPTIONS: dict[str, set[str]] = {
-    "web/gmail_api.py": {"server.link_preview", "server.gmail", "server"},
     "web/server.py": {"server.link_preview", "server.gmail"},
 }
 
