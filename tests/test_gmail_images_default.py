@@ -762,6 +762,53 @@ def test_jpeg_parser_skips_restart_markers_before_sof(marker):
 
 
 @pytest.mark.parametrize(
+    "data",
+    [
+        b"\xff\xd8\x00\x00",  # byte non-FF dopo SOI
+        b"\xff\xd8\xff",  # FF a fine buffer
+        b"\xff\xd8\xff\xff",  # fill bytes fino a EOF
+    ],
+)
+def test_jpeg_dimensions_rejects_non_ff_and_truncated_marker(data):
+    assert lp._jpeg_dimensions(data) is None
+
+
+def test_jpeg_dimensions_skips_stuffed_zero_marker():
+    # FF 00 prima di EOI: il marker 0x00 va ignorato e il parsing prosegue.
+    assert lp._jpeg_dimensions(b"\xff\xd8\xff\x00\xff\xd9") is None
+
+
+@pytest.mark.parametrize("length", range(2, 7))
+def test_jpeg_sof_with_too_short_length_returns_none(length):
+    data = b"\xff\xd8\xff\xc0" + struct.pack(">H", length) + b"\x00" * length
+    assert lp._jpeg_dimensions(data) is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _webp_chunk(b"VP8X", b"\x00" * 9),  # chunk VP8X < 10
+        _webp_chunk(b"VP8 ", b"\x00" * 10),  # start code VP8 errato
+        _webp_chunk(b"VP8L", b"\x00" + struct.pack("<I", 0)),  # signature errata
+        _webp_chunk(b"JUNK", b"\x00" * 8),  # chunk kind sconosciuto
+        b"RIFF\x00\x00\x00\x00WEBP",  # header troncato (<20)
+        b"RIFF\x00\x00\x00\x00WEBX" + b"\x00" * 4,  # WEBP errato
+        _webp_chunk(b"VP8X", b"\x00" * 10)[:20],  # chunk troncato
+    ],
+)
+def test_webp_dimensions_invalid_headers_return_none(data):
+    assert lp._webp_dimensions(data) is None
+
+
+def test_raster_dimensions_unknown_content_type_and_empty_headers():
+    assert lp._raster_dimensions(b"", "image/avif") is None
+    assert lp._raster_dimensions(b"", "image/png") is None
+    assert lp._raster_dimensions(b"", "image/gif") is None
+    assert lp._raster_dimensions(b"", "image/webp") is None
+    assert lp._raster_dimensions(b"", "image/jpeg") is None
+
+
+@pytest.mark.parametrize(
     ("data", "content_type"),
     [
         (b"", "image/png"),
@@ -804,6 +851,11 @@ async def test_fetch_external_image_applies_pixel_cap(monkeypatch):
     assert await lp.fetch_external_image(
         "https://images.example/at-cap.png", max_pixels=_GMAIL_MAX_PIXELS
     ) == (at_cap, "image/png")
+
+
+async def test_fetch_external_image_rejects_non_raster_body(monkeypatch):
+    _install_fake_fetch(monkeypatch, b"<html>not an image</html>", "text/html")
+    assert await lp.fetch_external_image("https://images.example/page") is None
 
 
 async def test_fetch_external_image_pixel_cap_fails_open(monkeypatch):
