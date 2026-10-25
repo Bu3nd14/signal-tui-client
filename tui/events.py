@@ -268,13 +268,6 @@ class EventHandlingMixin:
         ts = p["timestamp"]
         is_mine = msg.get("is_mine", False)
 
-        # Trigger lazy scoped: il nome non è (più) risolto → chiedi un refresh
-        # del solo protocollo del messaggio (throttled dal cooldown del worker).
-        if p["was_placeholder"] or _looks_unresolved(contact):
-            schedule = getattr(self, "schedule_address_book_refresh", None)
-            if schedule is not None:
-                schedule(protocol)
-
         # Aggiorna il timestamp dell'ultimo messaggio del contatto così la
         # lista contatti (ordinata per "ultimo messaggio") risente subito del
         # nuovo arrivo.  Il re-sort/render è differito a FINE batch dal poll

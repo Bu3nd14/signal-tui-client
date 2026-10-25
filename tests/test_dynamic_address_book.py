@@ -36,9 +36,9 @@ from models import (
     contact_cache_key,
 )
 from protocols.whatsapp import WhatsAppBackend
+from server.address_book_refresh import DynamicAddressBookMixin
 from server.bus import EventBus
 from server.core import ChatCore
-from tui.address_book_refresh import DynamicAddressBookMixin
 from tui.events import EventHandlingMixin, _looks_unresolved, _signal_stable_key
 from tui.pickers import PickerMixin
 
@@ -65,12 +65,11 @@ class _App(EventHandlingMixin):
         self._TYPING_MUMBLING_DURATION = 5.0
         self._web_enabled = web_enabled
         self.scheduled: list[str] = []
+        # The lazy trigger is domain work: it fires from ChatCore.process.
+        self.core.schedule_address_book_refresh = self.scheduled.append  # type: ignore[method-assign]
 
     def call_from_thread(self, *_args, **_kwargs):  # pragma: no cover - no-op
         return None
-
-    def schedule_address_book_refresh(self, protocol: str) -> None:
-        self.scheduled.append(protocol)
 
 
 def _message_event(
@@ -450,7 +449,7 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
 
 @pytest.fixture
 def patch_refresh_config(monkeypatch):
-    import tui.address_book_refresh as abr
+    import server.address_book_refresh as abr
 
     def _apply(interval: float, cooldown: float):
         monkeypatch.setattr(abr, "get_dynamic_refresh_interval_s", lambda: interval)
@@ -502,7 +501,7 @@ class TestScheduler:
         throttlerebbe per sempre (fino al periodico).  Un secondo wake
         ravvicinato deve invece restare throttled.
         """
-        import tui.address_book_refresh as abr
+        import server.address_book_refresh as abr
 
         # Forza un uptime piccolo: il test non deve dipendere dall'host.
         monkeypatch.setattr(abr.time, "monotonic", lambda: 5.0)
@@ -626,3 +625,23 @@ class TestDynamicAddressBookIntegration:
         assert len(app.contacts) == 1
         assert app.contacts[0] is placeholder
         assert placeholder.display_name == "Mario"
+
+
+class TestCoreOwnsRefreshWorker:
+    """The refresh worker lives and dies with the core (headless server)."""
+
+    def test_start_and_stop_drive_the_worker(self, monkeypatch):
+        import server.core as core_mod
+
+        monkeypatch.setattr(core_mod, "signal_enabled", lambda: False)
+        core = ChatCore(EventBus())
+        core.whatsapp_backend = None
+        core.telegram_backend = None
+        core.start()
+        try:
+            thread = core._address_book_refresh_thread
+            assert thread is not None and thread.is_alive()
+        finally:
+            core.stop()
+        thread.join(timeout=2)
+        assert not thread.is_alive()

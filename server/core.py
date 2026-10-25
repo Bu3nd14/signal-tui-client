@@ -54,8 +54,9 @@ from protocols import (
 )
 from protocols.config import signal_enabled, telegram_enabled, whatsapp_enabled
 from protocols.webhook import WEBHOOK_PORT, ensure_webhook_server
+from server.address_book_refresh import DynamicAddressBookMixin
 from server.bus import EventBus
-from server.domain import resolve_placeholder_name
+from server.domain import looks_unresolved, resolve_placeholder_name
 
 logger = logging.getLogger("signal_tui")
 
@@ -82,7 +83,7 @@ def _run_startup_maintenance() -> None:
         logger.debug("Startup DB maintenance failed", exc_info=True)
 
 
-class ChatCore:
+class ChatCore(DynamicAddressBookMixin):
     """Owns the backends and runs their connection workers on daemon threads."""
 
     def __init__(self, bus: EventBus) -> None:
@@ -115,6 +116,18 @@ class ChatCore:
         self._pump_thread: threading.Thread | None = None
         self._pump_stop = threading.Event()
 
+        # Dynamic address-book refresh (periodic + lazy), see
+        # ``server.address_book_refresh.DynamicAddressBookMixin``.  State lives
+        # here (not in ``start``) so a core that is never started stays
+        # thread-free.
+        self._address_book_refresh_stop = False
+        self._address_book_refresh_wake = threading.Event()
+        self._address_book_refresh_lock = threading.Lock()
+        self._address_book_last_periodic = 0.0
+        self._address_book_last_lazy = 0.0
+        self._address_book_pending_protocols: set[str] = set()
+        self._address_book_refresh_thread: threading.Thread | None = None
+
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
@@ -139,9 +152,11 @@ class ChatCore:
             and not self.telegram_backend.needs_pairing
         ):
             self._spawn(self.connect_telegram, "core-connect-telegram")
+        self.start_address_book_refresh()
 
     def stop(self) -> None:
         """Stop the event pump; the thread exits within one 0.1s slice."""
+        self.stop_address_book_refresh()
         self._pump_stop.set()
         thread = self._pump_thread
         if thread is not None and thread is not threading.current_thread():
@@ -551,6 +566,10 @@ class ChatCore:
             return []
         contact, was_placeholder = self._resolve_contact(backend, event)
         self._ensure_registered(backend, contact)
+        # Lazy scoped trigger: the name is not (yet) resolved -> ask for a
+        # refresh of this protocol only (throttled by the worker cooldown).
+        if was_placeholder or looks_unresolved(contact):
+            self.schedule_address_book_refresh(event.protocol)
         ts = event.payload.get("timestamp", 0)
         # Save to DB + backend cache.  True only if newly added; "changed"
         # when an existing identity was upgraded (e.g. optimistic -> echo).
