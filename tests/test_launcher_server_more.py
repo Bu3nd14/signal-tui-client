@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 
 import pytest
@@ -73,14 +75,14 @@ class TestStatus:
 
     def test_reports_all_on(self, monkeypatch, tmp_path, capsys):
         lock = tmp_path / "signal-tui.lock"
-        lock.write_text("4242", encoding="utf-8")
+        lock.write_text(str(os.getpid()), encoding="utf-8")
         monkeypatch.setattr(server, "LOCK_FILE", lock)
         monkeypatch.setattr(server, "_pgrep", lambda pattern: True)
         monkeypatch.setattr(server, "_docker_container_running", lambda name: True)
         monkeypatch.setattr(server, "port_listening", lambda port: True)
         assert server.status() == 0
         out = capsys.readouterr().out
-        assert "Server: ATTIVO (pid 4242)" in out
+        assert f"Server: ATTIVO (pid {os.getpid()})" in out
         assert "daemon signal-cli: attivo" in out
         assert "WAHA: attivo" in out
         assert "in ascolto su 4242" in out
@@ -88,14 +90,14 @@ class TestStatus:
 
 class TestStopAll:
     def test_reports_waha_stopped(self, monkeypatch, capsys):
-        monkeypatch.setattr(server, "_stop_tui", lambda: None)
+        monkeypatch.setattr(server, "stop_server", lambda: True)
         monkeypatch.setattr(whatsapp_mod, "COMPOSE_FILE", "compose.yml")
         monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: _cp(a[0], 0))
         assert server.stop_all() == 0
         assert "WAHA fermato" in capsys.readouterr().out
 
     def test_reports_waha_was_not_running(self, monkeypatch, capsys):
-        monkeypatch.setattr(server, "_stop_tui", lambda: None)
+        monkeypatch.setattr(server, "stop_server", lambda: True)
         monkeypatch.setattr(whatsapp_mod, "COMPOSE_FILE", "compose.yml")
         monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: _cp(a[0], 1))
         assert server.stop_all() == 0
@@ -167,7 +169,7 @@ class TestStartAll:
 
     def test_stops_previous_instance_before_starting(self, monkeypatch, start_env):
         order = []
-        monkeypatch.setattr(server, "_stop_tui", lambda: order.append("stop"))
+        monkeypatch.setattr(server, "stop_server", lambda: order.append("stop") or True)
         monkeypatch.setattr(server, "port_listening", lambda port: True)
         real_popen = server.subprocess.Popen
         monkeypatch.setattr(
@@ -186,3 +188,113 @@ class TestKillTmuxSession:
 
         monkeypatch.setattr(server.subprocess, "run", _boom)
         server._kill_tmux_session()  # must not raise
+
+
+class TestStatusStaleLock:
+    def test_dead_lock_holder_is_not_running(self, monkeypatch, tmp_path, capsys):
+        lock = tmp_path / "signal-tui.lock"
+        lock.write_text("4242", encoding="utf-8")
+        monkeypatch.setattr(server, "LOCK_FILE", lock)
+        monkeypatch.setattr(server, "_pid_alive", lambda pid: False)
+        monkeypatch.setattr(server, "_pgrep", lambda pattern: False)
+        monkeypatch.setattr(server, "_docker_container_running", lambda name: False)
+        monkeypatch.setattr(server, "port_listening", lambda port: False)
+        server.status()
+        assert "Server: spento" in capsys.readouterr().out
+
+
+class TestStopServer:
+    @pytest.fixture
+    def lock(self, monkeypatch, tmp_path):
+        lock = tmp_path / "signal-tui.lock"
+        monkeypatch.setattr(server, "LOCK_FILE", lock)
+        monkeypatch.setattr(server.time, "sleep", lambda *_: None)
+        self.tmux = []
+        monkeypatch.setattr(
+            server, "_kill_tmux_session", lambda name="tui": self.tmux.append(name)
+        )
+        return lock
+
+    def test_sigint_then_waits_for_exit_and_clears_lock(self, monkeypatch, lock):
+        lock.write_text("31337", encoding="utf-8")
+        alive = {"v": True}
+        sent = []
+
+        def _kill(pid, sig):
+            if sig == 0:
+                if not alive["v"]:
+                    raise ProcessLookupError
+                return
+            sent.append((pid, sig))
+
+        polls = {"n": 0}
+
+        def _sleep(_):
+            polls["n"] += 1
+            if polls["n"] >= 3:
+                alive["v"] = False
+
+        monkeypatch.setattr(server.os, "kill", _kill)
+        monkeypatch.setattr(server.time, "sleep", _sleep)
+        assert server.stop_server() is True
+        assert sent == [(31337, signal.SIGINT)]
+        assert polls["n"] == 3  # waited for the pid, not just the lock file
+        assert not lock.exists()
+        assert self.tmux == ["tui"]  # legacy session still cleaned up
+
+    def test_process_that_survives_keeps_the_lock(self, monkeypatch, lock):
+        lock.write_text("31337", encoding="utf-8")
+        monkeypatch.setattr(server.os, "kill", lambda pid, sig: None)  # immortal
+        assert server.stop_server() is False
+        assert lock.read_text() == "31337"  # never free the lock under a live pid
+        assert self.tmux == []
+
+    def test_stale_lock_is_removed_without_signalling(self, monkeypatch, lock):
+        lock.write_text("31337", encoding="utf-8")
+        calls = []
+
+        def _kill(pid, sig):
+            calls.append(sig)
+            raise ProcessLookupError
+
+        monkeypatch.setattr(server.os, "kill", _kill)
+        assert server.stop_server() is True
+        assert calls == [0]  # liveness probe only, no SIGINT
+        assert not lock.exists()
+
+    def test_garbage_lock_is_removed(self, monkeypatch, lock):
+        lock.write_text("not-a-pid", encoding="utf-8")
+        assert server.stop_server() is True
+        assert not lock.exists()
+
+
+class TestStartAllStuckServer:
+    def test_does_not_spawn_next_to_a_server_that_will_not_stop(
+        self, monkeypatch, start_env
+    ):
+        monkeypatch.setattr(server, "stop_server", lambda: False)
+        monkeypatch.setattr(server, "server_pid", lambda: 99)
+        with pytest.raises(SystemExit):
+            server.start_all()
+        assert start_env == []  # nothing spawned
+
+    def test_stop_all_keeps_waha_when_server_will_not_stop(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(server, "stop_server", lambda: False)
+        monkeypatch.setattr(server, "server_pid", lambda: 99)
+        ran = []
+        monkeypatch.setattr(
+            server.subprocess, "run", lambda *a, **k: ran.append(a) or _cp(a[0], 0)
+        )
+        with pytest.raises(SystemExit):
+            server.stop_all()
+        assert ran == []
+
+    def test_never_starts_a_tmux_session(self, monkeypatch, start_env):
+        ran = []
+        monkeypatch.setattr(
+            server.subprocess, "run", lambda *a, **k: ran.append(a[0]) or _cp(a[0], 0)
+        )
+        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        monkeypatch.setattr(server, "stop_server", lambda: True)
+        assert server.start_all() == 0
+        assert not any(c[:2] == ["tmux", "new-session"] for c in ran)

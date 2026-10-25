@@ -26,6 +26,19 @@ SERVER_LOG = Path("/tmp/megachat-serve.log")
 SERVER_PORT = 4242
 #: Seconds to wait for the web adapter to listen after spawning the server.
 READY_TIMEOUT_S = 30
+#: Seconds to wait for a signalled server to exit before giving up.
+STOP_TIMEOUT_S = 30
+#: Arguments of ``.venv/bin/python`` that start the detached server (web on
+#: all interfaces; the Unix socket is on by default).  The remote handover
+#: script is built from the same list.
+SERVE_ARGS = [
+    "megachat.py",
+    "serve",
+    "--web-port",
+    str(SERVER_PORT),
+    "--web-host",
+    "0.0.0.0",
+]
 
 
 def _kill_tmux_session(name: str = "tui") -> None:
@@ -43,15 +56,7 @@ def _spawn_server() -> subprocess.Popen:
     # The child inherits its own descriptor; closing ours after Popen is safe.
     with open(SERVER_LOG, "ab") as log:
         return subprocess.Popen(
-            [
-                str(PROJECT_DIR / ".venv" / "bin" / "python"),
-                "megachat.py",
-                "serve",
-                "--web-port",
-                str(SERVER_PORT),
-                "--web-host",
-                "0.0.0.0",
-            ],
+            [str(PROJECT_DIR / ".venv" / "bin" / "python"), *SERVE_ARGS],
             cwd=PROJECT_DIR,
             start_new_session=True,
             stdin=subprocess.DEVNULL,
@@ -60,21 +65,68 @@ def _spawn_server() -> subprocess.Popen:
         )
 
 
-def _stop_tui() -> None:
-    """Stop the instance holding the lock (the server; SIGINT = clean stop)
-    and any legacy tmux session.  Attached TUIs just lose their connection."""
-    if LOCK_FILE.exists():
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True  # exists, owned by someone else
+    except OSError:
+        return False
+    return True
+
+
+def server_pid() -> int | None:
+    """Pid in the instance lock if that process is alive, else ``None``.
+
+    "Running" means the lock holder is alive: the lock belongs to the
+    ``megachat serve`` process (or to a legacy/``--in-process`` TUI).
+    """
+    try:
+        pid = int(LOCK_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if _pid_alive(pid) else None
+
+
+def stop_server() -> bool:
+    """Stop the instance holding the lock (SIGINT = clean stop) and any legacy
+    tmux session; wait for the process to exit.  Attached TUIs just lose their
+    connection.
+
+    Returns ``False`` (lock left in place, so no second server can start next
+    to a half-stopped one) when the process is still alive after the timeout.
+    """
+    pid = server_pid()
+    if pid is not None:
         try:
-            pid = int(LOCK_FILE.read_text().strip())
             os.kill(pid, signal.SIGINT)
-        except (OSError, ValueError):
+        except OSError:
             pass
-        for _ in range(12):
-            if not LOCK_FILE.exists():
+        for _ in range(int(STOP_TIMEOUT_S / 0.5)):
+            if not _pid_alive(pid):
                 break
             time.sleep(0.5)
+        if _pid_alive(pid):
+            return False
     _kill_tmux_session()
     LOCK_FILE.unlink(missing_ok=True)
+    return True
+
+
+def spawn_and_wait() -> bool:
+    """Spawn the detached server and wait until the web adapter listens.
+
+    ``False`` when it exited early or never came up.  ``OSError`` from the
+    spawn itself propagates.
+    """
+    proc = _spawn_server()
+    for _ in range(READY_TIMEOUT_S):
+        if proc.poll() is not None:
+            return False
+        if port_listening(SERVER_PORT):
+            return True
+        time.sleep(1)
+    return False
 
 
 def _local_ip() -> str:
@@ -131,23 +183,24 @@ def start_all(*, docker_limits: bool = True) -> int:
     )
     # Restart semantics: stop a running instance (lock pid, SIGINT) and any
     # legacy tmux 'tui' session before taking the lock again.
-    _stop_tui()
+    if not stop_server():
+        die(
+            f"Il server (pid {server_pid()}) non si ferma: non ne avvio un altro. "
+            "Controlla: tail -50 /tmp/signal-tui.log"
+        )
+        return 1
     try:
-        proc = _spawn_server()
+        up = spawn_and_wait()
     except OSError as exc:
         die(f"Impossibile avviare il server: {exc}")
         return 1
-
-    for _ in range(READY_TIMEOUT_S):
-        if proc.poll() is not None:
-            break
-        if port_listening(SERVER_PORT):
-            ok(f"Server attivo — Web UI su http://{_local_ip()}:{SERVER_PORT}")
-            print(f"   Token Web UI: {_read_web_token()}")
-            print("   Log:          tail -f /tmp/signal-tui.log")
-            print("   Stop:         python3 launcher.py server stop")
-            return 0
-        time.sleep(1)
+    if up:
+        ok(f"Server attivo — Web UI su http://{_local_ip()}:{SERVER_PORT}")
+        print(f"   Token Web UI: {_read_web_token()}")
+        print("   Log:          tail -f /tmp/signal-tui.log")
+        print("   Stop:         python3 launcher.py server stop")
+        print("   Interattivo:  python3 megachat.py  (si collega al server)")
+        return 0
     die(
         f"Il server non risulta attivo sulla porta {SERVER_PORT}. Controlla: "
         f"tail -50 /tmp/signal-tui.log {SERVER_LOG}"
@@ -157,7 +210,9 @@ def start_all(*, docker_limits: bool = True) -> int:
 
 def stop_all() -> int:
     info("Spegnimento server (SIGINT pulito)...")
-    _stop_tui()
+    if not stop_server():
+        die(f"Il server (pid {server_pid()}) non si ferma; WAHA lasciato acceso.")
+        return 1
     ok("Server fermato")
 
     info("Spegnimento WAHA...")
@@ -175,8 +230,9 @@ def stop_all() -> int:
 
 
 def status() -> int:
-    if LOCK_FILE.exists():
-        print(f"Server: ATTIVO (pid {LOCK_FILE.read_text().strip()})")
+    pid = server_pid()
+    if pid is not None:
+        print(f"Server: ATTIVO (pid {pid})")
     else:
         print("Server: spento")
     print(
