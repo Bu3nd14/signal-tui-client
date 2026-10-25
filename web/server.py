@@ -26,6 +26,7 @@ class WebServerHandle:
     status: str = "starting"
     loop: asyncio.AbstractEventLoop | None = None
     websocket_connections: set[Any] = field(default_factory=set)
+    websocket_v2_connections: set[Any] = field(default_factory=set)
 
 
 _active_server: WebServerHandle | None = None
@@ -80,6 +81,7 @@ def start_web_server(
     app.state.api = api
     app.state.token = token
     app.state.websocket_connections = set()
+    app.state.websocket_v2_connections = set()
 
     from web.api import create_api_router
     from web.auth import install_auth
@@ -200,6 +202,7 @@ def start_web_server(
         thread=thread,
         port=port,
         websocket_connections=app.state.websocket_connections,
+        websocket_v2_connections=app.state.websocket_v2_connections,
     )
     _active_server = handle
     thread.start()
@@ -216,7 +219,10 @@ def stop_web_server(handle: WebServerHandle | None = None) -> None:
         return
 
     async def close_websockets() -> None:
-        connections = tuple(handle.websocket_connections)
+        connections = (
+            *handle.websocket_connections,
+            *handle.websocket_v2_connections,
+        )
         if connections:
             await asyncio.gather(
                 *(connection.close() for connection in connections),

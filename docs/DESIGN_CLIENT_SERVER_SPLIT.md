@@ -220,3 +220,24 @@ directly for its own send/edit/load paths (Phase 1, `ChatClient`).
 
 Notes for Phase 2: the socket adapter must confine or copy client-supplied
 attachment paths (`messages.send` trusts `AttachmentIn.path`).
+
+## 9. Phase 1 / P1.7 outcome (adapters see only the API)
+
+- `start_web_server(api, port, token, *, host, require_auth, bus)`: the web
+  adapter gets only the `ChatAPI`; `web/` imports `server.api`,
+  `server.models_api`, `server.bus` and `server.uploads` and nothing else of
+  `server`, `protocols`, `tui` or `transcription` (enforced in
+  `tests/test_server_import_rules.py`). `tui/` and the root UI modules import
+  neither `protocols` nor `web`; the TUI gets its embedded web adapter injected
+  by the composition root `signal_tui.py` (which may import `protocols.config`
+  and `web`, as it runs before the core exists).
+- Operations added: `links.preview`, `links.preview_image` (blob),
+  `server.client_log`, `transcribe.submit|status|config`,
+  `config.set_openai_key`; `server.config` also carries the picker options.
+  The transcription service is core state (`ChatAPI.transcription`, started by
+  `ChatCore.start`, stopped by `ChatCore.shutdown`).
+- `/ws/v2` (same authentication as `/ws`): the client may send
+  `{"type":"subscribe","since":N}` (or use `?since=N`); the server streams
+  `{"seq","type","payload","ts"}` for every bus event, replays from the ring
+  buffer, sends a `gap` event (`reason` `buffer` or `overflow`) when the client
+  must resync, and `{"type":"heartbeat"}` when idle. `/ws` is unchanged.
