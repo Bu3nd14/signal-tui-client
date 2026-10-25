@@ -73,6 +73,11 @@ SYNC_WORKERS = 16
 AUX_WORKERS = 16
 #: Lines above this size are parsed off the loop.
 _INLINE_PARSE_BYTES = 256 * 1024
+#: After a fatal protocol error the connection is half-closed and the peer's
+#: pending input discarded (at most this long / this many bytes) so the error
+#: line is not lost to an ECONNRESET.
+_DRAIN_ON_CLOSE_S = 1.0
+_DRAIN_ON_CLOSE_BYTES = MAX_LINE_BYTES
 #: ``sun_path`` is 108 bytes on Linux, 104 on BSD/macOS (NUL included).
 _MAX_SOCKET_PATH_BYTES = 103
 
@@ -405,6 +410,32 @@ class _Connection:
         with contextlib.suppress(Exception):
             self.writer.transport.abort()
 
+    async def _drain_before_close(self) -> None:
+        """Half-close, then discard the peer's pending input before closing.
+
+        Closing a Unix stream socket with unread input makes the peer's next
+        read fail with ECONNRESET, which can discard the error line we just
+        sent.  Bounded in time and bytes so a client that keeps writing
+        cannot hold the connection open.
+        """
+        with contextlib.suppress(Exception):
+            await self.writer.drain()
+            if self.writer.can_write_eof():
+                self.writer.write_eof()
+        deadline = asyncio.get_running_loop().time() + _DRAIN_ON_CLOSE_S
+        discarded = 0
+        while discarded < _DRAIN_ON_CLOSE_BYTES:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            try:
+                chunk = await asyncio.wait_for(self.reader.read(65536), remaining)
+            except (TimeoutError, OSError, ValueError):
+                return
+            if not chunk:
+                return
+            discarded += len(chunk)
+
     async def aclose(self) -> None:
         """Close after flushing what was already written (the transport buffer
         may still hold the tail of a large response)."""
@@ -502,6 +533,7 @@ class _Connection:
                         {"code": "too_large", "message": "Request line too large"},
                     )
                 )
+                await self._drain_before_close()
                 return  # the stream cannot be resynchronised
             except OSError:
                 return
