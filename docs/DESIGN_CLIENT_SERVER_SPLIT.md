@@ -297,11 +297,13 @@ non-blocking, cached or prefetched, as each becomes a socket round trip):
   (`on_image_widget_image_clicked`, `_start_download`);
 - `server.config` (thumbnail sizes in `chat_view`, picker settings at
   `on_mount`);
-- `contacts.for_protocol`, `contacts.register` (WhatsApp loads the LID cache
-  from disk);
-- `messages.snapshot` at `backend_ready` (about 0.28s per 45k cached messages
-  for validation); `link.start|poll|finalize|submit_2fa` already run in
-  `to_thread` but need per-call timeouts server side.
+- `contacts.register` (WhatsApp loads the LID cache from disk).
+
+Already off the UI thread: `messages.snapshot` and `contacts.for_protocol` at
+`backend_ready` are prefetched by the poll worker
+(`_prefetch_backend_ready`); the UI-thread merge only fetches them itself
+when called directly. `link.start|poll|finalize|submit_2fa` run in
+`to_thread` but need per-call timeouts server side.
 
 Open follow-ups: `mc-7kp` (socket adapter must confine or copy client-supplied
 attachment paths), `mc-1t1` (unclosed sqlite connections in the test suite),
