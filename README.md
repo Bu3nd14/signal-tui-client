@@ -365,10 +365,17 @@ just prefer not to shell out.
 | Shell aliases only | `./install.sh --aliases` | `python3 launcher.py aliases` |
 | Start/stop WAHA | `./scripts/start_whatsapp.sh [--no-wait\|--stop]` | `python3 launcher.py whatsapp start\|stop [--no-wait]` |
 | Restart signal-cli + WAHA | `./scripts/restart_backend.sh [--no-wait]` | `python3 launcher.py backend-restart [--no-wait]` |
-| Run the client on a server | `./scripts/start_on_server.sh {start\|stop\|status}` | `python3 launcher.py server start\|stop\|status` |
-| Local ↔ remote handover | `./scripts/tui_handover.sh {to-server\|to-local\|status}` | `python3 launcher.py handover to-server\|to-local\|status` |
+| Run the server on a remote machine (disaster recovery) | `./scripts/start_on_server.sh {start\|stop\|status}` | `python3 launcher.py server start\|stop\|status` |
+| Local ↔ remote handover (moves `megachat serve`) | `./scripts/tui_handover.sh {to-server\|to-local\|status}` | `python3 launcher.py handover to-server\|to-local\|status` |
 | CPU/I-O profiling | `./profiling/run_pyspy.sh` / `run_strace.sh` `[duration]` | `python3 launcher.py profile pyspy\|strace [duration]` |
 | Regression tests | `./tests/run_regression_tests.sh` | `python3 launcher.py test` |
+
+The handover and `start_on_server.sh` start and stop the detached headless server (`megachat serve`,
+web on `0.0.0.0:4242`, Unix socket enabled), not a TUI inside tmux. Stopping is SIGINT to the lock pid,
+waiting for it to exit (a legacy tmux `tui` session is still killed, never started); if the server does
+not stop, the command aborts instead of risking two servers. To work interactively on the target
+machine run `python3 megachat.py` there: it attaches to the running server (Detach leaves it running,
+Quit stops it). See [`docs/HANDOVER.md`](docs/HANDOVER.md).
 
 Same flags, same behavior (the alias block it writes is byte-for-byte identical to `install.sh`'s),
 same exit codes — pick whichever entry point fits your environment. `python3 launcher.py --help`

@@ -16,6 +16,8 @@ Il server web ascolta su `0.0.0.0:4242` (porta di default `4242`). Il **token Be
 | `web-signal-tui-bg` | Avvia il server headless (`megachat serve`: core + Web UI, senza TUI) come **processo staccato** (background) ed **esporta il token** nella shell corrente come `SIGNAL_TUI_WEB_TOKEN` | Fast cycle: pronto subito per `curl` e per il login nella Web UI |
 | `web-signal-tui-stop` | Ferma il server background con SIGINT pulito (chiude anche un'eventuale vecchia sessione tmux `tui`) e rimuove `/tmp/signal-tui.lock` | Arrestare il server avviato con `web-signal-tui-bg` |
 
+> Handover locale ↔ server (`signal-tui-go-server`, `signal-tui-go-local`, `signal-tui-status`): sposta questo stesso server headless tra le due macchine, vedi [HANDOVER.md](HANDOVER.md). Dopo lo spostamento, per l'uso interattivo lancia `python3 megachat.py` sulla macchina di destinazione (si collega al server in esecuzione; Detach lo lascia attivo, Quit lo ferma).
+
 ## 2. Fast cycle (background + token in shell)
 
 `web-signal-tui-bg` avvia il server headless + Web UI in **background** ed **esporta**
