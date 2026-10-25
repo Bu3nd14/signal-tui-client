@@ -52,6 +52,13 @@ class ReactionsAvailableOut(BaseModel):
     emojis: list[str] = Field(default_factory=list)
 
 
+class ServerConfigOut(BaseModel):
+    """Settings a frontend needs to render (not secrets, not server wiring)."""
+
+    thumbnail_max_lines: int
+    thumbnail_max_cols: int
+
+
 # ``server.status`` returns ``dict[str, bool]`` (protocol -> connected).
 
 

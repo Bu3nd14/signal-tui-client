@@ -9,6 +9,8 @@ from textual.containers import Vertical
 from textual.widgets import Button, Static
 
 from models import (
+    DEFAULT_THUMBNAIL_MAX_COLS,
+    DEFAULT_THUMBNAIL_MAX_LINES,
     MERGE_FILL_FIELDS,
     MSG_TYPE_SYSTEM,
     PROTOCOL_SIGNAL,
@@ -20,10 +22,6 @@ from models import (
     is_whatsapp_synthetic_media_text,
     media_kind_from_mime,
 )
-from protocols import (
-    WhatsAppBackend,
-)
-from protocols.config import thumbnail_max_cols, thumbnail_max_lines
 from server.client import ApiError
 from tui.blobs import resolve_attachment_path
 from tui.images.detect import ImageSupport
@@ -307,6 +305,26 @@ class ChatViewMixin:
         if self._chat_log is None:
             self._chat_log = self.query_one("#chat-log", Vertical)
         return self._chat_log
+
+    def _thumbnail_limits(self) -> tuple[int, int]:
+        """``(max_lines, max_cols)`` for image thumbnails, from ``server.config``.
+
+        Asked once (the settings do not change while the app runs); falls back
+        to the model defaults when the server cannot answer.
+        """
+        limits = getattr(self, "_thumbnail_limits_cache", None)
+        if limits is None:
+            limits = (DEFAULT_THUMBNAIL_MAX_LINES, DEFAULT_THUMBNAIL_MAX_COLS)
+            try:
+                config = self.client.call("server.config")
+                limits = (
+                    int(config["thumbnail_max_lines"]),
+                    int(config["thumbnail_max_cols"]),
+                )
+                self._thumbnail_limits_cache = limits
+            except Exception:
+                logger.debug("server.config unavailable; using defaults", exc_info=True)
+        return limits
 
     def _add_message(
         self,
@@ -661,8 +679,7 @@ class ChatViewMixin:
         chat_log.mount(widget)
         chat_log.scroll_end(animate=False)
 
-        max_lines = thumbnail_max_lines()
-        max_cols = thumbnail_max_cols()
+        max_lines, max_cols = self._thumbnail_limits()
         chat_region = getattr(chat_log, "content_region", None)
         chat_width = chat_region.width if chat_region is not None else 0
         if chat_width > 0:
@@ -1017,8 +1034,7 @@ class ChatViewMixin:
             return
         if self._native_renderer is None:
             return
-        max_lines = thumbnail_max_lines()
-        max_cols = thumbnail_max_cols()
+        max_lines, max_cols = self._thumbnail_limits()
         chat_region = getattr(self.chat_log, "content_region", None)
         chat_width = chat_region.width if chat_region is not None else 0
         if chat_width > 0:
@@ -1098,7 +1114,7 @@ class ChatViewMixin:
                 or self.selected_contact != contact
             )
 
-        is_whatsapp = contact.protocol == WhatsAppBackend.protocol
+        is_whatsapp = contact.protocol == PROTOCOL_WHATSAPP
 
         # Phase 1: paint instantly from the local cache (no network wait).
         rendered_any = self._render_chat_window(

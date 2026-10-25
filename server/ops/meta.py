@@ -12,6 +12,7 @@ from server.models_api import (
     EmptyRequest,
     ReactionsAvailableOut,
     ReactionsAvailableRequest,
+    ServerConfigOut,
 )
 from server.ops.common import PROTOCOL_ORDER
 
@@ -81,3 +82,14 @@ def server_status(api: ChatAPI, req: EmptyRequest) -> dict[str, bool]:
         proto: bool(getattr(manager.get(proto), "is_connected", False))
         for proto in PROTOCOL_ORDER
     }
+
+
+@operation("server.config", request=EmptyRequest, response=ServerConfigOut)
+def server_config(api: ChatAPI, req: EmptyRequest) -> ServerConfigOut:
+    """Client-relevant settings (image thumbnail size limits)."""
+    from protocols.config import thumbnail_max_cols, thumbnail_max_lines
+
+    return ServerConfigOut(
+        thumbnail_max_lines=thumbnail_max_lines(),
+        thumbnail_max_cols=thumbnail_max_cols(),
+    )
