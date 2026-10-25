@@ -1,8 +1,11 @@
 """SignalTUI main App — composes the functional mixins and owns app lifecycle."""
 
+import asyncio
 import logging
+import signal
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import ClassVar
 
@@ -153,6 +156,9 @@ class SignalTUI(
         self.bus = EventBus()
         self.core = ChatCore(self.bus)
         self._core_sub: Subscription | None = None
+        # Ctrl+C handler set by ``signal_tui.main``; ``on_mount`` installs it on
+        # the running loop (None in tests and embedded use).
+        self._sigint_callback: Callable[[], None] | None = None
 
         self.contacts: list[ChatContact] = []
         self.selected_contact: ChatContact | None = None
@@ -295,9 +301,28 @@ class SignalTUI(
             yield Footer()
             yield StatusBar(id="status-bar")
 
+    def _install_sigint_on_loop(self) -> None:
+        """Move the Ctrl+C handler onto the asyncio loop.
+
+        Linux may deliver a process-directed SIGINT to any thread.  A plain
+        ``signal.signal`` handler only runs when the MAIN thread next executes
+        Python code, and an idle Textual loop can sit in ``select()``
+        indefinitely, so the handler (and the exit) never ran.
+        ``loop.add_signal_handler`` uses the loop's wakeup fd, which wakes the
+        loop whichever thread received the signal.
+        """
+        callback = self._sigint_callback
+        if callback is None:
+            return
+        try:
+            asyncio.get_running_loop().add_signal_handler(signal.SIGINT, callback)
+        except (NotImplementedError, RuntimeError, ValueError):
+            logger.debug("SIGINT loop handler unavailable", exc_info=True)
+
     def on_mount(self):
         """On startup, start poll worker and backend connections in parallel."""
         self._chat_log = self.query_one("#chat-log", Vertical)
+        self._install_sigint_on_loop()
         if self._web_enabled:
             from web.server import start_web_server
 

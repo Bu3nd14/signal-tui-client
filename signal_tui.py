@@ -194,7 +194,10 @@ def main(argv: list[str] | None = None) -> int:
             logger.exception("Cache prune on exit failed (non-fatal)")
         app.exit()
 
+    # Pre-run window: a plain handler.  Once the loop runs, ``on_mount`` moves
+    # it onto ``loop.add_signal_handler`` (see ``SignalTUI._sigint_callback``).
     signal_module.signal(signal_module.SIGINT, _handle_sigint)
+    app._sigint_callback = lambda: _handle_sigint(signal_module.SIGINT, None)
     app.run()
     _release_lock()
     return 0
