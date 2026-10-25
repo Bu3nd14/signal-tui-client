@@ -31,7 +31,11 @@ def fake_backends():
     """Same backend patching as tests/conftest.py (no real daemons/WAHA)."""
     with (
         patch("server.core.BackendManager"),
-        patch("server.core.SignalBackend"),
+        # a real ``protocol`` string: it travels in the (JSON) backend_* events
+        patch(
+            "server.core.SignalBackend",
+            return_value=MagicMock(protocol="signal"),
+        ),
         patch("server.core.whatsapp_enabled", return_value=False),
         patch("server.core.telegram_enabled", return_value=False),
         patch("server.core.signal_enabled", return_value=False),

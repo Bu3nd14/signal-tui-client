@@ -118,7 +118,7 @@ def _wa_backend() -> WhatsAppBackend:
 
 
 class TestMessageEventReanchor:
-    def test_message_event_updates_tui_object_not_payload_copy(self):
+    def test_message_event_updates_tui_object_and_backend_contact(self):
         tui_contact = ChatContact(
             id="1@c.us",
             display_name="Mario",
@@ -137,8 +137,9 @@ class TestMessageEventReanchor:
 
         assert app.contacts[0] is tui_contact
         assert tui_contact.last_message_ts == 5000
-        # The payload copy must not have been mutated.
-        assert payload_contact.last_message_ts == 0
+        # The core advances the contact the backend holds (here the one it
+        # registered); the TUI only anchors to its own list object.
+        assert payload_contact.last_message_ts == 5000
 
     def test_message_event_appends_unknown_contact_once(self):
         backend = _wa_backend()
@@ -255,7 +256,7 @@ class TestSignalDedupOnContactUpdate:
         assert app._handle_event(_contact_update_event(fresh)) is True
 
         assert len(app.contacts) == 1
-        assert app.contacts[0] is fresh
+        assert app.contacts[0] == fresh
         # The stale widget + key are marked dirty so the row is re-rendered.
         assert "signal:uuid-123" not in app._contact_widgets
         assert "signal:uuid-123" in app._dirty_contact_keys
@@ -278,7 +279,7 @@ class TestSignalDedupOnContactUpdate:
         app._handle_event(_contact_update_event(fresh))
 
         assert len(app.contacts) == 1
-        assert app.contacts[0] is fresh
+        assert app.contacts[0] == fresh
 
     def test_different_person_is_not_deduped(self):
         other = ChatContact(

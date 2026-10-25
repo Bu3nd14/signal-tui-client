@@ -12,10 +12,11 @@ react.  Event types and payloads:
   timeouts (a ready backend implies done on the consumer side).
 
 Domain events, produced by :meth:`ChatCore.process` for every raw backend
-``ChatEvent`` (the pump publishes them on the bus; payloads carry in-process
-objects such as ``ChatContact`` until Phase 1):
+``ChatEvent`` (the pump publishes them on the bus).  Every payload is in JSON
+"wire form", see :mod:`server.events_api` (``contact`` is a ``ContactWire``
+dict):
 
-- ``message`` ``{"protocol", "contact_id", "contact": ChatContact,
+- ``message`` ``{"protocol", "contact_id", "contact": <ContactWire>,
   "was_placeholder": bool, "message": <raw payload dict>, "timestamp": ts,
   "added": bool, "changed": bool}`` (always emitted, even when nothing new
   was stored: consumers use it for recency / list dirtiness)
@@ -26,7 +27,7 @@ objects such as ``ChatContact`` until Phase 1):
 - ``contact_update`` ``{"protocol", "contact_id", **backend payload}``
   (``contact``, ``display_name``, ``phone``, WhatsApp ``merged_into``)
 - ``sent_mirror`` ``{"protocol", "contact_id", **backend payload,
-  "contact": ChatContact}`` (contact resolved/registered by the core)
+  "contact": <ContactWire>}`` (contact resolved/registered by the core)
 - ``lid_warmup_done`` ``{"protocol", "contact_id", **payload}``
 
 This module must not import Textual, FastAPI, ``tui`` or ``web``.
@@ -58,6 +59,7 @@ from server.address_book_refresh import DynamicAddressBookMixin
 from server.api import ChatAPI
 from server.bus import EventBus
 from server.domain import looks_unresolved, resolve_placeholder_name
+from server.events_api import to_wire
 
 logger = logging.getLogger("signal_tui")
 
@@ -501,6 +503,21 @@ class ChatCore(DynamicAddressBookMixin):
         elif known is not None:
             known.append(contact)
 
+    @staticmethod
+    def _bump_recency(backend, cache_key: str, ts: Any) -> None:
+        """Raise ``last_message_ts`` of the backend's own contact for *cache_key*.
+
+        The recency used to be advanced by the TUI through the contact object
+        it shared with the backend; with wire-form events the TUI holds copies
+        so the core (the owner of the backend's contacts) does it.
+        """
+        if not isinstance(ts, int) or isinstance(ts, bool):
+            return
+        for known in getattr(backend, "contacts", None) or []:
+            if known.cache_key == cache_key:
+                known.last_message_ts = max(known.last_message_ts, ts)
+                return
+
     def process(self, event: ChatEvent) -> list[tuple[str, dict[str, Any]]]:
         """Domain step for ONE raw backend event; returns events to publish.
 
@@ -519,7 +536,8 @@ class ChatCore(DynamicAddressBookMixin):
         }.get(event.type)
         if handler is None:
             return []
-        return handler(event)
+        # Wire form only: contacts become snapshots, values plain JSON.
+        return [(etype, to_wire(etype, payload)) for etype, payload in handler(event)]
 
     @staticmethod
     def _passthrough_type(event: ChatEvent) -> str:
@@ -551,6 +569,7 @@ class ChatCore(DynamicAddressBookMixin):
         if contact is None:
             contact, _ = self._resolve_contact(backend, event)
         self._ensure_registered(backend, contact)
+        self._bump_recency(backend, key, event.payload.get("timestamp"))
         return [
             (
                 "sent_mirror",
@@ -580,6 +599,7 @@ class ChatCore(DynamicAddressBookMixin):
         result = ingest(contact.id, event.payload, ts) if ingest is not None else True
         added = result is True
         changed = result == "changed"
+        self._bump_recency(backend, contact.cache_key, ts)
         logger.debug(
             "core: message added=%s changed=%s protocol=%s contact=%s id=%s",
             added,

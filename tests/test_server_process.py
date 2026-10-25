@@ -17,6 +17,7 @@ from models import (
 )
 from server.bus import EventBus
 from server.core import ChatCore
+from server.events_api import contact_to_wire
 
 CID = "+391234567890"
 
@@ -67,9 +68,10 @@ class TestProcessMessage:
         assert payload == {
             "protocol": PROTOCOL_SIGNAL,
             "contact_id": CID,
-            "contact": contact,
+            "contact": contact_to_wire(contact),
             "was_placeholder": False,
-            "message": event.payload,
+            # the raw payload carries the live contact; the wire has a snapshot
+            "message": {**event.payload, "contact": contact_to_wire(contact)},
             "timestamp": 1000,
             "added": True,
             "changed": False,
@@ -107,7 +109,7 @@ class TestProcessMessage:
         [(_, payload)] = _core(backend).process(_msg_event())
 
         backend._identify_contact.assert_called_once_with(CID)
-        assert payload["contact"] is known
+        assert payload["contact"] == contact_to_wire(known)
         assert payload["was_placeholder"] is False
 
     def test_placeholder_registered_with_backend(self):
@@ -119,17 +121,17 @@ class TestProcessMessage:
 
         [(_, payload)] = _core(backend).process(_msg_event())
 
-        placeholder = payload["contact"]
         assert payload["was_placeholder"] is True
-        assert placeholder.cache_key == f"{PROTOCOL_SIGNAL}:{CID}"
-        assert placeholder.display_name == CID
-        backend.register_contact.assert_called_once_with(placeholder)
+        assert payload["contact"]["cache_key"] == f"{PROTOCOL_SIGNAL}:{CID}"
+        assert payload["contact"]["display_name"] == CID
+        [placeholder] = backend.register_contact.call_args.args
+        assert contact_to_wire(placeholder) == payload["contact"]
         backend.ingest_message.assert_called_once()
 
     def test_unknown_contact_appended_when_backend_has_no_register(self):
         backend = _backend(_identify_contact=MagicMock(return_value=None))
         [(_, payload)] = _core(backend).process(_msg_event())
-        assert backend.contacts == [payload["contact"]]
+        assert [contact_to_wire(c) for c in backend.contacts] == [payload["contact"]]
 
     def test_contact_known_to_backend_is_not_reregistered(self):
         known = ChatContact(id=CID, display_name="Ada", protocol=PROTOCOL_SIGNAL)
@@ -195,11 +197,11 @@ class TestProcessEdit:
         backend.apply_edit.assert_called_once_with(
             CID, "77", "Dopo", is_mine=False, edit_timestamp=5
         )
-        assert payload["info"] is _EDIT_INFO
+        assert payload["info"] == _EDIT_INFO
         assert payload["text"] == "Dopo"
         assert payload["protocol"] == PROTOCOL_SIGNAL
         assert payload["contact_id"] == CID
-        assert payload["contact"].id == CID  # placeholder resolved
+        assert payload["contact"]["id"] == CID  # placeholder resolved
 
     def test_noop_edit_emits_nothing(self):
         backend = _backend(apply_edit=MagicMock(return_value=None))
@@ -297,7 +299,7 @@ class TestProcessReceipt:
         backend.process_receipt.assert_called_once_with(
             {"message_ids": ["77"], "is_read": True, "contact_id": "42"}
         )
-        assert payload["updated"] is updated
+        assert payload["updated"] == updated
 
     def test_generic_defaults(self):
         backend = _backend(process_receipt=MagicMock(return_value=[]))
@@ -364,7 +366,7 @@ class TestProcessPassthrough:
                     "contact_id": "1@lid",
                     "display_name": "G",
                     "phone": "39",
-                    "contact": contact,
+                    "contact": contact_to_wire(contact),
                 },
             )
         ]
@@ -403,8 +405,8 @@ class TestProcessPassthrough:
         assert etype == "sent_mirror"
         assert payload["batch_id"] == "b"
         assert payload["timestamp"] == 5
-        assert payload["contact"].cache_key == f"{PROTOCOL_SIGNAL}:{CID}"
-        assert backend.contacts == [payload["contact"]]
+        assert payload["contact"]["cache_key"] == f"{PROTOCOL_SIGNAL}:{CID}"
+        assert [contact_to_wire(c) for c in backend.contacts] == [payload["contact"]]
 
     def test_sent_mirror_prefers_backend_object_without_lookup(self):
         known = ChatContact(id=CID, display_name="Ada", protocol=PROTOCOL_SIGNAL)
@@ -413,7 +415,7 @@ class TestProcessPassthrough:
 
         [(_, payload)] = _core(backend).process(event)
 
-        assert payload["contact"] is known
+        assert payload["contact"] == contact_to_wire(known)
         backend._identify_contact.assert_not_called()
 
     def test_sent_mirror_without_backend(self):

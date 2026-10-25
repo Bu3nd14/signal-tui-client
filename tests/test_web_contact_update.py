@@ -19,6 +19,7 @@ from models import PROTOCOL_WHATSAPP, ChatContact, ChatEvent, contact_cache_key
 from protocols.whatsapp import WhatsAppBackend
 from server.bus import EventBus
 from server.core import ChatCore
+from server.events_api import contact_to_wire
 from tui.events import EventHandlingMixin
 from web.legacy_events import to_legacy
 
@@ -71,7 +72,7 @@ def test_dispatcher_routes_contact_update():
     handler.assert_called_once()
     core_event = handler.call_args[0][0]
     assert core_event.type == "contact_update"
-    assert core_event.payload["contact"] is contact
+    assert core_event.payload["contact"] == contact_to_wire(contact)
     assert core_event.payload["contact_id"] == "1@lid"
 
 
@@ -140,7 +141,8 @@ def test_materialized_contact_is_added_to_tui_list_on_message():
     )
 
     assert app._handle_event(event) is True
-    assert materialized in app.contacts
+    assert [c.cache_key for c in app.contacts] == [materialized.cache_key]
+    assert app.contacts[0].display_name == "Giulia"
     assert app._contact_list_dirty is True
 
 
@@ -160,7 +162,8 @@ def test_materialized_contact_is_added_to_tui_list_on_sent_mirror():
     )
 
     assert app._handle_event(event) is True
-    assert materialized in app.contacts
+    assert [c.cache_key for c in app.contacts] == [materialized.cache_key]
+    assert app.contacts[0].display_name == "Luca"
 
 
 def test_placeholder_is_registered_with_backend():
@@ -188,4 +191,4 @@ def test_placeholder_is_registered_with_backend():
     backend.register_contact.assert_called_once()
     placeholder = backend.register_contact.call_args[0][0]
     assert placeholder.cache_key == contact_cache_key(PROTOCOL_WHATSAPP, "999@lid")
-    assert placeholder in app.contacts
+    assert [c.cache_key for c in app.contacts] == [placeholder.cache_key]

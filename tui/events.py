@@ -20,6 +20,7 @@ from models import (
 )
 from server.bus import Event
 from server.domain import looks_unresolved, resolve_placeholder_name
+from server.events_api import contact_from_wire
 from ui_components import (
     MessageWidget,
 )
@@ -136,12 +137,12 @@ class EventHandlingMixin:
             return self._view_contact_merged(ev, str(merged_into))
 
         cache_key = contact_cache_key(protocol, p["contact_id"])
-        contact = p.get("contact")
+        wire_contact = p.get("contact")
         new_name = p.get("display_name")
         phone = p.get("phone")
 
-        if contact is not None and protocol == PROTOCOL_SIGNAL:
-            stable = _signal_stable_key(contact)
+        if wire_contact is not None and protocol == PROTOCOL_SIGNAL:
+            stable = _signal_stable_key(contact_from_wire(wire_contact))
             if stable:
                 for stale in list(self.contacts):
                     if (
@@ -157,9 +158,10 @@ class EventHandlingMixin:
                         break
 
         target = next((c for c in self.contacts if c.cache_key == cache_key), None)
-        if target is None and contact is not None:
-            self.contacts.append(contact)  # NUOVO contatto → in lista
-            target = contact
+        if target is None and wire_contact is not None:
+            # NUOVO contatto → in lista (copia dal wire, non l'oggetto del backend)
+            target = contact_from_wire(wire_contact)
+            self.contacts.append(target)
         elif target is not None:
             if new_name and target.display_name != new_name:
                 target.display_name = new_name
@@ -222,7 +224,7 @@ class EventHandlingMixin:
             None,
         )
         if contact is None:
-            contact = p["contact"]
+            contact = contact_from_wire(p["contact"])
         # Ensure the contact is in the TUI list: a contact materialized by the
         # dynamic lid resolver must still be added.
         existing = {c.cache_key for c in self.contacts}
@@ -235,8 +237,11 @@ class EventHandlingMixin:
         # re-sort/render is deferred to the end of the batch by the poll
         # worker (same pattern as _view_message).
         ts = p.get("timestamp", 0)
-        if isinstance(ts, int) and ts > (contact.last_message_ts or 0):
-            contact.last_message_ts = ts
+        # The core may already have advanced a contact object shared with the
+        # backend, so the dirty flag cannot depend on the timestamp changing.
+        if isinstance(ts, int):
+            if ts > (contact.last_message_ts or 0):
+                contact.last_message_ts = ts
             if contact.cache_key != (
                 self.selected_contact.cache_key if self.selected_contact else None
             ):
@@ -248,19 +253,22 @@ class EventHandlingMixin:
         """Display an ingested incoming/outgoing message (ingest done by core)."""
         p = ev.payload
         protocol = p["protocol"]
-        contact: ChatContact = p["contact"]
+        wire_contact: dict[str, Any] = p["contact"]
         msg: dict[str, Any] = p["message"]
         added: bool = p["added"]
         # RIANCORAGGIO: preferisci l'oggetto già nella lista TUI (identità
         # stabile) così gli aggiornamenti a display_name/last_message_ts si
-        # riflettono su sort/render.  Se assente, appendilo (un contatto
-        # materializzato dal resolver lid deve comunque entrare in lista).
+        # riflettono su sort/render.  Se assente, costruiscilo dallo snapshot
+        # wire e appendilo (un contatto materializzato dal resolver lid deve
+        # comunque entrare in lista).
         tui_contact = next(
-            (c for c in self.contacts if c.cache_key == contact.cache_key), None
+            (c for c in self.contacts if c.cache_key == wire_contact["cache_key"]),
+            None,
         )
         if tui_contact is not None:
             contact = tui_contact
         else:
+            contact = contact_from_wire(wire_contact)
             self.contacts.append(contact)
             self._contact_list_dirty = True
             self._dirty_contact_keys.add(contact.cache_key)
@@ -367,10 +375,9 @@ class EventHandlingMixin:
         p = ev.payload
         info = p["info"]
         new_text = p["text"]
-        contact: ChatContact = p["contact"]
 
         # Mirror nella cache UI + chirurgia identità.
-        cache_key = contact.cache_key
+        cache_key = p["contact"]["cache_key"]
         ui_msgs = self._cache.get(cache_key) or []
         target = next(
             (

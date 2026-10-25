@@ -48,6 +48,37 @@ def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pa
 
 
 @pytest.fixture(autouse=True)
+def bus_wire_guard(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Every event published on any ``EventBus`` must be JSON-serializable.
+
+    The Phase 2 socket adapter forwards payloads unchanged, so a live object
+    (``ChatContact``, set, Path, ...) on the bus is a bug.  Violations are
+    collected (a publisher thread may swallow exceptions) and asserted at
+    teardown.  Opt out with ``@pytest.mark.allow_unserializable_events``.
+    """
+    import json
+
+    from server.bus import EventBus
+
+    if request.node.get_closest_marker("allow_unserializable_events"):
+        yield
+        return
+    original = EventBus.publish
+    violations: list[str] = []
+
+    def guarded(self, type, payload=None):
+        try:
+            json.dumps(payload)
+        except (TypeError, ValueError) as exc:
+            violations.append(f"{type}: {exc}")
+        return original(self, type, payload)
+
+    monkeypatch.setattr(EventBus, "publish", guarded)
+    yield
+    assert not violations, f"non-JSON event payloads published: {violations}"
+
+
+@pytest.fixture(autouse=True)
 def isolate_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear SIGNAL_TUI_WEB_TOKEN so web-server tests are deterministic.
 
