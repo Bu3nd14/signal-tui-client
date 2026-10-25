@@ -1,5 +1,6 @@
 """Regression tests for failed optimistic-message status handling."""
 
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +8,7 @@ import pytest
 from client_harness import client_for
 
 from models import PROTOCOL_TELEGRAM
+from tui.client_calls import ClientCallsMixin
 from tui.events import EventHandlingMixin
 from tui.send import SendMixin
 from tui.unread_reply import UnreadReplyMixin
@@ -146,8 +148,12 @@ def core_status():
         yield transition
 
 
-class _SendHandler(SendMixin):
+class _SendHandler(ClientCallsMixin, SendMixin):
+    is_running = False
+
     def __init__(self, selected_contact=None, messages=()):
+        self._init_client_state()
+        self._thread_id = threading.get_ident()
         self.selected_contact = selected_contact
         self._cache = (
             {selected_contact.cache_key: list(messages)} if selected_contact else {}

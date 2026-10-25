@@ -4,6 +4,7 @@ import logging
 
 from models import PROTOCOL_SIGNAL
 from server.api import ApiError
+from tui.client_calls import is_unknown_outcome
 from ui_components import MessageTextArea, MessageWidget
 
 logger = logging.getLogger(__name__)
@@ -161,7 +162,7 @@ class EditMessageMixin:
     def _edit_message_worker(self, snap: dict, old_text: str, new_text: str) -> None:
         """Worker thread: ``messages.edit``, rollback della vista su errore."""
         try:
-            self.client.call(
+            self._call_op(
                 "messages.edit",
                 {
                     "protocol": snap["protocol"],
@@ -171,7 +172,20 @@ class EditMessageMixin:
                 },
             )
         except Exception as e:
+            if isinstance(e, ApiError) and is_unknown_outcome(e):
+                # Timed out / connection lost: the edit may have been applied.
+                # Keep the new text; the resync shows what the server holds.
+                logger.warning("messages.edit outcome unknown: %s", e)
+                self._note_unknown_outcome(e)
+                self.call_from_thread(
+                    self._status,
+                    "⚠️ Modifica non confermata dal server — verrà verificata",
+                    10,
+                )
+                return
             logger.warning("messages.edit failed", exc_info=True)
+            if isinstance(e, ApiError):
+                self._report_client_error(e, "modifica")
             details = e.details if isinstance(e, ApiError) else None
             error = (
                 details.get("error")

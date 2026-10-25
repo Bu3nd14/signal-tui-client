@@ -4,6 +4,7 @@ import logging
 import time
 
 from server.bus import GAP, Event
+from server.socket_client import CONNECTION_EVENT
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,12 @@ class PollingMixin:
             # Lost events: we cannot know what changed -> full flush.
             logger.debug("Core event bus gap: %s", event.payload)
             self._contact_list_dirty = True
+            self.call_from_thread(self._schedule_resync, "gap")
+            return True
+        if event.type == CONNECTION_EVENT:
+            # Synthetic event of a remote client: the server went away / came
+            # back (a restored connection resyncs).
+            self.call_from_thread(self._on_client_connection, event.payload)
             return True
         return self._dispatch_view_event(event)
 

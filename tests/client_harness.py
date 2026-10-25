@@ -29,9 +29,14 @@ class StubClient:
     def __init__(self, *answers: Any) -> None:
         self.answers = list(answers)
         self.calls: list[tuple[str, dict]] = []
+        #: Timeout passed with each call, parallel to ``calls``.
+        self.timeouts: list[float | None] = []
 
-    def call(self, name: str, data: dict | None = None) -> Any:
+    def call(
+        self, name: str, data: dict | None = None, *, timeout: float | None = None
+    ) -> Any:
         self.calls.append((name, data or {}))
+        self.timeouts.append(timeout)
         answer = self.answers.pop(0) if self.answers else {"ok": True}
         if isinstance(answer, BaseException):
             raise answer
@@ -76,3 +81,32 @@ def api_for(manager: Any, bus: Any = None) -> ChatAPI:
     core = SimpleNamespace(manager=manager, bus=bus)
     core.api = ChatAPI(core)
     return core.api
+
+
+def inline_client_calls(app: Any, *mixins: type) -> Any:
+    """Give a stand-in app the thread helpers of ``ClientCallsMixin`` (inline).
+
+    ``_offload``/``_ui`` run their callable at once, ``_call_op`` calls
+    ``app.client`` with the configured timeout and transport errors are not
+    reported.  Methods of *mixins* the app does not define are bound to it, so
+    ``SimpleNamespace`` stand-ins can run code that hands work to a worker.
+    """
+    from types import MethodType
+
+    from tui.client_timeouts import call_op
+
+    defaults: dict[str, Any] = {
+        "is_running": False,
+        "_offload": lambda work: work(),
+        "_ui": lambda fn, *a: fn(*a),
+        "_call_op": lambda op, data=None: call_op(app.client, op, data),
+        "_report_client_error": lambda exc, what="": False,
+    }
+    for name, value in defaults.items():
+        if not hasattr(app, name):
+            setattr(app, name, value)
+    for mixin in mixins:
+        for name, fn in vars(mixin).items():
+            if callable(fn) and not hasattr(app, name):
+                setattr(app, name, MethodType(fn, app))
+    return app

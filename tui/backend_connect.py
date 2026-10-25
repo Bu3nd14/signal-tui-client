@@ -1,6 +1,7 @@
 """Per-protocol backend connection workers."""
 
 import logging
+import threading
 
 from models import ChatContact, contact_cache_key
 from server.api import ApiError
@@ -68,15 +69,17 @@ class BackendConnectMixin:
         snapshot: dict | None = None
         contacts: list | None = None
         try:
-            snapshot = self.client.call("messages.snapshot", {"protocol": proto})
-        except ApiError:
+            snapshot = self._call_op("messages.snapshot", {"protocol": proto})
+        except ApiError as exc:
             logger.warning("messages.snapshot failed for %s", proto, exc_info=True)
+            self._report_client_error(exc, "caricamento messaggi")
             snapshot = {}
         try:
-            wire = self.client.call("contacts.for_protocol", {"protocol": proto})
+            wire = self._call_op("contacts.for_protocol", {"protocol": proto})
             contacts = [contact_from_wire(w) for w in wire]
-        except ApiError:
+        except ApiError as exc:
             logger.warning("contacts.for_protocol failed for %s", proto, exc_info=True)
+            self._report_client_error(exc, "caricamento contatti")
             contacts = []
         return snapshot, contacts
 
@@ -96,6 +99,19 @@ class BackendConnectMixin:
         Contatti e cache messaggi arrivano dalle operazioni
         ``contacts.for_protocol`` e ``messages.snapshot`` (copie wire).
         """
+        if (snapshot is None or contacts is None) and self.is_running:
+            # Data not prefetched: fetch it off the UI thread, merge afterwards.
+            def _prefetch() -> None:
+                fetched_snapshot, fetched_contacts = self._prefetch_backend_ready(proto)
+                self._ui(
+                    self._on_backend_ready,
+                    proto,
+                    snapshot if snapshot is not None else fetched_snapshot,
+                    contacts if contacts is not None else fetched_contacts,
+                )
+
+            self._offload(_prefetch)
+            return
         self._merge_ready_backend_cache(proto, snapshot)
         if contacts is None:
             contacts = self._fetch_protocol_contacts(proto)
@@ -120,11 +136,12 @@ class BackendConnectMixin:
     def _fetch_protocol_contacts(self, proto: str) -> list[ChatContact]:
         """Contacts of *proto* from the core, as TUI-owned copies.
 
-        Runs on the UI thread (an in-memory snapshot in the embedded core).
-        A refusal leaves the list empty: the backend is still reported done.
+        Blocking: only reached without a running app (unit tests); a running
+        app prefetches in a worker (see ``_on_backend_ready``).  A refusal
+        leaves the list empty: the backend is still reported done.
         """
         try:
-            wire = self.client.call("contacts.for_protocol", {"protocol": proto})
+            wire = self._call_op("contacts.for_protocol", {"protocol": proto})
         except ApiError:
             logger.warning("contacts.for_protocol failed for %s", proto, exc_info=True)
             return []
@@ -165,7 +182,7 @@ class BackendConnectMixin:
         """
         if snapshot is None:
             try:
-                snapshot = self.client.call("messages.snapshot", {"protocol": proto})
+                snapshot = self._call_op("messages.snapshot", {"protocol": proto})
             except ApiError:
                 logger.warning("messages.snapshot failed for %s", proto, exc_info=True)
                 return
@@ -242,18 +259,19 @@ class BackendConnectMixin:
         for cid, msgs in snapshot.items():
             _merge_messages(contact_cache_key(proto, cid), msgs)
 
-    def _reconnect_touched_backends(self, protocols: set[str]) -> None:
+    def _reconnect_touched_backends(
+        self, protocols: set[str], after: threading.Thread | None = None
+    ) -> None:
         """Reconnect only the backends whose link flow was actually started.
 
-        Asks the server (``link.reconnect``); the connect workers run in the
-        core and report back through events.
+        Asks the server (``link.reconnect``, in a worker); the connect workers
+        run in the core and report back through events.
         """
         if not protocols:
             return
-        try:
-            self.client.call("link.reconnect", {"protocols": sorted(protocols)})
-        except Exception:
-            logger.warning("link.reconnect failed", exc_info=True)
+        self._client_call_background(
+            "link.reconnect", {"protocols": sorted(protocols)}, after=after
+        )
 
     def _dispatch_core_event(self, event: Event) -> None:
         """UI thread: applica un evento del core al TUI."""

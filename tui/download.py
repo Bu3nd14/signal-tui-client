@@ -177,28 +177,38 @@ class DownloadModeMixin:
         If ``attachment_id`` is provided the server serves that attachment's
         file.  Otherwise the message text is written to a .txt file and served.
 
-        A clickable ``DownloadLinkWidget`` is mounted in the chat log.
+        A clickable ``DownloadLinkWidget`` is mounted in the chat log.  The
+        request runs in a worker (a remote server adds a round trip); the
+        widget is mounted, and download mode left, when the server answers.
         """
-        try:
-            if attachment_id:
-                served = self.client.call(
-                    "download.serve_attachment",
-                    {
-                        "protocol": protocol or PROTOCOL_SIGNAL,
-                        "attachment_id": attachment_id,
-                    },
-                )
-            else:
-                # Use timestamp to create a unique filename
-                fname = (
-                    f"signal-message-{timestamp}.txt" if timestamp else "message.txt"
-                )
-                served = self.client.call(
-                    "download.serve_text", {"text": text, "filename": fname}
-                )
-        except ApiError as exc:
-            self._status(f"❌ {exc.message}")
+        if attachment_id:
+            op = "download.serve_attachment"
+            data = {
+                "protocol": protocol or PROTOCOL_SIGNAL,
+                "attachment_id": attachment_id,
+            }
         else:
+            # Use timestamp to create a unique filename
+            fname = f"signal-message-{timestamp}.txt" if timestamp else "message.txt"
+            op = "download.serve_text"
+            data = {"text": text, "filename": fname}
+
+        def _work() -> None:
+            try:
+                served = self._call_op(op, data)
+            except ApiError as exc:
+                self._ui(self._finish_download, None, exc)
+                return
+            self._ui(self._finish_download, served, None)
+
+        self._offload(_work)
+
+    def _finish_download(self, served: dict | None, error: ApiError | None) -> None:
+        """UI thread: show the download link (or the error) and leave the mode."""
+        if error is not None:
+            if not self._report_client_error(error, "download"):
+                self._status(f"❌ {error.message}")
+        elif served is not None:
             # Mount a clickable download link widget
             chat_log = self.chat_log
             widget = DownloadLinkWidget(served["url"])
@@ -231,16 +241,35 @@ class DownloadModeMixin:
         att_path = event.attachment_path
         # Lazy resolution: when loaded from cache the path is not yet known,
         # but the attachment_id is.  Use the selected contact's protocol to
-        # route the lookup through the correct backend.
+        # route the lookup through the correct backend.  The lookup may
+        # download the file: it runs in a worker and the click is handled when
+        # it returns.
         if att_path is None and event.attachment_id:
             protocol = self.selected_contact.protocol if self.selected_contact else None
             if protocol:
-                att_path = resolve_attachment_path(
-                    self.client, protocol, event.attachment_id
-                )
-                if event.widget is not None:
-                    event.widget.attachment_path = att_path
 
+                def _work() -> None:
+                    path = resolve_attachment_path(
+                        self.client, protocol, event.attachment_id
+                    )
+                    self._ui(self._finish_image_click, event, path)
+
+                self._offload(_work)
+                return
+        self._handle_image_click(event, att_path)
+
+    def _finish_image_click(
+        self, event: ImageWidget.ImageClicked, path: Path | None
+    ) -> None:
+        """UI thread: the clicked image's path is resolved; carry on."""
+        if event.widget is not None:
+            event.widget.attachment_path = path
+        self._handle_image_click(event, path)
+
+    def _handle_image_click(
+        self, event: ImageWidget.ImageClicked, att_path: Path | None
+    ) -> None:
+        """UI thread: serve the image in download mode, else open the modal."""
         if self._download_mode:
             text = att_path.name if att_path else "attachment"
             protocol = self.selected_contact.protocol if self.selected_contact else None

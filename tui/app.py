@@ -34,6 +34,7 @@ from server.client import ChatClient, ClientSubscription, InProcessClient
 from server.core import ChatCore
 from tui.backend_connect import BackendConnectMixin
 from tui.chat_view import ChatViewMixin
+from tui.client_calls import ClientCallsMixin
 from tui.contacts import ContactListMixin
 from tui.css import APP_CSS
 from tui.download import DownloadModeMixin
@@ -91,6 +92,7 @@ class SignalTUI(
     UnreadReplyMixin,
     DownloadModeMixin,
     PickerMixin,
+    ClientCallsMixin,
 ):
     """Main Signal TUI App with JSON-RPC daemon over HTTP."""
 
@@ -122,6 +124,7 @@ class SignalTUI(
         web_token: str = "",
         web_no_auth: bool = False,
         web_adapter: WebAdapter | None = None,
+        client: ChatClient | None = None,
     ):
         super().__init__()
         # Terminal image backend detected in ``signal_tui`` before ``run()``.
@@ -179,8 +182,14 @@ class SignalTUI(
         # The TUI consumes core events (and, in later steps, operations)
         # through the client; ``bus``/``core`` stay for the not yet migrated
         # direct uses.
-        self.client: ChatClient = InProcessClient(self.core)
+        # With an injected ``client`` (a remote server) the TUI does not own the
+        # core: it neither starts nor shuts it down and syncs from the server.
+        self._owns_core = client is None
+        self.client: ChatClient = (
+            InProcessClient(self.core) if client is None else client
+        )
         self._core_sub: ClientSubscription | None = None
+        self._init_client_state()
         # Ctrl+C handler set by ``signal_tui.main``; ``on_mount`` installs it on
         # the running loop (None in tests and embedded use).
         self._sigint_callback: Callable[[], None] | None = None
@@ -314,7 +323,9 @@ class SignalTUI(
         """On startup, start poll worker and backend connections in parallel."""
         self._chat_log = self.query_one("#chat-log", Vertical)
         self._install_sigint_on_loop()
-        self._configure_picker()
+        # Settings (thumbnail sizes, picker options) come from the server in a
+        # worker; the defaults serve until they arrive.
+        self._start_server_config_fetch()
         if self._web_enabled:
             adapter = self._web_adapter
             if adapter is None:
@@ -352,7 +363,12 @@ class SignalTUI(
         # worker is the single bus consumer (the core owns the event pump).
         self._core_sub = self.client.subscribe()
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
-        self.core.start()
+        if self._owns_core:
+            self.core.start()
+        else:
+            # The server's backends are already up: no ``backend_ready`` will
+            # come, so fetch contacts and chats the way a resync does.
+            self._schedule_resync("attach")
 
         self._init_native_renderer()
 
@@ -643,12 +659,14 @@ class SignalTUI(
             logger.debug("Hi-res executor shutdown failed", exc_info=True)
         # Stop, web adapter, Telegram disconnect and cache prune: one core
         # method, idempotent (the SIGINT handler may already have run it).
-        self.core.shutdown(self._stop_web_adapter)
+        if self._owns_core:
+            self.core.shutdown(self._stop_web_adapter)
 
     def shutdown_from_signal(self) -> None:
         """Ctrl+C: stop polling, shut the core down, exit the app."""
         self._polling_active = False
-        self.core.shutdown(self._stop_web_adapter)
+        if self._owns_core:
+            self.core.shutdown(self._stop_web_adapter)
         self.exit()
 
     def _stop_web_adapter(self) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -10,6 +11,7 @@ from client_harness import StubClient, client_for
 
 from models import DEFAULT_THUMBNAIL_MAX_COLS, DEFAULT_THUMBNAIL_MAX_LINES
 from tui.chat_view import ChatViewMixin
+from tui.client_calls import ClientCallsMixin
 from tui.pickers import PickerMixin
 
 
@@ -30,27 +32,45 @@ def test_op_defaults_match_model_constants(monkeypatch, tmp_path):
     assert out["thumbnail_max_cols"] == DEFAULT_THUMBNAIL_MAX_COLS
 
 
-class _View(ChatViewMixin):
-    pass
+class _View(ClientCallsMixin, ChatViewMixin):
+    is_running = False
+
+    def __init__(self) -> None:
+        self._init_client_state()
+        self._thread_id = threading.get_ident()
 
 
-def test_tui_asks_once_and_caches():
+def test_tui_never_calls_the_client_for_thumbnail_limits():
     view = _View()
     view.client = StubClient({"thumbnail_max_lines": 7, "thumbnail_max_cols": 33})
-    assert view._thumbnail_limits() == (7, 33)
-    assert view._thumbnail_limits() == (7, 33)
-    assert [name for name, _ in view.client.calls] == ["server.config"]
-
-
-def test_tui_falls_back_to_defaults_and_retries():
-    view = _View()
-    view.client = StubClient(
-        RuntimeError("down"), {"thumbnail_max_lines": 5, "thumbnail_max_cols": 9}
-    )
     assert view._thumbnail_limits() == (
         DEFAULT_THUMBNAIL_MAX_LINES,
         DEFAULT_THUMBNAIL_MAX_COLS,
     )
+    assert view.client.calls == []
+
+
+def test_prefetched_config_sets_the_limits_once():
+    view = _View()
+    view.client = StubClient({"thumbnail_max_lines": 7, "thumbnail_max_cols": 33})
+    view._start_server_config_fetch()  # no running app: inline
+    assert view._thumbnail_limits() == (7, 33)
+    assert view._thumbnail_limits() == (7, 33)
+    assert [name for name, _ in view.client.calls] == ["server.config"]
+    assert view.client.timeouts == [5.0]
+
+
+def test_failed_prefetch_keeps_defaults_and_a_retry_applies():
+    view = _View()
+    view.client = StubClient(
+        RuntimeError("down"), {"thumbnail_max_lines": 5, "thumbnail_max_cols": 9}
+    )
+    view._start_server_config_fetch()
+    assert view._thumbnail_limits() == (
+        DEFAULT_THUMBNAIL_MAX_LINES,
+        DEFAULT_THUMBNAIL_MAX_COLS,
+    )
+    view._start_server_config_fetch()
     assert view._thumbnail_limits() == (5, 9)
 
 
@@ -72,10 +92,12 @@ def test_op_returns_picker_options(monkeypatch, tmp_path):
 def test_tui_configures_the_picker_from_the_server():
     import contact_picker
 
-    class _App(PickerMixin):
-        pass
+    class _App(ClientCallsMixin, PickerMixin):
+        is_running = False
 
     app = _App()
+    app._init_client_state()
+    app._thread_id = threading.get_ident()
     app.client = StubClient(
         {
             "thumbnail_max_lines": 1,
@@ -85,11 +107,11 @@ def test_tui_configures_the_picker_from_the_server():
         }
     )
     try:
-        app._configure_picker()
+        app._start_server_config_fetch()
         assert contact_picker._SETTINGS.max_results == 9
         assert contact_picker._SETTINGS.preferred_backend == "signal"
         app.client = StubClient(RuntimeError("down"))
-        app._configure_picker()  # keeps the previous settings
+        app._start_server_config_fetch()  # keeps the previous settings
         assert contact_picker._SETTINGS.max_results == 9
     finally:
         contact_picker.configure_picker()

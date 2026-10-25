@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import threading
 import time
 from typing import Any, ClassVar
 
@@ -34,6 +35,7 @@ from textual.widgets import (
 from models import DEFAULT_SIGNAL_DEVICE_NAME
 from qr_utils import qr_png_to_ascii, qr_to_ascii
 from server.client import ApiError
+from tui.client_timeouts import call_op
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +225,8 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         super().__init__()
         #: The server client the flow talks to (default: the app's ``client``).
         self._link_client = client
+        #: Thread of the last background ``link.cancel`` (see ``dismiss``).
+        self.cancel_thread: threading.Thread | None = None
         self._signal_number = signal_number
         self._has_whatsapp = has_whatsapp
         self._has_telegram = has_telegram
@@ -491,7 +495,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
 
     async def _call(self, op: str, data: dict[str, Any]) -> Any:
         """Run operation *op* off the UI thread (it may block for seconds)."""
-        return await asyncio.to_thread(self._client().call, op, data)
+        return await asyncio.to_thread(call_op, self._client(), op, data)
 
     @staticmethod
     def _render_qr(qr: dict[str, str]) -> str:
@@ -661,11 +665,34 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         # Tell the server to drop the link (it kills a signal-cli subprocess)
         active, self._active_link = self._active_link, None
         if active is not None:
+            self._cancel_link_in_background(active)
+        super().dismiss(result)
+
+    def _cancel_link_in_background(self, protocol: str) -> None:
+        """``link.cancel`` without making the UI thread wait for the server.
+
+        Fire and forget on a short-lived thread (the screen is going away, so
+        a screen worker would be cancelled with it); a failure is only logged.
+        """
+        client = self._client()
+
+        def _cancel() -> None:
             try:
-                self._client().call("link.cancel", {"protocol": active})
+                call_op(client, "link.cancel", {"protocol": protocol})
             except Exception as _e:
                 logger.debug("Failed to cancel the device link", exc_info=True)
-        super().dismiss(result)
+
+        try:
+            running = self.app.is_running
+        except Exception as _e:  # no active app (unit tests)
+            logger.debug("No active app", exc_info=True)
+            running = False
+        if running:
+            thread = threading.Thread(target=_cancel, name="link-cancel", daemon=True)
+            self.cancel_thread = thread
+            thread.start()
+        else:
+            _cancel()
 
     # ── Event handlers ─────────────────────────────────────────────────────
 

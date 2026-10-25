@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from server.client import ApiError, ChatClient
+from tui.client_timeouts import call_op
 
 logger = logging.getLogger(__name__)
 
@@ -16,12 +17,14 @@ def resolve_attachment_path(
     """Local file of an attachment through ``media.attachment``, or ``None``.
 
     ``None`` when the server cannot produce it (``not_found``: missing,
-    failed download, outside the media root; any other API error is logged and
-    treated the same: a missing attachment must never break the chat view).  May block (lazy download): call
-    it from a worker thread wherever the old backend lookup was.
+    failed download, outside the media root; any other API error, a transport
+    error included, is logged and treated the same: a missing attachment must
+    never break the chat view).  May block (lazy download, a remote server):
+    call it from a worker thread, never from the UI thread.
     """
     try:
-        blob = client.call(
+        blob = call_op(
+            client,
             "media.attachment",
             {"protocol": protocol, "attachment_id": attachment_id},
         )

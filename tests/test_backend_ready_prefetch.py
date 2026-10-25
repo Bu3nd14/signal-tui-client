@@ -14,7 +14,7 @@ from tui.app import SignalTUI
 def _app() -> SignalTUI:
     app = SignalTUI.__new__(SignalTUI)
     app.client = MagicMock()
-    app.client.call.side_effect = lambda name, data=None: (
+    app.client.call.side_effect = lambda name, data=None, **_kw: (
         {"+39": [{"text": "hi", "timestamp": 1}]}
         if name == "messages.snapshot"
         else [{"id": "+39", "display_name": "Bob", "protocol": "signal"}]
@@ -26,7 +26,7 @@ def test_ready_prefetches_on_worker_and_merges_on_ui_thread() -> None:
     app = _app()
     calls: list[tuple[str, str]] = []
     app.client.call.side_effect = (
-        lambda name, data=None, _orig=app.client.call.side_effect: (
+        lambda name, data=None, _orig=app.client.call.side_effect, **_kw: (
             calls.append((name, threading.current_thread().name)) or _orig(name, data)
         )
     )

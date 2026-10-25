@@ -5,17 +5,22 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import SimpleNamespace as _Namespace
 from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import pytest
-from client_harness import StubClient, client_for
+from client_harness import StubClient, client_for, inline_client_calls
 
 from tui.download import DownloadModeMixin
 from ui_components import DownloadLinkWidget, ImageWidget, MessageWidget
+
+
+def SimpleNamespace(**kwargs):
+    return inline_client_calls(_Namespace(**kwargs), DownloadModeMixin)
+
 
 pytestmark = pytest.mark.usefixtures("open_media_root")
 

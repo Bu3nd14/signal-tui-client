@@ -42,6 +42,7 @@ from protocols.whatsapp import WhatsAppBackend
 from server.address_book_refresh import DynamicAddressBookMixin
 from server.bus import EventBus
 from server.core import ChatCore
+from tui.client_calls import ClientCallsMixin
 from tui.events import EventHandlingMixin, _looks_unresolved, _signal_stable_key
 from tui.pickers import PickerMixin
 from tui.polling import PollingMixin
@@ -587,8 +588,12 @@ class TestScheduler:
 @pytest.mark.integration
 class TestDynamicAddressBookIntegration:
     def test_picker_worker_forces_address_book(self):
-        class _PickerHarness(PickerMixin):
+        class _PickerHarness(ClientCallsMixin, PickerMixin):
+            is_running = False
+
             def __init__(self, manager, token=1):
+                self._init_client_state()
+                self._thread_id = threading.get_ident()
                 self.client = client_for(manager)
                 self._address_book_token = token
                 self.statuses: list[str] = []

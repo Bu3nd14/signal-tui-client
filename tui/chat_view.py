@@ -309,21 +309,13 @@ class ChatViewMixin:
     def _thumbnail_limits(self) -> tuple[int, int]:
         """``(max_lines, max_cols)`` for image thumbnails, from ``server.config``.
 
-        Asked once (the settings do not change while the app runs); falls back
-        to the model defaults when the server cannot answer.
+        UI thread, never a client call: the settings are fetched once by a
+        worker at mount (and again on resync); until they arrive, or when the
+        server cannot answer, the model defaults apply.
         """
-        limits = getattr(self, "_thumbnail_limits_cache", None)
+        limits = self._thumbnail_limits_cache
         if limits is None:
-            limits = (DEFAULT_THUMBNAIL_MAX_LINES, DEFAULT_THUMBNAIL_MAX_COLS)
-            try:
-                config = self.client.call("server.config")
-                limits = (
-                    int(config["thumbnail_max_lines"]),
-                    int(config["thumbnail_max_cols"]),
-                )
-                self._thumbnail_limits_cache = limits
-            except Exception:
-                logger.debug("server.config unavailable; using defaults", exc_info=True)
+            return (DEFAULT_THUMBNAIL_MAX_LINES, DEFAULT_THUMBNAIL_MAX_COLS)
         return limits
 
     def _add_message(
@@ -983,7 +975,7 @@ class ChatViewMixin:
         if not (widget.contact_key and widget.protocol):
             return None
         try:
-            result = self.client.call(
+            result = self._call_op(
                 "media.quoted_attachment",
                 {
                     "protocol": widget.protocol,
@@ -1141,7 +1133,7 @@ class ChatViewMixin:
             # Respects _is_stale() to avoid mounting into a stale selection.
             _retry = 0
             while True:
-                window = self.client.call(
+                window = self._call_op(
                     "messages.window",
                     {
                         "protocol": contact.protocol,
@@ -1170,8 +1162,9 @@ class ChatViewMixin:
                 for msg in self._cache.get(contact.cache_key, []):
                     if not msg.get("is_mine"):
                         msg["read"] = True
-        except Exception as _e:  # fallback: stay on the local cache
+        except Exception as exc:  # fallback: stay on the local cache
             logger.debug("History fetch failed, staying on local cache", exc_info=True)
+            self._report_client_error(exc, "cronologia")
 
         if _is_stale():
             return

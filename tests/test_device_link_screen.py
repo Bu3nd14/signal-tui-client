@@ -243,7 +243,9 @@ class TestDeviceLinkReconnectWiring:
             app._open_device_link()
         callback = app.push_screen.call_args[0][1]
         callback(None)
-        app._reconnect_touched_backends.assert_called_once_with({"telegram"})
+        app._reconnect_touched_backends.assert_called_once_with(
+            {"telegram"}, after=fake_screen.cancel_thread
+        )
 
 
 class TestSignalLinkPersistenceEdgeCases:
@@ -932,9 +934,11 @@ class LinkStub:
     def __init__(self, **ops):
         self.ops = ops
         self.calls: list[tuple[str, dict]] = []
+        self.timeouts: list[float | None] = []
 
-    def call(self, name, data=None):
+    def call(self, name, data=None, *, timeout=None):
         self.calls.append((name, data))
+        self.timeouts.append(timeout)
         answer = self.ops[name]
         if isinstance(answer, list):
             answer = answer.pop(0)
@@ -989,6 +993,7 @@ class TestDeviceLinkOpening:
             "link.reconnect",
             {"protocols": ["telegram", "whatsapp"]},
         )
+        assert app.client.timeouts[-1] == 15.0
 
     def test_dismiss_without_touched_protocols_reconnects_nothing(self):
         app = self._app({})

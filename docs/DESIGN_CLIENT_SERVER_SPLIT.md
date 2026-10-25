@@ -467,3 +467,42 @@ attachment paths), `mc-1t1` (unclosed sqlite connections in the test suite),
 `mc-cvp` (isolate the `test_install_script` background alias from the real
 lock file), `mc-kke` (convert handover/disaster-recovery scripts to
 `megachat serve`).
+
+## 11. Phase 2 / P2.3 outcome (the TUI over a remote client)
+
+The TUI works with any `ChatClient`; with a `SocketClient` a call is a round
+trip that can be slow or fail. Rules, implemented in `tui/client_calls.py`
+(`ClientCallsMixin`) and `tui/client_timeouts.py`:
+
+- **No client call on the UI thread.** Call sites run in a worker
+  (`_offload`) and apply the result with `_ui` (inline on the UI thread,
+  `call_from_thread` elsewhere). Without a running app (plain unit tests)
+  `_offload` runs inline. The former UI-thread calls moved as follows:
+  `link.status` (Ctrl+L opens the modal when the answer arrives),
+  `link.cancel` (fire and forget thread, ordered before `link.reconnect`),
+  `link.reconnect`, `download.serve_*` (the link widget is mounted, and
+  download mode left, when the server answers), `media.attachment` of an
+  image click, `contacts.register` (opening a contact not yet listed shows
+  "Apertura chat…" and opens the chat when the server answers), the
+  `backend_ready` fallback fetches, and `server.config` (fetched once by a
+  worker at mount and on resync; thumbnail limits use the model defaults until
+  it arrives).
+- **Timeouts** per operation, one table (`OP_TIMEOUTS`); an operation missing
+  from it raises `KeyError`, and a test checks every operation name the TUI
+  uses is listed.
+- **Errors.** `ServerUnavailable` and `OperationTimeout` show a transient
+  status message (at most one per 5 s, none while the persistent "lost"
+  message is up); `IncompatibleServer` a persistent one. A mutation that
+  timed out or lost its connection has an unknown outcome: a send stays
+  `pending` (never `failed`, a retry could duplicate it), an edit keeps its new
+  text, and the resync settles both. Other `ApiError`s are handled as before.
+- **Resync** (worker, coalesced, UI-thread merge) on `gap`, on
+  `client_connection` `restored`, after a timed-out mutation (at most every
+  10 s) and when the TUI attaches to a server it does not own: `server.status`,
+  then for each connected protocol `messages.snapshot` + `contacts.for_protocol`
+  (merged by `cache_key`, add-only), the open chat's `messages.window`, unread
+  badges. A changed open chat is remounted from the merged cache. Pending
+  bubbles the server has no trace of become `failed`; ones it knows take its
+  status.
+- `SignalTUI(client=...)` injects a client; the TUI then does not own the core
+  (it neither starts nor shuts it down). Attach-or-spawn is P2.4.

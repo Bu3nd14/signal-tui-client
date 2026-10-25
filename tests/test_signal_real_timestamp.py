@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,7 @@ from client_harness import client_for
 import protocols.db as backend_mod
 from models import PROTOCOL_SIGNAL, ChatContact
 from protocols import SignalBackend
+from tui.client_calls import ClientCallsMixin
 from tui.edit import EditMessageMixin
 from tui.send import SendMixin
 from ui_components import MessageWidget
@@ -358,10 +360,14 @@ class TestApplyEditIdFirst:
 # ─── Worker Signal: "real id" path ────────────────────────────────────────────
 
 
-class _SendHandler(SendMixin):
+class _SendHandler(ClientCallsMixin, SendMixin):
     """Minimal SendMixin host (mirrors ``test_failed_send_status.py``)."""
 
+    is_running = False
+
     def __init__(self, contact, messages=(), bubble=None):
+        self._init_client_state()
+        self._thread_id = threading.get_ident()
         self.selected_contact = contact
         self._cache = {contact.cache_key: list(messages)}
         self._status = MagicMock()

@@ -17,6 +17,8 @@ from models import (
     is_media_quote_placeholder,
 )
 from server.api import ApiError
+from server.socket_client import OperationTimeout
+from tui.client_calls import is_unknown_outcome
 from ui_components import MessageTextArea
 
 logger = logging.getLogger(__name__)
@@ -337,8 +339,11 @@ class SendMixin:
             message[:60],
         )
         try:
-            result = self.client.call("messages.send", request)
+            result = self._call_op("messages.send", request)
         except Exception as e:
+            if isinstance(e, ApiError) and is_unknown_outcome(e):
+                self._send_outcome_unknown(e, protocol, contact_id, timestamp, message)
+                return
             # The cause goes to the log and the (permanent) status bar.
             logger.exception(
                 "messages.send failed (protocol=%r contact=%r ts=%s text=%r)",
@@ -352,6 +357,8 @@ class SendMixin:
             self._apply_outgoing_status(
                 protocol, contact_id, timestamp, message, "failed", ("pending",)
             )
+            if isinstance(e, ApiError) and self._report_client_error(e, "invio"):
+                return  # IncompatibleServer: persistent message already shown
             details = e.details if isinstance(e, ApiError) else None
             error = details.get("error") if isinstance(details, dict) else None
             self.call_from_thread(self._status, f"❌ Send error: {error or e}", 0)
@@ -367,6 +374,44 @@ class SendMixin:
         if message_id:
             self._update_outgoing_message_id(
                 protocol, contact_id, timestamp, message, str(message_id)
+            )
+
+    def _send_outcome_unknown(
+        self,
+        exc: ApiError,
+        protocol: str,
+        contact_id: str,
+        timestamp: int,
+        message: str,
+    ) -> None:
+        """A send timed out or lost its connection: it may have gone out.
+
+        The bubble stays ``pending`` (never ``failed``: a retry could send the
+        message twice).  The next resync settles it: the server's row decides
+        (sent/delivered/read, or ``failed``), and a bubble the server has no
+        trace of is marked ``failed`` so it can be retried.
+        """
+        logger.warning(
+            "messages.send outcome unknown (protocol=%r contact=%r ts=%s): %s",
+            protocol,
+            contact_id,
+            timestamp,
+            exc,
+        )
+        self._note_unknown_outcome(exc)
+        if isinstance(exc, OperationTimeout):
+            # The resync started above replaces this message when it is done.
+            self.call_from_thread(
+                self._status,
+                "⚠️ Invio non confermato dal server — verifica in corso…",
+                0,
+            )
+        else:
+            self.call_from_thread(
+                self._status,
+                "⚠️ Server non raggiungibile — invio non confermato, "
+                "verrà verificato alla riconnessione",
+                10,
             )
 
     def _apply_outgoing_status(

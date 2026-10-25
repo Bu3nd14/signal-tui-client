@@ -4,7 +4,7 @@ import logging
 
 from textual.widgets import TextArea
 
-from contact_picker import ContactPickerScreen, configure_picker
+from contact_picker import ContactPickerScreen
 from device_link_screen import DeviceLinkPickerScreen
 from emoji_picker import (
     EmojiCompletionWidget,
@@ -13,6 +13,7 @@ from emoji_picker import (
 from models import (
     ChatContact,
 )
+from server.api import ApiError
 from server.events_api import contact_from_wire
 from ui_components import MessageTextArea
 
@@ -20,17 +21,7 @@ logger = logging.getLogger("signal_tui")
 
 
 class PickerMixin:
-    def _configure_picker(self) -> None:
-        """Take the picker options (result cap, preferred protocol) from the
-        server's ``server.config``; the defaults stay when it cannot answer."""
-        try:
-            config = self.client.call("server.config")
-            configure_picker(
-                max_results=int(config["picker_max_results"]),
-                preferred_backend=str(config["picker_preferred_backend"]),
-            )
-        except Exception:
-            logger.debug("server.config unavailable; picker defaults", exc_info=True)
+    _device_link_opening: bool = False
 
     def _is_emoji_picker_open(self) -> bool:
         """Check if the emoji picker modal screen is currently active."""
@@ -108,12 +99,13 @@ class PickerMixin:
         token is still current and the screen is still mounted.
         """
         try:
-            result = self.client.call(
+            result = self._call_op(
                 "contacts.address_book",
                 {"protocols": sorted(scope) if scope else None, "force": True},
             )
-        except Exception:
+        except Exception as exc:
             logger.warning("contacts.address_book failed", exc_info=True)
+            self._report_client_error(exc, "rubrica")
             return
         contacts = [contact_from_wire(w) for w in result["contacts"]]
         errors = dict(result["errors"])
@@ -134,8 +126,38 @@ class PickerMixin:
     # ─── Device link picker ────────────────────────────────────────────────────
 
     def _open_device_link(self) -> None:
-        """Open the device link picker modal (Ctrl+L)."""
-        status = self.client.call("link.status")["protocols"]
+        """Open the device link picker modal (Ctrl+L).
+
+        The picker needs ``link.status``, so the call runs in a worker and the
+        modal opens when it returns (instantly with the embedded core).
+        """
+        if self._device_link_opening:
+            return  # a second Ctrl+L while the first is still being answered
+        self._device_link_opening = True
+
+        def _work() -> None:
+            try:
+                status = self._call_op("link.status")["protocols"]
+            except ApiError as exc:
+                logger.warning("link.status failed: %s", exc)
+                if not self._report_client_error(exc, "collegamento dispositivo"):
+                    self._ui(self._status, f"❌ {exc.message}")
+                self._ui(self._device_link_closed)
+                return
+            except Exception:
+                logger.exception("link.status answer unusable")
+                self._ui(self._device_link_closed)
+                return
+            self._ui(self._push_device_link_screen, status)
+
+        self._offload(_work)
+
+    def _device_link_closed(self) -> None:
+        """UI thread: the device link flow is over (or never started)."""
+        self._device_link_opening = False
+
+    def _push_device_link_screen(self, status: dict) -> None:
+        """UI thread: open the device link modal for the server's link *status*."""
         screen = DeviceLinkPickerScreen(
             signal_number=status["signal"]["account"],
             has_whatsapp=status["whatsapp"]["available"],
@@ -145,7 +167,10 @@ class PickerMixin:
 
         def _on_done(_: object) -> None:
             logger.info("LINK-DONE: callback fired")
-            self._reconnect_touched_backends(screen._touched_protocols)
+            self._device_link_closed()
+            self._reconnect_touched_backends(
+                screen._touched_protocols, after=screen.cancel_thread
+            )
 
         self.push_screen(screen, _on_done)
 

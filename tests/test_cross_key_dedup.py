@@ -160,6 +160,9 @@ class _ChatViewStub:
         return self._merge_window_rows(contact, window["messages"])
 
 
+from tui.client_timeouts import call_op
+
+
 class _BackendConnectStub:
     """Minimal duck-type for ``BackendConnectMixin._on_backend_ready``."""
 
@@ -173,6 +176,11 @@ class _BackendConnectStub:
         self.selected_contact = None
         self.selection = None
         self.rendered: list[ChatContact] | None = None
+
+    is_running = False
+
+    def _call_op(self, op: str, data: dict | None = None):
+        return call_op(self.client, op, data)
 
     def _select_contact(self, contact: ChatContact) -> None:
         self.selection = contact

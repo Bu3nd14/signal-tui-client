@@ -15,6 +15,7 @@ All tests use an isolated temporary SQLite DB (``protocols.db.DB_FILE`` /
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -311,11 +312,16 @@ class TestSendPropagatesIdToUi:
     """📤 N1 (TUI) — l'id ritornato da ``send_message_sync`` raggiunge UI cache e widget."""
 
     def test_whatsapp_send_result_updates_ui_cache_and_widget_id(self):
+        from tui.client_calls import ClientCallsMixin
         from tui.send import SendMixin
         from ui_components import MessageWidget
 
-        class Handler(SendMixin):
+        class Handler(ClientCallsMixin, SendMixin):
+            is_running = False
+
             def __init__(self):
+                self._init_client_state()
+                self._thread_id = threading.get_ident()
                 self._cache = {}
                 self._status = MagicMock()
                 self._update_message_widgets_status = MagicMock()
