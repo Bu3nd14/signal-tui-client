@@ -20,7 +20,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import protocols.db as backend_mod
 from protocols.whatsapp import WhatsAppBackend
-from signal_tui import SignalTUI
 
 
 def _make_backend(api_url: str = "http://api.test") -> WhatsAppBackend:
@@ -30,51 +29,6 @@ def _make_backend(api_url: str = "http://api.test") -> WhatsAppBackend:
     backend._chats_last_refresh = 0.0
     backend._CHATS_REFRESH_INTERVAL = 15.0
     return backend
-
-
-# ─── _resync_wa_history (integrazione UI) ────────────────────────────────────
-
-
-class TestUIResync:
-    def _make_app(self) -> SignalTUI:
-        app = SignalTUI()
-        app.manager = MagicMock()
-        return app
-
-    def test_calls_resync_when_connected(self):
-        app = self._make_app()
-        backend = _make_backend()
-        app.whatsapp_backend = backend
-        backend._rest._request.return_value = []
-        backend.cache = {"111@lid": [{"id": "a"}]}
-        backend._rest.list_messages.return_value = []
-        n = app._resync_wa_history()
-        assert n == 1
-
-    def test_does_not_resync_when_disconnected(self):
-        app = self._make_app()
-        backend = _make_backend()
-        backend._connected = False
-        app.whatsapp_backend = backend
-        n = app._resync_wa_history()
-        assert n == 0
-        backend._rest.list_messages.assert_not_called()
-
-    def test_no_backend_returns_zero(self):
-        app = self._make_app()
-        app.whatsapp_backend = None
-        assert app._resync_wa_history() == 0
-
-    def test_backend_error_is_swallowed(self):
-        app = self._make_app()
-        backend = _make_backend()
-        app.whatsapp_backend = backend
-
-        def boom():
-            raise RuntimeError("boom")
-
-        backend.resync_history = boom
-        assert app._resync_wa_history() == 0
 
 
 # ─── resync_history (backend WhatsApp) ────────────────────────────────────────

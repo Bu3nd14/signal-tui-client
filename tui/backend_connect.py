@@ -1,7 +1,6 @@
 """Per-protocol backend connection workers."""
 
 import logging
-import time
 
 from models import (
     PROTOCOL_WHATSAPP,
@@ -12,7 +11,7 @@ from models import (
 from protocols import (
     ChatBackend,
 )
-from protocols.webhook import WEBHOOK_PORT, ensure_webhook_server
+from server.bus import GAP, Event
 
 logger = logging.getLogger("signal_tui")
 
@@ -20,32 +19,10 @@ logger = logging.getLogger("signal_tui")
 # of an already-present entry (never downgrade read → sent).
 _STATUS_RANK = {"pending": 0, "failed": 0, "sent": 1, "delivered": 2, "read": 3}
 
-#: How long (seconds) the boot worker waits for WAHA to report WORKING before
-#: giving up, and how often it polls.  Covers a WAHA session that is still
-#: syncing when the app starts (e.g. right after a container restart/device
-#: link) so the UI no longer stays empty until a manual restart.
-WA_BOOT_READY_TIMEOUT_S = 300.0
-WA_BOOT_POLL_INTERVAL_S = 2.5
-
 
 def _status_rank(status: str | None) -> int:
     """Return the numeric rank of a delivery status (default 0)."""
     return _STATUS_RANK.get(status, 0)
-
-
-def _run_startup_maintenance() -> None:
-    """Run the idempotent DB maintenance before backend caches load.
-
-    Each connect worker calls this; ``run_startup_maintenance`` is guarded per
-    DB path (R3), so the heavy dedup runs at most once per process.  Never
-    raises: a maintenance failure must not abort a backend connection.
-    """
-    try:
-        from protocols.db import run_startup_maintenance
-
-        run_startup_maintenance()
-    except Exception:
-        logger.debug("Startup DB maintenance failed", exc_info=True)
 
 
 def _dedup_key(m: dict) -> tuple | None:
@@ -97,6 +74,9 @@ class BackendConnectMixin:
         proto = backend.protocol
 
         # ── Merge cache (incrementale, no clear, idempotente) ──
+        # Il core non attende più questo merge (evento asincrono): un worker
+        # (es. resync WhatsApp) può scrivere in backend.cache in parallelo,
+        # quindi si itera sempre su snapshot (list(...)).
         # `_on_backend_ready` può girare più volte (avvio + device-link Ctrl+L,
         # che ri-connette tutti i backend).  Un dedup basato SOLO su `id`
         # ri-appenderebbe i messaggi senza id (Signal, optimistic send) ad ogni
@@ -114,7 +94,7 @@ class BackendConnectMixin:
                 ): m
                 for m in ui_msgs
             }
-            for m in msgs:
+            for m in list(msgs):  # snapshot: the core may still be ingesting
                 mid = m.get("id")
                 identity = (
                     bool(m.get("is_mine", False)),
@@ -169,11 +149,11 @@ class BackendConnectMixin:
             # Processiamo ogni contatto UNA volta: union delle sue chiavi
             # storage, dedup cross-key, merge nella sola chiave canonica.
             key_owner: dict[str, object] = {}
-            for contact in getattr(backend, "contacts", []):
+            for contact in list(getattr(backend, "contacts", [])):
                 for storage_key in contact_storage_keys(contact):
                     key_owner.setdefault(storage_key, contact)
             processed: set[str] = set()
-            for cid, msgs in backend.cache.items():
+            for cid, msgs in list(backend.cache.items()):
                 owner = key_owner.get(cid)
                 if owner is None:
                     _merge_messages(contact_cache_key(proto, cid), msgs)
@@ -184,7 +164,7 @@ class BackendConnectMixin:
                 tagged = [
                     (storage_key, m)
                     for storage_key in contact_storage_keys(owner)
-                    for m in backend.cache.get(storage_key, [])
+                    for m in list(backend.cache.get(storage_key, []))
                 ]
                 kept_pairs = dedup_cross_key(
                     tagged,
@@ -197,12 +177,12 @@ class BackendConnectMixin:
                     [m for _key, m in kept_pairs],
                 )
         else:
-            for cid, msgs in backend.cache.items():
+            for cid, msgs in list(backend.cache.items()):
                 _merge_messages(contact_cache_key(proto, cid), msgs)
 
         # ── Merge contatti (aggiunge nuovi, aggiorna last_message_ts) ──
         existing_ids = {c.cache_key for c in self.contacts}
-        for c in backend.contacts:
+        for c in list(backend.contacts):
             if c.cache_key in existing_ids:
                 for old in self.contacts:
                     if old.cache_key == c.cache_key:
@@ -231,231 +211,53 @@ class BackendConnectMixin:
     def _reconnect_touched_backends(self, protocols: set[str]) -> None:
         """Reconnect only the backends whose link flow was actually started.
 
-        Called after the device-link screen dismisses.  A plain ``Ctrl+L`` →
-        ``Esc`` touches nothing and reconnects nothing; starting a QR flow for
-        a protocol marks it and, on dismiss, only that backend is reconnected
-        (to restore the connection the QR flow disturbed or to activate a just
-        linked account).
+        Delegates to :meth:`server.core.ChatCore.reconnect`.
         """
-        if self.signal_backend and "signal" in protocols:
-            self.run_worker(self._connect_signal, exclusive=False, thread=True)
-        if self.whatsapp_backend and "whatsapp" in protocols:
-            self.run_worker(self._connect_whatsapp, exclusive=False, thread=True)
-        if self.telegram_backend and "telegram" in protocols:
-            self.run_worker(self._connect_telegram, exclusive=False, thread=True)
+        self.core.reconnect(protocols)
 
-    def _connect_signal(self) -> None:
-        """Worker thread: avvia Signal, poi merge nel UI thread."""
-        _run_startup_maintenance()
-        self.call_from_thread(
-            self._mark_backend_connecting, self.signal_backend.protocol
-        )
-        try:
-            self.call_from_thread(self._status, "⏳ Signal: avvio daemon...", 0)
-            sb = self.signal_backend
-            logger.info("LINK-SIG: start, daemon_proc=%s", sb.daemon_proc is not None)
-            sb._connect_sync()
-            logger.info("LINK-SIG: connect_sync done, use_daemon=%s", sb._use_daemon)
-            self.call_from_thread(self._on_backend_ready, sb)
-            self.call_from_thread(self._status, "💡 Select a contact to view chat")
-            if sb._use_daemon:
-                self.call_from_thread(self._status, "✅ Signal: daemon attivo")
-            else:
-                self.call_from_thread(
-                    self._status, "⚠️ Signal: daemon non disponibile (subprocess)", 0
-                )
-        except Exception as e:
-            logger.exception("LINK-SIG: failed")
-            self.call_from_thread(self._status, f"❌ Signal: errore — {e}", 0)
-            self.call_from_thread(self._mark_backend_done, self.signal_backend.protocol)
+    def _core_event_worker(self) -> None:
+        """Worker thread: inoltra gli eventi del core al UI thread.
 
-    def _connect_whatsapp_boot(self) -> None:
-        """Worker thread: connect WhatsApp once WAHA reports WORKING.
-
-        WAHA may still be syncing when the app starts (``status != WORKING``,
-        e.g. right after a container restart).  The previous strict
-        ``is_working`` gate skipped the connect *before* scheduling anything,
-        with no retry, so the UI stayed empty until a manual restart.  Poll
-        (bounded) until the session is WORKING, then delegate to the normal
-        ``_connect_whatsapp`` path which waits for readiness and polls contacts.
-        If the session asks for pairing in the meantime, stop: the user links it
-        from Ctrl+L.
+        Sostituisce le vecchie ``call_from_thread`` dei connect worker.  La
+        subscription è creata in ``on_mount`` PRIMA di ``core.start()`` così
+        nessun evento va perso.
         """
-        backend = self.whatsapp_backend
-        if backend is None:
+        sub = self._core_sub
+        if sub is None:
             return
-        _run_startup_maintenance()
-        deadline = time.monotonic() + WA_BOOT_READY_TIMEOUT_S
-        while time.monotonic() < deadline:
-            if backend.needs_pairing:
-                logger.info("LINK-WA: pairing richiesto, skip auto-connect")
-                self.call_from_thread(self._mark_backend_done, backend.protocol)
-                return
-            if backend.is_working:
-                logger.info("LINK-WA: WAHA WORKING, avvio connessione")
-                self._connect_whatsapp()
-                return
-            time.sleep(WA_BOOT_POLL_INTERVAL_S)
-        logger.warning(
-            "LINK-WA: WAHA non WORKING dopo %.0fs, auto-connect annullato",
-            WA_BOOT_READY_TIMEOUT_S,
-        )
-        self.call_from_thread(self._mark_backend_done, backend.protocol)
-
-    def _connect_whatsapp(self) -> None:
-        """Worker thread: avvia WhatsApp, mostra contatti subito, sync cronologia dopo."""
-        if self._wa_connecting:
-            logger.info("LINK-WA: already connecting, skipping duplicate worker")
-            return
-        self._wa_connecting = True
-        self.call_from_thread(
-            self._mark_backend_connecting, self.whatsapp_backend.protocol
-        )
         try:
-            logger.info("LINK-WA: start")
-            if self.whatsapp_backend.needs_pairing:
-                self.call_from_thread(self._status, "⏳ WAHA: attesa pairing...", 0)
-            self.whatsapp_backend.connect_sync()
-            n = len(self.whatsapp_backend.contacts)
-            logger.info("LINK-WA: connect_sync done, wa_contacts=%d", n)
-            try:
-                ensure_webhook_server(self.whatsapp_backend)
-            except Exception as _e:
-                logger.debug("Webhook server startup failed", exc_info=True)
-            if n > 0:
-                self.call_from_thread(
-                    self._status,
-                    f"✅ WAHA: {n} contatti (webhook :{WEBHOOK_PORT})",
-                )
-                self.call_from_thread(self._on_backend_ready, self.whatsapp_backend)
-                self._resync_wa_history()
-                self._wa_connecting = False
-            else:
-                # WAHA is working but server-side contacts sync still in
-                # progress.  Launch a background poller worker — sleeps in
-                # a thread, never blocks the UI.
-                self.run_worker(self._poll_wa_contacts, thread=True)
-        except Exception as exc:
-            logger.exception("LINK-WA: failed")
-            self.call_from_thread(self._status, f"❌ WAHA: non disponibile — {exc}", 0)
-            self.call_from_thread(
-                self._mark_backend_done, self.whatsapp_backend.protocol
-            )
-            self._wa_connecting = False
-
-    def _poll_wa_contacts(self) -> None:
-        """Worker thread: attende sync contatti WAHA, mostra subito, poi cronologia."""
-        poll_count = 0
-        deadline = time.monotonic() + 120.0
-        self.call_from_thread(self._status, "🔄 WAHA: sync contatti...", 0)
-        while time.monotonic() < deadline:
-            time.sleep(2.0)
-            poll_count += 1
-            self.whatsapp_backend._load_contacts()
-            n = len(self.whatsapp_backend.contacts)
-            if n > 0:
-                logger.info(
-                    "LINK-WA: contacts synced after %d polls, wa_contacts=%d",
-                    poll_count,
-                    n,
-                )
-                self.call_from_thread(
-                    self._status,
-                    f"📥 WAHA: {n} contatti caricati",
-                )
-                break
-            logger.info("LINK-WA: waiting (poll=%d)", poll_count)
-        else:
-            logger.warning("LINK-WA: timeout after 2 min")
-            self.call_from_thread(
-                self._status,
-                "⚠️ WAHA: timeout contatti",
-                0,
-            )
-            self.call_from_thread(
-                self._mark_backend_done, self.whatsapp_backend.protocol
-            )
-            self._wa_connecting = False
-            return
-
-        # Mostra i contatti SUBITO, poi sync cronologia in background
-        self.call_from_thread(self._on_backend_ready, self.whatsapp_backend)
-        self.call_from_thread(self._status, "⏳ WAHA: sync cronologia...", 0)
-        self._resync_wa_history()
-        self.call_from_thread(self._status, "")
-        logger.info("LINK-WA: done, total_contacts=%d", len(self.contacts))
-        self._wa_connecting = False
-
-    def _connect_telegram(self) -> None:
-        """Worker thread: connette Telegram, poi merge nel UI thread."""
-        if self._tg_connecting:
-            logger.info("LINK-TG: already connecting, skipping duplicate worker")
-            return
-        self._tg_connecting = True
-        _run_startup_maintenance()
-        try:
-            self.call_from_thread(
-                self._mark_backend_connecting, self.telegram_backend.protocol
-            )
-            logger.info(
-                "LINK-TG: start, needs_pairing=%s", self.telegram_backend.needs_pairing
-            )
-            self.call_from_thread(self._status, "⏳ Telegram: connecting...", 0)
-            self.telegram_backend._connect_sync()
-            n = len(self.telegram_backend.contacts)
-            logger.info(
-                "LINK-TG: connect_sync done, contacts=%d, connected=%s",
-                n,
-                self.telegram_backend._connected,
-            )
-            if n > 0:
-                self.call_from_thread(
-                    self._status, "⏳ Telegram: sync cronologia...", 0
-                )
-                fetched = self.telegram_backend.fetch_recent_history(limit=20)
-                logger.info("LINK-TG: history synced, %d messages", fetched)
-            self.call_from_thread(self._on_backend_ready, self.telegram_backend)
-        except Exception as e:
-            logger.exception("Telegram connect failed")
-            self.call_from_thread(self._status, f"❌ Telegram: {e}", 0)
-            self.call_from_thread(
-                self._mark_backend_done, self.telegram_backend.protocol
-            )
+            while self._polling_active:
+                event = sub.get(timeout=0.1)
+                if event is None:
+                    if sub.closed:
+                        break
+                    continue
+                try:
+                    self.call_from_thread(self._dispatch_core_event, event)
+                except Exception:
+                    logger.debug("Core event dispatch failed", exc_info=True)
         finally:
-            self._tg_connecting = False
+            sub.close()
 
-    def _resync_wa_history(self) -> int:
-        """Re-sync best-effort dello storico WhatsApp all'avvio.
-
-        Delega al backend ``resync_history`` (unread ∪ chat con messaggi nel DB)
-        e riporta un info-message se ha processato qualche chat.  Non solleva
-        mai eccezioni: all'avvio l'UI non deve fallire né per un errore remoto
-        né per il reporting.  Ritorna il numero di chat ri-sincronizzate
-        (0 se non applicabile).
-        """
-        if self.whatsapp_backend is None or not getattr(
-            self.whatsapp_backend, "_connected", False
-        ):
-            return 0
-        try:
-            resync = getattr(self.whatsapp_backend, "resync_history", None)
-        except Exception as _e:
-            logger.debug("Failed to resolve resync_history", exc_info=True)
-            return 0
-        if resync is None:
-            return 0
-        try:
-            n = resync()
-        except Exception as _e:
-            logger.debug("WhatsApp history resync failed", exc_info=True)
-            return 0
-        if n:
-            try:
-                self.call_from_thread(
-                    self._status, f"✅ WAHA: cronologia sincronizzata per {n} chat"
-                )
-            except Exception as _e:
-                logger.debug(
-                    "Status report failed", exc_info=True
-                )  # il report è solo informativo
-        return n
+    def _dispatch_core_event(self, event: Event) -> None:
+        """UI thread: applica un evento del core al TUI."""
+        payload = event.payload
+        if event.type == "backend_connecting":
+            self._mark_backend_connecting(payload["protocol"])
+        elif event.type == "backend_status":
+            if payload.get("persistent"):
+                self._status(payload["text"], 0)
+            else:
+                self._status(payload["text"])
+        elif event.type == "backend_ready":
+            backend = self.manager.get(payload["protocol"])
+            if backend is not None:
+                self._on_backend_ready(backend)
+            else:
+                logger.debug("backend_ready for unknown protocol %s", payload)
+        elif event.type == "backend_done":
+            self._mark_backend_done(payload["protocol"])
+        elif event.type == GAP:
+            logger.debug("Core event bus gap: %s", payload)
+        else:
+            logger.debug("Ignoring unknown core event %s", event.type)

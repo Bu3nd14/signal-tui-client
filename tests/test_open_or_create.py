@@ -34,10 +34,10 @@ from tui.app import SignalTUI
 def _make_app(contacts: list[ChatContact] | None = None) -> SignalTUI:
     """Build a ``SignalTUI`` with neutralized workers and a controllable manager."""
     with (
-        patch("tui.app.BackendManager"),
-        patch("tui.app.SignalBackend"),
-        patch("tui.app.whatsapp_enabled", return_value=False),
-        patch("tui.app.telegram_enabled", return_value=False),
+        patch("server.core.BackendManager"),
+        patch("server.core.SignalBackend"),
+        patch("server.core.whatsapp_enabled", return_value=False),
+        patch("server.core.telegram_enabled", return_value=False),
     ):
         app = SignalTUI()
     app.manager = MagicMock()

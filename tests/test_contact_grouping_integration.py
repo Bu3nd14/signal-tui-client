@@ -48,10 +48,10 @@ def _grouped_app(*contacts: ChatContact):
         self._render_contact_list(list(self.contacts))
 
     with (
-        patch("tui.app.BackendManager"),
-        patch("tui.app.SignalBackend"),
-        patch("tui.app.whatsapp_enabled", return_value=False),
-        patch("tui.app.telegram_enabled", return_value=False),
+        patch("server.core.BackendManager"),
+        patch("server.core.SignalBackend"),
+        patch("server.core.whatsapp_enabled", return_value=False),
+        patch("server.core.telegram_enabled", return_value=False),
         patch.object(SignalTUI, "on_mount", _noop_on_mount),
     ):
         app = SignalTUI()

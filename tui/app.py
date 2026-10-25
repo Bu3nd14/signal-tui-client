@@ -27,12 +27,12 @@ from models import (
     protocol_emoji,
 )
 from protocols import (
-    BackendManager,
     SignalBackend,
     TelegramBackend,
     WhatsAppBackend,
 )
-from protocols.config import signal_enabled, telegram_enabled, whatsapp_enabled
+from server.bus import EventBus, Subscription
+from server.core import ChatCore
 from tui.address_book_refresh import DynamicAddressBookMixin
 from tui.backend_connect import BackendConnectMixin
 from tui.chat_view import ChatViewMixin
@@ -148,24 +148,13 @@ class SignalTUI(
         self._window_native_token = 0
         self._window_native_pending = 0
 
-        # Multi-protocol backend manager + the always-registered Signal backend.
-        self.manager = BackendManager()
-        self.signal_backend = SignalBackend()
-        self.manager.register(self.signal_backend)
-
-        # WhatsApp backend is registered only when configured (env/config.json);
-        # otherwise it's skipped gracefully and the Signal TUI keeps working.
-        self.whatsapp_backend: WhatsAppBackend | None = None
-        if whatsapp_enabled():
-            self.whatsapp_backend = WhatsAppBackend()
-            self.manager.register(self.whatsapp_backend)
-
-        # Telegram backend is registered only when credentials are configured;
-        # otherwise it's skipped gracefully.
-        self.telegram_backend: TelegramBackend | None = None
-        if telegram_enabled():
-            self.telegram_backend = TelegramBackend()
-            self.manager.register(self.telegram_backend)
+        # Headless core: owns the backends and their connect workers; the TUI
+        # reacts to its bus events (see ``BackendConnectMixin``).  The backend
+        # attributes below are aliases to the core's objects.
+        self.bus = EventBus()
+        self.core = ChatCore(self.bus)
+        self.manager = self.core.manager
+        self._core_sub: Subscription | None = None
 
         self.contacts: list[ChatContact] = []
         self.selected_contact: ChatContact | None = None
@@ -254,13 +243,6 @@ class SignalTUI(
         # O(N) CSS selector scans via query_one on every message mount.
         self._chat_log: Vertical | None = None
 
-        # WhatsApp link guard: prevents duplicate concurrent connect workers.
-        self._wa_connecting: bool = False
-
-        # Telegram link guard: prevents duplicate concurrent connect workers
-        # (two Ctrl+L→Esc in a row used to race on the shared client state).
-        self._tg_connecting: bool = False
-
         # Backends currently connecting (pending a ready/failure report).
         # Populated as each connect worker starts and drained when the backend
         # reports (ready OR failed); when empty, the startup auto-selection runs.
@@ -281,6 +263,32 @@ class SignalTUI(
         self._address_book_last_lazy = 0.0
         self._address_book_pending_protocols: set[str] = set()
         self._address_book_refresh_thread: threading.Thread | None = None
+
+    # Backend aliases: the core owns the objects; assigning (tests, relink)
+    # replaces the core's attribute so both sides always agree.
+    @property
+    def signal_backend(self) -> SignalBackend:
+        return self.core.signal_backend
+
+    @signal_backend.setter
+    def signal_backend(self, value: SignalBackend) -> None:
+        self.core.signal_backend = value
+
+    @property
+    def whatsapp_backend(self) -> WhatsAppBackend | None:
+        return self.core.whatsapp_backend
+
+    @whatsapp_backend.setter
+    def whatsapp_backend(self, value: WhatsAppBackend | None) -> None:
+        self.core.whatsapp_backend = value
+
+    @property
+    def telegram_backend(self) -> TelegramBackend | None:
+        return self.core.telegram_backend
+
+    @telegram_backend.setter
+    def telegram_backend(self, value: TelegramBackend | None) -> None:
+        self.core.telegram_backend = value
 
     def compose(self):
         yield Header()
@@ -326,24 +334,10 @@ class SignalTUI(
         # as soon as their backends are ready (independent workers below).
         self._polling_active = True
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
-        # Only connect backends that are already linked (skip slow daemon
-        # startup for unlinked accounts — they connect after Ctrl+L link).
-        if signal_enabled():
-            self.run_worker(self._connect_signal, exclusive=False, thread=True)
-        else:
-            logger.info("Signal auto-connect disabled (signal_enabled() is False)")
-            self._mark_backend_done(self.signal_backend.protocol)
-        # WhatsApp: WAHA may still be syncing at boot.  The boot worker waits
-        # (bounded) for the session to become WORKING, then connects; the old
-        # strict ``is_working`` gate skipped the connect with no retry, leaving
-        # the UI empty until a manual restart.
-        if self.whatsapp_backend is not None:
-            self.run_worker(self._connect_whatsapp_boot, exclusive=False, thread=True)
-        if (
-            self.telegram_backend is not None
-            and not self.telegram_backend.needs_pairing
-        ):
-            self.run_worker(self._connect_telegram, exclusive=False, thread=True)
+        # Subscribe BEFORE starting the core so no connect event is missed.
+        self._core_sub = self.bus.subscribe()
+        self.run_worker(self._core_event_worker, exclusive=False, thread=True)
+        self.core.start()
 
         self._init_native_renderer()
         self.start_address_book_refresh()
