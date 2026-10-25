@@ -8,6 +8,7 @@ in :mod:`server.models_api`.
 from server.ops import (  # noqa: F401
     chats,
     contacts,
+    download,
     edit,
     media,
     messages,

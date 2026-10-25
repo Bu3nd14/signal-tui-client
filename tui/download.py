@@ -12,7 +12,7 @@ from textual.widgets import Static
 from models import (
     PROTOCOL_SIGNAL,
 )
-from protocols.download import serve_text_as_file
+from server.client import ApiError
 from tui.blobs import resolve_attachment_path
 from tui.images.detect import ImageSupport
 from ui_components import (
@@ -84,7 +84,6 @@ class DownloadModeMixin:
                 text=event.path.name if event.path else "attachment",
                 attachment_id=event.attachment_id,
                 protocol=event.protocol,
-                attachment_path=event.path,
             )
             return
         if event.path is not None:
@@ -141,7 +140,6 @@ class DownloadModeMixin:
             text=path.name,
             attachment_id=attachment_id,
             protocol=protocol,
-            attachment_path=path,
         )
 
     def action_download_mode(self) -> None:
@@ -173,40 +171,37 @@ class DownloadModeMixin:
         attachment_id: str | None = None,
         timestamp: int = 0,
         protocol: str | None = None,
-        attachment_path: Path | None = None,
     ) -> None:
-        """Start a temporary HTTP server to serve the message content.
+        """Ask the server to serve the message content on its temporary HTTP server.
 
-        If ``attachment_id`` is provided and the protocol backend resolves
-        a local file, that file is served.  Otherwise the message text is
-        written to a .txt file and served.
+        If ``attachment_id`` is provided the server serves that attachment's
+        file.  Otherwise the message text is written to a .txt file and served.
 
         A clickable ``DownloadLinkWidget`` is mounted in the chat log.
         """
-        from protocols.download import _serve_file_path
-
-        if attachment_id:
-            resolved = attachment_path
-            if resolved is None:
-                resolved = resolve_attachment_path(
-                    self.client, protocol or PROTOCOL_SIGNAL, attachment_id
+        try:
+            if attachment_id:
+                served = self.client.call(
+                    "download.serve_attachment",
+                    {
+                        "protocol": protocol or PROTOCOL_SIGNAL,
+                        "attachment_id": attachment_id,
+                    },
                 )
-            if resolved is not None and resolved.is_file():
-                url = _serve_file_path(resolved)
             else:
-                url = f"ERROR: Attachment file not found (id={attachment_id[:80]})"
-        else:
-            # Serve the message text as a .txt file
-            # Use timestamp to create a unique filename
-            fname = f"signal-message-{timestamp}.txt" if timestamp else "message.txt"
-            url = serve_text_as_file(text, filename=fname)
-
-        if url.startswith("ERROR:"):
-            self._status(f"❌ {url}")
+                # Use timestamp to create a unique filename
+                fname = (
+                    f"signal-message-{timestamp}.txt" if timestamp else "message.txt"
+                )
+                served = self.client.call(
+                    "download.serve_text", {"text": text, "filename": fname}
+                )
+        except ApiError as exc:
+            self._status(f"❌ {exc.message}")
         else:
             # Mount a clickable download link widget
             chat_log = self.chat_log
-            widget = DownloadLinkWidget(url)
+            widget = DownloadLinkWidget(served["url"])
             chat_log.mount(widget)
             chat_log.scroll_end(animate=False)
 
@@ -253,7 +248,6 @@ class DownloadModeMixin:
                 text=text,
                 attachment_id=event.attachment_id,
                 protocol=protocol,
-                attachment_path=att_path,
             )
             return
 

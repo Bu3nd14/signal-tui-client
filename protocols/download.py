@@ -139,6 +139,11 @@ def _serve_file_path(att_path: Path) -> str:
     return f"{url_base}/{att_path.name}"
 
 
+def serve_file_path(att_path: Path) -> str:
+    """Public name of :func:`_serve_file_path` (the server's download ops)."""
+    return _serve_file_path(att_path)
+
+
 def serve_attachment_for_download(attachment_id: str) -> str:
     """Serve a Signal attachment file via the persistent HTTP server.
 

@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import pytest
-from client_harness import client_for
+from client_harness import StubClient, client_for
 
 from tui.download import DownloadModeMixin
 from ui_components import DownloadLinkWidget, ImageWidget, MessageWidget
@@ -106,25 +106,40 @@ class TestDownloadMode:
 
     def test_start_download_serves_text_and_mounts_link(self):
         chat_log = MagicMock()
+        client = StubClient({"url": "http://x/file.txt"})
         app = SimpleNamespace(
-            manager=MagicMock(),
+            client=client,
             chat_log=chat_log,
             _download_mode=True,
             _status=MagicMock(),
             _update_download_bar=MagicMock(),
         )
-        with patch(
-            "tui.download.serve_text_as_file", return_value="http://x/file.txt"
-        ) as serve:
-            DownloadModeMixin._start_download(app, "hello", timestamp=42)
+        DownloadModeMixin._start_download(app, "hello", timestamp=42)
 
-        serve.assert_called_once_with("hello", filename="signal-message-42.txt")
+        assert client.calls == [
+            (
+                "download.serve_text",
+                {"text": "hello", "filename": "signal-message-42.txt"},
+            )
+        ]
         mounted = chat_log.mount.call_args.args[0]
         assert isinstance(mounted, DownloadLinkWidget)
         assert mounted._url == "http://x/file.txt"
         chat_log.scroll_end.assert_called_once_with(animate=False)
         assert app._download_mode is False
         app._update_download_bar.assert_called_once()
+
+    def test_start_download_default_text_filename(self):
+        client = StubClient({"url": "http://x/message.txt"})
+        app = SimpleNamespace(
+            client=client,
+            chat_log=MagicMock(),
+            _download_mode=True,
+            _status=MagicMock(),
+            _update_download_bar=MagicMock(),
+        )
+        DownloadModeMixin._start_download(app, "hello")
+        assert client.calls[0][1]["filename"] == "message.txt"
 
     def test_start_download_serves_resolved_attachment(self, tmp_path):
         attachment = tmp_path / "photo.jpg"
@@ -133,7 +148,6 @@ class TestDownloadMode:
         manager = MagicMock()
         manager.get_attachment_path.return_value = attachment
         app = SimpleNamespace(
-            manager=manager,
             client=client_for(manager),
             chat_log=chat_log,
             _download_mode=True,
@@ -148,33 +162,43 @@ class TestDownloadMode:
             )
 
         serve.assert_called_once_with(attachment)
-        assert isinstance(chat_log.mount.call_args.args[0], DownloadLinkWidget)
+        mounted = chat_log.mount.call_args.args[0]
+        assert isinstance(mounted, DownloadLinkWidget)
+        assert mounted._url == "http://x/photo.jpg"
+        manager.get_attachment_path.assert_called_once_with("signal", "att")
+        assert app._download_mode is False
 
-    def test_start_download_uses_cached_attachment_path(self, tmp_path):
-        attachment = tmp_path / "cached.mp4"
-        attachment.write_text("video")
-        manager = MagicMock()
+    def test_start_download_defaults_attachment_protocol_to_signal(self):
+        client = StubClient({"url": "http://x/a"})
         app = SimpleNamespace(
-            manager=manager,
-            client=client_for(manager),
+            client=client,
             chat_log=MagicMock(),
             _download_mode=True,
             _status=MagicMock(),
             _update_download_bar=MagicMock(),
         )
-
-        with patch(
-            "protocols.download._serve_file_path", return_value="http://x/cached.mp4"
-        ):
-            DownloadModeMixin._start_download(
-                app,
-                "cached.mp4",
-                attachment_id="att",
-                protocol="signal",
-                attachment_path=attachment,
+        DownloadModeMixin._start_download(app, "a", attachment_id="att")
+        assert client.calls == [
+            (
+                "download.serve_attachment",
+                {"protocol": "signal", "attachment_id": "att"},
             )
+        ]
 
-        manager.get_attachment_path.assert_not_called()
+    def test_start_download_does_not_resolve_the_path_itself(self):
+        """The TUI never looks the file up (nor serves it): the server does."""
+        client = StubClient({"url": "http://x/cached.mp4"})
+        app = SimpleNamespace(
+            client=client,
+            chat_log=MagicMock(),
+            _download_mode=True,
+            _status=MagicMock(),
+            _update_download_bar=MagicMock(),
+        )
+        DownloadModeMixin._start_download(
+            app, "cached.mp4", attachment_id="att", protocol="signal"
+        )
+        assert [name for name, _ in client.calls] == ["download.serve_attachment"]
 
     def test_media_download_resolves_once_and_caches_path(self, tmp_path):
         attachment = tmp_path / "clip.mp4"
@@ -200,7 +224,6 @@ class TestDownloadMode:
             text="clip.mp4",
             attachment_id="att",
             protocol="telegram",
-            attachment_path=attachment,
         )
 
     def test_start_download_reports_attachment_and_server_errors(self):
@@ -254,7 +277,6 @@ class TestDownloadMode:
             text="photo.jpg",
             attachment_id="att",
             protocol="signal",
-            attachment_path=attachment,
         )
 
     def test_image_click_opens_modal_or_reports_missing(self, tmp_path):

@@ -321,6 +321,26 @@ class ContactsAvatarRequest(BaseModel):
     contact_id: str
 
 
+# -- download mode ------------------------------------------------------------
+
+
+class DownloadServeAttachmentRequest(BaseModel):
+    protocol: StrictStr
+    attachment_id: StrictStr
+
+
+class DownloadServeTextRequest(BaseModel):
+    text: StrictStr
+    #: Plain file name (no directories): it becomes the last URL segment.
+    filename: StrictStr = "message.txt"
+
+
+class DownloadOut(BaseModel):
+    """URL on the temporary download server (port 10042)."""
+
+    url: str
+
+
 # -- reactions ----------------------------------------------------------------
 
 
