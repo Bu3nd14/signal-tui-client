@@ -285,12 +285,24 @@ class TestAppExitPrune:
         prune.assert_called_once_with()
 
     def test_on_exit_app_invokes_prune_and_swallows_failure(self):
+        from server.bus import EventBus
+        from server.core import ChatCore
+
+        with (
+            patch("server.core.BackendManager"),
+            patch(
+                "server.core.SignalBackend",
+                return_value=MagicMock(protocol="signal"),
+            ),
+            patch("server.core.whatsapp_enabled", return_value=False),
+            patch("server.core.telegram_enabled", return_value=False),
+        ):
+            core = ChatCore(EventBus())
         app = object.__new__(SignalTUI)
         app._polling_active = True
         app._hires_executor = MagicMock()
         app._web_enabled = False
-        # backend aliases delegate to the core (not built by object.__new__)
-        app.core = MagicMock(telegram_backend=None)
+        app.core = core
         app.client = MagicMock()
 
         with patch("protocols.db._prune_cache") as prune:
@@ -298,5 +310,12 @@ class TestAppExitPrune:
         prune.assert_called_once_with()
         assert app._polling_active is False
 
+        # A second exit path (SIGINT handler then on_exit_app) is a no-op;
+        # a fresh core shows that a failing prune is best-effort.
+        with patch("protocols.db._prune_cache") as prune:
+            SignalTUI.on_exit_app(app)
+        prune.assert_not_called()
+
+        core._shutdown_done = False
         with patch("protocols.db._prune_cache", side_effect=RuntimeError("boom")):
             SignalTUI.on_exit_app(app)  # best-effort: must not propagate

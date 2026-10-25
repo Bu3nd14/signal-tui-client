@@ -122,6 +122,10 @@ class ChatCore(DynamicAddressBookMixin):
         self._wa_connecting = False
         self._tg_connecting = False
 
+        # ``shutdown()`` runs once, whoever asks first (TUI exit, SIGINT, serve).
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_done = False
+
         # Event pump (one daemon thread, see start()/stop()).
         self._pump_thread: threading.Thread | None = None
         self._pump_stop = threading.Event()
@@ -171,6 +175,43 @@ class ChatCore(DynamicAddressBookMixin):
         thread = self._pump_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(1.0)
+
+    def shutdown(self, stop_adapters: Callable[[], None] | None = None) -> None:
+        """Orderly exit: stop the core, then *stop_adapters*, then disconnect
+        Telegram and prune the cache.  Runs once; later calls are no-ops.
+
+        *stop_adapters* is the caller's hook for whatever sits on top of the
+        core (the web adapter): it runs after :meth:`stop` and before the
+        backends are disconnected, like the old TUI and ``megachat serve``
+        exit paths.  Every step is best-effort so one failure never skips the
+        next one (nor the lock release done by the caller).
+        """
+        with self._shutdown_lock:
+            if self._shutdown_done:
+                return
+            self._shutdown_done = True
+        try:
+            self.stop()
+        except Exception:
+            logger.exception("Core stop failed (non-fatal)")
+        if stop_adapters is not None:
+            try:
+                stop_adapters()
+            except Exception:
+                logger.exception("Adapter stop failed (non-fatal)")
+        telegram = self.telegram_backend
+        if telegram is not None:
+            try:
+                telegram.disconnect_sync()
+            except Exception:
+                logger.debug("Telegram disconnect on exit failed", exc_info=True)
+        # Prune the history now that no other event can arrive (bug #51).
+        try:
+            from protocols.db import _prune_cache
+
+            _prune_cache()
+        except Exception:
+            logger.exception("Cache prune on exit failed (non-fatal)")
 
     def reconnect(self, protocols: set[str]) -> None:
         """Reconnect only the backends whose link flow was actually started.

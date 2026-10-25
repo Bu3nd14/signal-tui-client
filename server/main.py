@@ -68,34 +68,20 @@ def _configure_logging(debug: bool) -> None:
 
 
 def _shutdown(core: ChatCore, web_handle: Any) -> None:
-    """Stop the core, then the web adapter, then prune the cache.
+    """Stop the core, then the web adapter, then disconnect and prune.
 
-    Mirrors the TUI exit path.  Every step is best-effort so one failure can
-    never skip the next one (or the lock release done by the caller).
+    The order lives in :meth:`ChatCore.shutdown`, shared with the TUI exit
+    paths; this only supplies the web adapter stop.
     """
-    try:
-        core.stop()
-    except Exception:
-        logger.exception("Core stop failed (non-fatal)")
+    stop_adapters = None
     if web_handle is not None:
-        try:
+
+        def stop_adapters() -> None:
             from web.server import stop_web_server
 
             stop_web_server(web_handle)
-        except Exception:
-            logger.exception("Web server stop failed (non-fatal)")
-    telegram = core.telegram_backend
-    if telegram is not None:
-        try:
-            telegram.disconnect_sync()
-        except Exception:
-            logger.debug("Telegram disconnect on exit failed", exc_info=True)
-    try:
-        from protocols.db import _prune_cache
 
-        _prune_cache()
-    except Exception:
-        logger.exception("Cache prune on exit failed (non-fatal)")
+    core.shutdown(stop_adapters)
 
 
 def serve(

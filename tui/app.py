@@ -332,12 +332,13 @@ class SignalTUI(
             from web.server import start_web_server
 
             self._web_server = start_web_server(
-                self.manager,
+                self.core.manager,
                 self._web_port,
                 self._web_token,
                 host=self._web_host,
                 require_auth=not self._web_no_auth,
                 bus=self.bus,
+                api=self.core.api,
             )
             if self._web_server is not None:
                 # Only the web-signal-tui-bg shell alias used to print the
@@ -648,30 +649,26 @@ class SignalTUI(
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
         self.client.close()
-        self.core.stop()
         try:
             self._hires_executor.shutdown(wait=False)
         except Exception as _e:
             logger.debug("Hi-res executor shutdown failed", exc_info=True)
+        # Stop, web adapter, Telegram disconnect and cache prune: one core
+        # method, idempotent (the SIGINT handler may already have run it).
+        self.core.shutdown(self._stop_web_adapter)
+
+    def shutdown_from_signal(self) -> None:
+        """Ctrl+C: stop polling, shut the core down, exit the app."""
+        self._polling_active = False
+        self.core.shutdown(self._stop_web_adapter)
+        self.exit()
+
+    def _stop_web_adapter(self) -> None:
+        """Stop the embedded web adapter (the core's shutdown hook)."""
         if self._web_enabled:
             from web.server import stop_web_server
 
             stop_web_server(self._web_server)
-        if self.telegram_backend is not None:
-            try:
-                self.telegram_backend.disconnect_sync()
-            except Exception as _e:
-                logger.debug("Telegram disconnect on exit failed", exc_info=True)
-        # No flush needed — SQLite writes are incremental
-        # Prune dello storico (bug #51): a chiusura app, quando nessun altro
-        # evento può arrivare. Best-effort: un errore non deve mai impedire
-        # l'uscita.
-        try:
-            from protocols.db import _prune_cache
-
-            _prune_cache()
-        except Exception:
-            logger.exception("Cache prune on exit failed (non-fatal)")
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Gate the global Ctrl+W / Ctrl+U / Ctrl+A filters while a picker is open.

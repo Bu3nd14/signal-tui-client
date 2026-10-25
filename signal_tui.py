@@ -177,22 +177,15 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     def _handle_sigint(sig, frame):
-        """Handle Ctrl+C: stop polling, prune the cache, and exit cleanly.
+        """Handle Ctrl+C: shut the core down (prune included) and exit.
 
         Il prune va eseguito QUI e non solo in ``on_exit_app``: ``app.exit()``
         chiamato dal gestore del segnale non innesca in modo affidabile il
         ciclo di shutdown di Textual, quindi senza questo step lo stop via
         segnale (web-signal-tui-stop) non poterebbe mai lo storico.
+        ``ChatCore.shutdown`` e' idempotente: ``on_exit_app`` non lo ripete.
         """
-        app._polling_active = False
-        app.core.stop()
-        try:
-            from protocols.db import _prune_cache
-
-            _prune_cache()
-        except Exception:
-            logger.exception("Cache prune on exit failed (non-fatal)")
-        app.exit()
+        app.shutdown_from_signal()
 
     # Pre-run window: a plain handler.  Once the loop runs, ``on_mount`` moves
     # it onto ``loop.add_signal_handler`` (see ``SignalTUI._sigint_callback``).

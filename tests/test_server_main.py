@@ -16,6 +16,7 @@ import pytest
 
 from server import main as server_main
 from server.bus import EventBus
+from server.core import ChatCore
 
 
 @pytest.fixture
@@ -112,12 +113,20 @@ def test_lock_contention_exits_1(lock_file, capsys):
     assert lock_file.read_text().strip() == str(os.getpid())  # untouched
 
 
-def test_shutdown_order(lock_file):
+def _recording_core(calls: list[str], telegram=None):
+    """A real ``ChatCore`` (fake backends) whose lifecycle steps are recorded."""
+    core = ChatCore(EventBus())
+    core.telegram_backend = telegram
+    core.start = lambda: calls.append("core.start")  # type: ignore[method-assign]
+    core.stop = lambda: calls.append("core.stop")  # type: ignore[method-assign]
+    return core
+
+
+def test_shutdown_order(lock_file, fake_backends):
     calls: list[str] = []
-    core = MagicMock()
-    core.telegram_backend = None
-    core.start.side_effect = lambda: calls.append("core.start")
-    core.stop.side_effect = lambda: calls.append("core.stop")
+    telegram = MagicMock()
+    telegram.disconnect_sync.side_effect = lambda: calls.append("telegram.disconnect")
+    core = _recording_core(calls, telegram)
     stop = threading.Event()
     stop.set()
     handle = MagicMock(status="up")
@@ -146,6 +155,7 @@ def test_shutdown_order(lock_file):
         "web.start",
         "core.stop",
         "web.stop",
+        "telegram.disconnect",
         "prune",
         "release",
     ]
@@ -154,12 +164,13 @@ def test_shutdown_order(lock_file):
     assert kwargs["host"] == "0.0.0.0"
     assert kwargs["require_auth"] is True
     assert isinstance(kwargs["bus"], EventBus)
+    assert kwargs["api"] is core.api
 
 
-def test_shutdown_failures_are_non_fatal(lock_file):
-    core = MagicMock()
-    core.telegram_backend = None
-    core.stop.side_effect = RuntimeError("boom")
+def test_shutdown_failures_are_non_fatal(lock_file, fake_backends):
+    core = ChatCore(EventBus())
+    core.start = lambda: None  # type: ignore[method-assign]
+    core.stop = MagicMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
     stop = threading.Event()
     stop.set()
     prune = MagicMock(side_effect=RuntimeError("prune boom"))
@@ -169,6 +180,7 @@ def test_shutdown_failures_are_non_fatal(lock_file):
     ):
         rc = server_main.serve(["--no-web"], stop_event=stop)
     assert rc == 0
+    core.stop.assert_called_once()
     prune.assert_called_once()
     assert not lock_file.exists()
 
