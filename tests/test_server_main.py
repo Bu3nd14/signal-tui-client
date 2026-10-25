@@ -274,6 +274,38 @@ def test_serve_starts_and_stops_the_socket_by_default(
     assert not lock_file.exists()
 
 
+def test_server_shutdown_op_stops_serve_cleanly(
+    lock_file, fake_backends, tmp_path, isolate_server_socket
+):
+    """``server.shutdown`` is acknowledged, then serve exits 0 like on SIGINT."""
+    stop = threading.Event()
+    result: list[int] = []
+    runtime = isolate_server_socket.with_suffix(".json")
+    prune = MagicMock()
+    with patch("protocols.db._prune_cache", prune):
+        t = threading.Thread(
+            target=lambda: result.append(
+                server_main.serve(["--no-web"], stop_event=stop)
+            )
+        )
+        t.start()
+        try:
+            assert _wait(runtime.exists)
+            clients = _rpc(isolate_server_socket, "server.clients")["result"]
+            assert clients["connections"] == 1 and clients["self_included"] is True
+            answer = _rpc(isolate_server_socket, "server.shutdown")
+            assert answer["result"] == {"status": "ok"}  # flushed to the caller
+            t.join(15)
+            assert not t.is_alive()
+        finally:
+            stop.set()
+            t.join(15)
+    assert result == [0]
+    prune.assert_called_once()
+    assert not isolate_server_socket.exists() and not runtime.exists()
+    assert not lock_file.exists()
+
+
 def test_no_socket_flag_skips_the_adapter(lock_file, fake_backends):
     stop = threading.Event()
     stop.set()

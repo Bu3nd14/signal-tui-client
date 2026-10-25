@@ -248,6 +248,7 @@ class _Adapter:
         self.sync_pool = ThreadPoolExecutor(SYNC_WORKERS, "megachat-sock-op")
         self.aux_pool = ThreadPoolExecutor(AUX_WORKERS, "megachat-sock-aux")
         self.connections: set[_Connection] = set()
+        api.client_counters["socket"] = lambda: len(self.connections)
         self.tasks: set[asyncio.Task[Any]] = set()
         self.stopping = False
 
@@ -400,6 +401,13 @@ class _Connection:
         except (TimeoutError, OSError):  # a stuck or vanished peer
             logger.info("Socket client dropped (write failed or timed out)")
             self.close()
+
+    async def flush(self, timeout: float) -> None:
+        """Wait (bounded) until the output written so far left the transport."""
+        if self.closed:
+            return
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(self.writer.drain(), timeout)
 
     def close(self) -> None:
         """Drop the connection now (unsent output is lost)."""
@@ -868,6 +876,12 @@ def start(
             adapter.stopping = True
             _remove_files(handle)  # clients stop finding us before we close
             server.close()
+            # Let answers already written (``server.shutdown``'s) leave the
+            # transport buffers before the connections are aborted.
+            await asyncio.gather(
+                *(c.flush(1.0) for c in list(adapter.connections)),
+                return_exceptions=True,
+            )
             for conn in list(adapter.connections):
                 conn.close()
             pending = [t for t in adapter.tasks if not t.done()]
@@ -892,6 +906,7 @@ def start(
         finally:
             handle.status = "down"
             _remove_files(handle)
+            adapter.api.client_counters.pop("socket", None)
             handle.ready.set()
             adapter.sync_pool.shutdown(wait=False, cancel_futures=True)
             adapter.aux_pool.shutdown(wait=False, cancel_futures=True)

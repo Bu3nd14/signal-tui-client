@@ -216,6 +216,17 @@ in flight, `-32031` too many connections. Everything else (`-320xx`) maps from `
   restarts the stream. Events are delivered in order; a client that reads too
   slowly overflows into a `gap` rather than blocking the bus.
 - `events.unsubscribe` -> `{"subscribed": false}` (idempotent).
+- `server.clients` -> `{"connections": N, "self_included": true, "web": W}`:
+  live socket connections (the caller's own included, hence `self_included`)
+  and, separately, browser WebSockets of the web adapter. Adapters register a
+  counter in `ChatAPI.client_counters`; `connections` is 0 and
+  `self_included` false when no socket adapter runs.
+- `server.shutdown` -> `{"status": "ok"}`: answers at once, then the host's
+  `ChatAPI.shutdown_hook` runs ~0.2 s later on its own thread (`megachat serve`
+  installs `stop.set`, the same event SIGINT sets: ordered shutdown, prune,
+  lock/socket/runtime file removed, exit 0). `not_supported` when there is no
+  hook (in-process core). The socket adapter drains the connections' output
+  before aborting them, so the answer cannot be lost to the stop.
 
 #### Attachment paths (mc-7kp)
 
@@ -314,9 +325,7 @@ ones are served from a ring of the last 2000 events.
      the lock, as before Phase 2.
   The TUI records whether it spawned the server (`SignalTUI.server_spawned`:
   `True` spawned, `False` attached, `None` in-process); the exit dialog's
-  default depends on it (below). Until the dialog exists (P2.5) an attached or
-  spawned TUI just closes its client on Ctrl+C/exit and the server keeps
-  running; `--in-process` shuts its core down as before.
+  default depends on it (below). See the exit table below for what quitting does.
 - Lock: `/tmp/signal-tui.lock` (`$MEGACHAT_LOCK_FILE` overrides it) belongs to
   whoever owns the backends: the server, or a `--in-process` TUI. An attached
   TUI never takes it, so many TUIs share one server. Check-and-write is
@@ -329,8 +338,27 @@ ones are served from a ring of the last 2000 events.
 - Logs: `megachat serve` and `--in-process` log to `/tmp/signal-tui.log`; the
   TUI client logs to its own `/tmp/megachat-tui.log`; the output of a spawned
   server (startup errors) is in `/tmp/megachat-serve.log`.
-- Exit dialog: **Detach** (disconnect only) / **Quit** (`server.shutdown`). If
-  the TUI attached to a server it did not spawn, Detach is the default.
+- Exit (`tui/exit_dialog.py`, flow in `tui/exit_flow.py`):
+
+  | Situation | Result |
+  |-----------|--------|
+  | `--in-process` (the TUI owns the core) | no dialog; Ctrl+Q quits as before |
+  | Ctrl+Q, attached or spawned, server reachable | dialog **Detach** / **Quit** / **Annulla** |
+  | Ctrl+Q, server lost or `server.clients` says `ServerUnavailable` | no dialog, exit |
+  | Ctrl+C / SIGINT, attached or spawned | no dialog, **Detach**; never stops the server |
+  | Detach | close the client, exit; the server keeps running |
+  | Quit | `server.shutdown`, wait until the server process is gone (<= 30 s), close the client, exit |
+  | Quit, `server.shutdown` -> `ServerUnavailable` | exit anyway |
+  | Quit, any other error (`not_supported`, timeout, ...) | error in the status bar, stay (as Cancel) |
+
+  The default button is Quit when `server_spawned` is True (this TUI started
+  the server) and Detach otherwise. Before showing the dialog the TUI asks
+  `server.clients` (worker); other clients (`connections` minus itself, plus
+  web sockets) are announced ("Altri N client connessi") and Quit then needs a
+  second confirmation (Cancel focused, Detach no longer offered). Keys: `d`,
+  `q`, `Esc` = Cancel, arrows/`Tab`, `Enter`. Quit reads the server pid from
+  the runtime file before asking (the file disappears early in the stop) and
+  waits for that process to exit, so no orphan server is left behind.
 - Optimistic send: client-generated `client_msg_id`, confirmed by the
   server's `message` event (the existing `server/send_registry.py` mechanism
   moves to the core).

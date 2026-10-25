@@ -301,8 +301,9 @@ def main(argv: list[str] | None = None) -> int:
         app.run()
     finally:
         if client is not None:
-            # An attached or spawned TUI only disconnects; the server keeps
-            # running (the Detach/Quit dialog is P2.5).
+            # An attached or spawned TUI only disconnects here (Ctrl+C, or
+            # Detach/Quit already done by the exit dialog, tui/exit_flow.py);
+            # stopping the server is the dialog's Quit, never this.
             client.close()
     if args.in_process:
         _release_lock()

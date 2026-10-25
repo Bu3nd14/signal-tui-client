@@ -143,6 +143,8 @@ def serve(
     try:
         bus = EventBus()
         core = ChatCore(bus)
+        # ``server.shutdown`` ends the serve loop like SIGINT does.
+        core.api.shutdown_hook = stop.set
         core.start()
 
         if not args.no_socket:
@@ -202,6 +204,11 @@ def serve(
                 )
                 exit_code = 1
             else:
+                handle = web_handle
+                core.api.client_counters["web"] = lambda: (
+                    len(handle.websocket_connections)
+                    + len(handle.websocket_v2_connections)
+                )
                 if args.web_no_auth:
                     line = (
                         f"🌐 Web UI: http://{host}:{port} — ⚠️ NO AUTH (--web-no-auth)"

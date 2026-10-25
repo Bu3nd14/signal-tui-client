@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -35,6 +36,9 @@ from typing import Any, Protocol
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from server.send_registry import SendRegistry
+
+#: Seconds between the ``server.shutdown`` acknowledgement and the hook.
+SHUTDOWN_DELAY_S = 0.2
 
 #: Neutral error codes; each adapter maps them to its own form (HTTP status,
 #: JSON-RPC error, exception).  ``backend_error`` is a backend that answered
@@ -130,6 +134,15 @@ class ChatAPI:
 
     def __init__(self, host: ApiHost) -> None:
         self._host = host
+        #: Installed by the host that can stop itself (``megachat serve``):
+        #: called, once, by the ``server.shutdown`` operation after it has
+        #: been acknowledged.  ``None`` (in-process core, tests) makes the
+        #: operation answer ``not_supported``.
+        self.shutdown_hook: Callable[[], None] | None = None
+        #: Adapters register a ``() -> int`` of their live client connections
+        #: under their name (``socket``, ``web``); ``server.clients`` sums
+        #: them up.  Adapters remove their entry when they stop.
+        self.client_counters: dict[str, Callable[[], int]] = {}
         #: Text-send idempotency claims; per-process state, one per ChatAPI
         #: (``ChatCore`` owns exactly one ChatAPI).
         self.send_registry = SendRegistry()
@@ -160,6 +173,33 @@ class ChatAPI:
         if reconnect is None:
             raise ApiError("not_supported", "This server cannot reconnect backends")
         reconnect(protocols)
+
+    def request_shutdown(self, delay: float = SHUTDOWN_DELAY_S) -> None:
+        """Run :attr:`shutdown_hook` shortly from now on its own thread.
+
+        The delay lets the caller's acknowledgement reach its transport
+        before the adapters are torn down (the socket adapter also drains its
+        connections when it stops).  Raises ``not_supported`` without a hook.
+        """
+        hook = self.shutdown_hook
+        if hook is None:
+            raise ApiError("not_supported", "This server cannot be shut down remotely")
+
+        def run() -> None:
+            time.sleep(delay)
+            hook()
+
+        threading.Thread(target=run, name="megachat-shutdown", daemon=True).start()
+
+    def client_counts(self) -> dict[str, int]:
+        """Live client connections per adapter (a failing counter reads 0)."""
+        counts: dict[str, int] = {}
+        for name, counter in list(self.client_counters.items()):
+            try:
+                counts[name] = max(0, int(counter()))
+            except Exception:  # noqa: BLE001 - a counter must not break the op
+                counts[name] = 0
+        return counts
 
     def publish_web_push(self, event: dict[str, Any]) -> bool:
         """Publish a legacy ``/ws`` frame as a ``web_push`` bus event.

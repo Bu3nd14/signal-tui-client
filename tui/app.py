@@ -40,6 +40,7 @@ from tui.css import APP_CSS
 from tui.download import DownloadModeMixin
 from tui.edit import EditMessageMixin
 from tui.events import EventHandlingMixin
+from tui.exit_flow import ExitFlowMixin
 from tui.images.cellsize import get_cell_size_ioctl
 from tui.images.detect import ImageSupport
 from tui.images.kitty_renderer import KittyRenderer, compute_source_rect
@@ -93,6 +94,7 @@ class SignalTUI(
     DownloadModeMixin,
     PickerMixin,
     ClientCallsMixin,
+    ExitFlowMixin,
 ):
     """Main Signal TUI App with JSON-RPC daemon over HTTP."""
 
@@ -197,6 +199,7 @@ class SignalTUI(
         )
         self._core_sub: ClientSubscription | None = None
         self._init_client_state()
+        self._init_exit_state()
         # Ctrl+C handler set by ``signal_tui.main``; ``on_mount`` installs it on
         # the running loop (None in tests and embedded use).
         self._sigint_callback: Callable[[], None] | None = None
@@ -646,9 +649,8 @@ class SignalTUI(
             logger.debug("Failed to clear kitty images on exit", exc_info=True)
 
     def action_quit(self):
-        """Ctrl+Q: stop polling and exit cleanly."""
-        self._polling_active = False
-        self.exit()
+        """Ctrl+Q: exit.  A client of a server asks Detach/Quit first."""
+        self._request_exit()
 
     def action_toggle_unread_filter(self):
         """Ctrl+U: toggle the unread-only filter on the contact list."""
@@ -666,6 +668,7 @@ class SignalTUI(
     def on_exit_app(self):
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
+        self._cancel_exit_wait()
         self.client.close()
         try:
             self._hires_executor.shutdown(wait=False)
@@ -677,8 +680,12 @@ class SignalTUI(
             self._own_core().shutdown(self._stop_web_adapter)
 
     def shutdown_from_signal(self) -> None:
-        """Ctrl+C: stop polling, shut the core down, exit the app."""
+        """Ctrl+C: stop polling, shut the core down, exit the app.
+
+        A client of a server only detaches (no dialog: a signal must never stop
+        a server other TUIs share)."""
         self._polling_active = False
+        self._cancel_exit_wait()
         if self._owns_core:
             self._own_core().shutdown(self._stop_web_adapter)
         self.exit()

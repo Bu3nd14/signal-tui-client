@@ -3,6 +3,7 @@ headless TUIs to it, also from two TUIs started at the same moment."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -135,3 +136,61 @@ def test_two_tuis_started_together_end_up_with_one_server(isolated):
             if isinstance(r, attach.Attached):
                 r.client.close()
     _stop_server(isolated)
+
+
+async def _quit_with(app, pilot, key: str, default_focus: str) -> None:
+    """Ctrl+Q, check the dialog's default button, press *key*."""
+    from tui.exit_dialog import ExitDialogScreen
+
+    await pilot.press("ctrl+q")
+    deadline = time.monotonic() + 10
+    while not isinstance(app.screen, ExitDialogScreen):
+        assert time.monotonic() < deadline, "the exit dialog did not open"
+        await pilot.pause(0.05)
+    assert app.screen.focused.id == default_focus
+    await pilot.press(key)
+    deadline = time.monotonic() + 40  # Quit waits for the server process
+    while not app._exit:
+        assert time.monotonic() < deadline, "the TUI did not exit"
+        await pilot.pause(0.05)
+
+
+@pytest.mark.integration
+async def test_detach_keeps_the_server_and_quit_from_another_tui_stops_it(isolated):
+    from tui.app import SignalTUI
+
+    log = isolated.root / "serve.log"
+    first = attach.attach_or_spawn(serve_args=["--no-web"], log_path=log)
+    second = None
+    try:
+        assert first.spawned is True
+        pid = _server_pid(isolated)
+
+        # The spawning TUI defaults to Quit; the user picks Detach instead.
+        app1 = SignalTUI(client=first.client, server_spawned=first.spawned)
+        async with app1.run_test() as pilot:
+            await pilot.pause(0.5)
+            await _quit_with(app1, pilot, "d", "exit-quit")
+        assert first.client.state == "closed"
+        await asyncio.sleep(0.5)
+        os.kill(pid, 0)  # the server is still running
+        assert isolated.lock.exists() and isolated.sock.exists()
+
+        # A second TUI attaches (default: Detach) and Quits the server.
+        second = attach.attach_or_spawn(serve_args=["--no-web"], log_path=log)
+        assert second.spawned is False and _server_pid(isolated) == pid
+        app2 = SignalTUI(client=second.client, server_spawned=second.spawned)
+        async with app2.run_test() as pilot:
+            await pilot.pause(0.5)
+            await _quit_with(app2, pilot, "q", "exit-detach")
+        assert second.client.state == "closed"
+        # The TUI waited for the server process to be gone.
+        with pytest.raises(OSError):
+            os.kill(pid, 0)
+        assert not isolated.lock.exists()
+        assert not isolated.sock.exists()
+        assert not runtime_file_path(isolated.sock).exists()
+    finally:
+        first.client.close()
+        if second is not None:
+            second.client.close()

@@ -443,15 +443,31 @@ The TUI is a client of the chat server. At startup it looks for a server on the 
 (`$MEGACHAT_SOCKET`, else `$XDG_RUNTIME_DIR/megachat/server.sock`, else
 `~/.local/state/megachat/server.sock`); if one answers it attaches, otherwise it starts
 `megachat serve` detached (same Python and checkout, no TUI, `--no-web` unless you pass `--web...`
-flags or `config.json` enables the web UI), waits for its socket (up to 30 s) and attaches. Closing
-the TUI (Ctrl+C or exit) only disconnects it: the server keeps running and any number of TUIs can
-attach to the same one. Web options (`--web`, `--web-port`, ...) are forwarded to a server the TUI
+flags or `config.json` enables the web UI), waits for its socket (up to 30 s) and attaches. Ctrl+C only
+disconnects the TUI (the server keeps running); Ctrl+Q asks what to do, see
+[Leaving the TUI](#leaving-the-tui). Any number of TUIs can attach to the same server. Web options (`--web`, `--web-port`, ...) are forwarded to a server the TUI
 starts; they are ignored, with a note, when it attaches to one already running. A spawned server's
 output goes to `/tmp/megachat-serve.log`, the server's own log to `/tmp/signal-tui.log` and the
 TUI's to `/tmp/megachat-tui.log`.
 
 The app starts the `signal-cli` daemon automatically on first launch (for Signal) and a webhook
 HTTP server for WhatsApp push events. See the subsections below for details on each area.
+
+### Leaving the TUI
+
+`Ctrl+Q` opens a dialog (keys: `d`, `q`, `Esc`, arrows/`Tab`, `Enter`):
+
+| Choice | Effect |
+|--------|--------|
+| **Detach** (`d`) | Closes this TUI; the server keeps running (web UI, other TUIs, background sync) |
+| **Quit** (`q`) | Stops the server cleanly (as `Ctrl+C` does on `megachat serve`: prune, disconnect), then exits |
+| **Annulla** (`Esc`) | Back to the chat |
+
+The default button is Quit when this TUI started the server and Detach when it attached to one
+that was already running. If other clients are connected the dialog says so ("Altri N client
+connessi") and Quit asks for a second confirmation. `Ctrl+C` (SIGINT) never opens the dialog and
+never stops a server: it always detaches. If the server cannot be reached, `Ctrl+Q` just exits.
+`megachat --in-process` has no dialog (it owns the core and quits as before).
 
 <a id="tips"></a>
 
@@ -480,7 +496,8 @@ HTTP server for WhatsApp push events. See the subsections below for details on e
 | Click (on a status-bar segment) | Jump to that backend — unread view if it has unread, else its plain filter |
 | `Ctrl+L` | Link a new device (Signal / WhatsApp / Telegram) via QR code |
 | `Ctrl+N` / `Ctrl+P` | Navigate emoji suggestions / emoji picker categories |
-| `Ctrl+Q` / `Ctrl+C` | Quit |
+| `Ctrl+Q` | Exit: **Detach** / **Quit** / Cancel dialog — see [Leaving the TUI](#leaving-the-tui) |
+| `Ctrl+C` | Detach (disconnect this TUI; the server keeps running) |
 
 ### Composing messages
 

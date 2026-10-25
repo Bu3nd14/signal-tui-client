@@ -26,6 +26,9 @@ OP_TIMEOUTS: dict[str, float] = {
     # Lookups answered from the server's memory.
     "server.config": 5.0,
     "server.status": 5.0,
+    "server.clients": 5.0,
+    # Acknowledged at once; the stop itself happens after the answer.
+    "server.shutdown": 10.0,
     "link.status": 5.0,
     "contacts.check_number": 10.0,
     "media.quoted_attachment": 10.0,

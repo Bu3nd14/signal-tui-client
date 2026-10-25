@@ -477,6 +477,19 @@ class StatusOut(BaseModel):
     status: str
 
 
+class ClientsOut(BaseModel):
+    """``server.clients``: live client connections of the server.
+
+    ``connections`` counts the Unix-socket connections, including the caller's
+    own when it comes through the socket (``self_included``); ``web`` counts
+    the browser WebSockets separately.  Both are 0 without that adapter.
+    """
+
+    connections: int
+    self_included: bool
+    web: int = 0
+
+
 # -- transcription / OpenAI key -----------------------------------------------
 
 

@@ -9,6 +9,7 @@ from typing import Any
 from server.api import ChatAPI, operation
 from server.models_api import (
     ClientLogRequest,
+    ClientsOut,
     EmojiCategoryOut,
     EmptyRequest,
     ReactionsAvailableOut,
@@ -108,4 +109,32 @@ def server_config(api: ChatAPI, req: EmptyRequest) -> ServerConfigOut:
 def server_client_log(api: ChatAPI, req: ClientLogRequest) -> StatusOut:
     """Write a line from a frontend (truncated to 500 characters) to the log."""
     logger.info("[%s] %s", req.source, str(req.message or "")[:500])
+    return StatusOut(status="ok")
+
+
+@operation("server.clients", request=EmptyRequest, response=ClientsOut)
+def server_clients(api: ChatAPI, req: EmptyRequest) -> ClientsOut:
+    """How many clients are connected (the exit dialog warns before Quit).
+
+    ``connections`` is the socket adapter's count, the caller's own connection
+    included; ``web`` is the number of browser WebSockets.
+    """
+    counts = api.client_counts()
+    return ClientsOut(
+        connections=counts.get("socket", 0),
+        self_included="socket" in counts,
+        web=counts.get("web", 0),
+    )
+
+
+@operation("server.shutdown", request=EmptyRequest, response=StatusOut)
+def server_shutdown(api: ChatAPI, req: EmptyRequest) -> StatusOut:
+    """Stop the server cleanly, as SIGINT does.
+
+    Acknowledges at once; the shutdown starts a moment later so the answer
+    reaches the caller first.  ``not_supported`` when the host cannot stop
+    itself (in-process core).
+    """
+    api.request_shutdown()
+    logger.info("Shutdown requested through server.shutdown")
     return StatusOut(status="ok")

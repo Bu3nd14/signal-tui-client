@@ -44,7 +44,9 @@ __all__ = [
     "Attached",
     "attach_or_spawn",
     "serve_args_for_web",
+    "server_pid",
     "spawn_server",
+    "wait_server_stopped",
 ]
 
 #: stdout/stderr of a spawned ``megachat serve`` (the server's own log stays
@@ -252,3 +254,54 @@ def _early_exit_message(proc: subprocess.Popen, log_path: Path, offset: int) -> 
         f"The server (megachat serve) exited with code {proc.returncode} "
         "before accepting connections." + _log_hint(log_path, offset)
     )
+
+
+def server_pid(socket_path: Path | str) -> int | None:
+    """Pid recorded in the runtime file next to *socket_path*, if readable."""
+    try:
+        data = json.loads(runtime_file_path(Path(socket_path)).read_text("utf-8"))
+        pid = data.get("pid")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return pid if isinstance(pid, int) and not isinstance(pid, bool) else None
+
+
+def _process_gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False  # EPERM: alive, not ours
+    try:  # a zombie nobody reaped yet is as good as gone
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            return handle.read().rpartition(b")")[2].split()[0] == b"Z"
+    except (OSError, IndexError):
+        return False
+
+
+def wait_server_stopped(
+    socket_path: Path | str,
+    pid: int | None,
+    timeout: float = 20.0,
+    *,
+    cancelled: Callable[[], bool] | None = None,
+) -> bool:
+    """Wait until the server stopped (after ``server.shutdown`` was answered).
+
+    With *pid* (read with :func:`server_pid` BEFORE asking for the shutdown:
+    the runtime file goes away early) the server is stopped when the process
+    is gone, i.e. it released the lock after pruning.  Without one, when its
+    runtime file is gone.  ``False`` on timeout or when *cancelled* says so.
+    """
+    deadline = time.monotonic() + timeout
+    runtime = runtime_file_path(Path(socket_path))
+    while True:
+        if pid is not None:
+            if _process_gone(pid):
+                return True
+        elif not runtime.exists():
+            return True
+        if (cancelled is not None and cancelled()) or time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
