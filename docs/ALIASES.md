@@ -43,7 +43,8 @@ Gli endpoint REST vivono sotto `/api` e richiedono l'header `Authorization: Bear
 # ─── Signal TUI Client: web reader + background via megachat serve ───────
 # Web su 0.0.0.0:4242. Token Bearer: config.json (web.token) o SIGNAL_TUI_WEB_TOKEN.
 # web-signal-tui-bg stampa ed esporta il token (fast cycle: curl + login Web UI).
-SIGNAL_TUI_DIR="~/signal-tui-client"
+# Gmail TPM: la shell/TUI deve avere il gruppo tss (dopo usermod serve re-login).
+SIGNAL_TUI_DIR="$HOME/signal-tui-client"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 _signal_tui_web_bg() {
     local pid=""

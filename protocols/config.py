@@ -19,14 +19,21 @@ backend without affecting the Signal TUI client.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import os
+import shlex
 import socket
+import subprocess
+import threading
+import time
 from pathlib import Path
 
 from models import DEFAULT_THUMBNAIL_MAX_COLS, DEFAULT_THUMBNAIL_MAX_LINES
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+logger = logging.getLogger(__name__)
 
 
 def _load_dotenv() -> dict:
@@ -185,6 +192,17 @@ def get_whatsapp_webhook_port() -> int:
         return int(raw)
     except ValueError:
         return 8088
+
+
+WHATSAPP_WEBHOOK_EVENTS = (
+    "message",
+    "message.any",
+    "message.ack",
+    "message.ack.group",
+    "presence.update",
+    "message.reaction",
+    "chat.archive",
+)
 
 
 def get_whatsapp_webhook_url() -> str:
@@ -419,3 +437,232 @@ def web_token() -> str:
         return env_token
     value = _web_config().get("token", "")
     return str(value) if value is not None else ""
+
+
+# ─── Gmail configuration ───────────────────────────────────────────────────
+
+
+def _get_gmail(key: str, env_name: str, default: str = "") -> str:
+    """Resolve a Gmail setting: environment, config.json, then ``.env``.
+
+    Whitespace-only values are treated as unset so an empty ``GMAIL_ADDRESS``
+    line in ``.env`` does not shadow a value from another source.
+    """
+    env = os.environ.get(env_name)
+    if env is not None and env.strip():
+        return env.strip()
+    cfg = _load_config().get(key)
+    if cfg is not None and str(cfg).strip():
+        return str(cfg).strip()
+    dotenv = _load_dotenv().get(env_name)
+    if dotenv is not None and dotenv.strip():
+        return dotenv.strip()
+    return default
+
+
+def _get_gmail_int(key: str, env_name: str, default: int) -> int:
+    """Return an integer Gmail setting, falling back to *default* if invalid."""
+    raw = _get_gmail(key, env_name, str(default))
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_gmail_address() -> str:
+    """Return the Gmail address used as SMTP ``From`` and IMAP login."""
+    return _get_gmail("gmail_address", "GMAIL_ADDRESS")
+
+
+def _gmail_secret_path(raw: str) -> Path:
+    """Resolve a secret file path, relative paths live under the project."""
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else PROJECT_DIR / path
+
+
+_GMAIL_SECRET_CACHE_TTL_S = 300
+_GMAIL_SECRET_CMD_LABEL = "gmail_secret_cmd"
+_GMAIL_SECRET_FILE_LABEL = "gmail_secret_file"
+
+# Only the output of ``GMAIL_APP_PASSWORD_CMD`` (TPM/GPG) is cached: file and
+# plaintext sources are sub-millisecond and must stay fresh on every call.
+_gmail_secret_cache: dict[str, tuple[float, str]] = {}
+_gmail_secret_cache_gen = 0
+_gmail_secret_cache_lock = threading.Lock()
+
+
+def _now() -> float:
+    """Indirection over ``time.monotonic`` so tests can freeze the clock."""
+    return time.monotonic()
+
+
+def _gmail_secret_cache_key(command: str) -> str:
+    """Return the opaque cache key for a credential command.
+
+    The raw command may contain a secret inline, so it never appears in the
+    cache or in logs.
+    """
+    return hashlib.sha256(command.encode("utf-8")).hexdigest()
+
+
+def _prune_gmail_secret_cache_locked(now: float) -> None:
+    expired = [
+        key
+        for key, (expires_at, _secret) in _gmail_secret_cache.items()
+        if expires_at <= now
+    ]
+    for key in expired:
+        del _gmail_secret_cache[key]
+
+
+def _gmail_secret_cache_get(key: str) -> str | None:
+    now = _now()
+    with _gmail_secret_cache_lock:
+        _prune_gmail_secret_cache_locked(now)
+        entry = _gmail_secret_cache.get(key)
+        return entry[1] if entry is not None else None
+
+
+def _gmail_secret_cache_put(key: str, secret: str, gen0: int) -> None:
+    now = _now()
+    with _gmail_secret_cache_lock:
+        _prune_gmail_secret_cache_locked(now)
+        if _gmail_secret_cache_gen != gen0:
+            return
+        _gmail_secret_cache[key] = (now + _GMAIL_SECRET_CACHE_TTL_S, secret)
+
+
+def clear_gmail_secret_cache() -> None:
+    """Drop the cached command secret and invalidate in-flight puts."""
+    global _gmail_secret_cache_gen
+    with _gmail_secret_cache_lock:
+        _gmail_secret_cache.clear()
+        _gmail_secret_cache_gen += 1
+
+
+def _gmail_secret_from_file(raw: str) -> str:
+    try:
+        return _gmail_secret_path(raw).read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError:
+        logger.warning("Gmail secret file failed: UnicodeDecodeError")
+        return ""
+    except OSError:
+        logger.warning("Gmail secret file failed: OSError")
+        return ""
+
+
+def _gmail_secret_from_command(command: str) -> str:
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        logger.warning("Gmail secret command failed: ValueError")
+        return ""
+    if not argv:
+        logger.warning("Gmail secret command failed: empty command")
+        return ""
+
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Gmail secret command failed: TimeoutExpired")
+        return ""
+    except OSError:
+        logger.warning("Gmail secret command failed: OSError")
+        return ""
+    except UnicodeDecodeError:
+        logger.warning("Gmail secret command failed: UnicodeDecodeError")
+        return ""
+    except ValueError:
+        logger.warning("Gmail secret command failed: ValueError")
+        return ""
+
+    if result.returncode != 0:
+        logger.warning("Gmail secret command failed: returncode")
+        return ""
+    secret = (result.stdout or "").strip()
+    if not secret:
+        logger.warning("Gmail secret command failed: empty output")
+        return ""
+    return secret
+
+
+def _cached_command_secret(command: str) -> str:
+    """Return the command output, caching only successful non-empty results."""
+    key = _gmail_secret_cache_key(command)
+    cached = _gmail_secret_cache_get(key)
+    if cached is not None:
+        return cached
+
+    with _gmail_secret_cache_lock:
+        gen0 = _gmail_secret_cache_gen
+
+    secret = _gmail_secret_from_command(command)
+    if secret:
+        _gmail_secret_cache_put(key, secret, gen0)
+    return secret
+
+
+def get_gmail_app_password() -> str:
+    """Return the Gmail App Password (never exposed in API responses/logs).
+
+    Preferred sources, in order: ``GMAIL_APP_PASSWORD_FILE`` (a ``600`` file,
+    e.g. outside the repo), ``GMAIL_APP_PASSWORD_CMD`` (credential helper such
+    as ``gpg --decrypt`` or a keyring lookup), then the legacy plaintext
+    ``GMAIL_APP_PASSWORD`` env/config entry.
+    """
+    file_path = _get_gmail("gmail_app_password_file", "GMAIL_APP_PASSWORD_FILE")
+    if file_path:
+        secret = _gmail_secret_from_file(file_path)
+        if secret:
+            return secret
+    command = _get_gmail("gmail_app_password_cmd", "GMAIL_APP_PASSWORD_CMD")
+    if command:
+        secret = _cached_command_secret(command)
+        if secret:
+            return secret
+    return _get_gmail("gmail_app_password", "GMAIL_APP_PASSWORD")
+
+
+def get_gmail_imap_host() -> str:
+    """Return the IMAP host (default ``imap.gmail.com``)."""
+    return _get_gmail("gmail_imap_host", "GMAIL_IMAP_HOST", "imap.gmail.com")
+
+
+def get_gmail_imap_port() -> int:
+    """Return the IMAP SSL port (default ``993``)."""
+    port = _get_gmail_int("gmail_imap_port", "GMAIL_IMAP_PORT", 993)
+    return port if 1 <= port <= 65535 else 993
+
+
+def get_gmail_smtp_host() -> str:
+    """Return the SMTP host (default ``smtp.gmail.com``)."""
+    return _get_gmail("gmail_smtp_host", "GMAIL_SMTP_HOST", "smtp.gmail.com")
+
+
+def get_gmail_smtp_port() -> int:
+    """Return the SMTP STARTTLS port (default ``587``)."""
+    port = _get_gmail_int("gmail_smtp_port", "GMAIL_SMTP_PORT", 587)
+    return port if 1 <= port <= 65535 else 587
+
+
+def get_gmail_folder() -> str:
+    """Return the default mailbox folder (default ``INBOX``)."""
+    folder = _get_gmail("gmail_folder", "GMAIL_FOLDER", "INBOX")
+    return folder or "INBOX"
+
+
+def get_gmail_timeout_s() -> int:
+    """Return the IMAP/SMTP socket timeout in seconds (default ``30``)."""
+    timeout = _get_gmail_int("gmail_timeout_s", "GMAIL_TIMEOUT_S", 30)
+    return timeout if timeout > 0 else 30
+
+
+def gmail_enabled() -> bool:
+    """Return True when both the address and the App Password are configured."""
+    return bool(get_gmail_address() and get_gmail_app_password())

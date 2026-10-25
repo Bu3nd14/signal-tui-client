@@ -52,6 +52,7 @@ DO_UPDATE=0
 DO_WHATSAPP=0
 DO_CHECK_WHATSAPP=0
 DO_ALIASES_ONLY=0
+DO_GMAIL=0
 DO_WEB=1
 DO_DOCKER_LIMITS=1
 SPECIFIC_VERSION=""
@@ -73,6 +74,7 @@ Opzioni:
   --check-whatsapp     Verifica i prerequisiti WhatsApp (Docker, porte, firewall)
   --no-web            Non installare le dipendenze opzionali della Web UI (requirements-web.txt)
   --aliases            Installa solo gli alias shell della Web UI
+  --gmail              Configura solo Gmail (App Password, IMAP/SMTP, .env)
   --no-docker-limits   Avvia WAHA senza i cap CPU/RAM (default: applicati via
                        docker-compose.resources.yml; disattiva se il tuo host
                        non delega il controller cgroup memory, es. LXC senza
@@ -87,6 +89,7 @@ Esempi:
   ./install.sh --whatsapp               # avvia WAHA (WhatsApp HTTP API)
   ./install.sh --whatsapp --no-docker-limits  # avvia WAHA senza cap CPU/RAM
   ./install.sh --aliases                # installa solo gli alias della Web UI
+  ./install.sh --gmail                  # configura Gmail (dopo un git pull, senza reinstallare)
 EOF
 }
 
@@ -209,6 +212,7 @@ install_aliases() {
 # ─── Signal TUI Client: web reader + background via megachat serve ───────
 # Web su 0.0.0.0:4242. Token Bearer: config.json (web.token) o SIGNAL_TUI_WEB_TOKEN.
 # web-signal-tui-bg stampa ed esporta il token (fast cycle: curl + login Web UI).
+# Gmail TPM: la shell/TUI deve avere il gruppo tss (dopo usermod serve re-login).
 SIGNAL_TUI_DIR="__PROJECT_DIR__"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 _signal_tui_web_bg() {
@@ -416,6 +420,33 @@ PY
     fi
 }
 
+ensure_env_permissions() {
+    local env_file="$PROJECT_DIR/.env"
+    if [ -f "$env_file" ]; then
+        if chmod 600 "$env_file" 2>/dev/null; then
+            ok ".env: permessi 600 verificati"
+        else
+            warn "Impossibile impostare .env a 600 (owner/permessi da verificare)."
+        fi
+    fi
+}
+
+check_optional_secrets() {
+    local env_file="$PROJECT_DIR/.env"
+    [ -f "$env_file" ] || return 0
+    if grep -q '^GMAIL_APP_PASSWORD=' "$env_file"; then
+        warn "Gmail: App Password in chiaro in .env; usa GMAIL_APP_PASSWORD_FILE/CMD (vedi .env.example)."
+    fi
+    if grep -q 'systemd-creds' "$env_file"; then
+        if ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx tss; then
+            warn "Gmail TPM: utente non nel gruppo tss; esegui 'sudo usermod -aG tss $USER' e rifai login."
+        fi
+    fi
+    if grep -q 'GMAIL_APP_PASSWORD_CMD=.*gpg' "$env_file" && ! command -v gpg >/dev/null 2>&1; then
+        warn "Gmail GPG: comando configurato ma gpg non è installato."
+    fi
+}
+
 setup_whatsapp() {
     local should_start="${1:-0}"
     local api_key="" ready=0
@@ -614,9 +645,31 @@ install_python_deps() {
     fi
 }
 
+setup_gmail() {
+    local py="$PROJECT_DIR/.venv/bin/python"
+    [ -x "$py" ] || py="python3"
+    if ! "$py" -c "import nh3, tinycss2" >/dev/null 2>&1; then
+        info "Installo nh3 e tinycss2 (sanitizzazione HTML/CSS del reader Gmail)…"
+        "$py" -m pip install --quiet "nh3>=0.3.7,<0.4" "tinycss2>=1.5.1,<2" \
+            || warn "nh3/tinycss2 non installati: il reader userà solo il testo. Riprova: $py -m pip install -r requirements-web.txt"
+    fi
+    "$py" "$PROJECT_DIR/scripts/gmail_setup.py"
+}
+
+if [ "$DO_GMAIL" -eq 1 ]; then
+    info "Configurazione Gmail…"
+    ensure_web_config || die "Configurazione Web non riuscita."
+    ensure_env_permissions
+    chmod +x "$PROJECT_DIR"/scripts/gmail_*.sh "$PROJECT_DIR"/scripts/gmail_setup.py 2>/dev/null || true
+    setup_gmail
+    exit $?
+fi
+
 if [ "$DO_ALIASES_ONLY" -eq 1 ]; then
     info "Aggiunta alias web…"
     ensure_web_config || die "Configurazione Web non riuscita."
+    ensure_env_permissions
+    check_optional_secrets
     install_aliases
     exit $?
 fi
@@ -698,6 +751,11 @@ fi
 # 5.6 Alias shell della Web UI
 install_aliases || warn "Installazione degli alias shell non riuscita; l'installazione continua."
 
+# 5.7 Permessi .env e controlli sui segreti opzionali (Gmail)
+ensure_env_permissions
+check_optional_secrets
+chmod +x "$PROJECT_DIR"/scripts/gmail_*.sh "$PROJECT_DIR"/scripts/gmail_setup.py 2>/dev/null || true
+
 # 6. Riepilogo finale
 echo
 echo "${C_GREEN}${C_BOLD}=== Installazione completata! ===${C_RESET}"
@@ -733,6 +791,7 @@ echo "       python3 signal_tui.py"
 if [ "$DO_WEB" -eq 1 ]; then
     echo "       Web UI: http://127.0.0.1:4242"
     echo "       Token:  config.json → web.token"
+    echo "       Gmail (opzionale): ./install.sh --gmail  (oppure python3 scripts/gmail_setup.py)"
 fi
 echo
 if [ "$DO_WHATSAPP" -eq 0 ] && [ "$DO_CHECK_WHATSAPP" -eq 0 ]; then

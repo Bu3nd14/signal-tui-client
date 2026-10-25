@@ -895,6 +895,7 @@ globalThis.storeDraftText = () => {};
 globalThis.dropSentAttachments = () => {};
 globalThis.state = { drafts: new Map(),
   mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(), objectUrls: new Set(["blob:preview"]), mediaCache: new Map(),
+  drafts: new Map(),
   optimistic: [{
     optimistic_id: "local-1", localPreviewUrl: "blob:preview", known_message_ids: [],
     protocol: "signal", contactId: "42", direction: "out", text: "", timestamp: 1,
@@ -986,6 +987,39 @@ assert.equal(state.objectUrls.has("blob:50"), true);
     assert completed.returncode == 0, completed.stderr
 
 
+def test_web_prune_orphans_preserves_draft_preview_urls():
+    source = r"""
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const vm = require("node:vm");
+const app = fs.readFileSync("./web/static/app.js", "utf8");
+const pruneStart = app.indexOf("function pruneOrphanObjectUrls(");
+const pruneEnd = app.indexOf("\nconst MAX_MEDIA_FETCHES", pruneStart);
+assert.ok(pruneStart >= 0, "marker pruneStart non trovato");
+assert.ok(pruneEnd > pruneStart, "marker pruneEnd non trovato");
+globalThis.state = {
+  mediaCache: new Map(),
+  optimistic: [],
+  fileTabUrls: new Map(),
+  drafts: new Map([["signal:42", { text: "", attachments: [{ previewUrl: "blob:draft" }] }]]),
+  objectUrls: new Set(["blob:draft", "blob:orphan"]),
+  pinnedUrls: new Set(),
+  modalObjectUrl: null,
+};
+const revoked = [];
+globalThis.URL = { revokeObjectURL: (url) => revoked.push(url) };
+vm.runInThisContext(app.slice(pruneStart, pruneEnd));
+pruneOrphanObjectUrls();
+assert.deepEqual(revoked, ["blob:orphan"]);
+assert.equal(state.objectUrls.has("blob:draft"), true);
+assert.equal(state.objectUrls.has("blob:orphan"), false);
+"""
+    completed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_web_media_renders_reuse_inflight_request_and_limit_concurrency():
     source = r"""
 const assert = require("node:assert/strict");
@@ -1002,7 +1036,7 @@ globalThis.storeDraftText = () => {};
 globalThis.dropSentAttachments = () => {};
 globalThis.state = { drafts: new Map(),
   mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(),
-  objectUrls: new Set(), mediaCache: new Map(), optimistic: [],
+  objectUrls: new Set(), mediaCache: new Map(), drafts: new Map(), optimistic: [],
   active: { protocol: "signal", id: "42" },
 };
 globalThis.window = {
@@ -1084,10 +1118,14 @@ const vm = require("node:vm");
 const app = fs.readFileSync("./web/static/app.js", "utf8");
 const mediaStart = app.indexOf("function abortMediaRequests(");
 const mediaEnd = app.indexOf("\nfunction pruneOrphanObjectUrls", mediaStart);
+const draftStart = app.indexOf("function draftKey(");
+const draftEnd = app.indexOf("\nfunction dropSentAttachments", draftStart);
 const openStart = app.indexOf("function openThread(");
 const openEnd = app.indexOf("\nfunction normalizeEmojiSearch", openStart);
 const submitStart = app.indexOf("async function submitMessage(");
 const submitEnd = app.indexOf("\nfunction encodeToken", submitStart);
+assert.ok(draftStart >= 0, "marker draftStart non trovato (draftKey)");
+assert.ok(draftEnd > draftStart, "marker draftEnd non trovato o mal posizionato (dropSentAttachments)");
 const controller = { aborted: false, abort() { this.aborted = true; } };
 const inflight = Promise.resolve();
 globalThis.stashComposerDraft = () => {};
@@ -1097,7 +1135,7 @@ globalThis.dropSentAttachments = () => {};
 globalThis.state = { drafts: new Map(),
   mediaRequests: new Set([controller]), mediaLoads: new Map([["old", inflight]]),
   active: null, messages: [], optimistic: [], optimisticSequence: 0,
-  sending: false, stagedAttachments: [], replyTo: null,
+  sending: false, stagedAttachments: [], replyTo: null, drafts: new Map(),
 };
 globalThis.history = { pushState() {} };
 function node() { return { children: [], classList: { add() {} }, append(child) { this.children.push(child); }, replaceChildren() { this.children = []; }, focus() {} }; }
@@ -1118,17 +1156,33 @@ globalThis.loadMessages = () => {
   assert.equal(state.mediaLoads.size, 0);
 };
 globalThis.markRead = () => {};
+globalThis.renderAttachmentsPreview = () => {};
+globalThis.resizeComposer = () => {};
+globalThis.updateComposer = () => {};
+globalThis.DRAFTS_KEY = "signal-tui-web-drafts";
+const localStorageCalls = { get: 0, set: 0 };
+globalThis.localStorage = {
+  getItem(key) { localStorageCalls.get += 1; assert.equal(key, "signal-tui-web-drafts"); return null; },
+  setItem(key, value) { localStorageCalls.set += 1; assert.equal(key, "signal-tui-web-drafts"); assert.equal(typeof value, "string"); },
+};
 vm.runInThisContext(app.slice(mediaStart, mediaEnd));
+vm.runInThisContext(app.slice(draftStart, draftEnd));
+for (const name of ["draftKey", "loadStoredDrafts", "storeDraftText", "stashComposerDraft", "restoreComposerDraft"]) {
+  assert.equal(typeof globalThis[name], "function", `draft slice non definisce ${name}`);
+}
 vm.runInThisContext(app.slice(openStart, openEnd));
 openThread({ id: "new", protocol: "signal", display_name: "New" });
+// C4: simula la digitazione nella chat appena aperta. openThread (via il vero
+// restoreComposerDraft) svuota il composer; senza input non vuoto submitMessage
+// uscirebbe a riga 3339 senza esercitare il path di render che contiene
+// l'assert "submit NON aborta i media".
+elements.messageInput.value = "hello";
 
 const submitController = { aborted: false, abort() { this.aborted = true; } };
 state.mediaRequests.add(submitController);
 state.mediaLoads.set("current", inflight);
 state.active = { id: "new", protocol: "signal" };
 globalThis.window = { SignalTuiReconcile: { messageIdentity: (message) => message.id } };
-globalThis.resizeComposer = () => {};
-globalThis.updateComposer = () => {};
 globalThis.renderMessages = () => {
   assert.equal(submitController.aborted, false);
   assert.equal(state.mediaLoads.get("current"), inflight);
@@ -1139,6 +1193,8 @@ vm.runInThisContext(app.slice(submitStart, submitEnd));
   await submitMessage();
   assert.equal(submitController.aborted, false);
   assert.equal(state.mediaLoads.get("current"), inflight);
+  assert.ok(localStorageCalls.get >= 1, "nessuna getItem localStorage osservata");
+  assert.ok(localStorageCalls.set >= 1, "nessuna setItem localStorage osservata");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
 """
     completed = subprocess.run(

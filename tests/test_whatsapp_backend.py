@@ -27,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
+from protocols.config import WHATSAPP_WEBHOOK_EVENTS, get_whatsapp_webhook_url
 from protocols.whatsapp import (
     WhatsAppBackend,
     WhatsAppRESTClient,
@@ -258,9 +259,14 @@ class TestWhatsAppRESTClient:
             patch.object(
                 client, "start_session", side_effect=lambda: calls.append("start")
             ),
+            patch.object(
+                client,
+                "get_session_status",
+                return_value={"status": "SCAN_QR_CODE"},
+            ),
             patch.object(client, "get_session_qr", return_value=b"\x89PNG-fresh"),
         ):
-            qr = client.get_fresh_pairing_qr(reset=True)
+            qr = client.get_fresh_pairing_qr(reset=True, delay=0)
         assert calls == ["reset", "start"]
         assert qr == b"\x89PNG-fresh"
 
@@ -277,11 +283,48 @@ class TestWhatsAppRESTClient:
             patch.object(
                 client, "start_session", side_effect=lambda: calls.append("start")
             ),
+            patch.object(
+                client,
+                "get_session_status",
+                return_value={"status": "SCAN_QR_CODE"},
+            ),
             patch.object(client, "get_session_qr", return_value="2@fresh"),
         ):
-            qr = client.get_fresh_pairing_qr(reset=False)
+            qr = client.get_fresh_pairing_qr(reset=False, delay=0)
         assert calls == ["start"]
         assert qr == "2@fresh"
+
+    def test_get_fresh_pairing_qr_waits_for_scan_state(self):
+        """Dopo start la sessione è STARTING: si attende SCAN_QR_CODE."""
+        client = WhatsAppRESTClient("http://api.test")
+        states = iter(
+            [{"status": "STARTING"}, {"status": "STARTING"}, {"status": "SCAN_QR_CODE"}]
+        )
+        with (
+            patch.object(client, "reset_session"),
+            patch.object(client, "start_session"),
+            patch.object(
+                client, "get_session_status", side_effect=lambda: next(states)
+            ),
+            patch.object(client, "get_session_qr", return_value=b"\x89PNG-wait"),
+        ):
+            qr = client.get_fresh_pairing_qr(reset=True, attempts=5, delay=0)
+        assert qr == b"\x89PNG-wait"
+
+    def test_get_fresh_pairing_qr_returns_none_on_timeout(self):
+        """Se WAHA non arriva mai a SCAN_QR_CODE, il polling termina con None."""
+        client = WhatsAppRESTClient("http://api.test")
+        with (
+            patch.object(client, "reset_session"),
+            patch.object(client, "start_session"),
+            patch.object(
+                client, "get_session_status", return_value={"status": "STARTING"}
+            ),
+            patch.object(client, "get_session_qr") as qr_mock,
+        ):
+            qr = client.get_fresh_pairing_qr(reset=True, attempts=2, delay=0)
+        assert qr is None
+        qr_mock.assert_not_called()
 
     def test_reset_session_uses_logout_then_returns(self):
         """reset_session invoca /api/sessions/logout e ne ritorna il risultato."""
@@ -2695,7 +2738,12 @@ class TestWhatsAppMentionLidResolver:
         try:
             backend._schedule_mention_lid_resolve("555@lid")
             with backend._mention_lid_lock:
-                backend._mention_lid_pending["555@lid"]["next"] = 0
+                # Il worker può aver già consumato/rimosso l'entry tra lo
+                # schedule e questa sezione critica: il test verifica la
+                # risoluzione finale, non il timing esatto del primo recheck.
+                pending = backend._mention_lid_pending.get("555@lid")
+                if isinstance(pending, dict):
+                    pending["next"] = 0
 
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
@@ -5750,3 +5798,71 @@ class TestIncomingAttachmentIdFirstDedup:
         with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
             count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         assert count == 1
+
+
+class TestWhatsAppWebhookConfig:
+    """Never update the WAHA webhook config while the session is WORKING."""
+
+    def test_configure_webhook_skips_put_while_working(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.get_session_status.return_value = {
+            "status": "WORKING",
+            "config": {"webhooks": []},
+        }
+
+        backend._configure_webhook()
+
+        backend._rest.update_session_config.assert_not_called()
+
+    def test_configure_webhook_updates_while_starting(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.get_session_status.return_value = {
+            "status": "STARTING",
+            "config": {"webhooks": []},
+        }
+
+        backend._configure_webhook()
+
+        backend._rest.update_session_config.assert_called_once()
+        payload = backend._rest.update_session_config.call_args.args[0]
+        webhook = payload["config"]["webhooks"][0]
+        assert webhook["url"] == get_whatsapp_webhook_url()
+        assert webhook["events"] == list(WHATSAPP_WEBHOOK_EVENTS)
+
+    def test_configure_webhook_noop_when_working_and_matching(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._rest.get_session_status.return_value = {
+            "status": "WORKING",
+            "config": {
+                "webhooks": [
+                    {
+                        "url": get_whatsapp_webhook_url(),
+                        "events": list(WHATSAPP_WEBHOOK_EVENTS),
+                    }
+                ]
+            },
+        }
+
+        backend._configure_webhook()
+
+        backend._rest.update_session_config.assert_not_called()
+
+    def test_client_configure_webhook_payload(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch.object(client, "update_session_config", return_value={}) as update:
+            client.last_status = 200
+            assert client.configure_webhook() is True
+
+        payload = update.call_args.args[0]
+        webhook = payload["config"]["webhooks"][0]
+        assert webhook["url"] == get_whatsapp_webhook_url()
+        assert webhook["events"] == list(WHATSAPP_WEBHOOK_EVENTS)
+
+    def test_client_configure_webhook_failure(self):
+        client = WhatsAppRESTClient("http://api.test")
+        with patch.object(client, "update_session_config", return_value=None):
+            client.last_status = 500
+            assert client.configure_webhook() is False

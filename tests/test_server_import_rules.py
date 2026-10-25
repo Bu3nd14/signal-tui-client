@@ -128,11 +128,35 @@ WEB_SERVER_ALLOWLIST = {
 WEB_FORBIDDEN_ROOTS = {"protocols", "tui", "transcription", "signal_tui", "textual"}
 
 
+#: TEMPORARY, narrow exemption (bead mc-im6; design doc §13).  Gmail is a
+#: web-only integration that predates the split and talks to IMAP/SMTP itself.
+#: Until it moves into the core behind operations, exactly these web modules
+#: may import exactly these names, and nothing else:
+#:
+#: * ``web/gmail.py``     - ``from protocols import config``: the Gmail
+#:                          settings (credentials, folders, cache limits) live
+#:                          in ``protocols/config.py``.
+#: * ``web/gmail_api.py`` - ``server.link_preview`` (``fetch_external_image``):
+#:                          the Gmail image proxy reuses the SSRF-safe fetcher.
+#: * ``web/server.py``    - ``server.link_preview`` (``close_shared_session``):
+#:                          the adapter closes that shared HTTP session on its
+#:                          own event loop at shutdown (the Gmail image proxy
+#:                          and ``links.preview*`` share it).
+#:
+#: ``test_gmail_exemption_is_exact`` keeps this list from growing silently.
+GMAIL_IMPORT_EXEMPTIONS: dict[str, set[str]] = {
+    "web/gmail.py": {"protocols"},
+    "web/gmail_api.py": {"server.link_preview"},
+    "web/server.py": {"server.link_preview"},
+}
+
+
 def _web_violations() -> list[str]:
     found = []
     for path in sorted((ROOT / "web").rglob("*.py")):
         bad = set()
-        for name in _imported_modules(path):
+        exempt = GMAIL_IMPORT_EXEMPTIONS.get(str(path.relative_to(ROOT)), set())
+        for name in _imported_modules(path) - exempt:
             root = name.split(".")[0]
             if (
                 root in WEB_FORBIDDEN_ROOTS
@@ -147,6 +171,28 @@ def _web_violations() -> list[str]:
 
 def test_web_only_imports_the_api_surface():
     assert _web_violations() == []
+
+
+def test_gmail_exemption_is_exact():
+    """Every exempted import is really used, and ``web/gmail.py`` takes only
+    ``config`` from ``protocols`` (no database, no backends)."""
+    for rel, names in GMAIL_IMPORT_EXEMPTIONS.items():
+        assert names <= _imported_modules(ROOT / rel), (rel, names)
+    tree = ast.parse((ROOT / "web" / "gmail.py").read_text(encoding="utf-8"))
+    taken = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "protocols"
+        for alias in node.names
+    }
+    assert taken == {"config"}
+    assert not any(
+        isinstance(node, ast.Import)
+        and any(a.name.split(".")[0] == "protocols" for a in node.names)
+        or isinstance(node, ast.ImportFrom)
+        and (node.module or "").startswith("protocols.")
+        for node in ast.walk(tree)
+    )
 
 
 def test_web_allowlist_has_no_unused_entries():

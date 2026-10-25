@@ -12,6 +12,7 @@
   <script>try{document.documentElement.dataset.skin=localStorage.getItem("signal-tui-web-skin")||"";}catch(e){}</script>
   <link rel="stylesheet" href="/style.css?v=72">
   <link rel="stylesheet" href="/teams-skin.css?v=24">
+  <link rel="stylesheet" href="/gmail.css?v=17">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -33,6 +34,7 @@
         <button class="protocol-tab active" type="button" role="tab" data-protocol="signal" aria-selected="true">Signal<span class="unread-dot" hidden></span></button>
         <button class="protocol-tab" type="button" role="tab" data-protocol="whatsapp" aria-selected="false">WhatsApp<span class="unread-dot" hidden></span></button>
         <button class="protocol-tab" type="button" role="tab" data-protocol="telegram" aria-selected="false">Telegram<span class="unread-dot" hidden></span></button>
+        <button id="gmail-tab" class="protocol-tab" type="button" role="tab" data-view="gmail" aria-selected="false" aria-controls="gmail-view">Gmail</button>
       </div>
       <div class="sidebar-search">
         <input id="contact-search" type="search" placeholder="Cerca contatti…" autocomplete="off" spellcheck="false" aria-label="Cerca contatti">
@@ -99,6 +101,127 @@
       </aside>
       </div>
     </main>
+
+    <section id="gmail-view" class="gmail-view" role="region" aria-label="Gmail" hidden>
+      <header class="gmail-toolbar">
+        <button id="gmail-back" class="gmail-icon-button gmail-back-button" type="button" aria-label="Torna alle chat" title="Torna alle chat">‹</button>
+        <div class="gmail-heading">
+          <h2>Gmail</h2>
+          <p id="gmail-account-status" class="gmail-account-status">Non configurato</p>
+        </div>
+        <div class="gmail-toolbar-actions">
+          <button id="gmail-refresh" class="gmail-button" type="button">Ricarica</button>
+          <button id="gmail-compose-new" class="gmail-button gmail-primary" type="button" disabled>Scrivi</button>
+        </div>
+      </header>
+      <div id="gmail-error" class="gmail-error" role="alert" hidden>
+        <span id="gmail-error-text"></span>
+        <button id="gmail-error-dismiss" type="button" aria-label="Chiudi avviso">×</button>
+      </div>
+      <div id="gmail-notice" class="gmail-notice" role="status" aria-live="polite" hidden>
+        <span id="gmail-notice-text"></span>
+      </div>
+      <div class="gmail-body">
+        <section class="gmail-list-pane" aria-label="Messaggi Gmail">
+          <div class="gmail-list-top">
+            <span id="gmail-list-summary" aria-live="polite">Pronto.</span>
+            <span id="gmail-list-spinner" class="spinner gmail-spinner" aria-hidden="true" hidden></span>
+            <button id="gmail-delete-selected" class="gmail-select-toggle gmail-danger" type="button" hidden>Elimina</button>
+            <button id="gmail-select-toggle" class="gmail-select-toggle" type="button" aria-pressed="false">Seleziona</button>
+          </div>
+          <div id="gmail-not-configured" class="gmail-config-hint" hidden>
+            <h3>Gmail non configurato</h3>
+            <p>Dalla directory del progetto esegui:</p>
+            <pre><code>python3 scripts/gmail_setup.py</code></pre>
+            <p>oppure <code>./install.sh --gmail</code>.</p>
+            <p>La App Password viene inserita nel terminale, non nel browser. Al termine premi <strong>Ricarica</strong>.</p>
+          </div>
+          <div id="gmail-messages" class="gmail-list-scroll" role="list" aria-label="Messaggi inbox"></div>
+          <div id="gmail-pager" class="gmail-pager" hidden>
+            <button id="gmail-page-newer" class="gmail-button" type="button">Più recenti</button>
+            <span id="gmail-page-info" class="gmail-page-info"></span>
+            <button id="gmail-page-older" class="gmail-button" type="button">Più vecchi</button>
+          </div>
+        </section>
+        <section class="gmail-detail-pane" aria-label="Messaggio">
+          <div id="gmail-detail-empty" class="gmail-empty">
+            <span class="gmail-empty-icon" aria-hidden="true">◇</span>
+            <strong>Nessun messaggio</strong>
+            <p>Seleziona un messaggio per leggerlo.</p>
+          </div>
+          <article id="gmail-reader" class="gmail-reader" aria-busy="false" hidden>
+            <header class="gmail-reader-header">
+              <div class="gmail-reader-actions">
+                <button id="gmail-reader-back" class="gmail-icon-button" type="button" aria-label="Torna alla lista">‹</button>
+                <div class="gmail-reader-action-group">
+                  <button id="gmail-images-toggle" class="gmail-button" type="button" hidden>Mostra immagini</button>
+                  <button id="gmail-render-toggle" class="gmail-button" type="button" hidden>Testo</button>
+                  <button id="gmail-reply" class="gmail-button" type="button">Rispondi</button>
+                  <button id="gmail-delete" class="gmail-button gmail-danger" type="button">Elimina</button>
+                </div>
+              </div>
+              <h2 id="gmail-reader-subject" tabindex="-1"></h2>
+              <dl class="gmail-meta">
+                <div><dt>Da</dt><dd id="gmail-reader-from"></dd></div>
+                <div><dt>A</dt><dd id="gmail-reader-to"></dd></div>
+                <div id="gmail-reader-cc-row" hidden><dt>Cc</dt><dd id="gmail-reader-cc"></dd></div>
+                <div><dt>Data</dt><dd id="gmail-reader-date"></dd></div>
+              </dl>
+            </header>
+            <div id="gmail-reader-body" class="gmail-reader-body"></div>
+            <section id="gmail-attachments" class="gmail-attachments" aria-label="Allegati" hidden>
+              <h3>Allegati</h3>
+              <div id="gmail-attachment-list" class="gmail-attachment-list"></div>
+            </section>
+          </article>
+        </section>
+      </div>
+      <dialog id="gmail-compose-dialog" class="gmail-compose-dialog" aria-labelledby="gmail-compose-title">
+        <form id="gmail-compose-form" class="gmail-compose-form">
+          <header class="gmail-compose-header">
+            <h2 id="gmail-compose-title">Nuova email</h2>
+            <button id="gmail-compose-close" class="gmail-icon-button" type="button" aria-label="Chiudi compose">×</button>
+          </header>
+          <div class="gmail-compose-fields">
+            <p id="gmail-compose-reply-ref" class="gmail-reply-ref" hidden></p>
+            <label class="gmail-field" for="gmail-compose-to">
+              <span>A</span>
+              <input id="gmail-compose-to" name="to" type="text" autocomplete="off" spellcheck="false">
+            </label>
+            <div class="gmail-compose-row">
+              <label class="gmail-field" for="gmail-compose-cc">
+                <span>Cc</span>
+                <input id="gmail-compose-cc" name="cc" type="text" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="gmail-field" for="gmail-compose-bcc">
+                <span>Bcc</span>
+                <input id="gmail-compose-bcc" name="bcc" type="text" autocomplete="off" spellcheck="false">
+              </label>
+            </div>
+            <label class="gmail-field" for="gmail-compose-subject">
+              <span>Oggetto</span>
+              <input id="gmail-compose-subject" name="subject" type="text" autocomplete="off">
+            </label>
+            <label class="gmail-field" for="gmail-compose-text">
+              <span>Messaggio</span>
+              <textarea id="gmail-compose-text" name="text" rows="6" maxlength="65536"></textarea>
+            </label>
+            <div class="gmail-compose-attach-row">
+              <button id="gmail-compose-attach" class="gmail-button" type="button">Allega file</button>
+              <input id="gmail-compose-files" type="file" multiple hidden>
+              <span id="gmail-compose-file-summary" class="gmail-file-summary">Nessun allegato</span>
+            </div>
+            <div id="gmail-compose-file-list" class="gmail-file-list"></div>
+            <p id="gmail-compose-error" class="gmail-compose-error" role="alert" hidden></p>
+          </div>
+          <footer class="gmail-compose-footer">
+            <span class="gmail-compose-hint">Max 10 allegati, 25 MB totali.</span>
+            <button id="gmail-compose-cancel" class="gmail-button" type="button">Annulla</button>
+            <button id="gmail-compose-send" class="gmail-button gmail-primary" type="submit">Invia</button>
+          </footer>
+        </form>
+      </dialog>
+    </section>
   </div>
 
   <dialog id="link-dialog" class="link-dialog">
@@ -194,5 +317,6 @@
   <script src="/outbox.js?v=1" defer></script>
   <script src="/message_cache.js?v=1" defer></script>
   <script src="/app.js?v=131" defer></script>
+  <script src="/gmail.js?v=16" defer></script>
 </body>
 </html>

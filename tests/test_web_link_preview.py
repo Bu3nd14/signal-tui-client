@@ -13,6 +13,7 @@ import server.link_preview as lp
 from web.api import create_api_router
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
+LARGE_PNG = PNG + b"\0" * (256 * 1024)
 
 PAGE = """<!doctype html><html><head>
 <meta charset="utf-8"><title>Fallback title</title>
@@ -117,12 +118,16 @@ def _serve_and_run(monkeypatch, coro_factory):
     async def cover(_request):
         return aioweb.Response(body=PNG, content_type="image/png")
 
+    async def large_cover(_request):
+        return aioweb.Response(body=LARGE_PNG, content_type="image/png")
+
     async def main():
         app = aioweb.Application()
         app.router.add_get("/page", page)
         app.router.add_get("/redirect", redirect)
         app.router.add_get("/private", bounce_private)
         app.router.add_get("/img/cover.png", cover)
+        app.router.add_get("/img/large.png", large_cover)
         runner = aioweb.AppRunner(app)
         await runner.setup()
         site = aioweb.TCPSite(runner, "127.0.0.1", 0)
@@ -132,7 +137,13 @@ def _serve_and_run(monkeypatch, coro_factory):
         try:
             return await coro_factory(f"http://127.0.0.1:{port}")
         finally:
-            await runner.cleanup()
+            # The shared HTTP session belongs to this loop: close it here,
+            # before ``asyncio.run`` tears the loop down, or aiohttp emits
+            # ``ResourceWarning: Unclosed client session/connector``.
+            try:
+                await lp.close_shared_session()
+            finally:
+                await runner.cleanup()
 
     return asyncio.run(main())
 
@@ -147,6 +158,17 @@ def test_fetch_follows_redirect_and_serves_image(monkeypatch):
     assert preview["title"] == "Caffè & cornetti"
     assert preview["url"].endswith("/redirect")
     assert image == (PNG, "image/png")
+
+
+def test_fetch_external_image_reads_the_whole_body(monkeypatch):
+    async def scenario(base):
+        return await lp.fetch_external_image(
+            f"{base}/img/large.png", max_bytes=1024 * 1024
+        )
+
+    image = _serve_and_run(monkeypatch, scenario)
+    assert image is not None
+    assert image == (LARGE_PNG, "image/png")
 
 
 def test_redirect_to_blocked_host_gives_no_preview(monkeypatch):

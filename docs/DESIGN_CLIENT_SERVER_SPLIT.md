@@ -612,3 +612,30 @@ Known limitations:
   `megachat-tui.log`), also in the smoke run.
 - The smoke needs `script` (util-linux) and Linux (`/proc`); it uses no real
   backend, so backend behaviour is covered by the unit/integration suites.
+
+## 13. Master merge: Gmail stays web-only (mc-615, mc-im6)
+
+`origin/master` gained a Gmail reader (`web/gmail.py`, `web/gmail_api.py`,
+`web/static/gmail.*`, the Gmail settings in `protocols/config.py`) that talks to
+IMAP/SMTP from inside the web adapter.  The merge keeps it as it is: Gmail is
+**web-only for now** and does not go through `ChatAPI`; the TUI cannot use it.
+Moving it into the core as operations is bead **mc-im6**.
+
+That breaks the §4.4 rule "`web/` imports no `protocols`" in exactly three
+places, listed in `GMAIL_IMPORT_EXEMPTIONS` of
+`tests/test_server_import_rules.py` (a temporary exemption; the same test fails
+if the list names an import that is not used, or if `web/gmail.py` takes
+anything but `config` from `protocols`):
+
+| module | import | why |
+|---|---|---|
+| `web/gmail.py` | `from protocols import config` | Gmail settings (credentials, folders, cache limits) |
+| `web/gmail_api.py` | `server.link_preview` | image proxy reuses the SSRF-safe `fetch_external_image` |
+| `web/server.py` | `server.link_preview` | closes the shared HTTP session on the web loop at shutdown |
+
+Every other rule (no `tui`, `transcription`, `signal_tui`, `textual`; other
+`server.*` modules) still applies to the Gmail modules.  Link previews live in
+`server/link_preview.py` (master's shared-session and `fetch_external_image`
+changes were ported there); `web/link_preview.py` no longer exists.  Gmail
+routers are mounted by `start_web_server(api, ...)`; the old shutdown hooks
+(shared session, IMAP pool) run on the web loop as before.

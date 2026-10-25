@@ -74,11 +74,28 @@ def main() -> None:
     print(f"✅ Session: {session_name}")
     print()
 
+    # Non abbattere una sessione già funzionante: un rilancio del link
+    # scollegherebbe il dispositivo appena associato.
+    current = client.get_session_status() or {}
+    current_status = str(current.get("status") or "").lower()
+    if current_status in ("working", "connected", "authenticated", "ready", "open"):
+        print("✅ Sessione WhatsApp già collegata: nessun reset necessario.")
+        print("   Per ri-associare un dispositivo, esegui prima un logout esplicito.")
+        return
+
     print("⏳ Creating a fresh session / requesting a valid QR...")
     # Sempre un QR nuovo e valido: abbatte la vecchia sessione (un QR scaduto è il
     # motivo più comune del "non puoi collegare nuovi dispositivi") e ne chiede uno
-    # appena generato.
-    qr = client.get_fresh_pairing_qr(reset=True)
+    # appena generato. Configuriamo il webhook ORA, prima dello scan: WAHA sloggia
+    # la sessione se il config viene aggiornato mentre è WORKING.
+    client.reset_session()
+    client.start_session()
+    if not client.configure_webhook():
+        print(
+            "⚠️  Webhook WAHA non configurato durante il pairing; il TUI riproverà a link completato.",
+            file=sys.stderr,
+        )
+    qr = client.wait_for_pairing_qr()
     if not qr:
         if client.last_status == 401:
             print(

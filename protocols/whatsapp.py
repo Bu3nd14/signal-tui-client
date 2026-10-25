@@ -44,6 +44,7 @@ from .base import (
     should_upgrade_outgoing_attachment,
 )
 from .config import (
+    WHATSAPP_WEBHOOK_EVENTS,
     get_address_book_ttl_s,
     get_wa_lid_cache_ttl_days,
     get_wa_lid_retry_cooldown_s,
@@ -801,15 +802,8 @@ class WhatsAppBackend(ChatBackend):
             current = self._rest.get_session_status() or {}
             configured = current.get("config") or {}
             urls = [(w or {}).get("url") for w in (configured.get("webhooks") or [])]
-            desired_events = [
-                "message",
-                "message.any",
-                "message.ack",
-                "message.ack.group",
-                "presence.update",
-                "message.reaction",
-                "chat.archive",
-            ]
+            desired_events = list(WHATSAPP_WEBHOOK_EVENTS)
+            status = str(current.get("status") or "").lower()
             if webhook in urls:
                 # URL già registrato — controlla se anche gli eventi sono
                 # aggiornati (es. dopo un upgrade che ha aggiunto message.ack).
@@ -819,6 +813,11 @@ class WhatsAppBackend(ChatBackend):
                         if set(current_events) >= set(desired_events):
                             return  # già aggiornato: niente restart
                         break
+            if status == "working":
+                logger.warning(
+                    "WhatsApp webhook differs while WORKING; skipping PUT to avoid logout"
+                )
+                return
             self._rest.update_session_config(
                 {
                     "config": {
