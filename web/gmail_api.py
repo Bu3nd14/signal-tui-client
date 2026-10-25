@@ -42,22 +42,35 @@ async def _consume_blob(blob: dict[str, Any]) -> bytes:
         path.unlink(missing_ok=True)
 
 
+_GMAIL_IMAGE_MAX_PIXELS = 25_000_000
+_GMAIL_IMAGE_CONCURRENCY = 4
+
+
 def create_gmail_image_router() -> Any:
     """Same-origin image proxy for email HTML.
 
     The URL is carried by an HMAC-signed token, so this endpoint is safe to
     mount outside the Bearer-protected ``/api`` namespace (``<img src>`` cannot
     send an Authorization header).  The ``gmail.image`` operation verifies the
-    token and fetches with the SSRF-safe resolver of the link previews.
+    token and fetches with the SSRF-safe resolver and raster sniffing of the
+    link previews.
+
+    The semaphore caps concurrent Gmail image fetches per app; with multiple
+    uvicorn workers the aggregate concurrency is the cap times the number of
+    workers.  The per-image byte and pixel caps bound each fetch; the
+    per-message aggregate budget (50 images) is documented as a residual risk
+    in ``docs/DESIGN_GMAIL_IMAGES_DEFAULT.md``.
     """
     from fastapi import APIRouter, Request
     from fastapi.responses import Response
 
     router = APIRouter()
+    image_semaphore = asyncio.Semaphore(_GMAIL_IMAGE_CONCURRENCY)
 
     @router.get("/gmail-image")
     async def image(request: Request, token: str) -> Response:
-        blob = await call_op(request, "gmail.image", {"token": token})
+        async with image_semaphore:
+            blob = await call_op(request, "gmail.image", {"token": token})
         data = await _consume_blob(blob)
         return Response(
             content=data,

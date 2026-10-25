@@ -499,13 +499,17 @@ def materialize_image(data: bytes, content_type: str) -> Path | None:
 
 
 async def fetch_external_image(
-    url: str, max_bytes: int = _MAX_IMAGE_BYTES
+    url: str,
+    max_bytes: int = _MAX_IMAGE_BYTES,
+    max_pixels: int | None = None,
 ) -> tuple[bytes, str] | None:
     """Fetch a public raster image through the SSRF-safe preview session.
 
     Used by the Gmail image proxy: redirects and DNS answers are validated by
     the same public-only resolver as link previews; SVG and non-image bodies
-    are rejected by magic-byte sniffing.
+    are rejected by magic-byte sniffing.  When *max_pixels* is set, images
+    whose header declares a larger raster are rejected; unparseable headers
+    fail open (the byte cap remains the backstop).
     """
     try:
         async with shared_session() as session:
@@ -514,7 +518,104 @@ async def fetch_external_image(
         logger.debug("external image failed for %s: %s", url, exc)
         return None
     sniffed = _sniff_raster(body)
-    return (body, sniffed) if sniffed else None
+    if not sniffed:
+        return None
+    if max_pixels is not None:
+        dimensions = _raster_dimensions(body, sniffed)
+        if dimensions is not None and dimensions[0] * dimensions[1] > max_pixels:
+            logger.debug("external image over pixel cap: %s", url)
+            return None
+    return (body, sniffed)
+
+
+def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
+    """Walk JPEG segments (skipping APPn/COM payloads) to the first real SOF."""
+    index = 2
+    size = len(data)
+    while index + 1 < size:
+        if data[index] != 0xFF:
+            return None
+        while index < size and data[index] == 0xFF:
+            index += 1
+        if index >= size:
+            return None
+        marker = data[index]
+        index += 1
+        if marker == 0x00:
+            continue
+        if marker == 0xD9:
+            return None
+        if marker == 0x01 or 0xD0 <= marker <= 0xD8:
+            continue
+        if marker == 0xDA or index + 2 > size:
+            return None
+        segment_length = int.from_bytes(data[index : index + 2], "big")
+        if segment_length < 2 or index + segment_length > size:
+            return None
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            if segment_length < 7:
+                return None
+            height = int.from_bytes(data[index + 3 : index + 5], "big")
+            width = int.from_bytes(data[index + 5 : index + 7], "big")
+            return (width, height)
+        index += segment_length
+    return None
+
+
+def _webp_dimensions(data: bytes) -> tuple[int, int] | None:
+    if len(data) < 20 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return None
+    kind = data[12:16]
+    chunk_size = int.from_bytes(data[16:20], "little")
+    if 20 + chunk_size > len(data):
+        return None
+    if kind == b"VP8X":
+        if chunk_size < 10 or len(data) < 30:
+            return None
+        width = int.from_bytes(data[24:27], "little") + 1
+        height = int.from_bytes(data[27:30], "little") + 1
+        return (width, height)
+    if kind == b"VP8 ":
+        if chunk_size < 10 or len(data) < 30 or data[23:26] != b"\x9d\x01\x2a":
+            return None
+        width = int.from_bytes(data[26:28], "little") & 0x3FFF
+        height = int.from_bytes(data[28:30], "little") & 0x3FFF
+        return (width, height)
+    if kind == b"VP8L":
+        if chunk_size < 5 or len(data) < 25 or data[20] != 0x2F:
+            return None
+        packed = int.from_bytes(data[21:25], "little")
+        width = (packed & 0x3FFF) + 1
+        height = ((packed >> 14) & 0x3FFF) + 1
+        return (width, height)
+    return None
+
+
+def _raster_dimensions(data: bytes, content_type: str) -> tuple[int, int] | None:
+    """Best-effort ``(width, height)`` from a raster header.
+
+    Returns ``None`` when the header is truncated or not parseable, so callers
+    can fail open instead of rejecting valid images.
+    """
+    if content_type == "image/png":
+        if len(data) < 24 or data[12:16] != b"IHDR":
+            return None
+        return (
+            int.from_bytes(data[16:20], "big"),
+            int.from_bytes(data[20:24], "big"),
+        )
+    if content_type == "image/jpeg":
+        return _jpeg_dimensions(data)
+    if content_type == "image/gif":
+        if len(data) < 10:
+            return None
+        return (
+            int.from_bytes(data[6:8], "little"),
+            int.from_bytes(data[8:10], "little"),
+        )
+    if content_type == "image/webp":
+        return _webp_dimensions(data)
+    return None
 
 
 def _sniff_raster(data: bytes) -> str | None:

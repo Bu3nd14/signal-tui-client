@@ -50,6 +50,8 @@ logger = logging.getLogger(__name__)
 
 #: Largest image the proxy fetches (the image goes into an ``<img>``).
 IMAGE_PROXY_MAX_BYTES = 8 * 1024 * 1024
+#: Largest decoded image (width * height) the proxy accepts.
+IMAGE_PROXY_MAX_PIXELS = 25_000_000
 
 _COMM_ERROR = "Errore di comunicazione con Gmail"
 
@@ -246,7 +248,9 @@ async def gmail_image(api: ChatAPI, req: GmailImageRequest) -> BlobOut:
     if not url:
         raise ApiError("not_found", "Immagine non trovata")
     result = await link_preview.fetch_external_image(
-        url, max_bytes=IMAGE_PROXY_MAX_BYTES
+        url,
+        max_bytes=IMAGE_PROXY_MAX_BYTES,
+        max_pixels=IMAGE_PROXY_MAX_PIXELS,
     )
     if not result:
         raise ApiError("backend_error", "Immagine non disponibile")

@@ -777,9 +777,16 @@ updates `.env`. Then reload the Gmail tab in the Web UI. Email HTML is sanitized
 scripts, `<style>` blocks, classes, iframes and external CSS are removed, while safe inline CSS
 (allow-listed properties/values; no `url()`, `position`, `var()` or `calc()`) and legacy table
 attributes are preserved, within size/complexity caps. The reader can toggle between HTML and plain
-text. Remote images are not loaded automatically; use **Mostra immagini** to fetch them on demand
-(this reveals your IP to the sender). Emails that rely on `<style>` blocks or classes may look
-simpler than in Gmail.
+text. Remote images are loaded by default through the same-origin `/gmail-image` proxy, so the
+sender never sees the browser's IP: it sees the server's IP, at the time the message is opened.
+Tracking is therefore accepted, and `Cache-Control: no-store` plus a Testo↔HTML toggle mean each
+render can re-ping the tracker. Images are capped at **50 per message**, **25 MP each**, and the
+proxy allows at most **4 concurrent Gmail image fetches**. Residual risks: the signed image URL
+does not expire and is not single-use, `/gmail-image` is mounted outside the Bearer-protected
+`/api` namespace, and there is no per-message aggregate budget: the theoretical ceiling is
+50 × 25 MP ≈ 1.25 Gpixel (~5 GB decoded RGBA) and 50 × 8 MiB = 400 MB of payload, while the
+semaphore only bounds concurrency (4 per worker). Emails that rely on `<style>` blocks or classes
+may look simpler than in Gmail.
 
 > After pulling a version that adds the HTML reader, install the new web dependencies once:
 > `.venv/bin/pip install -r requirements-web.txt` (or re-run `./install.sh`). `./install.sh --gmail`
