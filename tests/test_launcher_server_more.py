@@ -65,7 +65,9 @@ class TestStatus:
         monkeypatch.setattr(server, "LOCK_FILE", tmp_path / "no.lock")
         monkeypatch.setattr(server, "_pgrep", lambda pattern: False)
         monkeypatch.setattr(server, "_docker_container_running", lambda name: False)
-        monkeypatch.setattr(server, "port_listening", lambda port: False)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": False
+        )
         assert server.status() == 0
         out = capsys.readouterr().out
         assert "Server: spento" in out
@@ -79,14 +81,16 @@ class TestStatus:
         monkeypatch.setattr(server, "LOCK_FILE", lock)
         monkeypatch.setattr(server, "_pgrep", lambda pattern: True)
         monkeypatch.setattr(server, "_docker_container_running", lambda name: True)
-        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": True
+        )
         monkeypatch.setattr(whatsapp_mod, "session_status", lambda timeout=3: "WORKING")
         assert server.status() == 0
         out = capsys.readouterr().out
         assert f"Server: ATTIVO (pid {os.getpid()})" in out
         assert "daemon signal-cli: attivo" in out
         assert "WAHA: attivo" in out
-        assert "in ascolto su 4242" in out
+        assert "in ascolto su 0.0.0.0:4242" in out
 
     def test_reports_session_state_when_waha_is_active(
         self, monkeypatch, tmp_path, capsys
@@ -94,7 +98,9 @@ class TestStatus:
         monkeypatch.setattr(server, "LOCK_FILE", tmp_path / "no.lock")
         monkeypatch.setattr(server, "_pgrep", lambda pattern: False)
         monkeypatch.setattr(server, "_docker_container_running", lambda name: True)
-        monkeypatch.setattr(server, "port_listening", lambda port: False)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": False
+        )
         seen = {}
 
         def fake_status(timeout=3):
@@ -126,6 +132,8 @@ class TestStopAll:
 
 
 class _FakeProc:
+    pid = 4321
+
     def __init__(self, returncode=None):
         self.returncode = returncode
 
@@ -154,20 +162,26 @@ def start_env(monkeypatch, tmp_path):
 
 class TestStartAll:
     def test_dies_when_server_never_comes_up(self, monkeypatch, start_env):
-        monkeypatch.setattr(server, "port_listening", lambda port: False)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": False
+        )
         with pytest.raises(SystemExit):
             server.start_all()
 
     def test_dies_early_when_server_process_exits(self, monkeypatch, start_env):
         monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: _FakeProc(1))
-        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": True
+        )
         with pytest.raises(SystemExit):
             server.start_all()
 
     def test_reports_success_with_token_and_url(self, monkeypatch, start_env, capsys):
         monkeypatch.setattr(server, "_read_web_token", lambda: "tok123")
         monkeypatch.setattr(server, "_local_ip", lambda: "10.0.0.5")
-        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": True
+        )
         assert server.start_all() == 0
         out = capsys.readouterr().out
         assert "10.0.0.5:4242" in out
@@ -179,14 +193,18 @@ class TestStartAll:
     ):
         monkeypatch.setattr(server, "_read_web_token", lambda: "tok123")
         monkeypatch.setattr(server, "_local_ip", lambda: "10.0.0.5")
-        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": True
+        )
         assert server.start_all(print_token=False) == 0
         out = capsys.readouterr().out
         assert "Token Web UI" not in out
         assert "10.0.0.5:4242" in out
 
     def test_starts_detached_serve_process(self, monkeypatch, start_env):
-        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": True
+        )
         assert server.start_all() == 0
         ((cmd, kwargs),) = start_env
         assert cmd[0].endswith(".venv/bin/python")
@@ -204,7 +222,9 @@ class TestStartAll:
     def test_stops_previous_instance_before_starting(self, monkeypatch, start_env):
         order = []
         monkeypatch.setattr(server, "stop_server", lambda: order.append("stop") or True)
-        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": True
+        )
         real_popen = server.subprocess.Popen
         monkeypatch.setattr(
             server.subprocess,
@@ -232,7 +252,9 @@ class TestStatusStaleLock:
         monkeypatch.setattr(server, "_pid_alive", lambda pid: False)
         monkeypatch.setattr(server, "_pgrep", lambda pattern: False)
         monkeypatch.setattr(server, "_docker_container_running", lambda name: False)
-        monkeypatch.setattr(server, "port_listening", lambda port: False)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": False
+        )
         server.status()
         assert "Server: spento" in capsys.readouterr().out
 
@@ -328,7 +350,9 @@ class TestStartAllStuckServer:
         monkeypatch.setattr(
             server.subprocess, "run", lambda *a, **k: ran.append(a[0]) or _cp(a[0], 0)
         )
-        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        monkeypatch.setattr(
+            server, "port_listening", lambda port, host="127.0.0.1": True
+        )
         monkeypatch.setattr(server, "stop_server", lambda: True)
         assert server.start_all() == 0
         assert not any(c[:2] == ["tmux", "new-session"] for c in ran)

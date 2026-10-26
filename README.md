@@ -366,7 +366,7 @@ just prefer not to shell out.
 | Shell aliases only | `./install.sh --aliases` | `python3 launcher.py aliases` |
 | Start/stop WAHA | `./scripts/start_whatsapp.sh [--no-wait\|--stop]` | `python3 launcher.py whatsapp start\|stop [--no-wait]` |
 | Restart signal-cli + WAHA | `./scripts/restart_backend.sh [--no-wait]` | `python3 launcher.py backend-restart [--no-wait]` |
-| Run the server on a remote machine (disaster recovery) | `./scripts/start_on_server.sh {start\|stop\|status}` | `python3 launcher.py server start\|stop\|status` |
+| Run the headless server on this machine (also disaster recovery on the remote one) | `./scripts/start_on_server.sh {start\|stop\|status}` | `python3 launcher.py server start\|stop\|status` (see [Headless server](#headless-server-megachat-serve)) |
 | Local ↔ remote handover (moves `megachat serve`) | `./scripts/tui_handover.sh {to-server\|to-local\|status}` | `python3 launcher.py handover to-server\|to-local\|status` |
 | CPU/I-O profiling | `./profiling/run_pyspy.sh` / `run_strace.sh` `[duration]` | `python3 launcher.py profile pyspy\|strace [duration]` |
 | Regression tests | `./tests/run_regression_tests.sh` | `python3 launcher.py test` |
@@ -690,8 +690,8 @@ The automatic installer enables the Web UI in `config.json`, so a normal
 | Alias | What it does |
 |---|---|
 | `web-signal-tui` | Starts the TUI with the web server on `0.0.0.0:4242`: attaches to a running server or starts one that keeps running after the TUI exits (stop it with `web-signal-tui-stop`) |
-| `web-signal-tui-bg` | Starts the headless server (`megachat serve`: core + web server, no TUI) as a **detached background process** and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN` |
-| `web-signal-tui-stop` | Cleanly stops the background server (SIGINT; also kills a legacy tmux `tui` session if one exists) and removes `/tmp/signal-tui.lock` |
+| `web-signal-tui-bg` | Starts the headless server (`launcher.py server start`: WAHA + `megachat serve`, no TUI) as a **detached background process** and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN`; extra arguments go to `server start` (e.g. `web-signal-tui-bg --web-port 8080`) |
+| `web-signal-tui-stop` | Cleanly stops the background server, leaving WAHA running (`launcher.py server stop --keep-whatsapp`) |
 
 `signal-tui-bg` and `signal-tui-stop` are shorter aliases for the two background commands.
 Starting the background command is idempotent: when the server is already running it still prints
@@ -704,21 +704,35 @@ and exports the current token instead of failing.
 The web UI no longer needs the TUI (or tmux) to stay alive. `megachat serve` runs the chat core and
 the web adapter without Textual, logs to `/tmp/signal-tui.log`, prints the web URL and Bearer token,
 and runs until SIGINT/SIGTERM (then stops the core and the web server, prunes the message cache and
-releases the lock):
+releases the lock).
+
+Start, stop and inspect it through the launcher — one command for every way of running it:
 
 ```bash
-python3 megachat.py serve                      # web on config.json host/port (default 127.0.0.1:4242)
-python3 megachat.py serve --web-host 0.0.0.0 --web-port 4242
-python3 -m server --web-no-auth                # same entry point, no token (trusted networks only)
+python3 launcher.py server start                         # WAHA + server, detached, web on 0.0.0.0:4242
+python3 launcher.py server start --web-host 127.0.0.1 --web-port 8080
+python3 launcher.py server start --web-no-auth           # no token (trusted networks only, warns)
+python3 launcher.py server start --foreground            # in this terminal; Ctrl+C stops it
+python3 launcher.py server start --no-whatsapp --no-web  # no WAHA, no web UI (socket only)
+python3 launcher.py server status                        # server, signal-cli, WAHA, web UI address
+python3 launcher.py server stop                          # server + WAHA
+python3 launcher.py server stop --keep-whatsapp          # server only
 ```
 
-Options: `--debug`, `--web-port`, `--web-host`, `--web-no-auth`, `--no-web` (no client can connect
-yet; logs a warning). The server holds the single-instance lock (`/tmp/signal-tui.lock`, override
-with `$MEGACHAT_LOCK_FILE`); attached TUIs never take it, only `megachat --in-process` does (so it
-cannot run next to a server). `python3 launcher.py server
-start|stop|status` starts/stops it (together with WAHA) as a detached background process; its
-stdout/stderr go to `/tmp/megachat-serve.log`. `megachat.py` with any other arguments starts the TUI
-as before (`python3 signal_tui.py` keeps working). Stopping the server (`web-signal-tui-stop`, SIGINT to the lock pid) disconnects every attached TUI; they show a reconnect message and resync if a new server appears.
+`server start` options: `--web-host` (default `0.0.0.0`), `--web-port` (default `4242`),
+`--web-no-auth`, `--no-web`, `--socket PATH` / `--no-socket`, `--debug`, `--no-whatsapp`,
+`--foreground`, `--no-token` (don't print the token), `--no-docker-limits`. The `--web-*`,
+`--socket`, `--no-socket`, `--no-web` and `--debug` options are passed to `megachat serve`; a
+detached server's stdout/stderr go to `/tmp/megachat-serve.log`, and its options are recorded next
+to the lock (`/tmp/signal-tui.lock.json`) so `server status` reports the real address. `start`
+restarts a server that is already running. `python3 megachat.py serve [same --web-* options]` still
+works for running the bare server by hand.
+
+The server holds the single-instance lock (`/tmp/signal-tui.lock`, override with
+`$MEGACHAT_LOCK_FILE`); attached TUIs never take it, only `megachat --in-process` does (so it
+cannot run next to a server). `megachat.py` with any other arguments starts the TUI as before
+(`python3 signal_tui.py` keeps working). Stopping the server disconnects every attached TUI; they
+show a reconnect message and resync if a new server appears.
 
 ### Fast cycle (background + token)
 
@@ -991,7 +1005,7 @@ lsof ~/.local/share/signal-tui-client/messages.db
 
 # 5. Restart from the project root with the usual web options
 cd /home/rob/signal-tui-client
-nohup .venv/bin/python megachat.py serve --web-host 0.0.0.0 --web-port 4242 >/dev/null 2>&1 &
+python3 launcher.py server start
 ```
 
 The script aborts (`-1`) if more rows than expected match, and is idempotent (a second run finds
