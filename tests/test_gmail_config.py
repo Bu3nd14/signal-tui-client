@@ -271,14 +271,23 @@ def test_command_output_is_cached(monkeypatch):
     assert calls == [["/bin/secret-helper"]]
 
 
-def test_command_cache_key_is_sha256_hex_string():
-    key = config._gmail_secret_cache_key("gpg --decrypt secret.gpg")
+def test_command_cache_key_is_keyed_blake2b_hex_string():
+    command = "gpg --decrypt secret.gpg"
+    key = config._gmail_secret_cache_key(command)
     other = config._gmail_secret_cache_key("gpg --decrypt secret2.gpg")
 
     assert isinstance(key, str)
-    assert key == hashlib.sha256(b"gpg --decrypt secret.gpg").hexdigest()
+    assert (
+        key
+        == hashlib.blake2b(
+            command.encode("utf-8"),
+            key=config._SECRET_CACHE_HMAC_KEY,
+            digest_size=32,
+        ).hexdigest()
+    )
     assert len(key) == 64
     assert key != other
+    assert command not in key
 
 
 def test_command_cache_uses_fixed_ttl(monkeypatch):

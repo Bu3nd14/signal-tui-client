@@ -48,11 +48,19 @@ def _entry(expires_at: float, uid: int = 1) -> gmail._InboxCacheEntry:
     )
 
 
-def test_secret_cache_key_is_opaque_sha256():
-    key = config._gmail_secret_cache_key("hunter2 --with-secret")
+def test_secret_cache_key_is_keyed_blake2b_hex_string():
+    command = "hunter2 --with-secret"
+    key = config._gmail_secret_cache_key(command)
 
     assert isinstance(key, str)
-    assert key == hashlib.sha256(b"hunter2 --with-secret").hexdigest()
+    assert (
+        key
+        == hashlib.blake2b(
+            command.encode("utf-8"),
+            key=config._SECRET_CACHE_HMAC_KEY,
+            digest_size=32,
+        ).hexdigest()
+    )
     assert len(key) == 64
     assert "hunter2" not in key
     assert key != config._gmail_secret_cache_key("hunter2 --with-secret2")

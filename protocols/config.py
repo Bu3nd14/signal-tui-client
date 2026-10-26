@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import shlex
 import socket
 import subprocess
@@ -500,6 +501,10 @@ _gmail_secret_cache: dict[str, tuple[float, str]] = {}
 _gmail_secret_cache_gen = 0
 _gmail_secret_cache_lock = threading.Lock()
 
+#: Per-process key for the opaque cache key: keeps the digest keyed so the
+#: raw command (which may embed a secret) never lands in the cache.
+_SECRET_CACHE_HMAC_KEY = secrets.token_bytes(32)
+
 
 def _now() -> float:
     """Indirection over ``time.monotonic`` so tests can freeze the clock."""
@@ -510,9 +515,12 @@ def _gmail_secret_cache_key(command: str) -> str:
     """Return the opaque cache key for a credential command.
 
     The raw command may contain a secret inline, so it never appears in the
-    cache or in logs.
+    cache or in logs.  A keyed BLAKE2b digest keeps the key opaque without
+    hashing password material with a fast password-hashing algorithm.
     """
-    return hashlib.sha256(command.encode("utf-8")).hexdigest()
+    return hashlib.blake2b(
+        command.encode("utf-8"), key=_SECRET_CACHE_HMAC_KEY, digest_size=32
+    ).hexdigest()
 
 
 def _prune_gmail_secret_cache_locked(now: float) -> None:
