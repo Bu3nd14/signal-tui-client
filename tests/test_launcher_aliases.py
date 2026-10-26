@@ -108,6 +108,7 @@ class TestContentParity:
         assert "web-signal-tui-status" in content
         assert "launcher.py server start" in content.replace('"', "")
         assert "server start --no-token" in content
+        assert "gmail_warm_cache.py" in content
         assert "signal-tui-stop" in content
 
     def test_no_project_dir_placeholder_leaks(self, home: Path, monkeypatch):

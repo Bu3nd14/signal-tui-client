@@ -88,6 +88,37 @@ def test_env_precedence(monkeypatch, tmp_path):
     assert config.gmail_enabled() is True
 
 
+def test_secret_source_getters_resolve_env_config_and_dotenv(monkeypatch, tmp_path):
+    assert config.get_gmail_app_password_file() == ""
+    assert config.get_gmail_app_password_cmd() == ""
+
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_FILE", "/tmp/from-env")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_CMD", "gpg --decrypt env.gpg")
+    assert config.get_gmail_app_password_file() == "/tmp/from-env"
+    assert config.get_gmail_app_password_cmd() == "gpg --decrypt env.gpg"
+
+    monkeypatch.delenv("GMAIL_APP_PASSWORD_FILE")
+    monkeypatch.delenv("GMAIL_APP_PASSWORD_CMD")
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "gmail_app_password_file": "from-config",
+                "gmail_app_password_cmd": "gpg --decrypt config.gpg",
+            }
+        )
+    )
+    assert config.get_gmail_app_password_file() == "from-config"
+    assert config.get_gmail_app_password_cmd() == "gpg --decrypt config.gpg"
+
+    (tmp_path / "config.json").unlink()
+    (tmp_path / ".env").write_text(
+        "GMAIL_APP_PASSWORD_FILE=from-dotenv\n"
+        "GMAIL_APP_PASSWORD_CMD=gpg --decrypt dotenv.gpg\n"
+    )
+    assert config.get_gmail_app_password_file() == "from-dotenv"
+    assert config.get_gmail_app_password_cmd() == "gpg --decrypt dotenv.gpg"
+
+
 def test_app_password_file_preferred(monkeypatch, tmp_path):
     secret = tmp_path / "gmail-secret"
     secret.write_text("file-secret\n")
@@ -240,14 +271,23 @@ def test_command_output_is_cached(monkeypatch):
     assert calls == [["/bin/secret-helper"]]
 
 
-def test_command_cache_key_is_sha256_hex_string():
-    key = config._gmail_secret_cache_key("gpg --decrypt secret.gpg")
+def test_command_cache_key_is_keyed_blake2b_hex_string():
+    command = "gpg --decrypt secret.gpg"
+    key = config._gmail_secret_cache_key(command)
     other = config._gmail_secret_cache_key("gpg --decrypt secret2.gpg")
 
     assert isinstance(key, str)
-    assert key == hashlib.sha256(b"gpg --decrypt secret.gpg").hexdigest()
+    assert (
+        key
+        == hashlib.blake2b(
+            command.encode("utf-8"),
+            key=config._SECRET_CACHE_HMAC_KEY,
+            digest_size=32,
+        ).hexdigest()
+    )
     assert len(key) == 64
     assert key != other
+    assert command not in key
 
 
 def test_command_cache_uses_fixed_ttl(monkeypatch):

@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import shlex
 import socket
 import subprocess
@@ -474,6 +475,16 @@ def get_gmail_address() -> str:
     return _get_gmail("gmail_address", "GMAIL_ADDRESS")
 
 
+def get_gmail_app_password_file() -> str:
+    """Return the configured secret file path (``GMAIL_APP_PASSWORD_FILE``), or ``""``."""
+    return _get_gmail("gmail_app_password_file", "GMAIL_APP_PASSWORD_FILE")
+
+
+def get_gmail_app_password_cmd() -> str:
+    """Return the configured secret command (``GMAIL_APP_PASSWORD_CMD``), or ``""``."""
+    return _get_gmail("gmail_app_password_cmd", "GMAIL_APP_PASSWORD_CMD")
+
+
 def _gmail_secret_path(raw: str) -> Path:
     """Resolve a secret file path, relative paths live under the project."""
     path = Path(raw).expanduser()
@@ -490,6 +501,10 @@ _gmail_secret_cache: dict[str, tuple[float, str]] = {}
 _gmail_secret_cache_gen = 0
 _gmail_secret_cache_lock = threading.Lock()
 
+#: Per-process key for the opaque cache key: keeps the digest keyed so the
+#: raw command (which may embed a secret) never lands in the cache.
+_SECRET_CACHE_HMAC_KEY = secrets.token_bytes(32)
+
 
 def _now() -> float:
     """Indirection over ``time.monotonic`` so tests can freeze the clock."""
@@ -500,9 +515,12 @@ def _gmail_secret_cache_key(command: str) -> str:
     """Return the opaque cache key for a credential command.
 
     The raw command may contain a secret inline, so it never appears in the
-    cache or in logs.
+    cache or in logs.  A keyed BLAKE2b digest keeps the key opaque without
+    hashing password material with a fast password-hashing algorithm.
     """
-    return hashlib.sha256(command.encode("utf-8")).hexdigest()
+    return hashlib.blake2b(
+        command.encode("utf-8"), key=_SECRET_CACHE_HMAC_KEY, digest_size=32
+    ).hexdigest()
 
 
 def _prune_gmail_secret_cache_locked(now: float) -> None:
@@ -616,12 +634,12 @@ def get_gmail_app_password() -> str:
     as ``gpg --decrypt`` or a keyring lookup), then the legacy plaintext
     ``GMAIL_APP_PASSWORD`` env/config entry.
     """
-    file_path = _get_gmail("gmail_app_password_file", "GMAIL_APP_PASSWORD_FILE")
+    file_path = get_gmail_app_password_file()
     if file_path:
         secret = _gmail_secret_from_file(file_path)
         if secret:
             return secret
-    command = _get_gmail("gmail_app_password_cmd", "GMAIL_APP_PASSWORD_CMD")
+    command = get_gmail_app_password_cmd()
     if command:
         secret = _cached_command_secret(command)
         if secret:

@@ -216,6 +216,9 @@ install_aliases() {
 SIGNAL_TUI_DIR="__PROJECT_DIR__"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 _signal_tui_web_bg() {
+    if [ -x "$SIGNAL_TUI_DIR/.venv/bin/python" ] && [ -f "$SIGNAL_TUI_DIR/scripts/gmail_warm_cache.py" ]; then
+        "$SIGNAL_TUI_DIR/.venv/bin/python" "$SIGNAL_TUI_DIR/scripts/gmail_warm_cache.py" || true
+    fi
     local pid="" lock="${MEGACHAT_LOCK_FILE:-/tmp/signal-tui.lock}"
     [ -f "$lock" ] && pid="$(cat "$lock")"
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
