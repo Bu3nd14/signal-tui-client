@@ -97,7 +97,7 @@ Variabili in `.env` (stesso parsing di WAHA/Telegram):
 
 ### GPG (opzionale, per cifratura a riposo)
 
-- `scripts/gmail_gpg_init.sh` cifra il file segreto con GPG simmetrico AES-256, elimina il plaintext con `shred` e imposta `GMAIL_APP_PASSWORD_CMD`.
+- `scripts/gmail_gpg_init.sh` cifra il file segreto con GPG simmetrico AES-256, elimina il plaintext (`shred`, oppure `rm` su macOS dove `shred` manca) e imposta `GMAIL_APP_PASSWORD_CMD`.
 - `scripts/gmail_gpg_unlock.sh` scalda la cache di `gpg-agent` dopo un reboot o alla scadenza della cache (default 10 minuti; aumentabile in `~/.gnupg/gpg-agent.conf`).
 - Con cache fredda e nessun TTY, `gpg` non può chiedere la passphrase: il comando fallisce e Gmail risulta non configurato finché non si esegue lo script di unlock.
 

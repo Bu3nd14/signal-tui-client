@@ -792,8 +792,9 @@ may look simpler than in Gmail.
 > `.venv/bin/pip install -r requirements-web.txt` (or re-run `./install.sh`). `./install.sh --gmail`
 > installs `nh3` and `tinycss2` automatically if they are missing.
 
-Optional at-rest encryption: `bash scripts/gmail_gpg_init.sh` (GPG passphrase) or
-`bash scripts/gmail_tpm_init.sh` (Linux TPM2; requires the `tss` group and a re-login). See
+Optional at-rest encryption: `bash scripts/gmail_gpg_init.sh` (GPG passphrase; it also configures
+the gpg-agent cache, 7 days by default via `--cache-ttl`) or `bash scripts/gmail_tpm_init.sh`
+(Linux TPM2 only — macOS has no TPM2/systemd; requires the `tss` group and a re-login). See
 [docs/DESIGN_GMAIL_POC.md](docs/DESIGN_GMAIL_POC.md) and [.env.example](.env.example).
 
 ### Installing the aliases
