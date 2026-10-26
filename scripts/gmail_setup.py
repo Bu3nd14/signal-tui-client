@@ -3,7 +3,9 @@
 
 Prompts for the Gmail address and Google App Password, verifies IMAP/SMTP,
 stores the secret in a ``600`` file under ``~/.config/signal-tui`` and updates
-``.env``.  The secret never goes through the browser.
+``.env``.  The secret never goes through the browser.  If the current
+interpreter lacks the project dependencies (Pillow), the script re-executes
+itself with the project virtualenv interpreter.
 
 Run it from the project directory:
 
@@ -30,7 +32,48 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from protocols import config
+
+def _pil_available() -> bool:
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _venv_python() -> Path | None:
+    """Path del python del venv di progetto, se esiste ed è un altro interprete."""
+    candidate = PROJECT_DIR / ".venv" / "bin" / "python"
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        return None
+    with contextlib.suppress(OSError):
+        if Path(sys.executable).resolve() == candidate.resolve():
+            return None
+    return candidate
+
+
+def _ensure_venv() -> None:
+    if _pil_available():
+        return
+    candidate = _venv_python()
+    if candidate is not None:
+        print(
+            f"🔁 Dipendenze non nel Python corrente; riavvio con: {candidate}",
+            flush=True,
+        )
+        os.execv(str(candidate), [str(candidate), *sys.argv])
+    print(
+        "Dipendenze mancanti: usa .venv/bin/python oppure crea il venv con "
+        "`python3 -m venv .venv` e `pip install -r requirements.txt`.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    _ensure_venv()
+
+from protocols import config  # import dopo il guard del venv
 
 CONFIG_ROOT = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
 SECRET_DIR = CONFIG_ROOT / "signal-tui"
@@ -121,6 +164,34 @@ def test_credentials(address: str, password: str) -> bool:
     return ok
 
 
+def _platform() -> str:
+    return sys.platform
+
+
+def encryption_hint() -> list[str]:
+    """Righe del messaggio finale sulla cifratura a riposo."""
+    lines = [
+        "Cifratura a riposo consigliata (ora la App Password è in chiaro in un file 600):",
+        "  bash scripts/gmail_gpg_init.sh    # GPG AES-256 + cache gpg-agent (7 giorni)",
+    ]
+    if _platform().startswith("linux"):
+        lines.append("  bash scripts/gmail_tpm_init.sh    # TPM2 via systemd-creds")
+    else:
+        lines.append(
+            "  TPM2/systemd-creds non disponibili su questa piattaforma: usa GPG."
+        )
+    lines.extend(
+        [
+            "  Guida: README.md#gmail-optional · docs/DESIGN_GMAIL_POC.md",
+            (
+                "Esegui gmail_gpg_init.sh subito dopo il setup per non lasciare "
+                "la password in chiaro."
+            ),
+        ]
+    )
+    return lines
+
+
 def _existing_configuration() -> bool:
     if config.get_gmail_address():
         return True
@@ -207,11 +278,17 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "Ricarica la tab Gmail nella Web UI: il server rilegge .env a ogni richiesta."
     )
-    print("Cifratura opzionale:")
-    print("  bash scripts/gmail_gpg_init.sh   # GPG con passphrase")
-    print("  bash scripts/gmail_tpm_init.sh   # TPM2 (richiede il gruppo tss)")
+    for line in encryption_hint():
+        print(line)
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# Nota manutentore: il messaggio finale di ``main()`` passa per
+# ``encryption_hint()`` e rimanda a ``scripts/gmail_gpg_init.sh`` (guida:
+# README.md#gmail-optional) per cifrare la App Password a riposo; la riga
+# ``gmail_tpm_init.sh`` compare solo su Linux (TPM2/systemd-creds). Aggiorna
+# entrambi se cambi il flusso.
