@@ -144,6 +144,29 @@ class TestMainDispatch:
         launcher_cli.main(["server", "start", "--no-token"])
         assert calls[0]["print_token"] is False
 
+    def test_compose_file_flag_reaches_compose_args(
+        self, launcher_cli, monkeypatch, tmp_path
+    ):
+        # main() writes os.environ directly: register the key for restore.
+        monkeypatch.setenv("WAHA_COMPOSE_FILES", "")
+        monkeypatch.setattr(launcher_cli.whatsapp, "PROJECT_DIR", tmp_path)
+        monkeypatch.chdir(tmp_path)
+        seen = []
+        monkeypatch.setattr(
+            launcher_cli.whatsapp,
+            "start",
+            lambda **k: seen.append(launcher_cli.whatsapp.compose_args()) or 0,
+        )
+        launcher_cli.main(
+            ["whatsapp", "start", "--compose-file", "a.yml", "--compose-file", "b.yml"]
+        )
+        assert seen[0][-4:] == [
+            "-f",
+            str((tmp_path / "a.yml").resolve()),
+            "-f",
+            str((tmp_path / "b.yml").resolve()),
+        ]
+
     def test_server_stop_dispatches(self, launcher_cli, monkeypatch):
         calls = []
         monkeypatch.setattr(

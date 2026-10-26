@@ -3,7 +3,9 @@
 #
 # Layered on top of docker-compose.yml BY DEFAULT by install.sh, scripts/*.sh
 # and launcher.py (1.5 CPU / 4GB RAM on the WAHA container); pass
-# --no-docker-limits to any of them to skip it.
+# --no-docker-limits to any of them to skip it, or set WAHA_DOCKER_LIMITS=0 in
+# .env to skip it everywhere.  Extra overlays: WAHA_COMPOSE_FILES / --compose-file
+# (see README, "Extra compose files").
 #
 # Kept in a separate file because `deploy.resources.limits` needs the memory
 # cgroup controller delegated to the Docker host; inside an unprivileged

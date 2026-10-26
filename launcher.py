@@ -43,6 +43,19 @@ def _port(value: str) -> int:
     return port
 
 
+def _add_compose_file(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--compose-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Extra docker compose file layered on WAHA's (repeatable); "
+            "to make it permanent set WAHA_COMPOSE_FILES in .env"
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="launcher.py",
@@ -99,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
             "nesting=1."
         ),
     )
+    _add_compose_file(p_install)
 
     sub.add_parser("aliases", help="Install only the web reader shell aliases")
 
@@ -113,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Start WAHA without CPU/RAM caps (default: applied)",
     )
+    _add_compose_file(p_wa_start)
     wa_sub.add_parser("stop")
 
     p_backend = sub.add_parser(
@@ -125,6 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Restart WAHA without CPU/RAM caps (default: applied)",
     )
+    _add_compose_file(p_backend)
 
     p_server = sub.add_parser(
         "server",
@@ -137,6 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Start WAHA without CPU/RAM caps (default: applied)",
     )
+    _add_compose_file(p_server_start)
     p_server_start.add_argument(
         "--no-token",
         action="store_true",
@@ -211,6 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Start WAHA locally without CPU/RAM caps (default: applied)",
     )
+    _add_compose_file(p_handover_to_local)
     handover_sub.add_parser("status")
 
     p_profile = sub.add_parser("profile", help="CPU (py-spy) / I/O (strace) profiling")
@@ -228,6 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    whatsapp.add_compose_files(getattr(args, "compose_file", None) or [])
 
     if args.command == "install":
         return install.run(args)

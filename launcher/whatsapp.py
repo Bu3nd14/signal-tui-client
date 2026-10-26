@@ -14,6 +14,7 @@ import secrets
 import stat
 import subprocess
 import time
+from pathlib import Path
 
 from .common import (
     C_BLUE,
@@ -35,8 +36,66 @@ COMPOSE_FILE = PROJECT_DIR / "docker-compose.yml"
 RESOURCES_FILE = PROJECT_DIR / "docker-compose.resources.yml"
 
 
+def env_setting(name: str) -> str:
+    """Read *name* from the environment, else from the project's ``.env``."""
+    value = os.environ.get(name, "")
+    if value:
+        return value
+    env_file = PROJECT_DIR / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith(f"{name}="):
+                value = line.split("=", 1)[1].strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
+                return value
+    return ""
+
+
+def limits_enabled(docker_limits: bool = True) -> bool:
+    """Whether the CPU/RAM overlay applies.
+
+    ``--no-docker-limits`` (*docker_limits* False) or ``WAHA_DOCKER_LIMITS=0``
+    (environment or ``.env``, so it holds for every command, the remote side
+    of a handover included) turn it off.
+    """
+    setting = env_setting("WAHA_DOCKER_LIMITS").strip().lower()
+    return docker_limits and setting not in ("0", "false", "no", "off")
+
+
+def extra_compose_files() -> list[Path]:
+    """Extra compose files from ``WAHA_COMPOSE_FILES`` (environment or ``.env``).
+
+    ``os.pathsep``-separated (``:`` on Linux/macOS), layered after the
+    defaults in that order; relative paths are resolved against the project.
+    """
+    files = []
+    for entry in env_setting("WAHA_COMPOSE_FILES").split(os.pathsep):
+        entry = entry.strip()
+        if entry:
+            path = Path(entry).expanduser()
+            files.append(path if path.is_absolute() else PROJECT_DIR / path)
+    return files
+
+
+def add_compose_files(paths: list[str]) -> None:
+    """Layer *paths* (``--compose-file``) for this run, after ``WAHA_COMPOSE_FILES``.
+
+    Exported through the environment so every compose call of this process
+    sees them; relative paths are taken from the current directory.
+    """
+    if not paths:
+        return
+    current = env_setting("WAHA_COMPOSE_FILES")
+    resolved = [str(Path(path).expanduser().resolve()) for path in paths]
+    os.environ["WAHA_COMPOSE_FILES"] = os.pathsep.join(
+        [entry for entry in [current] if entry] + resolved
+    )
+
+
 def compose_args(docker_limits: bool = True) -> list[str]:
-    """``-f`` args for ``docker compose``, adding the resources overlay by default.
+    """``-f`` args for ``docker compose``: base file, the resources overlay
+    (unless turned off, see :func:`limits_enabled`), then the extra files.
 
     Mirrors the bash scripts: CPU/RAM caps (docker-compose.resources.yml) are
     layered on top unless *docker_limits* is False (``--no-docker-limits``),
@@ -44,25 +103,16 @@ def compose_args(docker_limits: bool = True) -> list[str]:
     unprivileged Proxmox/LXC container without ``nesting=1``).
     """
     args = ["-f", str(COMPOSE_FILE)]
-    if docker_limits:
+    if limits_enabled(docker_limits):
         args += ["-f", str(RESOURCES_FILE)]
+    for path in extra_compose_files():
+        args += ["-f", str(path)]
     return args
 
 
 def read_waha_api_key() -> str:
     """Read WAHA_API_KEY from the environment, else the project's ``.env``."""
-    key = os.environ.get("WAHA_API_KEY", "")
-    if key:
-        return key
-    env_file = PROJECT_DIR / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            if line.strip().startswith("WAHA_API_KEY="):
-                value = line.split("=", 1)[1].strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                    value = value[1:-1]
-                return value
-    return ""
+    return env_setting("WAHA_API_KEY")
 
 
 def docker_available() -> bool:
@@ -294,7 +344,7 @@ def setup(should_start: bool, *, docker_limits: bool = True) -> bool:
     if should_start:
         ensure_waha_env()
         print()
-        if docker_limits:
+        if limits_enabled(docker_limits):
             info(
                 "Avvio WAHA via Docker Compose (cap CPU/RAM attivi — "
                 "usa --no-docker-limits per disattivarli)..."
@@ -342,7 +392,7 @@ def start(no_wait: bool, *, docker_limits: bool = True) -> int:
     if not docker_available():
         _docker_daemon_error()
         return 1
-    if docker_limits:
+    if limits_enabled(docker_limits):
         print(
             "🟢 Avvio WhatsApp HTTP API (WAHA) via Docker Compose (cap CPU/RAM attivi)..."
         )
@@ -382,7 +432,7 @@ def start(no_wait: bool, *, docker_limits: bool = True) -> int:
 
 def stop() -> int:
     result = subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "down"], check=False
+        ["docker", "compose", *compose_args(False), "down"], check=False
     )
     if result.returncode == 0:
         print("WAHA stopped.")
