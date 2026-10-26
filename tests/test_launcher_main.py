@@ -124,7 +124,17 @@ class TestMainDispatch:
             lambda **kwargs: calls.append(kwargs) or 0,
         )
         launcher_cli.main(["server", "start"])
-        assert calls == [{"docker_limits": True}]
+        assert calls == [{"docker_limits": True, "print_token": True}]
+
+    def test_server_start_no_token_flag(self, launcher_cli, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            launcher_cli.server,
+            "start_all",
+            lambda **kwargs: calls.append(kwargs) or 0,
+        )
+        launcher_cli.main(["server", "start", "--no-token"])
+        assert calls == [{"docker_limits": True, "print_token": False}]
 
     def test_server_stop_dispatches(self, launcher_cli, monkeypatch):
         monkeypatch.setattr(launcher_cli.server, "stop_all", lambda: 0)

@@ -907,7 +907,7 @@ class TestAliasIsolation:
         fake_bin.mkdir()
         shutil.copy(INSTALL_SCRIPT, script)
         _make_executable(script)
-        # The background alias runs ``.venv/bin/python megachat.py serve``:
+        # The background alias delegates to ``launcher.py server start``:
         # record the invocation instead of starting a real server.
         serve_calls = tmp_path / "serve.calls"
         venv_python = tmp_path / ".venv" / "bin" / "python"
@@ -974,4 +974,9 @@ class TestAliasIsolation:
         deadline = time.monotonic() + 5
         while not serve_calls.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
-        assert set(serve_calls.read_text().splitlines()) == {"megachat.py serve"}
+        recorded_calls = serve_calls.read_text().splitlines()
+        assert recorded_calls
+        assert all(
+            line.endswith("launcher.py server start --no-token")
+            for line in recorded_calls
+        )

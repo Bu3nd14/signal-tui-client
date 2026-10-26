@@ -1,28 +1,35 @@
 # Alias shell della Web UI
 
 Alias di shell (bash/zsh/ash) per avviare la **Web UI** del Signal TUI Client e gestirne il ciclo di
-vita: una sessione **foreground** interattiva, un server **background** headless (`megachat serve`, senza TUI, che esporta il
-token Bearer nella shell) e un comando di **stop** pulito.
+vita: una sessione **foreground** interattiva, un server **background** headless (`launcher.py server
+start` → `megachat serve`, senza TUI, che esporta il token Bearer nella shell) e comandi di **stop** e
+**status**.
 
 Il server web ascolta su `0.0.0.0:4242` (porta di default `4242`). Il **token Bearer** è salvato in
 `config.json` nella chiave `web.token`; il server lo accetta anche dalla variabile d'ambiente
 `SIGNAL_TUI_WEB_TOKEN`.
 
-## 1. I tre alias
+## 1. Gli alias
 
 | Alias | Cosa fa | Quando usarlo |
 |---|---|---|
 | `web-signal-tui` | Avvia la TUI con la Web UI in **foreground** su `0.0.0.0:4242` | Sessione interattiva: vuoi vedere output e log della TUI direttamente nel terminale |
-| `web-signal-tui-bg` | Avvia il server headless (`megachat serve`: core + Web UI, senza TUI) come **processo staccato** (background) ed **esporta il token** nella shell corrente come `SIGNAL_TUI_WEB_TOKEN` | Fast cycle: pronto subito per `curl` e per il login nella Web UI |
-| `web-signal-tui-stop` | Ferma il server background con SIGINT pulito (chiude anche un'eventuale vecchia sessione tmux `tui`) e rimuove `/tmp/signal-tui.lock` | Arrestare il server avviato con `web-signal-tui-bg` |
+| `web-signal-tui-bg` | Avvia il server headless delegando a `launcher.py server start --no-token` (che lancia `megachat serve` — core + Web UI, senza TUI — e **WAHA**) come **processo staccato** (background) ed **esporta il token** nella shell corrente come `SIGNAL_TUI_WEB_TOKEN` | Fast cycle: pronto subito per `curl` e per il login nella Web UI |
+| `web-signal-tui-stop` | Ferma il server background con SIGINT pulito (chiude anche un'eventuale vecchia sessione tmux `tui`) e rimuove `/tmp/signal-tui.lock`; **WAHA non viene fermata** | Arrestare il server avviato con `web-signal-tui-bg` senza interrompere WhatsApp |
+| `web-signal-tui-status` | Mostra lo stato di server, daemon signal-cli, WAHA e Web UI (`launcher.py server status`) | Verificare rapidamente cosa è attivo |
 
 > Handover locale ↔ server (`signal-tui-go-server`, `signal-tui-go-local`, `signal-tui-status`): sposta questo stesso server headless tra le due macchine, vedi [HANDOVER.md](HANDOVER.md). Dopo lo spostamento, per l'uso interattivo lancia `python3 megachat.py` sulla macchina di destinazione (si collega al server in esecuzione; Detach lo lascia attivo, Quit lo ferma).
 
 ## 2. Fast cycle (background + token in shell)
 
-`web-signal-tui-bg` avvia il server headless + Web UI in **background** ed **esporta**
-`SIGNAL_TUI_WEB_TOKEN` nella shell corrente. Il token letto da `config.json` viene anche stampato in
-console, quindi si può:
+`web-signal-tui-bg` avvia il server headless + Web UI in **background** delegando a
+`launcher.py server start --no-token` (che avvia anche WAHA) ed **esporta**
+`SIGNAL_TUI_WEB_TOKEN` nella shell corrente. `--no-token` evita che il launcher stampi il token
+due volte: l'alias lo stampa già alla fine. Se il server è già vivo (pid del lock attivo) non viene riavviato: l'alias si limita a
+esportare e stampare il token. `web-signal-tui-stop` ferma solo il server headless: **WAHA resta
+attiva** di proposito.
+
+Il token letto da `config.json` viene anche stampato in console, quindi si può:
 
 - **incollare nel login della Web UI** — il comando stampa il token (es. `Server bg attivo — token: …`);
 - **usarlo subito con `curl`** contro l'API autenticata, senza recuperarlo a mano da `config.json`:
@@ -47,16 +54,17 @@ Gli endpoint REST vivono sotto `/api` e richiedono l'header `Authorization: Bear
 SIGNAL_TUI_DIR="$HOME/signal-tui-client"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 _signal_tui_web_bg() {
-    local pid=""
-    [ -f /tmp/signal-tui.lock ] && pid="$(cat /tmp/signal-tui.lock)"
+    local pid="" lock="${MEGACHAT_LOCK_FILE:-/tmp/signal-tui.lock}"
+    [ -f "$lock" ] && pid="$(cat "$lock")"
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-        ( ( cd "$SIGNAL_TUI_DIR" && exec nohup .venv/bin/python megachat.py serve ) </dev/null >/dev/null 2>&1 & )
+        "$SIGNAL_TUI_DIR/.venv/bin/python" "$SIGNAL_TUI_DIR/launcher.py" server start --no-token || return 1
     fi
     SIGNAL_TUI_WEB_TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["web"]["token"])' "$SIGNAL_TUI_DIR/config.json")" || return 1
     export SIGNAL_TUI_WEB_TOKEN
     echo "Server bg attivo — token: $SIGNAL_TUI_WEB_TOKEN"
 }
 _signal_tui_web_stop() {
+    # WAHA non viene fermata di proposito: resta attiva per i messaggi.
     local lock="${MEGACHAT_LOCK_FILE:-/tmp/signal-tui.lock}" pid=""
     [ -f "$lock" ] && pid="$(cat "$lock" 2>/dev/null)"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -77,8 +85,10 @@ _signal_tui_web_stop() {
     fi
     echo "Server bg fermato."
 }
+_signal_tui_web_status() { "$SIGNAL_TUI_DIR/.venv/bin/python" "$SIGNAL_TUI_DIR/launcher.py" server status; }
 alias web-signal-tui-bg='_signal_tui_web_bg'
 alias web-signal-tui-stop='_signal_tui_web_stop'
+alias web-signal-tui-status='_signal_tui_web_status'
 alias signal-tui-bg='_signal_tui_web_bg'
 alias signal-tui-stop='_signal_tui_web_stop'
 ```

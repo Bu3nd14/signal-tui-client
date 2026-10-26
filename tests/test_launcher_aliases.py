@@ -105,6 +105,9 @@ class TestContentParity:
         content = (home / ".bashrc").read_text(encoding="utf-8")
         assert f'SIGNAL_TUI_DIR="{aliases.PROJECT_DIR}"' in content
         assert "web-signal-tui-bg" in content
+        assert "web-signal-tui-status" in content
+        assert "launcher.py server start" in content.replace('"', "")
+        assert "server start --no-token" in content
         assert "signal-tui-stop" in content
 
     def test_no_project_dir_placeholder_leaks(self, home: Path, monkeypatch):

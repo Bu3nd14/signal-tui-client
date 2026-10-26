@@ -6,6 +6,7 @@ WhatsApp prerequisite-check/start flow of ``install.sh`` (``setup``).
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -62,6 +63,80 @@ def read_waha_api_key() -> str:
                     value = value[1:-1]
                 return value
     return ""
+
+
+def docker_available() -> bool:
+    """Return ``True`` when the Docker daemon answers ``docker info``."""
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
+def _docker_daemon_error() -> None:
+    if command_exists("colima"):
+        err("Docker non raggiungibile (Colima spento?). Avvialo con: colima start")
+    else:
+        err("Docker non raggiungibile. Avvia il daemon Docker e riprova.")
+
+
+def session_name() -> str:
+    return os.environ.get("WHATSAPP_SESSION_NAME", "default") or "default"
+
+
+def api_base() -> str:
+    port = os.environ.get("WHATSAPP_API_PORT", "3005") or "3005"
+    return os.environ.get("WHATSAPP_API_URL", f"http://127.0.0.1:{port}").rstrip("/")
+
+
+def _session_headers() -> dict[str, str]:
+    key = read_waha_api_key()
+    return {"X-Api-Key": key} if key else {}
+
+
+def session_status(timeout: float = 3) -> str | None:
+    result = http_get(
+        f"{api_base()}/api/sessions/{session_name()}",
+        headers=_session_headers(),
+        timeout=timeout,
+    )
+    if result is None:
+        return None
+    code, body = result
+    if not 200 <= code < 300:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    status = payload.get("status") if isinstance(payload, dict) else None
+    return status if isinstance(status, str) else None
+
+
+def describe_session(status: str | None) -> None:
+    if status == "WORKING":
+        ok("Sessione WhatsApp connessa.")
+    elif status == "SCAN_QR_CODE":
+        warn(
+            "Sessione WhatsApp in attesa di associazione: esegui "
+            "`python3 link_whatsapp.py` e scansiona il QR."
+        )
+    elif status == "FAILED":
+        warn(
+            "Sessione WhatsApp sloggata (FAILED): serve una nuova associazione — "
+            "`python3 link_whatsapp.py`."
+        )
+    elif status == "STARTING":
+        info("Sessione WhatsApp in avvio...")
+    else:
+        info(f"Sessione WhatsApp: {status}")
 
 
 def _listening_port_owner(port: int) -> tuple[str | None, str | None]:
@@ -196,6 +271,9 @@ def setup(should_start: bool, *, docker_limits: bool = True) -> bool:
     if not command_exists("docker"):
         err("Docker non trovato. Installa Docker per usare WhatsApp.")
         return False
+    if not docker_available():
+        _docker_daemon_error()
+        return False
     version = subprocess.run(
         ["docker", "--version"], capture_output=True, text=True, check=False
     ).stdout.strip()
@@ -260,6 +338,9 @@ def start(no_wait: bool, *, docker_limits: bool = True) -> int:
     """Standalone start (formerly ``scripts/start_whatsapp.sh``)."""
     if not command_exists("docker"):
         err("docker non trovato. Installa Docker e riprova.")
+        return 1
+    if not docker_available():
+        _docker_daemon_error()
         return 1
     if docker_limits:
         print(
