@@ -28,7 +28,7 @@ def test_sanitize_strips_scripts_and_event_handlers():
     assert "<img" in cleaned
     sources = _image_sources(cleaned)
     assert len(sources) == 1
-    assert sources[0].startswith("/gmail-image?token=")
+    assert sources[0].startswith("gmail-image?token=")
     assert "<b>grassetto</b>" in cleaned
     assert "Ciao" in cleaned
 
@@ -65,7 +65,7 @@ def test_sanitize_strips_styles_and_remote_resources():
     assert "<iframe" not in cleaned
     sources = _image_sources(cleaned)
     assert len(sources) == 1
-    assert sources[0].startswith("/gmail-image?token=")
+    assert sources[0].startswith("gmail-image?token=")
     assert "onerror" not in cleaned
     assert "testo" in cleaned
 

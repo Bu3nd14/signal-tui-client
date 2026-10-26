@@ -295,7 +295,7 @@ function safeExternalUrl(value) {
 
 function loadLinkPreview(url) {
   if (!state.linkPreviews.has(url)) {
-    const request = apiFetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
+    const request = apiFetch(`api/link-preview?url=${encodeURIComponent(url)}`)
       .then((response) => response.json())
       .catch(() => null);
     state.linkPreviews.set(url, request);
@@ -306,7 +306,7 @@ function loadLinkPreview(url) {
 function loadLinkPreviewImage(url) {
   if (!state.linkPreviewImages.has(url)) {
     // Blob PINNATO come le miniature quote: la LRU media non deve revocarlo.
-    const request = apiFetch(`/api/link-preview/image?url=${encodeURIComponent(url)}`)
+    const request = apiFetch(`api/link-preview/image?url=${encodeURIComponent(url)}`)
       .then((response) => response.blob())
       .then((blob) => {
         const objectUrl = URL.createObjectURL(blob);
@@ -435,7 +435,7 @@ function contactAvatarUrl(contact) {
     contact.protocol !== "telegram"
   )
     return null;
-  return `/api/contact-avatar?proto=${contact.protocol}&contact_id=${encodeURIComponent(contact.id)}`;
+  return `api/contact-avatar?proto=${contact.protocol}&contact_id=${encodeURIComponent(contact.id)}`;
 }
 
 async function attachContactAvatar(avatarEl, contact, url, onLoaded) {
@@ -557,7 +557,7 @@ async function updateBackendStatuses() {
   // inferred from whether the protocol happens to have any contacts loaded
   // yet — a freshly connected account with zero chats is still connected.
   try {
-    const response = await apiFetch("/api/status");
+    const response = await apiFetch("api/status");
     const data = await response.json();
     for (const protocol of PROTOCOLS) {
       statuses[protocol].textContent = data[protocol] ? "Collegato" : "Non collegato";
@@ -574,7 +574,7 @@ async function loadTranscriptionConfig() {
   }
   elements.openaiKeyStatus.textContent = "Verifica configurazione…";
   try {
-    const response = await apiFetch("/api/transcribe/config");
+    const response = await apiFetch("api/transcribe/config");
     const config = await response.json();
     const enabled = config.enabled === true;
     remoteLog("[transcribe-config]", { enabled, hasToken: Boolean(state.token) });
@@ -607,7 +607,7 @@ async function saveOpenaiKey() {
   elements.openaiKeyStatus.textContent = "Salvataggio…";
   let saved = false;
   try {
-    await apiFetch("/api/config/openai-key", {
+    await apiFetch("api/config/openai-key", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ api_key: apiKey }),
@@ -772,7 +772,7 @@ async function loadContacts({ quiet = false } = {}) {
   if (!state.token) return requestToken();
   if (!quiet) elements.contactStatus.textContent = "Caricamento…";
   try {
-    const response = await apiFetch("/api/contacts");
+    const response = await apiFetch("api/contacts");
     state.contacts = await response.json();
     if (state.active) {
       const current = state.contacts.find((contact) => contact.id === state.active.id && contact.protocol === state.active.protocol);
@@ -1099,7 +1099,7 @@ function loadImage(container, image, path, attachmentId, direction, onLoad) {
 // URL /api/media con version token `v=` per invalidare la cache HTTP quando il
 // file (attachment_id NON content-addressed) viene sovrascritto.
 function mediaUrl(protocol, attachmentId, version) {
-  const base = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+  const base = `api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
   return version ? `${base}?v=${encodeURIComponent(String(version))}` : base;
 }
 
@@ -1232,7 +1232,7 @@ function fileAttachment(attachment, protocol, direction) {
       transcriptBox.textContent = "Trascrizione in corso…";
       transcriptBox.hidden = false;
       try {
-        const response = await apiFetch("/api/transcribe", {
+        const response = await apiFetch("api/transcribe", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ protocol, attachment_id: attachmentId }),
@@ -1249,7 +1249,7 @@ function fileAttachment(attachment, protocol, direction) {
           return;
         }
 
-        const statusPath = `/api/transcribe/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+        const statusPath = `api/transcribe/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
         for (let attempt = 0; attempt < 150; attempt += 1) {
           await new Promise((resolve) => setTimeout(resolve, 2000));
           const statusResponse = await apiFetch(statusPath);
@@ -1290,7 +1290,7 @@ function fileAttachment(attachment, protocol, direction) {
     });
     container.append(transcribeButton, transcriptBox);
   }
-  const mediaPath = `/api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
+  const mediaPath = `api/media/${encodeURIComponent(protocol)}/${attachmentId.split("/").map(encodeURIComponent).join("/")}`;
   const open = fileAttachmentOpenHandler(mediaPath, protocol);
   container.addEventListener("click", open);
   container.addEventListener("keydown", (event) => {
@@ -1440,7 +1440,7 @@ function startReply(item) {
 function remoteLog(tag, data) {
   console.debug(`[web] ${tag}`, data);
   try {
-    fetch("/api/log", {
+    fetch("api/log", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.token}` },
       body: JSON.stringify({ message: `${tag} ${JSON.stringify(data ?? "")}` }),
@@ -2008,7 +2008,7 @@ function startReaction(item, event) {
 async function sendReaction(item, emoji) {
   if (!state.active || item.optimistic_id) return;
   try {
-    const response = await apiFetch("/api/messages/reaction", {
+    const response = await apiFetch("api/messages/reaction", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2064,7 +2064,7 @@ async function syncChatMessages(contact, { refresh = false, signal } = {}) {
   if (cache) query.set("limit", String(limit));
   if (since != null) query.set("since", String(since));
   if (refresh) query.set("refresh", "1");
-  const response = await apiFetch(`/api/messages?${query}`, { signal });
+  const response = await apiFetch(`api/messages?${query}`, { signal });
   const fresh = await response.json();
   if (!cache) return fresh;
   const merged = cacheApi.mergeDelta(cached, fresh, since, limit);
@@ -2260,7 +2260,7 @@ async function submitEdit() {
   state.editSending = true;
   cancelEdit();
   try {
-    await apiFetch("/api/messages/edit", {
+    await apiFetch("api/messages/edit", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2386,7 +2386,7 @@ function handleTyping(payload) {
 function markRead(protocol, contactId) {
   const key = `${protocol}:${contactId}`;
   // Persistenza DB immediata (i badge tornano azzerati dopo un refresh).
-  apiFetch("/api/messages/read", {
+  apiFetch("api/messages/read", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ protocol, contact_id: contactId }),
@@ -2422,7 +2422,7 @@ function updateTelegramRefreshTimer() {
 async function loadTelegramReactions() {
   if (state.active?.protocol !== "telegram") return;
   try {
-    const response = await apiFetch("/api/reactions?protocol=telegram");
+    const response = await apiFetch("api/reactions?protocol=telegram");
     const data = await response.json();
     state.telegramReactions = Array.isArray(data.emojis) ? data.emojis : [];
   } catch (error) {
@@ -2494,7 +2494,7 @@ async function toggleActiveArchived() {
   const archived = !isArchived(contact);
   elements.archiveButton.disabled = true;
   try {
-    await apiFetch("/api/chats/archive", {
+    await apiFetch("api/chats/archive", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ protocol: contact.protocol, contact_id: contact.id, archived }),
@@ -2523,7 +2523,7 @@ async function loadEmojiData() {
   if (state.emojiData) return state.emojiData;
   if (state.emojiFailed) throw new Error("emoji unavailable");
   if (!state.emojiRequest) {
-    state.emojiRequest = apiFetch("/api/emoji")
+    state.emojiRequest = apiFetch("api/emoji")
       .then((response) => response.json())
       .then((categories) => {
         if (!Array.isArray(categories) || !categories.length) throw new Error("invalid emoji data");
@@ -3182,7 +3182,7 @@ function recordQuoteFields(record) {
   if (mediaType && record.protocol !== "signal") fields.quote_media_type = mediaType;
   if (quote.quote_attachment_id) {
     const attachmentId = String(quote.quote_attachment_id).split("/").map(encodeURIComponent).join("/");
-    fields.quote_thumb_url = `/api/media/${record.protocol}/${attachmentId}?w=96`;
+    fields.quote_thumb_url = `api/media/${record.protocol}/${attachmentId}?w=96`;
     fields.quote_media_placeholder = !quote.quote_message;
   }
   return fields;
@@ -3213,7 +3213,7 @@ function sendOutboxRecord(record) {
   const active = { protocol: record.protocol, id: record.contact_id };
   const payload = module.buildSendPayload(active, record.text, record.quote);
   payload.client_msg_id = record.client_msg_id;
-  return apiFetch("/api/send", {
+  return apiFetch("api/send", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -3376,7 +3376,7 @@ async function submitMessage() {
     }
     if ((reply.isImage || reply.isVideo) && reply.attachmentId) {
       const quoteAttachmentId = String(reply.attachmentId).split("/").map(encodeURIComponent).join("/");
-      quoteFields.quote_thumb_url = `/api/media/${active.protocol}/${quoteAttachmentId}?w=96`;
+      quoteFields.quote_thumb_url = `api/media/${active.protocol}/${quoteAttachmentId}?w=96`;
       // Senza caption reale la bolla optimistic mostra SOLO la miniatura
       // (come il messaggio confermato): evita il nome file accanto alla
       // thumb e il flash "testo che sparisce" alla reconciliation.
@@ -3511,9 +3511,9 @@ async function submitMessage() {
       for (const [key, value] of Object.entries(quotePayload)) body.set(key, String(value));
       // append (non set): il campo "file" e' ripetuto per ciascun allegato.
       for (const attachment of attachments) body.append("file", attachment.file, attachment.filename);
-      await apiFetch("/api/send", { method: "POST", body });
+      await apiFetch("api/send", { method: "POST", body });
     } else {
-      await apiFetch("/api/send", {
+      await apiFetch("api/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text, client_msg_id: clientMsgId, ...quotePayload }),
@@ -3636,9 +3636,11 @@ function scheduleReconnect() {
 function connectSocket() {
   disconnectSocket();
   if (!state.token) return;
-  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  // Relative to the page so the socket follows any reverse-proxy path prefix.
+  const url = new URL("ws", location.href);
+  url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const protocol = `signal-tui-token.${encodeToken(state.token)}`;
-  const socket = new WebSocket(`${scheme}//${location.host}/ws`, ["signal-tui-bearer", protocol]);
+  const socket = new WebSocket(url.href, ["signal-tui-bearer", protocol]);
   state.socket = socket;
   state.lastWsActivity = Date.now();
   startWsWatchdog();
@@ -4135,7 +4137,7 @@ if (elements.contactSearch) {
       };
       let chatResults = [];
       try {
-        const response = await apiFetch(`/api/contacts?q=${encodeURIComponent(trimmed)}`);
+        const response = await apiFetch(`api/contacts?q=${encodeURIComponent(trimmed)}`);
         chatResults = await response.json();
       } catch (error) {
         if (error.name !== "AbortError" && error.message !== "unauthorized") {
@@ -4150,7 +4152,7 @@ if (elements.contactSearch) {
         elements.contactStatus.textContent = "Nessun risultato nelle conversazioni — cerco nella rubrica…";
       }
       try {
-        const bookResponse = await apiFetch(`/api/contacts/book?q=${encodeURIComponent(trimmed)}`);
+        const bookResponse = await apiFetch(`api/contacts/book?q=${encodeURIComponent(trimmed)}`);
         const bookResults = await bookResponse.json();
         if (seq !== searchSeq || state.contactQuery !== query) return;
         const seen = new Set(chatResults.map((contact) => `${contact.protocol}:${contact.id}`));
@@ -4197,7 +4199,7 @@ async function boot() {
   // started with --web-no-auth skips the login dialog entirely instead of
   // demanding a token it doesn't actually require.
   try {
-    const response = await fetch("/health");
+    const response = await fetch("health");
     if (response.ok) {
       const data = await response.json();
       if (data.auth_required === false && !state.token) {

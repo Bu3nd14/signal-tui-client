@@ -345,7 +345,7 @@ def test_reaction_button_picker_and_send_flow_are_wired():
     assert 'state.active?.protocol === "telegram"' in source
     assert "state.telegramReactions?.length" in source
     assert ": REACTION_EMOJIS" in source
-    assert 'apiFetch("/api/messages/reaction"' in source
+    assert 'apiFetch("api/messages/reaction"' in source
     assert "applyReactionUpdate({" in source
 
 

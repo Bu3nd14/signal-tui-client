@@ -537,13 +537,13 @@ def _quote_thumb_url(row: sqlite3.Row | dict[str, Any]) -> str | None:
 
     def _media_url(value: str) -> str:
         encoded = "/".join(url_quote(segment, safe="") for segment in value.split("/"))
-        return f"/api/media/{proto}/{encoded}?w=96"
+        return f"api/media/{proto}/{encoded}?w=96"
 
     path = row["quote_attachment_path"]
     if path:
         resolved = Path(path).resolve()
         if resolved.parent == thumbs_root:
-            return f"/api/quote-media/{proto}/{row['id']}?w=96"
+            return f"api/quote-media/{proto}/{row['id']}?w=96"
         content_type = (row["quote_content_type"] or "").lower()
         is_image = content_type.startswith("image/") or str(path).lower().endswith(
             image_extensions

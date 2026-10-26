@@ -215,7 +215,7 @@ _CLEAN_CONTENT_TAGS = {
 
 _FOLDER_RE = re.compile(r"^[A-Za-z0-9._/\- ]+$")
 _SIGNED_IMAGE_RE = re.compile(
-    r"^/gmail-image\?token=([A-Za-z0-9_-]+)\.([0-9a-f]{32})(?:&v=\d+)?$"
+    r"^/?gmail-image\?token=([A-Za-z0-9_-]+)\.([0-9a-f]{32})(?:&v=\d+)?$"
 )
 _SAFE_IMAGE_DATA_RE = re.compile(
     r"^data:image/(?:png|jpe?g|gif|webp);base64,", re.IGNORECASE
@@ -1606,12 +1606,12 @@ def _b64url_decode(value: str) -> str:
 
 
 def sign_image_url(url: str) -> str:
-    """Return an opaque, signed same-origin path for a remote image."""
+    """Return an opaque, signed page-relative URL for a remote image."""
     payload = _b64url_encode(url)
     signature = hmac.new(
         _IMAGE_PROXY_KEY, payload.encode("ascii"), hashlib.sha256
     ).hexdigest()[:32]
-    return f"/gmail-image?token={payload}.{signature}&v={_IMAGE_PROXY_VERSION}"
+    return f"gmail-image?token={payload}.{signature}&v={_IMAGE_PROXY_VERSION}"
 
 
 def verify_image_token(token: str) -> str:
@@ -1926,7 +1926,8 @@ def _filter_image_src(value: str) -> str | None:
     signed = _SIGNED_IMAGE_RE.fullmatch(value)
     if signed:
         token = f"{signed.group(1)}.{signed.group(2)}"
-        return value if verify_image_token(token) else None
+        # Always emit the page-relative form, even for a legacy "/gmail-image".
+        return value.lstrip("/") if verify_image_token(token) else None
     if _SAFE_IMAGE_DATA_RE.match(value):
         return value
     if len(value) > _IMAGE_URL_MAX_LEN:

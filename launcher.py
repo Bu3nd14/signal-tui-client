@@ -115,7 +115,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p_server = sub.add_parser(
-        "server", help="Start/stop/status the TUI on this machine (tmux + WAHA)"
+        "server",
+        help="Start/stop/status the headless server (megachat serve + WAHA)",
     )
     server_sub = p_server.add_subparsers(dest="server_command", required=True)
     p_server_start = server_sub.add_parser("start")
@@ -129,7 +130,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_handover = sub.add_parser(
         "handover",
-        help="Move the TUI session between this machine and the remote server",
+        help="Move the headless server between this machine and the remote server",
     )
     handover_sub = p_handover.add_subparsers(dest="handover_command", required=True)
     p_handover_to_server = handover_sub.add_parser("to-server")
