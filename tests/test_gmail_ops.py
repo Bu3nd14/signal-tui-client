@@ -161,9 +161,11 @@ def _token(url: str) -> str:
 
 def test_image_fetches_a_signed_url_into_a_blob(api, monkeypatch):
     seen: list[tuple[str, int]] = []
+    pixels: list[int | None] = []
 
-    async def fake_fetch(url, max_bytes):
+    async def fake_fetch(url, max_bytes, max_pixels=None):
         seen.append((url, max_bytes))
+        pixels.append(max_pixels)
         return b"\x89PNG\r\n\x1a\nxx", "image/png"
 
     monkeypatch.setattr("server.link_preview.fetch_external_image", fake_fetch)
@@ -171,6 +173,7 @@ def test_image_fetches_a_signed_url_into_a_blob(api, monkeypatch):
     assert Path(blob["path"]).read_bytes() == b"\x89PNG\r\n\x1a\nxx"
     assert (blob["content_type"], blob["size"]) == ("image/png", 10)
     assert seen == [("https://img.example/a.png", 8 * 1024 * 1024)]
+    assert pixels == [25_000_000]
 
 
 @pytest.mark.parametrize(
@@ -183,7 +186,7 @@ def test_image_fetches_a_signed_url_into_a_blob(api, monkeypatch):
     ],
 )
 def test_image_unsigned_or_forged_token_is_never_fetched(api, monkeypatch, token):
-    async def fail(url, max_bytes):
+    async def fail(url, max_bytes, max_pixels=None):
         raise AssertionError("fetched an unsigned URL")
 
     monkeypatch.setattr("server.link_preview.fetch_external_image", fail)
@@ -194,7 +197,7 @@ def test_image_unsigned_or_forged_token_is_never_fetched(api, monkeypatch, token
 
 
 def test_image_signature_does_not_transfer_to_another_url(api, monkeypatch):
-    async def fail(url, max_bytes):
+    async def fail(url, max_bytes, max_pixels=None):
         raise AssertionError("fetched an unsigned URL")
 
     monkeypatch.setattr("server.link_preview.fetch_external_image", fail)
@@ -206,7 +209,7 @@ def test_image_signature_does_not_transfer_to_another_url(api, monkeypatch):
 
 
 def test_image_fetch_failure_is_a_backend_error(api, monkeypatch):
-    async def none(url, max_bytes):
+    async def none(url, max_bytes, max_pixels=None):
         return None
 
     monkeypatch.setattr("server.link_preview.fetch_external_image", none)
