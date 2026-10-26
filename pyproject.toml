@@ -9,7 +9,10 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-ra --tb=short --strict-markers"
+# Basetemp corta per non superare il limite macOS di 104 char sui socket Unix
+# (`megachat-run/server.sock` dentro tmp_path). Essendo un path fisso, due
+# sessioni pytest concorrenti si cancellano a vicenda la basetemp.
+addopts = "-ra --tb=short --strict-markers --basetemp=/tmp/t"
 asyncio_mode = "auto"
 markers = [
     "integration: test che lancia la TUI (lento, headless)",

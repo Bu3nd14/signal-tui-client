@@ -3,7 +3,7 @@
 
     python3 launcher.py install [options]            # was install.sh
     python3 launcher.py aliases                       # was install.sh --aliases
-    python3 launcher.py whatsapp start|stop [--no-wait]   # was scripts/start_whatsapp.sh
+    python3 launcher.py whatsapp start|stop [--no-wait]      # was scripts/start_whatsapp.sh
     python3 launcher.py backend-restart [--no-wait]   # was scripts/restart_backend.sh
     python3 launcher.py server start|stop|status      # was scripts/start_on_server.sh
     python3 launcher.py handover to-server|to-local|status  # was scripts/tui_handover.sh
@@ -125,6 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Start WAHA without CPU/RAM caps (default: applied)",
     )
+    p_server_start.add_argument(
+        "--no-token",
+        action="store_true",
+        help="Do not print the Web UI token (reduces duplicate output)",
+    )
     server_sub.add_parser("stop")
     server_sub.add_parser("status")
 
@@ -179,7 +184,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "server":
         if args.server_command == "start":
-            return server.start_all(docker_limits=not args.no_docker_limits)
+            return server.start_all(
+                docker_limits=not args.no_docker_limits,
+                print_token=not args.no_token,
+            )
         if args.server_command == "stop":
             return server.stop_all()
         return server.status()

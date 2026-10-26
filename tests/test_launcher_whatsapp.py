@@ -253,7 +253,8 @@ class TestStandaloneStartStop:
 
         whatsapp.start(no_wait=True)
 
-        assert str(whatsapp.RESOURCES_FILE) in docker_calls[0]
+        up_call = next(c for c in docker_calls if "up" in c and "-d" in c)
+        assert str(whatsapp.RESOURCES_FILE) in up_call
 
     def test_start_no_docker_limits_skips_resources_overlay(
         self, project: Path, monkeypatch
@@ -271,7 +272,8 @@ class TestStandaloneStartStop:
 
         whatsapp.start(no_wait=True, docker_limits=False)
 
-        assert str(whatsapp.RESOURCES_FILE) not in docker_calls[0]
+        up_call = next(c for c in docker_calls if "up" in c and "-d" in c)
+        assert str(whatsapp.RESOURCES_FILE) not in up_call
 
     def test_start_waits_and_reports_timeout(self, project: Path, monkeypatch):
         monkeypatch.setattr(whatsapp, "command_exists", lambda name: True)

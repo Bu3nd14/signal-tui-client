@@ -170,10 +170,11 @@ def _docker_container_running(name: str) -> bool:
     return name in result.stdout.splitlines()
 
 
-def start_all(*, docker_limits: bool = True) -> int:
+def start_all(*, docker_limits: bool = True, print_token: bool = True) -> int:
     info("Avvio WAHA (WhatsApp HTTP API)...")
     if whatsapp_mod.start(no_wait=False, docker_limits=docker_limits) == 0:
         ok("WAHA avviato e pronto")
+        whatsapp_mod.describe_session(whatsapp_mod.session_status())
     else:
         info("WAHA non partito (vedi docker compose logs whatsapp)")
 
@@ -196,7 +197,8 @@ def start_all(*, docker_limits: bool = True) -> int:
         return 1
     if up:
         ok(f"Server attivo — Web UI su http://{_local_ip()}:{SERVER_PORT}")
-        print(f"   Token Web UI: {_read_web_token()}")
+        if print_token:
+            print(f"   Token Web UI: {_read_web_token()}")
         print("   Log:          tail -f /tmp/signal-tui.log")
         print("   Stop:         python3 launcher.py server stop")
         print("   Interattivo:  python3 megachat.py  (si collega al server)")
@@ -240,10 +242,9 @@ def status() -> int:
         if _pgrep("signal-cli.*daemon")
         else "daemon signal-cli: spento"
     )
-    print(
-        "WAHA: attivo"
-        if _docker_container_running("signal-tui-whatsapp")
-        else "WAHA: spento"
-    )
+    waha_active = _docker_container_running("signal-tui-whatsapp")
+    print("WAHA: attivo" if waha_active else "WAHA: spento")
+    if waha_active:
+        whatsapp_mod.describe_session(whatsapp_mod.session_status(timeout=2))
     print("Web UI: in ascolto su 4242" if port_listening(4242) else "Web UI: spenta")
     return 0

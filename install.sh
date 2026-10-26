@@ -219,13 +219,14 @@ _signal_tui_web_bg() {
     local pid="" lock="${MEGACHAT_LOCK_FILE:-/tmp/signal-tui.lock}"
     [ -f "$lock" ] && pid="$(cat "$lock")"
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-        ( ( cd "$SIGNAL_TUI_DIR" && exec nohup .venv/bin/python megachat.py serve ) </dev/null >/dev/null 2>&1 & )
+        "$SIGNAL_TUI_DIR/.venv/bin/python" "$SIGNAL_TUI_DIR/launcher.py" server start --no-token || return 1
     fi
     SIGNAL_TUI_WEB_TOKEN="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["web"]["token"])' "$SIGNAL_TUI_DIR/config.json")" || return 1
     export SIGNAL_TUI_WEB_TOKEN
     echo "Server bg attivo — token: $SIGNAL_TUI_WEB_TOKEN"
 }
 _signal_tui_web_stop() {
+    # WAHA non viene fermata di proposito: resta attiva per i messaggi.
     local lock="${MEGACHAT_LOCK_FILE:-/tmp/signal-tui.lock}" pid=""
     [ -f "$lock" ] && pid="$(cat "$lock" 2>/dev/null)"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
@@ -246,8 +247,10 @@ _signal_tui_web_stop() {
     fi
     echo "Server bg fermato."
 }
+_signal_tui_web_status() { "$SIGNAL_TUI_DIR/.venv/bin/python" "$SIGNAL_TUI_DIR/launcher.py" server status; }
 alias web-signal-tui-bg='_signal_tui_web_bg'
 alias web-signal-tui-stop='_signal_tui_web_stop'
+alias web-signal-tui-status='_signal_tui_web_status'
 alias signal-tui-bg='_signal_tui_web_bg'
 alias signal-tui-stop='_signal_tui_web_stop'
 EOF

@@ -185,6 +185,7 @@ class TestStandaloneStartFailureBranches:
 
     def test_up_failure_returns_its_code(self, project, monkeypatch):
         monkeypatch.setattr(whatsapp, "command_exists", lambda name: True)
+        monkeypatch.setattr(whatsapp, "docker_available", lambda: True)
         monkeypatch.setattr(
             whatsapp.subprocess, "run", lambda cmd, **k: _cp(cmd, returncode=3)
         )
@@ -206,3 +207,73 @@ class TestStop:
         )
         assert whatsapp.stop() == 0
         assert "WAHA stopped" in capsys.readouterr().out
+
+
+class TestDockerAvailable:
+    def test_true_when_info_succeeds(self, monkeypatch):
+        monkeypatch.setattr(
+            whatsapp.subprocess, "run", lambda *a, **k: _cp(a[0], returncode=0)
+        )
+        assert whatsapp.docker_available() is True
+
+    def test_false_when_info_fails(self, monkeypatch):
+        monkeypatch.setattr(
+            whatsapp.subprocess, "run", lambda *a, **k: _cp(a[0], returncode=1)
+        )
+        assert whatsapp.docker_available() is False
+
+    def test_false_when_docker_is_missing(self, monkeypatch):
+        def _raise(*a, **k):
+            raise FileNotFoundError("docker")
+
+        monkeypatch.setattr(whatsapp.subprocess, "run", _raise)
+        assert whatsapp.docker_available() is False
+
+    def test_false_on_timeout(self, monkeypatch):
+        def _raise(*a, **k):
+            raise subprocess.TimeoutExpired("docker", 5)
+
+        monkeypatch.setattr(whatsapp.subprocess, "run", _raise)
+        assert whatsapp.docker_available() is False
+
+
+class TestStartRequiresDockerDaemon:
+    def test_suggests_colima_and_skips_compose(self, project, monkeypatch, capsys):
+        monkeypatch.setattr(whatsapp, "command_exists", lambda name: True)
+        monkeypatch.setattr(whatsapp, "docker_available", lambda: False)
+        calls = []
+        monkeypatch.setattr(
+            whatsapp.subprocess,
+            "run",
+            lambda cmd, **k: calls.append(cmd) or _cp(cmd),
+        )
+        assert whatsapp.start(no_wait=True) == 1
+        captured = capsys.readouterr()
+        assert "colima start" in captured.err
+        assert calls == []
+
+
+class TestSessionStatus:
+    def test_reads_status_from_json(self, project, monkeypatch):
+        monkeypatch.delenv("WHATSAPP_SESSION_NAME", raising=False)
+        monkeypatch.delenv("WHATSAPP_API_URL", raising=False)
+        monkeypatch.setattr(whatsapp, "read_waha_api_key", lambda: "k")
+        seen = {}
+
+        def fake_get(url, *, headers=None, timeout=5):
+            seen["url"] = url
+            seen["headers"] = headers
+            return 200, b'{"status": "WORKING"}'
+
+        monkeypatch.setattr(whatsapp, "http_get", fake_get)
+        assert whatsapp.session_status() == "WORKING"
+        assert seen["url"].endswith("/api/sessions/default")
+        assert seen["headers"] == {"X-Api-Key": "k"}
+
+    def test_none_on_transport_error(self, project, monkeypatch):
+        monkeypatch.setattr(whatsapp, "http_get", lambda *a, **k: None)
+        assert whatsapp.session_status() is None
+
+    def test_none_on_http_error(self, project, monkeypatch):
+        monkeypatch.setattr(whatsapp, "http_get", lambda *a, **k: (500, b""))
+        assert whatsapp.session_status() is None

@@ -80,12 +80,33 @@ class TestStatus:
         monkeypatch.setattr(server, "_pgrep", lambda pattern: True)
         monkeypatch.setattr(server, "_docker_container_running", lambda name: True)
         monkeypatch.setattr(server, "port_listening", lambda port: True)
+        monkeypatch.setattr(whatsapp_mod, "session_status", lambda timeout=3: "WORKING")
         assert server.status() == 0
         out = capsys.readouterr().out
         assert f"Server: ATTIVO (pid {os.getpid()})" in out
         assert "daemon signal-cli: attivo" in out
         assert "WAHA: attivo" in out
         assert "in ascolto su 4242" in out
+
+    def test_reports_session_state_when_waha_is_active(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.setattr(server, "LOCK_FILE", tmp_path / "no.lock")
+        monkeypatch.setattr(server, "_pgrep", lambda pattern: False)
+        monkeypatch.setattr(server, "_docker_container_running", lambda name: True)
+        monkeypatch.setattr(server, "port_listening", lambda port: False)
+        seen = {}
+
+        def fake_status(timeout=3):
+            seen["timeout"] = timeout
+            return "SCAN_QR_CODE"
+
+        monkeypatch.setattr(whatsapp_mod, "session_status", fake_status)
+        assert server.status() == 0
+        out = capsys.readouterr().out
+        assert "WAHA: attivo" in out
+        assert "in attesa di associazione" in out
+        assert seen["timeout"] == 2
 
 
 class TestStopAll:
@@ -116,6 +137,7 @@ class _FakeProc:
 def start_env(monkeypatch, tmp_path):
     """Isolate start_all from tmux, the real lock, the log and real sleeping."""
     monkeypatch.setattr(whatsapp_mod, "start", lambda **k: 0)
+    monkeypatch.setattr(whatsapp_mod, "session_status", lambda timeout=3: "WORKING")
     monkeypatch.setattr(server, "LOCK_FILE", tmp_path / "signal-tui.lock")
     monkeypatch.setattr(server, "_kill_tmux_session", lambda name="tui": None)
     monkeypatch.setattr(server, "SERVER_LOG", tmp_path / "serve.log")
@@ -150,6 +172,18 @@ class TestStartAll:
         out = capsys.readouterr().out
         assert "10.0.0.5:4242" in out
         assert "tok123" in out
+        assert "Sessione WhatsApp connessa." in out
+
+    def test_skips_token_when_print_token_is_false(
+        self, monkeypatch, start_env, capsys
+    ):
+        monkeypatch.setattr(server, "_read_web_token", lambda: "tok123")
+        monkeypatch.setattr(server, "_local_ip", lambda: "10.0.0.5")
+        monkeypatch.setattr(server, "port_listening", lambda port: True)
+        assert server.start_all(print_token=False) == 0
+        out = capsys.readouterr().out
+        assert "Token Web UI" not in out
+        assert "10.0.0.5:4242" in out
 
     def test_starts_detached_serve_process(self, monkeypatch, start_env):
         monkeypatch.setattr(server, "port_listening", lambda port: True)
