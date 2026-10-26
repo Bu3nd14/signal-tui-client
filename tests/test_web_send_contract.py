@@ -248,7 +248,7 @@ def test_backend_failure_retries_then_502_like_the_operation(env):
                 "contact_id": "alice",
                 "attempt": attempt,
                 "max_attempts": SEND_RETRY_MAX_ATTEMPTS,
-                "error": "[Errno 111] refused",
+                "error": str(refused),
             },
         }
         for attempt in (2, 3)
