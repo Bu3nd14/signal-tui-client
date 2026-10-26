@@ -320,3 +320,18 @@ class TestAppExitPrune:
         core._shutdown_done = False
         with patch("protocols.db._prune_cache", side_effect=RuntimeError("boom")):
             SignalTUI.on_exit_app(app)  # best-effort: must not propagate
+
+    def test_on_exit_app_sets_native_shutting_down_flag_first(self):
+        app = object.__new__(SignalTUI)
+        app._polling_active = True
+        app._hires_executor = MagicMock()
+        app._web_enabled = False
+        app._owns_core = False
+        app.client = MagicMock()
+        app.client.close.side_effect = RuntimeError("boom")
+        app._native_shutting_down = False
+
+        with pytest.raises(RuntimeError, match="boom"):
+            SignalTUI.on_exit_app(app)
+
+        assert app._native_shutting_down is True
