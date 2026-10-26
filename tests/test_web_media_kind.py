@@ -122,7 +122,7 @@ for (const [kind, expected] of Object.entries(icons)) {
     assert.equal(result, undefined)
     assert.deepEqual(events, [
       ["open", "", "_blank"],
-      ["fetch", "/api/media/telegram/folder/video%20report.bin"],
+      ["fetch", "api/media/telegram/folder/video%20report.bin"],
     ])
     assert.equal(tabs[0].document.title, "Caricamento allegato…")
     assert.match(tabs[0].writtenHtml, /Loading\.\.\./)

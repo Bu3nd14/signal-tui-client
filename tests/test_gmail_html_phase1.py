@@ -712,7 +712,7 @@ def test_remote_image_src_is_replaced_by_signed_data_src() -> None:
 
     sources = _unescaped_image_sources(cleaned)
     assert len(sources) == 1
-    assert sources[0].startswith("/gmail-image?token=")
+    assert sources[0].startswith("gmail-image?token=")
     assert gmail.verify_image_token(_token_of(sources[0])) == url
     assert "https://image.example" not in cleaned
 
@@ -749,7 +749,7 @@ def test_tampered_or_multi_dot_signed_tokens_are_removed() -> None:
     token = _token_of(path)
     replacement = "1" if token[-1] != "1" else "2"
     tampered = path.replace(token, token[:-1] + replacement, 1)
-    multi_dot = f"/gmail-image?token={token}.a.b"
+    multi_dot = f"gmail-image?token={token}.a.b"
 
     for candidate in (tampered, multi_dot):
         cleaned = _sanitize(f'<img data-src="{candidate}">')
@@ -839,7 +839,7 @@ def test_uppercase_signed_digest_is_rejected() -> None:
     path = gmail.sign_image_url("https://image.example/a.png")
     token = _token_of(path)
     base, digest = token.rsplit(".", 1)
-    uppercase = f"/gmail-image?token={base}.{digest.upper()}"
+    uppercase = f"gmail-image?token={base}.{digest.upper()}"
 
     cleaned = _sanitize(f'<img data-src="{uppercase}">')
 

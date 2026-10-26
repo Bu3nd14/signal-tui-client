@@ -515,7 +515,7 @@ vm.runInThisContext(submit);
   assert.equal(state.optimistic[0].batch_index, null);
   assert.deepEqual(cached, [["photo.png[0]", "blob:photo", 640, 480]]);
   assert.deepEqual(clearedWithOptions, { revoke: false });
-  assert.equal(request.url, "/api/send");
+  assert.equal(request.url, "api/send");
   assert.equal(request.options.body.get("text"), "la caption");
   assert.equal(request.options.body.getAll("file").length, 1);
   assert.equal(request.options.body.get("batch_id"), null);
@@ -2362,8 +2362,8 @@ def test_web_ui_static_contracts():
     index = Path("web/static/index.html").read_text()
     # Le risorse statiche usano cache-busting (?v=N): il test non deve
     # dipendere dal numero specifico, solo dalla presenza del versioning.
-    assert re.search(r'<script src="/app\.js\?v=\d+" defer></script>', index)
-    assert re.search(r'<link rel="stylesheet" href="/style\.css\?v=\d+">', index)
+    assert re.search(r'<script src="app\.js\?v=\d+" defer></script>', index)
+    assert re.search(r'<link rel="stylesheet" href="style\.css\?v=\d+">', index)
 
     css = Path("web/static/style.css").read_text()
     assert ".contact-copy { min-width: 0; overflow: hidden; }" in css

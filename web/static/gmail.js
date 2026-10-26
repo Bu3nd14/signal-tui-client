@@ -663,7 +663,9 @@
 
   function safeImageUrl(value) {
     const candidate = String(value || "").trim();
-    if (/^\/gmail-image\?token=[A-Za-z0-9._-]+(?:&v=\d+)?$/.test(candidate)) return candidate;
+    // Relative ("gmail-image?...") so it resolves under a reverse-proxy prefix;
+    // a legacy root-absolute form from older cached HTML is made relative.
+    if (/^\/?gmail-image\?token=[A-Za-z0-9._-]+(?:&v=\d+)?$/.test(candidate)) return candidate.replace(/^\//, "");
     if (/^data:image\/(?:png|jpe?g|gif|webp);base64,/i.test(candidate)) return candidate;
     return "";
   }
@@ -769,7 +771,7 @@
   async function markRead(uid, folder) {
     try {
       await request(
-        `/api/gmail/messages/${encodeURIComponent(String(uid))}/read?folder=${encodeURIComponent(folder)}`,
+        `api/gmail/messages/${encodeURIComponent(String(uid))}/read?folder=${encodeURIComponent(folder)}`,
         { method: "POST" },
       );
       let changed = false;
@@ -801,7 +803,7 @@
 
     try {
       const response = await request(
-        `/api/gmail/messages/${encodeURIComponent(String(state.selectedUid))}?folder=${encodeURIComponent(state.folder)}`,
+        `api/gmail/messages/${encodeURIComponent(String(state.selectedUid))}?folder=${encodeURIComponent(state.folder)}`,
       );
       const detail = await response.json();
       if (sequence !== state.readerSeq) return;
@@ -830,7 +832,7 @@
     button.textContent = "Eliminazione…";
     try {
       await request(
-        `/api/gmail/messages/${encodeURIComponent(String(uid))}?folder=${encodeURIComponent(state.folder)}`,
+        `api/gmail/messages/${encodeURIComponent(String(uid))}?folder=${encodeURIComponent(state.folder)}`,
         { method: "DELETE" },
       );
       closeReader();
@@ -865,7 +867,7 @@
     renderPager();
 
     try {
-      await request("/api/gmail/messages/bulk-delete", {
+      await request("api/gmail/messages/bulk-delete", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ uids, folder: state.folder }),
@@ -899,7 +901,7 @@
     button.textContent = "Download…";
     try {
       const response = await request(
-        `/api/gmail/messages/${encodeURIComponent(String(uid))}/attachments/${encodeURIComponent(String(index))}?folder=${encodeURIComponent(state.folder)}`,
+        `api/gmail/messages/${encodeURIComponent(String(uid))}/attachments/${encodeURIComponent(String(index))}?folder=${encodeURIComponent(state.folder)}`,
       );
       const blob = await response.blob();
       const filename = safeFilename(
@@ -943,7 +945,7 @@
     if (force) params.set("refresh", "1");
 
     try {
-      const response = await request(`/api/gmail/messages?${params.toString()}`);
+      const response = await request(`api/gmail/messages?${params.toString()}`);
       const payload = await response.json();
       if (sequence !== state.listSeq) return;
       if (!payload || !Array.isArray(payload.messages)) {
@@ -1010,7 +1012,7 @@
     if (!state.status) setAccountStatus("Caricamento…");
 
     try {
-      const response = await request("/api/gmail/status");
+      const response = await request("api/gmail/status");
       const payload = await response.json();
       if (!payload || typeof payload !== "object") throw new Error("Risposta di stato non valida.");
       state.status = payload;
@@ -1185,7 +1187,7 @@
 
     setSending(true);
     try {
-      await request("/api/gmail/send", { method: "POST", body: form });
+      await request("api/gmail/send", { method: "POST", body: form });
       closeCompose();
       showNotice("Email inviata.");
       void loadMessages();

@@ -249,7 +249,7 @@ let replaced = null;
 const avatarEl = { replaceChildren(node) { replaced = node; } };
 let loaded = 0;
 (async () => {
-  await attachContactAvatar(avatarEl, { id: "1@c.us" }, "/api/avatar", () => { loaded += 1; });
+  await attachContactAvatar(avatarEl, { id: "1@c.us" }, "api/avatar", () => { loaded += 1; });
   assert.equal(loaded, 1);
   assert.equal(replaced.src, "blob:cached");
 })().catch((error) => { console.error(error); process.exit(1); });
@@ -276,15 +276,15 @@ assert.equal(contactAvatarUrl({ protocol: "whatsapp", id: "1@c.us" }), null);
 globalThis.state = { stealth: false };
 assert.equal(
   contactAvatarUrl({ protocol: "whatsapp", id: "1@c.us" }),
-  "/api/contact-avatar?proto=whatsapp&contact_id=1%40c.us",
+  "api/contact-avatar?proto=whatsapp&contact_id=1%40c.us",
 );
 assert.equal(
   contactAvatarUrl({ protocol: "signal", id: "+393357405121" }),
-  "/api/contact-avatar?proto=signal&contact_id=%2B393357405121",
+  "api/contact-avatar?proto=signal&contact_id=%2B393357405121",
 );
 assert.equal(
   contactAvatarUrl({ protocol: "telegram", id: "1@c.us" }),
-  "/api/contact-avatar?proto=telegram&contact_id=1%40c.us",
+  "api/contact-avatar?proto=telegram&contact_id=1%40c.us",
 );
 assert.equal(contactAvatarUrl(null), null);
 """
