@@ -409,8 +409,8 @@ def test_web_send_retry_frontend_contract():
     assert "function buildSendPayload(" in outbox
 
     html = Path("web/static/index.html").read_text()
-    assert "/outbox.js?v=" in html
-    assert html.index("/outbox.js?v=") < html.index("/app.js?v=")
+    assert 'src="outbox.js?v=' in html
+    assert html.index('src="outbox.js?v=') < html.index('src="app.js?v=')
 
 
 # ── Edge cases aggiunti in fase di verifica (bug hunting) ────────────────────
@@ -521,8 +521,8 @@ def test_send_retry_error_message_is_truncated_to_200_chars():
 
 def test_index_html_bumps_static_asset_versions():
     html = Path("web/static/index.html").read_text()
-    assert "/app.js?v=" in html
-    assert "/style.css?v=" in html
+    assert 'src="app.js?v=' in html
+    assert 'href="style.css?v=' in html
 
 
 # ── Registry idempotenza server-side (§8) ────────────────────────────────────

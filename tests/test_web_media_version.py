@@ -249,7 +249,7 @@ def test_thumbnail_invalidates_on_size_change_with_same_mtime(monkeypatch, tmp_p
 
 def test_index_html_bumps_app_js_version():
     index = Path("web/static/index.html").read_text(encoding="utf-8")
-    assert "app.js?v=131" in index
+    assert "app.js?v=132" in index
 
 
 # ── SPA ───────────────────────────────────────────────────────────────────────
@@ -308,17 +308,17 @@ const fire = () => observerCallback([{ target: observed, isIntersecting: true }]
   const container = imageAttachment({ attachment_id: "image.png", version: "123-456" }, "signal", "in");
   fire();
   await tick();
-  assert.equal(fetched.at(-1), "/api/media/signal/image.png?v=123-456&w=480");
+  assert.equal(fetched.at(-1), "api/media/signal/image.png?v=123-456&w=480");
   assert.equal(state.mediaCache.has("image.png|123-456"), true);
   assert.equal(state.mediaCache.has("image.png|999-000"), false);
   assert.notEqual(mediaCacheKey("image.png", "123-456"), mediaCacheKey("image.png", "999-000"));
   container.listeners.click();
-  assert.equal(modalPath, "/api/media/signal/image.png?v=123-456");
+  assert.equal(modalPath, "api/media/signal/image.png?v=123-456");
 
   const legacy = imageAttachment({ attachment_id: "legacy.png" }, "signal", "in");
   fire();
   await tick();
-  assert.equal(fetched.at(-1), "/api/media/signal/legacy.png?w=480");
+  assert.equal(fetched.at(-1), "api/media/signal/legacy.png?w=480");
   assert.equal(state.mediaCache.has("legacy.png"), true);
 
   globalThis.setDotColor = () => {};
@@ -330,20 +330,20 @@ const fire = () => observerCallback([{ target: observed, isIntersecting: true }]
   vm.runInThisContext(app.slice(wsStart, wsEnd).replace("socket.onmessage =", "globalThis.__wsMessage ="));
 
   globalThis.apiFetch = async () => { throw Object.assign(new Error("404"), { status: 404 }); };
-  await fetchImage("/api/media/signal/image.png", "image.png", "image.png|123-456", "in").catch(() => {});
+  await fetchImage("api/media/signal/image.png", "image.png", "image.png|123-456", "in").catch(() => {});
   assert.equal(state.mediaFailures.has("image.png"), true);
   assert.equal(state.mediaFailures.has("image.png|123-456"), false);
 
   // B1: un successo sulla versione nuova azzera il failure RAW registrato su
   // una versione precedente (altrimenti il re-render mostrerebbe il fallback).
   globalThis.apiFetch = async () => ({ status: 200, blob: async () => ({}) });
-  await fetchImage("/api/media/signal/image.png", "image.png", "image.png|999-000", "in");
+  await fetchImage("api/media/signal/image.png", "image.png", "image.png|999-000", "in");
   assert.equal(state.mediaFailures.has("image.png"), false);
   assert.equal(state.mediaCache.has("image.png|999-000"), true);
 
   // Il WS handler deve continuare a pulire con l'id RAW.
   globalThis.apiFetch = async () => { throw Object.assign(new Error("404"), { status: 404 }); };
-  await fetchImage("/api/media/signal/image.png", "image.png", "image.png|123-456", "in").catch(() => {});
+  await fetchImage("api/media/signal/image.png", "image.png", "image.png|123-456", "in").catch(() => {});
   assert.equal(state.mediaFailures.has("image.png"), true);
   __wsMessage({ data: JSON.stringify({ type: "message", payload: { attachment_id: "image.png", protocol: "signal", contact_id: "alice" } }) });
   assert.equal(state.mediaFailures.has("image.png"), false);

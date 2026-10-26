@@ -243,7 +243,7 @@ vm.runInThisContext(submit);
   ]);
   // Il path di invio NON revoca i blob serviti all'optimistic.
   assert.deepEqual(clearedWithOptions, { revoke: false });
-  assert.equal(request.url, "/api/send");
+  assert.equal(request.url, "api/send");
   const body = request.options.body;
   assert.equal(body.get("protocol"), "signal");
   assert.equal(body.get("contact_id"), "alice");

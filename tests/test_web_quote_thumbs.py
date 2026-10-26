@@ -93,13 +93,13 @@ def test_message_payload_maps_quote_thumbnails_and_raw_fields(web_client):
     assert messages[0]["quote_attachment_id"] == "local-id"
     assert messages[0]["quote_content_type"] == "image/jpeg"
     assert messages[0]["quote_thumb_url"] == (
-        f"/api/quote-media/telegram/{local_id}?w=96"
+        f"api/quote-media/telegram/{local_id}?w=96"
     )
     encoded_id = "/".join(quote(part, safe="") for part in remote_id.split("/"))
     assert messages[1]["quote_attachment_id"] == remote_id
     assert messages[1]["quote_content_type"] == "image/jpeg"
-    assert messages[1]["quote_thumb_url"] == (f"/api/media/telegram/{encoded_id}?w=96")
-    assert messages[2]["quote_thumb_url"] == "/api/media/telegram/video-id?w=96"
+    assert messages[1]["quote_thumb_url"] == (f"api/media/telegram/{encoded_id}?w=96")
+    assert messages[2]["quote_thumb_url"] == "api/media/telegram/video-id?w=96"
     assert messages[3]["quote_attachment_id"] is None
     assert messages[3]["quote_content_type"] is None
     assert messages[3]["quote_thumb_url"] is None
@@ -121,7 +121,7 @@ def test_signal_embedded_video_thumbnail_is_content_type_agnostic(web_client):
 
     assert response.status_code == 200
     assert response.json()[0]["quote_thumb_url"] == (
-        f"/api/quote-media/signal/{row_id}?w=96"
+        f"api/quote-media/signal/{row_id}?w=96"
     )
 
 
@@ -230,7 +230,7 @@ vm.runInThisContext(quote);
 
 (async () => {
   const bubble = node("div");
-  appendRenderedQuote(bubble, { direction: "in", quote_author: "Alice", quote_text: "Foto", quote_thumb_url: "/api/quote-media/signal/7?w=96" });
+  appendRenderedQuote(bubble, { direction: "in", quote_author: "Alice", quote_text: "Foto", quote_thumb_url: "api/quote-media/signal/7?w=96" });
   const renderedQuote = bubble.children[0];
   const image = renderedQuote.children[0];
   assert.equal(renderedQuote.className, "message-quote has-thumb");
@@ -239,14 +239,14 @@ vm.runInThisContext(quote);
   assert.equal(image.attributes.loading, undefined);
   assert.equal(image.src, undefined);
   await new Promise(setImmediate);
-  assert.equal(requestedPath, "/api/quote-media/signal/7?w=96");
+  assert.equal(requestedPath, "api/quote-media/signal/7?w=96");
   assert.equal(image.src, "blob:quote-thumb");
   // Il blob della quote è pinnato: mai evittato dalla LRU né revocato dal prune.
   assert.ok(state.pinnedUrls.has("blob:quote-thumb"));
   assert.ok(!state.mediaCache.has("quote:/api/quote-media/signal/7?w=96"));
 
   const videoBubble = node("div");
-  appendRenderedQuote(videoBubble, { direction: "in", quote_author: "Bob", quote_text: "Video", quote_content_type: "video/mp4", quote_thumb_url: "/api/media/signal/video.mp4?w=96" });
+  appendRenderedQuote(videoBubble, { direction: "in", quote_author: "Bob", quote_text: "Video", quote_content_type: "video/mp4", quote_thumb_url: "api/media/signal/video.mp4?w=96" });
   const videoWrapper = videoBubble.children[0].children[0];
   assert.equal(videoWrapper.className, "message-quote-thumb-video");
   assert.equal(videoWrapper.children[0].className, "message-quote-thumb");
@@ -256,7 +256,7 @@ vm.runInThisContext(quote);
   for (const status of [404, 422]) {
     mode = status;
     const failedBubble = node("div");
-    appendRenderedQuote(failedBubble, { direction: "in", quote_author: "Bob", quote_text: "Testo", quote_content_type: "video/mp4", quote_thumb_url: `/api/media/signal/broken-${status}.mp4?w=96` });
+    appendRenderedQuote(failedBubble, { direction: "in", quote_author: "Bob", quote_text: "Testo", quote_content_type: "video/mp4", quote_thumb_url: `api/media/signal/broken-${status}.mp4?w=96` });
     const failedQuote = failedBubble.children[0];
     const failedWrapper = failedQuote.children[0];
     await new Promise(setImmediate);
@@ -310,19 +310,19 @@ vm.runInThisContext(submit);
 
 (async () => {
   await submitMessage();
-  assert.equal(state.optimistic[0].quote_thumb_url, "/api/media/signal/folder/photo%20id%3A1?w=96");
+  assert.equal(state.optimistic[0].quote_thumb_url, "api/media/signal/folder/photo%20id%3A1?w=96");
 
   state.active = { id: "bob", protocol: "whatsapp" };
   state.replyTo = { timestamp: 11, quoteAuthor: "bob", quoteMessage: "Foto WA", isImage: true, isMedia: true, contentType: "image/jpeg", attachmentId: "wa/image", id: "wa-11" };
   elements.messageInput.value = "reply wa";
   await submitMessage();
-  assert.equal(state.optimistic[1].quote_thumb_url, "/api/media/whatsapp/wa/image?w=96");
+  assert.equal(state.optimistic[1].quote_thumb_url, "api/media/whatsapp/wa/image?w=96");
 
   state.active = { id: "carol", protocol: "telegram" };
   state.replyTo = { timestamp: 12, quoteAuthor: "carol", quoteMessage: "Video TG", isImage: false, isVideo: true, isMedia: true, contentType: "video/mp4", attachmentId: "tgref:video id", id: "12" };
   elements.messageInput.value = "reply video";
   await submitMessage();
-  assert.equal(state.optimistic[2].quote_thumb_url, "/api/media/telegram/tgref%3Avideo%20id?w=96");
+  assert.equal(state.optimistic[2].quote_thumb_url, "api/media/telegram/tgref%3Avideo%20id?w=96");
   assert.equal(state.optimistic[2].quote_content_type, "video/mp4");
   assert.equal(state.optimistic[2].quote_media_type, "video");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
@@ -390,7 +390,7 @@ def test_quote_thumb_resolved_by_filename_when_timestamp_missing(web_client):
     messages = response.json()
     quoting = next(m for m in messages if m["text"] == "what a cool")
     assert quoting["quote_thumb_url"] == (
-        "/api/media/signal/ZNIWHsP-XwhFe3PWTpnx.jpg?w=96"
+        "api/media/signal/ZNIWHsP-XwhFe3PWTpnx.jpg?w=96"
     )
 
 
@@ -450,13 +450,13 @@ def test_quote_video_resolver_path_timestamp_and_filename(web_client):
         quote(part, safe="") for part in str(local_video).split("/")
     )
     assert messages["path reply"]["quote_thumb_url"] == (
-        f"/api/media/signal/{encoded_path}?w=96"
+        f"api/media/signal/{encoded_path}?w=96"
     )
     assert messages["timestamp reply"]["quote_thumb_url"] == (
-        "/api/media/signal/timestamp-video.mp4?w=96"
+        "api/media/signal/timestamp-video.mp4?w=96"
     )
     assert messages["filename reply"]["quote_thumb_url"] == (
-        "/api/media/signal/stored-video-id?w=96"
+        "api/media/signal/stored-video-id?w=96"
     )
 
 
@@ -504,7 +504,7 @@ def test_quote_thumb_resolved_by_reply_to_message_id_telegram(web_client):
     messages = response.json()
     quoting = next(m for m in messages if m["text"] == "reply to photo")
     assert quoting["quote_thumb_url"] == (
-        "/api/media/telegram/tgref%3Afolder/photo%20id?w=96"
+        "api/media/telegram/tgref%3Afolder/photo%20id?w=96"
     )
 
 
@@ -544,5 +544,5 @@ def test_quote_thumb_whatsapp_prefixed_msg_id(web_client):
     messages = response.json()
     quoting = next(m for m in messages if m["text"] == "Davvero bella")
     assert quoting["quote_thumb_url"] == (
-        "/api/media/whatsapp/sent-8a44cb8499554832aa70afa2e0d998ca.jpg?w=96"
+        "api/media/whatsapp/sent-8a44cb8499554832aa70afa2e0d998ca.jpg?w=96"
     )
