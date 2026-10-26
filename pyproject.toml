@@ -12,13 +12,14 @@ pythonpath = ["."]
 # Basetemp corta per non superare il limite macOS di 104 char sui socket Unix
 # (`megachat-run/server.sock` dentro tmp_path). Essendo un path fisso, due
 # sessioni pytest concorrenti si cancellano a vicenda la basetemp.
-addopts = "-ra --tb=short --strict-markers --basetemp=/tmp/t"
+addopts = "-ra --tb=short --strict-markers --basetemp=/tmp/t -m \"not smoke\""
 asyncio_mode = "auto"
 markers = [
     "integration: test che lancia la TUI (lento, headless)",
     "live: test su filo reale contro i backend (richiede LIVE_TESTS=1)",
     "live-manual: test live che richiede intervento manuale sul device (richiede LIVE_MANUAL=1)",
     "allow_unserializable_events: the test publishes non-JSON payloads on an EventBus on purpose",
+    "smoke: test di smoke della TUI headless (boot + exit), escluso dal run default",
 ]
 
 [tool.coverage.run]

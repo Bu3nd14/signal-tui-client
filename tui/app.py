@@ -158,6 +158,8 @@ class SignalTUI(
         self._native_stashed: set = set()
         self._last_sync = 0.0
         self._native_sync_timer = None
+        # One-shot, terminal flag: the App instance is not reused after exit.
+        self._native_shutting_down = False
         # Chat image ids (P3): the screen-stack gate deletes only these, never
         # the modal's own placement.
         self._chat_native_ids: set[int] = set()
@@ -430,6 +432,8 @@ class SignalTUI(
 
     def post_display_hook(self) -> None:
         """Reconcile native image placements right after each frame flush."""
+        if self._native_shutting_down:
+            return
         if not (self._native_widgets or self._native_stashed):
             return
         now = time.monotonic()
@@ -454,6 +458,14 @@ class SignalTUI(
 
     def _native_sync_tick(self) -> None:
         """Gate + reconcile placements (shared by the hook and the timer)."""
+        # Teardown gate: App._close_all clears the screen stack before the final
+        # _flush_next_callbacks runs a timer callback already queued via call_next
+        # (set_timer wraps the callback in partial(self.call_next, cb)). Reading
+        # self.screen here would raise ScreenStackError; an empty stack is only
+        # possible during teardown, so bail out.
+        if not self._screen_stack:
+            logger.debug("Skipping native sync: screen stack is empty (teardown)")
+            return
         renderer = self._native_renderer
         if self.image_support is not ImageSupport.KITTY or renderer is None:
             return
@@ -667,6 +679,7 @@ class SignalTUI(
 
     def on_exit_app(self):
         """On exit, stop polling and disconnect backends."""
+        self._native_shutting_down = True
         self._polling_active = False
         self._cancel_exit_wait()
         self.client.close()
