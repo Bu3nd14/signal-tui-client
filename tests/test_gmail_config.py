@@ -88,6 +88,37 @@ def test_env_precedence(monkeypatch, tmp_path):
     assert config.gmail_enabled() is True
 
 
+def test_secret_source_getters_resolve_env_config_and_dotenv(monkeypatch, tmp_path):
+    assert config.get_gmail_app_password_file() == ""
+    assert config.get_gmail_app_password_cmd() == ""
+
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_FILE", "/tmp/from-env")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD_CMD", "gpg --decrypt env.gpg")
+    assert config.get_gmail_app_password_file() == "/tmp/from-env"
+    assert config.get_gmail_app_password_cmd() == "gpg --decrypt env.gpg"
+
+    monkeypatch.delenv("GMAIL_APP_PASSWORD_FILE")
+    monkeypatch.delenv("GMAIL_APP_PASSWORD_CMD")
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "gmail_app_password_file": "from-config",
+                "gmail_app_password_cmd": "gpg --decrypt config.gpg",
+            }
+        )
+    )
+    assert config.get_gmail_app_password_file() == "from-config"
+    assert config.get_gmail_app_password_cmd() == "gpg --decrypt config.gpg"
+
+    (tmp_path / "config.json").unlink()
+    (tmp_path / ".env").write_text(
+        "GMAIL_APP_PASSWORD_FILE=from-dotenv\n"
+        "GMAIL_APP_PASSWORD_CMD=gpg --decrypt dotenv.gpg\n"
+    )
+    assert config.get_gmail_app_password_file() == "from-dotenv"
+    assert config.get_gmail_app_password_cmd() == "gpg --decrypt dotenv.gpg"
+
+
 def test_app_password_file_preferred(monkeypatch, tmp_path):
     secret = tmp_path / "gmail-secret"
     secret.write_text("file-secret\n")

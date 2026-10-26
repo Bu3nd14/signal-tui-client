@@ -14,7 +14,7 @@ Il server web ascolta su `0.0.0.0:4242` (porta di default `4242`). Il **token Be
 | Alias | Cosa fa | Quando usarlo |
 |---|---|---|
 | `web-signal-tui` | Avvia la TUI con la Web UI in **foreground** su `0.0.0.0:4242` | Sessione interattiva: vuoi vedere output e log della TUI direttamente nel terminale |
-| `web-signal-tui-bg` | Avvia il server headless delegando a `launcher.py server start --no-token` (che lancia `megachat serve` — core + Web UI, senza TUI — e **WAHA**) come **processo staccato** (background) ed **esporta il token** nella shell corrente come `SIGNAL_TUI_WEB_TOKEN` | Fast cycle: pronto subito per `curl` e per il login nella Web UI |
+| `web-signal-tui-bg` | Scalda la cache GPG del segreto Gmail (prompt della passphrase solo se fredda), poi avvia il server headless delegando a `launcher.py server start --no-token` (che lancia `megachat serve` — core + Web UI, senza TUI — e **WAHA**) come **processo staccato** (background) ed **esporta il token** nella shell corrente come `SIGNAL_TUI_WEB_TOKEN` | Fast cycle: pronto subito per `curl` e per il login nella Web UI |
 | `web-signal-tui-stop` | Ferma il server background con SIGINT pulito (chiude anche un'eventuale vecchia sessione tmux `tui`) e rimuove `/tmp/signal-tui.lock`; **WAHA non viene fermata** | Arrestare il server avviato con `web-signal-tui-bg` senza interrompere WhatsApp |
 | `web-signal-tui-status` | Mostra lo stato di server, daemon signal-cli, WAHA e Web UI (`launcher.py server status`) | Verificare rapidamente cosa è attivo |
 
@@ -54,6 +54,9 @@ Gli endpoint REST vivono sotto `/api` e richiedono l'header `Authorization: Bear
 SIGNAL_TUI_DIR="$HOME/signal-tui-client"
 alias web-signal-tui='( cd "$SIGNAL_TUI_DIR" && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0 )'
 _signal_tui_web_bg() {
+    if [ -x "$SIGNAL_TUI_DIR/.venv/bin/python" ] && [ -f "$SIGNAL_TUI_DIR/scripts/gmail_warm_cache.py" ]; then
+        "$SIGNAL_TUI_DIR/.venv/bin/python" "$SIGNAL_TUI_DIR/scripts/gmail_warm_cache.py" || true
+    fi
     local pid="" lock="${MEGACHAT_LOCK_FILE:-/tmp/signal-tui.lock}"
     [ -f "$lock" ] && pid="$(cat "$lock")"
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then

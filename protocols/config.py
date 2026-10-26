@@ -474,6 +474,16 @@ def get_gmail_address() -> str:
     return _get_gmail("gmail_address", "GMAIL_ADDRESS")
 
 
+def get_gmail_app_password_file() -> str:
+    """Return the configured secret file path (``GMAIL_APP_PASSWORD_FILE``), or ``""``."""
+    return _get_gmail("gmail_app_password_file", "GMAIL_APP_PASSWORD_FILE")
+
+
+def get_gmail_app_password_cmd() -> str:
+    """Return the configured secret command (``GMAIL_APP_PASSWORD_CMD``), or ``""``."""
+    return _get_gmail("gmail_app_password_cmd", "GMAIL_APP_PASSWORD_CMD")
+
+
 def _gmail_secret_path(raw: str) -> Path:
     """Resolve a secret file path, relative paths live under the project."""
     path = Path(raw).expanduser()
@@ -616,12 +626,12 @@ def get_gmail_app_password() -> str:
     as ``gpg --decrypt`` or a keyring lookup), then the legacy plaintext
     ``GMAIL_APP_PASSWORD`` env/config entry.
     """
-    file_path = _get_gmail("gmail_app_password_file", "GMAIL_APP_PASSWORD_FILE")
+    file_path = get_gmail_app_password_file()
     if file_path:
         secret = _gmail_secret_from_file(file_path)
         if secret:
             return secret
-    command = _get_gmail("gmail_app_password_cmd", "GMAIL_APP_PASSWORD_CMD")
+    command = get_gmail_app_password_cmd()
     if command:
         secret = _cached_command_secret(command)
         if secret:
