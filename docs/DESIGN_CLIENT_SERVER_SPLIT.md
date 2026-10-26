@@ -250,6 +250,15 @@ Because the filename decides the extension check, a missing `filename`
 defaults to the basename of the path. Confining paths to home/tmp was
 rejected: it blocks legitimate mounts and still trusts content.
 
+`gmail.messages.send` (mc-im6) has the same policy with two differences,
+because a mail attachment is any file, not media: the copy skips the per-kind
+media limits (`stage_local_file(media_limits=False)`) and is capped at the Gmail
+per-file limit (25 MiB); the operation then enforces the Gmail limits (10
+files, 25 MiB each and in total) on the copies. Its pre-check is
+`gmail.messages.send.check`. The adapter keeps one table of staging operations
+and their checks (`STAGING_CHECKS`), and still refuses to start for an
+operation with `attachments` that has no policy.
+
 #### Client: `server/socket_client.py`
 
 `SocketClient.connect(path=None, timeout=5)` implements `ChatClient` over the
@@ -613,29 +622,66 @@ Known limitations:
 - The smoke needs `script` (util-linux) and Linux (`/proc`); it uses no real
   backend, so backend behaviour is covered by the unit/integration suites.
 
-## 13. Master merge: Gmail stays web-only (mc-615, mc-im6)
+## 13. Gmail moved into the core (mc-615, mc-im6)
 
-`origin/master` gained a Gmail reader (`web/gmail.py`, `web/gmail_api.py`,
-`web/static/gmail.*`, the Gmail settings in `protocols/config.py`) that talks to
-IMAP/SMTP from inside the web adapter.  The merge keeps it as it is: Gmail is
-**web-only for now** and does not go through `ChatAPI`; the TUI cannot use it.
-Moving it into the core as operations is bead **mc-im6**.
+`origin/master` gained a Gmail reader (IMAP/SMTP, HTML sanitizer, signed image
+proxy, the Gmail settings in `protocols/config.py`) that lived inside the web
+adapter. The master merge (mc-615) kept it web-only behind a narrow, temporary
+import exemption; bead mc-im6 removed both. **Gmail is now core logic behind
+operations and `web/` has no Gmail-specific exception to the import rules.**
 
-That breaks the §4.4 rule "`web/` imports no `protocols`" in exactly three
-places, listed in `GMAIL_IMPORT_EXEMPTIONS` of
-`tests/test_server_import_rules.py` (a temporary exemption; the same test fails
-if the list names an import that is not used, or if `web/gmail.py` takes
-anything but `config` from `protocols`):
+| piece | where |
+|---|---|
+| IMAP/SMTP client, MIME parsing, sanitizer, caches, IMAP pool, image-token signing, temp blobs | `server/gmail.py` (may import `protocols.config`, like the rest of `server/`) |
+| operations | `server/ops/gmail.py`, models in `server/models_api.py` |
+| HTTP translation | `web/gmail_api.py` (`/api/gmail/*`, `/gmail-image`) |
 
-| module | import | why |
-|---|---|---|
-| `web/gmail.py` | `from protocols import config` | Gmail settings (credentials, folders, cache limits) |
-| `web/gmail_api.py` | `server.link_preview` | image proxy reuses the SSRF-safe `fetch_external_image` |
-| `web/server.py` | `server.link_preview` | closes the shared HTTP session on the web loop at shutdown |
+Operations: `gmail.status`, `gmail.messages.list`, `.get`, `.delete`,
+`.bulk_delete`, `.mark_read`, `.send`, `.send.check`, `gmail.attachment`,
+`gmail.image`. Response shapes equal the JSON the routes always sent
+(`dict` results); errors keep their HTTP status and Italian texts: not
+configured `backend_down` (503), validation `invalid_request`/`too_large`
+(400/413, the Gmail text), missing `not_found` (404 "Risorsa non trovata"),
+upstream/transport `backend_error` (502 "Errore di comunicazione con Gmail"),
+anything else `backend_error` (502 "Errore Gmail"). The blocking IMAP/SMTP calls
+run in the operation's worker thread (`call_op` / the socket's sync pool); only
+`gmail.image` is `async` (it uses the shared HTTP session).
 
-Every other rule (no `tui`, `transcription`, `signal_tui`, `textual`; other
-`server.*` modules) still applies to the Gmail modules.  Link previews live in
-`server/link_preview.py` (master's shared-session and `fetch_external_image`
-changes were ported there); `web/link_preview.py` no longer exists.  Gmail
-routers are mounted by `start_web_server(api, ...)`; the old shutdown hooks
-(shared session, IMAP pool) run on the web loop as before.
+Blobs. `gmail.attachment` (`GmailAttachmentOut`: a `BlobOut` plus `filename`)
+and `gmail.image` (`BlobOut`) return a **temporary** file: the bytes come from
+the network, so they are written `0600` to `<cache dir>/gmail-blobs` (`0700`).
+The adapter that delivers one deletes it (the HTTP routes do, right after
+reading it); the core prunes files older than 15 minutes at every write and
+wipes the directory at shutdown. The image proxy keeps its protections
+unchanged: `gmail.image` only fetches URLs this server HMAC-signed
+(`sign_image_url`/`verify_image_token`, key derived from the web token), through
+the SSRF-safe public-address fetcher of `server/link_preview.py` (redirects
+re-validated, raster magic bytes only, 8 MiB cap).
+
+Sending. `/api/gmail/send` stays multipart: the route parses the form, copies
+the files to temp files with `web/uploads.py` (per-file cap = the Gmail limit,
+no media policy) and passes them as `AttachmentIn` handles; the operation
+validates count, slots and sizes (in the old order: first oversized file, then
+the total), reads the bytes and sends. `gmail.messages.send.check` runs
+first, so too many attachments or a non-file slot cost no disk I/O. Over the
+socket the same operation has an explicit staging policy (section 4.2).
+
+Lifecycle. Two resources moved to the core, with different owners because of
+what they are bound to:
+
+- The **IMAP pool** (threads, sockets; no loop) is closed by
+  `ChatCore.shutdown` through `ChatAPI.close_resources()`, after the adapters
+  have stopped (so no request is mid-flight) and before the transcription
+  service stops. It is idempotent.
+- The **shared HTTP session** (aiohttp, used by link previews and the Gmail
+  image proxy) is bound to the event loop that created it and can only be closed
+  there. Each adapter that runs operations on its own loop (web, socket) awaits
+  `ChatAPI.close_loop_resources()` on that loop right before it closes; a
+  session owned by another loop is left alone (so the first adapter to stop no
+  longer orphans the other's). `web/server.py` therefore no longer imports
+  `server.link_preview` or Gmail: it only calls the API.
+
+`tests/test_server_import_rules.py` has no Gmail exemption any more:
+`GMAIL_IMPORT_EXEMPTIONS` and `test_gmail_exemption_is_exact` are gone, and
+`web/` imports only the API-layer allowlist. Link previews live in
+`server/link_preview.py`; `web/link_preview.py` no longer exists.

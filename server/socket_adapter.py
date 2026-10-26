@@ -47,6 +47,7 @@ from server.paths import (  # noqa: F401 - re-exported for callers of the adapte
     runtime_file_path,
 )
 from server.uploads import (
+    GMAIL_MAX_ATTACHMENT_BYTES,
     MAX_STAGED_TOTAL_BYTES,
     UploadValidationError,
     prune_upload_directory,
@@ -112,10 +113,22 @@ BUILTIN_METHODS = ("rpc.hello", "server.ping", "events.subscribe", "events.unsub
 
 #: Operations whose ``attachments`` are client-named local files that must be
 #: copied into the upload directory before the operation sees them (mc-7kp).
-STAGING_OPERATIONS = frozenset({"messages.send"})
+STAGING_OPERATIONS = frozenset({"messages.send", "gmail.messages.send"})
+#: The side-effect-free pre-check each staging operation has: run before any
+#: file is copied, so an invalid request costs no I/O (mc-mbm.10).
+STAGING_CHECKS = {
+    "messages.send": "messages.send.check",
+    "gmail.messages.send": "gmail.messages.send.check",
+}
+#: Staging operations whose files are plain mail attachments, not media: they
+#: skip the media-kind size policy and are capped at this many bytes per file
+#: (the operation enforces the real Gmail limits on the copies).
+PLAIN_FILE_STAGING_CAPS = {"gmail.messages.send": GMAIL_MAX_ATTACHMENT_BYTES}
 #: Operations with an ``attachments`` field that ignores the files (a pre-check):
 #: their attachment list is emptied, no path of the client reaches them.
-IGNORED_ATTACHMENT_OPERATIONS = frozenset({"messages.send.check"})
+IGNORED_ATTACHMENT_OPERATIONS = frozenset(
+    {"messages.send.check", "gmail.messages.send.check"}
+)
 
 
 class SocketAdapterError(RuntimeError):
@@ -340,9 +353,10 @@ class _Adapter:
         check["attachment_count"] = len(slots)
         check["slots_ok"] = all(s.path or s.rejected is not None for s in slots)
         await loop.run_in_executor(
-            self.sync_pool, self.api.call_json, "messages.send.check", check
+            self.sync_pool, self.api.call_json, STAGING_CHECKS[op.name], check
         )
         budget = MAX_STAGED_TOTAL_BYTES
+        plain_cap = PLAIN_FILE_STAGING_CAPS.get(op.name)
         out: list[dict[str, Any]] = []
         for slot in slots:
             if not slot.path:
@@ -353,7 +367,11 @@ class _Adapter:
                 copy = await loop.run_in_executor(
                     self.sync_pool,
                     lambda s=slot, n=filename, b=budget: stage_local_file(
-                        s.path, filename=n, content_type=s.content_type, max_bytes=b
+                        s.path,
+                        filename=n,
+                        content_type=s.content_type,
+                        max_bytes=b if plain_cap is None else min(b, plain_cap),
+                        media_limits=plain_cap is None,
                     ),
                 )
             except UploadValidationError as exc:
@@ -910,6 +928,8 @@ def start(
             handle.ready.set()
             adapter.sync_pool.shutdown(wait=False, cancel_futures=True)
             adapter.aux_pool.shutdown(wait=False, cancel_futures=True)
+            with contextlib.suppress(Exception):
+                loop.run_until_complete(adapter.api.close_loop_resources())
             with contextlib.suppress(Exception):
                 loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()

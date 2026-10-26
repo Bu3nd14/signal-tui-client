@@ -61,12 +61,12 @@ def fail_on_unclosed_sqlite(monkeypatch: pytest.MonkeyPatch):
 def isolate_gmail_imap_pool():
     """Reset the process-wide IMAP pool around every test.
 
-    The pool lives at module level in :mod:`web.gmail`, so a connection left
+    The pool lives at module level in :mod:`server.gmail`, so a connection left
     idle by one test would otherwise be reused by the next one, bypassing its
     freshly patched ``IMAP4_SSL`` fake.  Clearing before *and* after every test
     keeps the Gmail/link-preview suites isolated from module-level state.
     """
-    from web import gmail
+    from server import gmail
 
     gmail.clear_imap_pool()
     try:

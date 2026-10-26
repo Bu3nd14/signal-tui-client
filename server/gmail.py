@@ -1,7 +1,7 @@
-"""Synchronous IMAP/SMTP transport and MIME parsing for the Gmail POC.
+"""Synchronous IMAP/SMTP transport and MIME parsing for the Gmail integration.
 
-This module deliberately does not import the web framework: it is a plain
-transport layer used from ``web.gmail_api`` through ``asyncio.to_thread``.
+Part of the core (bead mc-im6): it does not import any web framework; the
+``gmail.*`` operations (``server/ops/gmail.py``) call it from worker threads.
 IMAP connections are pooled; SMTP opens one connection per send.
 """
 
@@ -21,6 +21,7 @@ import re
 import secrets
 import smtplib
 import socket
+import tempfile
 import threading
 import time
 import unicodedata
@@ -37,18 +38,25 @@ from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datet
 from fractions import Fraction
 from functools import lru_cache
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote_to_bytes
 
 from filename_utils import sanitize_filename
 from protocols import config
+from server.uploads import (
+    GMAIL_MAX_ATTACHMENT_BYTES,
+    GMAIL_MAX_ATTACHMENTS,
+    GMAIL_MAX_TOTAL_ATTACHMENT_BYTES,
+    cache_directory,
+)
 
 logger = logging.getLogger(__name__)
 
 _MAX_TEXT_LENGTH = 64 * 1024
-_MAX_ATTACHMENTS = 10
-_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
-_MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024
+_MAX_ATTACHMENTS = GMAIL_MAX_ATTACHMENTS
+_MAX_ATTACHMENT_BYTES = GMAIL_MAX_ATTACHMENT_BYTES
+_MAX_TOTAL_ATTACHMENT_BYTES = GMAIL_MAX_TOTAL_ATTACHMENT_BYTES
 _MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 200
@@ -469,6 +477,67 @@ def clear_imap_pool() -> None:
 def close_imap_pool() -> None:
     """Shut the IMAP pool down; safe to call more than once."""
     _reset_imap_pool()
+
+
+# -- temporary blobs ------------------------------------------------------------
+#
+# ``gmail.attachment`` / ``gmail.image`` hand adapters a local file (a blob), but
+# the bytes come from the network, not from a cache the core already owns.  They
+# are written here, 0600 in a 0700 directory, and deleted by whoever delivered
+# them (the HTTP adapter does, right after sending); anything left behind is
+# pruned by age on the next write and wiped when the core shuts down.
+
+_BLOB_DIR_NAME = "gmail-blobs"
+BLOB_MAX_AGE_S = 15 * 60
+
+
+def blob_directory() -> Path:
+    """``<cache dir>/gmail-blobs`` (``CACHE_DIR`` is read at call time)."""
+    return cache_directory() / _BLOB_DIR_NAME
+
+
+def prune_blobs(*, max_age_s: float = BLOB_MAX_AGE_S) -> None:
+    """Delete temporary blobs older than *max_age_s* (``0`` wipes them all)."""
+    directory = blob_directory()
+    cutoff = time.time() - max_age_s
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return
+    for path in entries:
+        try:
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and (max_age_s <= 0 or path.stat().st_mtime < cutoff)
+            ):
+                path.unlink()
+        except OSError:
+            continue
+
+
+def write_blob(data: bytes, suffix: str = "") -> Path:
+    """Store *data* as a new private temporary blob; return its path."""
+    directory = blob_directory()
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    prune_blobs()
+    with tempfile.NamedTemporaryFile(
+        dir=directory, prefix="blob-", suffix=suffix, delete=False
+    ) as handle:
+        path = Path(handle.name)
+        try:
+            os.chmod(path, 0o600)
+            handle.write(data)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+    return path
+
+
+def close_resources() -> None:
+    """Release what Gmail holds in the core: the IMAP pool and temporary blobs."""
+    close_imap_pool()
+    prune_blobs(max_age_s=0)
 
 
 def _create_and_login(pc: _PooledConn, settings: GmailSettings) -> None:

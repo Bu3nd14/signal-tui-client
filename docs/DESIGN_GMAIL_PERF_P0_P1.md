@@ -1,5 +1,11 @@
 # Design — Ottimizzazioni P0+P1 Gmail (request latency)
 
+> **Nota (mc-im6):** il servizio Gmail descritto qui come `web/gmail.py` ora vive in
+> `server/gmail.py` (core) e le sue funzioni sono esposte come operazioni `gmail.*`
+> (`server/ops/gmail.py`); `web/gmail_api.py` si limita a tradurle in HTTP. I percorsi
+> `web/gmail.py` e i numeri di riga qui sotto descrivono il codice com'era al momento
+> del design. Vedi `docs/DESIGN_CLIENT_SERVER_SPLIT.md` §13.
+
 Data: 2026-10-23 · Branch: `perf/gmail-request-latency` · Stato: proposta (rev. 5, post-red-team round 4) · Ambito: solo Gmail (`protocols/config.py`, `web/gmail.py`, `web/gmail_api.py`, `web/static/gmail.js`, test Gmail).
 
 > **Revisione 5** — de-scope della configurabilità TTL e della semantica **TTL 0** (elimina **R1/R2**): TTL **fissi** segreto **300s** / lista inbox **15s**, niente `GMAIL_SECRET_CACHE_TTL_S`/`GMAIL_LIST_CACHE_TTL_S`. Le misure cold usano `clear_gmail_secret_cache()`/`clear_inbox_cache()` tra le iterazioni, non un TTL 0. **R3 logging**: mai `argv`/`argv[0]`/`basename`/`str(exc)`; solo `type(exc).__name__`, `errno`, `timeout`, `returncode` e **label fissa**. Recepite inoltre: dedup flags `tuple(sorted(set(...)))`, **deep-freeze** (mutare un dict restituito da hit non altera la cache), **delete singolo/bulk invalidano globalmente** la lista (try/finally anche su COPY/STORE/EXPUNGE parziale), **`mark_read` aggiorna solo la chiave corrente** (cross-folder TTL documentato), ramo errore comando → **fallback plaintext** (mermaid), correzione `uidvalidity`. Vedi §10 per il riepilogo puntuale.

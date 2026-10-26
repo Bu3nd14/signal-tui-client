@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from web import gmail
+from server import gmail
 from web.gmail_api import create_gmail_image_router
 
 
@@ -19,6 +21,7 @@ def _token(url: str) -> str:
 
 def _client() -> TestClient:
     app = FastAPI()
+    app.state.api = api_for(SimpleNamespace())
     app.include_router(create_gmail_image_router())
     return TestClient(app)
 

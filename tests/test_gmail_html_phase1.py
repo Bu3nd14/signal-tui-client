@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import tinycss2
 
-from web import gmail
+from server import gmail
 
 # ---------------------------------------------------------------------------
 # Helpers

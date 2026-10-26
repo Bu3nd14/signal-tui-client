@@ -13,15 +13,17 @@ import threading
 import time
 from contextlib import ExitStack
 from email.message import EmailMessage
+from types import SimpleNamespace
 from typing import ClassVar
 from urllib.parse import quote
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from protocols import config
-from web import gmail
+from server import gmail
 from web.gmail_api import create_gmail_router
 
 _ENV_VARS = (
@@ -53,6 +55,7 @@ def isolate_gmail_config(monkeypatch, tmp_path):
 @pytest.fixture
 def client():
     app = FastAPI()
+    app.state.api = api_for(SimpleNamespace())
     app.include_router(create_gmail_router())
     return TestClient(app)
 

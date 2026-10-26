@@ -1,5 +1,11 @@
 # Design — Ottimizzazioni P2+P3 Gmail (pool IMAP, sessione HTTP, fetch parziale)
 
+> **Nota (mc-im6):** il servizio Gmail descritto qui come `web/gmail.py` ora vive in
+> `server/gmail.py` (core) e le sue funzioni sono esposte come operazioni `gmail.*`
+> (`server/ops/gmail.py`); `web/gmail_api.py` si limita a tradurle in HTTP. I percorsi
+> `web/gmail.py` e i numeri di riga qui sotto descrivono il codice com'era al momento
+> del design. Vedi `docs/DESIGN_CLIENT_SERVER_SPLIT.md` §13.
+
 Data: 2026-10-24 · Branch: `master` (su `1e24ee4`, P0/P1 già mergiati) · Stato: **revisione 6** (post red-team round 5, gate 6 obbligatorio) · Ambito: solo Gmail (`web/gmail.py`, `web/gmail_api.py`, `web/link_preview.py`, `web/server.py`, test Gmail/link-preview).
 
 > **Contesto**: P0/P1 su `master`. Misure live: `Gmail status` cold ≈0,80s / warm ≈7ms; lista 200 cold ≈1,76s / warm ≈11ms. Il doc copre **P2** (riuso connessioni IMAP), **P3a** (sessione HTTP condivisa), **P3b** (fetch parziale), incrementale e reversibile.
