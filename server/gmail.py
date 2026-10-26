@@ -98,10 +98,11 @@ _IMAP_POOL_CLOSE_TOTAL_S = 1.0
 _IMAP_POOL_ENABLED = True
 _POOL_FP_KEY = secrets.token_bytes(32)
 
-# Conservative allow-list for rendered email HTML.  Remote images are not
-# loaded (tracking pixels); inline CSS is re-serialized from a strict
-# property/value allow-list, while <style> and classes are stripped.  Only
-# safe URL schemes survive; nh3 removes scripts and event handlers.
+# Conservative allow-list for rendered email HTML.  Remote images are
+# rewritten to signed same-origin proxy URLs and loaded by default in the
+# client (the user accepted tracking); inline CSS is re-serialized from a
+# strict property/value allow-list, while <style> and classes are stripped.
+# Only safe URL schemes survive; nh3 removes scripts and event handlers.
 _ALLOWED_HTML_TAGS = frozenset(
     {
         "a",
@@ -2969,9 +2970,10 @@ def sanitize_html(raw: str) -> str:
     Email HTML is fully attacker-controlled.  Rendering it with ``innerHTML``
     without sanitizing would allow event handlers or scripts to steal the web
     UI Bearer token from ``localStorage``.  ``nh3`` removes disallowed tags,
-    attributes, URL schemes and CSS; remote images are dropped on purpose to
-    avoid tracking pixels.  Inline CSS is re-serialized from a strict
-    allow-list with ``tinycss2``.
+    attributes, URL schemes and CSS; remote images are rewritten to signed
+    same-origin proxy URLs in ``data-src`` and loaded by default in the client
+    (tracking accepted by the user), never fetched directly by the browser.
+    Inline CSS is re-serialized from a strict allow-list with ``tinycss2``.
     """
     if not raw or len(raw) > _MAX_HTML_CHARS:
         return ""

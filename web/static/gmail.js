@@ -5,6 +5,7 @@
   const PAGE_SIZE = 50;
   const FETCH_LIMIT = 200;
   const MAX_COMPOSE_FILES = 10;
+  const MAX_IMAGES_PER_MESSAGE = 50;
   const FOLDER_FALLBACK = "INBOX";
   const RENDER_KEY = "gmail-render-mode";
 
@@ -41,7 +42,6 @@
     readerCc: document.getElementById("gmail-reader-cc"),
     readerDate: document.getElementById("gmail-reader-date"),
     readerBody: document.getElementById("gmail-reader-body"),
-    imagesToggle: document.getElementById("gmail-images-toggle"),
     renderToggle: document.getElementById("gmail-render-toggle"),
     reply: document.getElementById("gmail-reply"),
     delete: document.getElementById("gmail-delete"),
@@ -85,7 +85,6 @@
     detail: null,
     readerSeq: 0,
     renderMode: localStorage.getItem(RENDER_KEY) === "text" ? "text" : "html",
-    imagesLoaded: false,
     composeFiles: [],
     replyToUid: null,
     replyToFolder: null,
@@ -582,10 +581,10 @@
     elements.detailEmpty.hidden = false;
     elements.attachments.hidden = true;
     elements.attachmentList.replaceChildren();
+    cancelPendingImages({ all: true });
     elements.readerBody.replaceChildren();
     elements.readerBody.classList.remove("is-empty", "is-html");
     elements.renderToggle.hidden = true;
-    elements.imagesToggle.hidden = true;
     setDetailOpen(false);
     renderList();
   }
@@ -600,11 +599,11 @@
     elements.readerCcRow.hidden = true;
     elements.readerCc.textContent = "";
     elements.readerDate.textContent = "";
+    cancelPendingImages({ all: true });
     elements.readerBody.textContent = "Caricamento…";
     elements.readerBody.classList.remove("is-html");
     elements.readerBody.classList.add("is-empty");
     elements.renderToggle.hidden = true;
-    elements.imagesToggle.hidden = true;
     elements.attachments.hidden = true;
     elements.attachmentList.replaceChildren();
   }
@@ -617,11 +616,11 @@
     elements.readerCcRow.hidden = true;
     elements.readerCc.textContent = "";
     elements.readerDate.textContent = "";
+    cancelPendingImages({ all: true });
     elements.readerBody.textContent = String(message || "Errore sconosciuto.");
     elements.readerBody.classList.remove("is-html");
     elements.readerBody.classList.add("is-empty");
     elements.renderToggle.hidden = true;
-    elements.imagesToggle.hidden = true;
     elements.attachments.hidden = true;
     elements.attachmentList.replaceChildren();
   }
@@ -670,43 +669,54 @@
     return "";
   }
 
-  function toggleImages() {
-    const images = [...elements.readerBody.querySelectorAll("img[data-src]")];
-    if (!images.length) return;
-    const load = !state.imagesLoaded;
-    let failed = 0;
-    for (const image of images) {
-      const url = safeImageUrl(image.dataset.src || "");
-      if (load && url) {
-        image.addEventListener(
-          "error",
-          () => {
-            failed += 1;
-            image.classList.add("is-failed");
-          },
-          { once: true },
-        );
-        image.src = url;
-      } else {
-        image.removeAttribute("src");
-        image.classList.remove("is-failed");
-      }
+  function cancelPendingImages({ all = false } = {}) {
+    for (const image of elements.readerBody.querySelectorAll("img[src]")) {
+      if (!all && image.dataset.loaded === "1") continue;
+      image.removeAttribute("src");
     }
-    state.imagesLoaded = load;
-    elements.imagesToggle.textContent = load
-      ? "Nascondi immagini"
-      : "Mostra immagini";
-    elements.imagesToggle.setAttribute("aria-pressed", load ? "true" : "false");
-    if (load) {
-      window.setTimeout(() => {
-        if (failed) {
-          showNotice(`${failed} immagini non disponibili (link scaduti o bloccati).`);
-        }
-      }, 6000);
+  }
+
+  function loadImages() {
+    const seq = state.readerSeq;
+    const images = [...elements.readerBody.querySelectorAll("img[data-src]")];
+    let loaded = 0;
+    for (const image of images) {
+      if (loaded >= MAX_IMAGES_PER_MESSAGE) break;
+      if (image.hasAttribute("src")) continue;
+      const url = safeImageUrl(image.dataset.src || "");
+      if (!url) {
+        image.classList.add("is-failed");
+        continue;
+      }
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.addEventListener(
+        "error",
+        () => {
+          if (seq !== state.readerSeq) return;
+          image.classList.add("is-failed");
+        },
+        { once: true },
+      );
+      image.addEventListener(
+        "load",
+        () => {
+          if (!image.hasAttribute("src")) return;
+          image.dataset.loaded = "1";
+          image.classList.remove("is-failed");
+        },
+        { once: true },
+      );
+      image.src = url;
+      loaded += 1;
+    }
+    if (images.length > MAX_IMAGES_PER_MESSAGE) {
+      showNotice(`Caricate ${loaded} di ${images.length} immagini.`);
     }
   }
 
   function renderReader(detail) {
+    cancelPendingImages({ all: true });
     elements.reader.setAttribute("aria-busy", "false");
     elements.readerSubject.textContent = subjectOf(detail);
     elements.readerFrom.textContent = senderOf(detail) || "—";
@@ -722,9 +732,10 @@
     const mode = hasHtml && state.renderMode === "html" ? "html" : "text";
     if (mode === "html") {
       // html is sanitized server-side by nh3 (allow-list, scripts removed,
-      // inline styles re-serialized from a strict CSS allow-list, no remote
-      // images, only http/https/mailto links). Parse it inertly and move the
-      // resulting nodes instead of assigning raw markup.
+      // inline styles re-serialized from a strict CSS allow-list, remote
+      // images deferred to signed data-src proxy URLs, only http/https/mailto
+      // links). Parse it inertly and move the resulting nodes instead of
+      // assigning raw markup.
       const parsed = new DOMParser().parseFromString(html, "text/html");
       const content = document.createElement("div");
       content.className = "gmail-html-content";
@@ -745,17 +756,7 @@
     );
     elements.renderToggle.title = mode === "html" ? "Mostra solo testo" : "Mostra HTML";
 
-    state.imagesLoaded = false;
-    const imageCount = mode === "html"
-      ? elements.readerBody.querySelectorAll("img[data-src]").length
-      : 0;
-    elements.imagesToggle.hidden = imageCount === 0;
-    if (imageCount) {
-      elements.imagesToggle.textContent = "Mostra immagini";
-      elements.imagesToggle.setAttribute("aria-pressed", "false");
-      elements.imagesToggle.title =
-        "Carica le immagini tramite il server (può rivelare l'IP del server al mittente)";
-    }
+    if (mode === "html") loadImages();
     renderAttachments(detail);
   }
 
@@ -1242,6 +1243,7 @@
     state.open = false;
     state.listSeq += 1;
     state.readerSeq += 1;
+    cancelPendingImages();
     state.selectedUids.clear();
     state.selectionMode = false;
     if (elements.composeDialog.open) elements.composeDialog.close();
@@ -1276,7 +1278,6 @@
     if (state.detail) openCompose("reply", state.detail);
   });
   elements.renderToggle.addEventListener("click", toggleRenderMode);
-  elements.imagesToggle.addEventListener("click", toggleImages);
   elements.readerBody.addEventListener("click", (event) => {
     const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
     if (!anchor) return;

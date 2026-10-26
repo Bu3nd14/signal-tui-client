@@ -35,9 +35,10 @@ def test_invalid_token_returns_404():
 def test_proxy_returns_raster_image_with_safety_headers():
     token = _token("https://images.example/a.png")
 
-    async def fake_fetch(url, max_bytes):
+    async def fake_fetch(url, max_bytes, max_pixels=None):
         assert url == "https://images.example/a.png"
-        assert max_bytes > 0
+        assert max_bytes == 8 * 1024 * 1024
+        assert max_pixels == 25_000_000
         return b"\x89PNG\r\n\x1a\nfake", "image/png"
 
     with patch("server.link_preview.fetch_external_image", new=fake_fetch):
@@ -53,8 +54,8 @@ def test_proxy_returns_raster_image_with_safety_headers():
 def test_proxy_maps_fetch_failure_to_502():
     token = _token("https://images.example/a.png")
 
-    async def fake_fetch(url, max_bytes):
-        return None
+    async def fake_fetch(url, max_bytes, max_pixels=None):
+        assert max_pixels == 25_000_000
 
     with patch("server.link_preview.fetch_external_image", new=fake_fetch):
         response = _client().get("/gmail-image", params={"token": token})

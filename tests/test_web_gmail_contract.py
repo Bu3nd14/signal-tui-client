@@ -312,7 +312,7 @@ def _token(url: str) -> str:
 def test_image_route_matches_operation_and_cleans_up(client, api, monkeypatch):
     fetched: list[tuple[str, int]] = []
 
-    async def fake_fetch(url, max_bytes):
+    async def fake_fetch(url, max_bytes, max_pixels=None):
         fetched.append((url, max_bytes))
         return _PNG, "image/png"
 
@@ -343,7 +343,7 @@ def test_image_route_matches_operation_and_cleans_up(client, api, monkeypatch):
     ],
 )
 def test_image_forged_token_never_reaches_the_fetcher(client, api, monkeypatch, token):
-    async def fail(url, max_bytes):
+    async def fail(url, max_bytes, max_pixels=None):
         raise AssertionError("fetched an unsigned URL")
 
     monkeypatch.setattr("server.link_preview.fetch_external_image", fail)
@@ -359,7 +359,7 @@ def test_image_forged_token_never_reaches_the_fetcher(client, api, monkeypatch, 
 
 
 def test_image_tampered_payload_is_rejected(client, monkeypatch):
-    async def fail(url, max_bytes):
+    async def fail(url, max_bytes, max_pixels=None):
         raise AssertionError("fetched an unsigned URL")
 
     monkeypatch.setattr("server.link_preview.fetch_external_image", fail)
@@ -371,7 +371,7 @@ def test_image_tampered_payload_is_rejected(client, monkeypatch):
 
 
 def test_image_fetch_failure_is_502(client, api, monkeypatch):
-    async def none(url, max_bytes):
+    async def none(url, max_bytes, max_pixels=None):
         return None
 
     monkeypatch.setattr("server.link_preview.fetch_external_image", none)
