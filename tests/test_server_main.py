@@ -223,10 +223,20 @@ def test_no_web_still_serves_the_socket(lock_file, fake_backends, capsys, tmp_pa
     t = threading.Thread(target=run)
     t.start()
     try:
-        assert _wait(path.exists)
-        err = capsys.readouterr()
-        assert "--no-web" in err.err and str(path) in err.err
-        assert f"Socket: {path}" in err.out
+        # Wait for the startup messages, not just the socket file: the file is
+        # created before the two lines are printed.
+        out = err = ""
+
+        def saw_startup() -> bool:
+            nonlocal out, err
+            chunk = capsys.readouterr()
+            out += chunk.out
+            err += chunk.err
+            return f"Socket: {path}" in out and "--no-web" in err
+
+        assert _wait(saw_startup)
+        assert "--no-web" in err and str(path) in err
+        assert f"Socket: {path}" in out
     finally:
         stop.set()
         t.join(15)
