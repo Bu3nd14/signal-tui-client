@@ -220,7 +220,7 @@ or use the installer:
 ```
 
 `./scripts/start_whatsapp.sh` and `./install.sh --whatsapp` both apply the WAHA container's CPU/RAM
-caps (1.5 CPU / 2GB RAM) by default; pass `--no-docker-limits` to either to skip them. A bare
+caps (1.5 CPU / 4GB RAM) by default; pass `--no-docker-limits` to either to skip them. A bare
 `docker compose up -d` never applies the caps (see [below](#running-without-cpuram-caps---no-docker-limits)).
 
 The installer creates `.env` with secure WAHA credentials and `0600` permissions,
@@ -252,7 +252,8 @@ backend at any compatible Baileys API.
 `./install.sh --whatsapp`, `./scripts/start_whatsapp.sh`, `./scripts/restart_backend.sh`,
 `./scripts/start_on_server.sh start`, and `./scripts/tui_handover.sh {to-server,to-local}` all layer
 `docker-compose.resources.yml` on top of `docker-compose.yml` **by default**, capping the WAHA
-container at 1.5 CPU / 2GB RAM. Pass `--no-docker-limits` to any of them to skip that:
+container at 1.5 CPU / 4GB RAM. Pass `--no-docker-limits` to any of them to skip that, or set
+`WAHA_DOCKER_LIMITS=0` in `.env` to skip it on every command (handover included):
 
 ```bash
 ./scripts/start_whatsapp.sh --no-docker-limits
@@ -269,6 +270,42 @@ container at 1.5 CPU / 2GB RAM. Pass `--no-docker-limits` to any of them to skip
 > ```bash
 > docker compose -f docker-compose.yml -f docker-compose.resources.yml up -d
 > ```
+
+#### Extra compose files (`WAHA_COMPOSE_FILES`, `--compose-file`)
+
+The launcher can layer your own compose files on top of WAHA's (port mappings, volumes, other
+limits, extra services, ...). They come after `docker-compose.yml` and the resources overlay, so
+their values win:
+
+```bash
+# Permanent: in .env (or the environment), separated by ":"; relative to the project directory
+WAHA_COMPOSE_FILES=docker-compose.local.yml:/etc/megachat/waha.yml
+
+# One run only: repeatable, relative to the current directory, added after WAHA_COMPOSE_FILES
+python3 launcher.py whatsapp start --compose-file my-limits.yml
+python3 launcher.py server start --compose-file my-limits.yml --compose-file ports.yml
+```
+
+`--compose-file` is accepted by `install`, `whatsapp start`, `backend-restart`, `server start` and
+`handover to-local`; `whatsapp stop`, `server stop` and the handover also pass the
+`WAHA_COMPOSE_FILES` files to `docker compose down` (put files you always use there, not on the
+command line). The remote side of a handover reads its own `.env`.
+
+Example — different caps instead of the default ones (the later file overrides the values it sets):
+
+```yaml
+# docker-compose.local.yml
+services:
+  whatsapp:
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2048M
+```
+
+To drop the caps entirely you don't need a replacement file: set `WAHA_DOCKER_LIMITS=0`. Don't give
+a file that `include:`s `docker-compose.yml` — the launcher always passes the base file itself.
 
 #### Configuration (env or `config.json`)
 

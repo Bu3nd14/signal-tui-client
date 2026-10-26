@@ -331,7 +331,7 @@ def stop_all(*, whatsapp: bool = True) -> int:
 
     info("Spegnimento WAHA...")
     result = subprocess.run(
-        ["docker", "compose", "-f", str(whatsapp_mod.COMPOSE_FILE), "down"],
+        ["docker", "compose", *whatsapp_mod.compose_args(False), "down"],
         capture_output=True,
         check=False,
     )

@@ -86,7 +86,7 @@ REMOTE_STOP = (
     + f"""
 stop_serve || {{ echo "server remoto non si ferma (pid $(lock_pid))" >&2; exit {REMOTE_STOP_STUCK}; }}
 pkill -f "signal-cli.*daemon" 2>/dev/null || true
-cd {shlex.quote(REMOTE_PROJECT_DIR)} && docker compose down >/dev/null 2>&1 || true
+cd {shlex.quote(REMOTE_PROJECT_DIR)} && python3 launcher.py whatsapp stop >/dev/null 2>&1 || true
 echo "server spento"
 """
 )
@@ -190,7 +190,7 @@ def to_server(*, docker_limits: bool = True) -> int:
         ["pkill", "-f", "signal-cli.*daemon"], capture_output=True, check=False
     )
     subprocess.run(
-        ["docker", "compose", "-f", str(whatsapp_mod.COMPOSE_FILE), "down"],
+        ["docker", "compose", *whatsapp_mod.compose_args(False), "down"],
         capture_output=True,
         check=False,
     )

@@ -5,6 +5,7 @@ Replaces the WAHA-related portion of tests/test_install_script.py.
 
 from __future__ import annotations
 
+import os
 import shutil
 import stat
 import subprocess
@@ -38,6 +39,65 @@ class TestComposeArgs:
     def test_no_docker_limits_omits_resources_overlay(self, project: Path):
         args = whatsapp.compose_args(False)
         assert args == ["-f", str(project / "docker-compose.yml")]
+
+    @pytest.mark.parametrize("value", ["0", "false", "off", "NO"])
+    def test_waha_docker_limits_0_in_dotenv_omits_overlay(
+        self, project: Path, monkeypatch, value
+    ):
+        monkeypatch.delenv("WAHA_DOCKER_LIMITS", raising=False)
+        (project / ".env").write_text(f"WAHA_DOCKER_LIMITS={value}\n")
+        assert whatsapp.compose_args() == ["-f", str(project / "docker-compose.yml")]
+        assert not whatsapp.limits_enabled()
+
+    def test_waha_docker_limits_1_keeps_overlay(self, project: Path, monkeypatch):
+        monkeypatch.setenv("WAHA_DOCKER_LIMITS", "1")
+        assert str(project / "docker-compose.resources.yml") in whatsapp.compose_args()
+
+    def test_extra_files_are_layered_last_in_order(self, project: Path, monkeypatch):
+        monkeypatch.setenv(
+            "WAHA_COMPOSE_FILES", f"local.yml{os.pathsep}/abs/other.yml{os.pathsep}"
+        )
+        assert whatsapp.compose_args() == [
+            "-f",
+            str(project / "docker-compose.yml"),
+            "-f",
+            str(project / "docker-compose.resources.yml"),
+            "-f",
+            str(project / "local.yml"),
+            "-f",
+            "/abs/other.yml",
+        ]
+
+    def test_extra_files_from_dotenv(self, project: Path, monkeypatch):
+        monkeypatch.delenv("WAHA_COMPOSE_FILES", raising=False)
+        (project / ".env").write_text('WAHA_COMPOSE_FILES="mine.yml"\n')
+        assert whatsapp.compose_args(False)[-2:] == ["-f", str(project / "mine.yml")]
+
+    def test_compose_file_flag_appends_after_dotenv(
+        self, project: Path, monkeypatch, tmp_path
+    ):
+        # add_compose_files writes os.environ directly: register it for restore.
+        monkeypatch.setenv("WAHA_COMPOSE_FILES", "")
+        (project / ".env").write_text("WAHA_COMPOSE_FILES=mine.yml\n")
+        monkeypatch.chdir(tmp_path)
+        whatsapp.add_compose_files(["cli.yml"])
+        assert whatsapp.compose_args(False)[2:] == [
+            "-f",
+            str(project / "mine.yml"),
+            "-f",
+            str((tmp_path / "cli.yml").resolve()),
+        ]
+
+    def test_stop_uses_the_extra_files(self, project: Path, monkeypatch):
+        monkeypatch.setenv("WAHA_COMPOSE_FILES", "/abs/other.yml")
+        calls = []
+        monkeypatch.setattr(
+            whatsapp.subprocess,
+            "run",
+            lambda cmd, **k: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0),
+        )
+        assert whatsapp.stop() == 0
+        assert calls[0][-3:] == ["-f", "/abs/other.yml", "down"]
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
