@@ -693,6 +693,29 @@ assert.equal(result.optimistic[0].confirmed_message_id, "wa-echo");
 """)
 
 
+def test_whatsapp_media_reply_reconciles_echo_without_quote_timestamp():
+    # The WAHA echo of a reply carries no replyTo timestamp and the caption as
+    # quote text: the optimistic image reply must still pair with its row.
+    _run_reconciliation_node("""
+const old = { id: "old", direction: "out", text: "risposta", timestamp: 1000 };
+const optimistic = { optimistic_id: "reply", protocol: "whatsapp", contactId: "g@g.us", direction: "out", text: "risposta", timestamp: 2000, known_message_ids: ["old"], optimisticStatus: "sent", quote_timestamp: 1500, quote_author: "g@g.us", quote_message: "bella foto", quote_media_type: "image" };
+const echo = { id: "wa-echo", direction: "out", text: "risposta", timestamp: 2001, quote_text: "bella foto", quote_timestamp: null, quote_author: "Mario" };
+const result = reconcileOptimisticMessages([old, echo], [optimistic], "whatsapp", "g@g.us");
+assert.equal(result.visible.length, 0);
+assert.equal(result.optimistic[0].confirmed_message_id, "wa-echo");
+""")
+
+
+def test_whatsapp_media_reply_fallback_requires_a_unique_row():
+    _run_reconciliation_node("""
+const optimistic = { optimistic_id: "reply", protocol: "whatsapp", contactId: "g@g.us", direction: "out", text: "ok", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: 1500, quote_author: "g@g.us", quote_message: "doc.pdf" };
+const a = { id: "a", direction: "out", text: "ok", timestamp: 2001, quote_text: "altro" };
+const b = { id: "b", direction: "out", text: "ok", timestamp: 2002, quote_text: "altro ancora" };
+const result = reconcileOptimisticMessages([a, b], [optimistic], "whatsapp", "g@g.us");
+assert.equal(result.visible.length, 1);
+""")
+
+
 def test_optimistic_image_reply_reconciles_waha_media_placeholder_echo():
     _run_reconciliation_node("""
 const optimistic = { optimistic_id: "image-reply", protocol: "whatsapp", contactId: "alice", direction: "out", text: "answer", timestamp: 2000, known_message_ids: [], optimisticStatus: "sent", quote_timestamp: 1000, quote_author: "alice", quote_message: "photo.jpg", quote_media_type: "image" };
