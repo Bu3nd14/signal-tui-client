@@ -2,7 +2,7 @@
 # docker-compose.resources.yml — CPU/RAM caps for the WAHA container
 #
 # Layered on top of docker-compose.yml BY DEFAULT by install.sh, scripts/*.sh
-# and launcher.py (1.5 CPU / 2GB RAM on the WAHA container); pass
+# and launcher.py (1.5 CPU / 4GB RAM on the WAHA container); pass
 # --no-docker-limits to any of them to skip it.
 #
 # Kept in a separate file because `deploy.resources.limits` needs the memory
@@ -25,4 +25,4 @@ services:
       resources:
         limits:
           cpus: '1.5'      # Impedisce di usare tutta la CPU
-          memory: 2048M    # Massimo 2GB di RAM per tutto il container
+          memory: 4096M    # Massimo 4GB di RAM per tutto il container
