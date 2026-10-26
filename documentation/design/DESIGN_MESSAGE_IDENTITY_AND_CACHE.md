@@ -38,7 +38,7 @@ servizi esterni
 ```
 
 - **Livello [1]** è gestito dal backend: dedup specifica di protocollo, ordinamento deterministico `(timestamp, id|testo)`, upgrade dell'id ottimistico con quello server.
-- **Livello [2]** alimenta lista contatti (unread, last_message_ts), finestra di chat e reload; è add-only verso il backend (`_merge_backend_cache` non può mai farla "restringere"). Attenzione: il merge **non copia i dict** — le entry appese nella cache UI sono GLI STESSI oggetti del backend cache, quindi le mutazioni dell'uno si riflettono nell'altro.
+- **Livello [2]** alimenta lista contatti (unread, last_message_ts), finestra di chat e reload; è add-only verso il backend (`_merge_window_rows` non può mai farla "restringere"). Dal P1.4 le righe arrivano dalle operazioni `messages.window` / `messages.snapshot` del core e sono **copie**: le entry nella cache UI non sono più gli stessi oggetti del backend cache (gli aggiornamenti passano dagli eventi).
 - **Livello [3]** è volatile: svuotato a ogni cambio contatto (`_clear_chat` resetta anche i set).
 - **Livello [4]** è la verità across-session: al boot WhatsApp e Telegram ricaricano solo le proprie righe (`_load_cache(protocol=...)`); **Signal invece chiama `_load_cache()` SENZA filtro protocollo** (`backends/signal.py:330`), quindi la sua cache in-memory parte con righe di tutti i protocolli (chiavi raw miste). La dedup per `msg_id` previene in generale il ri-ingest, ma ha limiti documentati nella sezione "Limiti noti" qui sotto.
 
@@ -62,7 +62,7 @@ servizi esterni
 
 Le finestre qui sopra sono **euristiche, non garanzie**: i casi di collasso documentati sono raccolti nella sezione 7.
 
-## 4. Merge cache backend → UI (`chat_view.py::_merge_backend_cache`)
+## 4. Merge cache backend → UI (`chat_view.py::_merge_window_rows`, righe da `messages.window`)
 
 Quando una chat WhatsApp viene aperta, lo storico remoto scaricato finisce nel backend cache e viene specchiato nella cache UI con regole add-only:
 

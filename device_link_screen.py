@@ -12,15 +12,12 @@ Provides:
 
 from __future__ import annotations
 
-import json
+import asyncio
+import base64
 import logging
-import os
-import re
-import subprocess
-import tempfile
+import threading
 import time
-from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -35,7 +32,10 @@ from textual.widgets import (
     Static,
 )
 
-from qr_utils import qr_to_ascii
+from models import DEFAULT_SIGNAL_DEVICE_NAME
+from qr_utils import qr_png_to_ascii, qr_to_ascii
+from server.client import ApiError
+from tui.client_timeouts import call_op
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +46,6 @@ _PROTOCOL_ITEMS: list[dict[str, str]] = [
     {"id": "whatsapp", "label": "💬 WhatsApp", "disabled": False},
     {"id": "telegram", "label": "📨 Telegram", "disabled": False},
 ]
-
-# Default device name used for Signal linking when the user doesn't customise it.
-_DEFAULT_SIGNAL_DEVICE_NAME = "Signal-TUI-Client"
 
 
 # ─── Screen ────────────────────────────────────────────────────────────────────
@@ -223,21 +220,28 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         has_whatsapp: bool = False,
         has_telegram: bool = False,
         force_phone_input: bool = False,
+        client: Any = None,
     ) -> None:
         super().__init__()
+        #: The server client the flow talks to (default: the app's ``client``).
+        self._link_client = client
+        #: Thread of the last background ``link.cancel`` (see ``dismiss``).
+        self.cancel_thread: threading.Thread | None = None
         self._signal_number = signal_number
         self._has_whatsapp = has_whatsapp
         self._has_telegram = has_telegram
         self._force_phone_input = force_phone_input
         self._phase: str = "picker"
         self._selected_protocol: str = ""
-        self._device_name: str = _DEFAULT_SIGNAL_DEVICE_NAME
-        self._signal_accounts_before_link: set[str] = set()
+        self._device_name: str = DEFAULT_SIGNAL_DEVICE_NAME
         self._signal_finalizing = False
         self._dismiss_after_finalize = False
         # Protocolli il cui flusso QR è stato effettivamente avviato in questa
         # schermata: al dismiss servono a riconnettere solo i backend toccati.
         self._touched_protocols: set[str] = set()
+        #: Protocol whose link the server is running for this screen; the
+        #: server is told to cancel it on dismiss.
+        self._active_link: str | None = None
 
     # ── Compose ────────────────────────────────────────────────────────────
 
@@ -402,8 +406,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             self._touched_protocols.add(self._selected_protocol)
         self._populate_qr_phase("⏳ Generating QR code...", phone)
         self._show_phase("qr")
-        self._linking_proc: subprocess.Popen | None = None
-        self._qr_start_time: float = time.time()
+        self._active_link = self._selected_protocol
         self.run_worker(self._fetch_real_qr(phone), exclusive=True)
 
     # ── Polling for completion ──────────────────────────────────────────────
@@ -415,8 +418,6 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         WhatsApp: polls WAHA session status; refreshes QR on expiry.
         Both timeout after 5 minutes.
         """
-        import asyncio as _asyncio
-
         deadline = time.time() + 300  # 5 min timeout
         proto = self._selected_protocol
 
@@ -472,11 +473,11 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                     code.refresh()
                 except Exception as _e:
                     logger.debug("Failed to update linked status", exc_info=True)
-                await _asyncio.sleep(2)
+                await asyncio.sleep(2)
                 self.dismiss(None)
                 return
 
-            await _asyncio.sleep(2)
+            await asyncio.sleep(2)
 
         # Timeout (only if still on QR phase)
         if self._phase == "qr":
@@ -486,171 +487,74 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             except Exception as _e:
                 logger.debug("Failed to update timeout status", exc_info=True)
 
+    # ── Server calls (the linking itself runs in the core) ─────────────────
+
+    def _client(self) -> Any:
+        """The client of the server running the link."""
+        return self._link_client if self._link_client is not None else self.app.client
+
+    async def _call(self, op: str, data: dict[str, Any]) -> Any:
+        """Run operation *op* off the UI thread (it may block for seconds)."""
+        return await asyncio.to_thread(call_op, self._client(), op, data)
+
+    @staticmethod
+    def _render_qr(qr: dict[str, str]) -> str:
+        """Text shown in the QR widget for a server QR payload."""
+        kind, data = qr["kind"], qr["data"]
+        if kind == "url":
+            return qr_to_ascii(data)
+        if kind == "png":
+            return qr_png_to_ascii(base64.b64decode(data))
+        if kind == "info":
+            return f"\n\n{data}\n"
+        if kind == "error":
+            return f"\n\n❌ {data}\n"
+        return data  # "text": already rendered
+
+    def _show_qr(self, qr: dict[str, str]) -> None:
+        """Replace the QR on screen."""
+        code_widget = self.query_one("#link-qr-code", Static)
+        code_widget.update(self._render_qr(qr))
+        code_widget.refresh()
+
+    async def _poll(self, protocol: str) -> dict[str, Any]:
+        """``link.poll``; a failed poll counts as "still waiting" (the
+        deadline in :meth:`_poll_completion` ends the wait)."""
+        try:
+            return await self._call("link.poll", {"protocol": protocol})
+        except ApiError as exc:
+            logger.warning("link.poll(%s) failed: %s", protocol, exc)
+            return {"state": "waiting", "needs_2fa": False, "qr": None}
+
     async def _check_signal_done(self) -> bool:
         """Check if the signal-cli link subprocess finished successfully."""
-        proc = getattr(self, "_linking_proc", None)
-        if proc is None:
-            return False
-        rc = proc.poll()
-        if rc is None:
-            return False  # still running
-        return rc == 0  # 0 = success
+        return (await self._poll("signal"))["state"] == "finalize"
 
     async def _finalize_signal_link(self, phone: str) -> None:
         """Persist the linked account and update the active Signal backend."""
-        import asyncio as _asyncio
-
-        account = await _asyncio.to_thread(
-            self._resolve_linked_signal_account,
-            phone,
-            self._signal_accounts_before_link,
+        result = await self._call(
+            "link.finalize", {"protocol": "signal", "phone": phone}
         )
-        backend = getattr(self.app, "signal_backend", None)
-        current_account = getattr(backend, "user_number", "")
-        if current_account and current_account != account:
-            raise RuntimeError(
-                "switching Signal accounts in an active profile is not supported"
-            )
-        await _asyncio.to_thread(self._persist_signal_account, account)
-        self._signal_number = account
-        if backend is not None:
-            backend.user_number = account
-
-    @staticmethod
-    def _list_signal_accounts() -> list[str]:
-        """Return canonical E.164 account numbers reported by signal-cli."""
-        from protocols import rpc as signal_rpc
-
-        result = subprocess.run(
-            [str(signal_rpc.find_signal_cli()), "listAccounts"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError("signal-cli could not list the linked accounts")
-        return list(
-            dict.fromkeys(re.findall(r"(?<!\d)\+\d{7,15}(?!\d)", result.stdout))
-        )
-
-    @classmethod
-    def _resolve_linked_signal_account(
-        cls, phone: str, previous_accounts: set[str] | None = None
-    ) -> str:
-        """Resolve the linked account without changing local configuration."""
-        accounts = cls._list_signal_accounts()
-        new_accounts = set(accounts) - (previous_accounts or set())
-        normalized_phone = re.sub(r"[\s()-]", "", phone)
-        if len(new_accounts) == 1:
-            account = new_accounts.pop()
-        elif normalized_phone in accounts:
-            account = normalized_phone
-        elif len(accounts) == 1:
-            account = accounts[0]
-        elif not accounts:
-            raise RuntimeError("signal-cli did not report a linked account")
-        else:
-            raise RuntimeError(
-                "multiple linked accounts found; select the account number"
-            )
-
-        environment_account = os.environ.get("SIGNAL_USER_NUMBER")
-        if environment_account and environment_account != account:
-            raise RuntimeError(
-                "SIGNAL_USER_NUMBER selects a different account; unset it and retry"
-            )
-        return account
-
-    @staticmethod
-    def _persist_signal_account(account: str) -> None:
-        """Atomically save the linked account while preserving other settings."""
-        from protocols import rpc as signal_rpc
-
-        config_file = signal_rpc.PROJECT_DIR / "config.json"
-        config: dict[str, object] = {}
-        if config_file.exists():
-            try:
-                loaded = json.loads(config_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as exc:
-                raise RuntimeError(
-                    "existing config.json is invalid or unreadable"
-                ) from exc
-            if not isinstance(loaded, dict):
-                raise RuntimeError("existing config.json must contain a JSON object")
-            config = loaded
-        config["user_number"] = account
-
-        temporary_path: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=config_file.parent,
-                prefix=".config.json.",
-                delete=False,
-            ) as temporary:
-                json.dump(config, temporary, indent=2)
-                temporary.write("\n")
-                temporary_path = Path(temporary.name)
-            os.replace(temporary_path, config_file)
-        finally:
-            if temporary_path is not None and temporary_path.exists():
-                temporary_path.unlink()
+        self._signal_number = result["account"]
 
     async def _check_whatsapp_done(self) -> bool:
-        """Check WAHA session status; refresh QR if expired."""
-        import asyncio as _asyncio
-
-        app = self.app
-        wa = getattr(app, "whatsapp_backend", None)
-        if wa is None or wa._rest is None:
-            return False
-
-        def _run() -> tuple[bool, bool]:
-            status = wa._rest.get_session_status() or {}
-            s = str(status.get("status") or "").lower()
-            if self._whatsapp_status_is_linked(status):
-                return True, False  # done, no refresh needed
-            # Check QR age for refresh
-            age = time.time() - self._qr_start_time
-            if age >= 60 and s in ("scan_qr", "scan_qr_code", "unpaired", "pending"):
-                return False, True  # not done, need refresh
-            return False, False
-
-        done, need_refresh = await _asyncio.to_thread(_run)
-
-        if need_refresh:
-            logger.info("WhatsApp QR expired, refreshing...")
+        """Check WAHA session status; the server renews the QR when expired."""
+        result = await self._poll("whatsapp")
+        if result["qr"] is not None:
             try:
-                new_qr = await self._get_whatsapp_qr_fresh()
-                if new_qr.startswith("INFO:"):
-                    qr_ascii = "\n\n" + new_qr[5:]
-                else:
-                    qr_ascii = new_qr  # already ASCII-rendered
-                code_widget = self.query_one("#link-qr-code", Static)
-                code_widget.update(qr_ascii)
-                code_widget.refresh()
-                self._qr_start_time = time.time()
+                self._show_qr(result["qr"])
             except Exception:
                 logger.exception("Failed to refresh WhatsApp QR")
-
-        return done
+        return result["state"] == "done"
 
     async def _check_telegram_done(self) -> bool:
-        """Check if Telegram QR login completed; refresh QR if expired."""
-        app = self.app
-        tb = getattr(app, "telegram_backend", None)
-        if tb is None:
-            return False
-
-        # _connected is set to True by the background wait task
-        if tb._connected:
+        """Check if Telegram QR login completed; the server renews the QR and
+        reports when the account asks for its 2FA password."""
+        result = await self._poll("telegram")
+        if result["state"] == "done":
             return True
 
-        # Check if 2FA password is needed
-        if getattr(tb, "_needs_2fa", False) and not getattr(self, "_2fa_shown", False):
-            self._2fa_shown = True
+        if result["needs_2fa"]:
             try:
                 status = self.query_one("#link-qr-status", Static)
                 status.update("🔐 2FA required — enter password below")
@@ -668,95 +572,31 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             except Exception as _e:
                 logger.debug("Failed to mount 2FA input", exc_info=True)
 
-        # Check QR age for refresh (Telegram QR tokens expire ~60s)
-        age = time.time() - self._qr_start_time
-        if age >= 60:
-            logger.info("Telegram QR expired, refreshing...")
+        if result["qr"] is not None:
             try:
-                new_url = await self._get_telegram_qr_link()
-                self._2fa_shown = False
-                if new_url.startswith("INFO:"):
-                    code_widget = self.query_one("#link-qr-code", Static)
-                    code_widget.update(f"\n\n{new_url[5:]}\n")
-                    code_widget.refresh()
-                elif new_url.startswith("ERROR:"):
-                    code_widget = self.query_one("#link-qr-code", Static)
-                    code_widget.update(f"\n\n❌ {new_url[7:]}\n")
-                    code_widget.refresh()
-                else:
-                    qr_ascii = qr_to_ascii(new_url)
-                    code_widget = self.query_one("#link-qr-code", Static)
-                    code_widget.update(qr_ascii)
-                    code_widget.refresh()
-                self._qr_start_time = time.time()
+                self._show_qr(result["qr"])
             except Exception:
                 logger.exception("Failed to refresh Telegram QR")
-
         return False
-
-    async def _get_whatsapp_qr_fresh(self) -> str:
-        """Get a fresh WhatsApp QR (resets session, unlike _get_whatsapp_qr)."""
-        import asyncio as _asyncio
-
-        app = self.app
-        wa = getattr(app, "whatsapp_backend", None)
-        if wa is None or wa._rest is None:
-            return "ERROR: WhatsApp backend not available"
-
-        def _run() -> str:
-            qr = wa._rest.get_fresh_pairing_qr(reset=False)
-            if isinstance(qr, bytes):
-                from qr_utils import qr_png_to_ascii
-
-                return qr_png_to_ascii(qr)
-            elif isinstance(qr, str):
-                return qr
-            return "ERROR: No fresh QR available"
-
-        return await _asyncio.to_thread(_run)
 
     # ── Real QR fetching (async workers) ────────────────────────────────────
 
     async def _fetch_real_qr(self, phone: str) -> None:
-        """Background worker: fetch the real QR from the backend."""
+        """Background worker: ask the server to start the link and show its QR."""
         try:
-            qr_data = await self._get_qr_data_async(phone)
+            qr = await self._start_link(phone)
 
-            # WhatsApp returns pre-rendered ASCII (prefixed with "ASCII:")
-            if qr_data.startswith("ASCII:"):
-                qr_ascii = qr_data[6:]
-                if qr_ascii.startswith("INFO:"):
-                    # Already-connected info message
-                    info_text = qr_ascii[5:].strip()
-                    qr_ascii = f"\n\n{info_text}\n"
-                    code_widget = self.query_one("#link-qr-code", Static)
-                    code_widget.update(qr_ascii)
-                    code_widget.refresh()
-                    status = self.query_one("#link-qr-status", Static)
-                    status.update("")
-                    return
-                code_widget = self.query_one("#link-qr-code", Static)
-                code_widget.update(qr_ascii)
-                code_widget.refresh()
-                status = self.query_one("#link-qr-status", Static)
-                status.update("⏳ Waiting for scan from phone...")
-                self.run_worker(self._poll_completion(phone), exclusive=False)
-                return
-
-            if qr_data.startswith("INFO:"):
+            if qr["kind"] == "info":
                 # Already-connected type message
-                info_text = qr_data[5:].strip()
                 code_widget = self.query_one("#link-qr-code", Static)
-                code_widget.update(f"\n\n{info_text}\n")
+                code_widget.update(f"\n\n{qr['data'].strip()}\n")
                 code_widget.refresh()
                 status = self.query_one("#link-qr-status", Static)
                 status.update("")
                 return
 
-            # Signal: generate QR from link URL
-            qr_ascii = qr_to_ascii(qr_data)
             code_widget = self.query_one("#link-qr-code", Static)
-            code_widget.update(qr_ascii)
+            code_widget.update(self._render_qr(qr))
             code_widget.refresh()
             status = self.query_one("#link-qr-status", Static)
             status.update("⏳ Waiting for scan from phone...")
@@ -774,150 +614,21 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             except Exception:
                 logger.exception("Failed to update QR widget")
 
-    async def _get_qr_data_async(self, phone: str) -> str:
-        """Return the real QR data for the selected protocol.
+    async def _start_link(self, phone: str) -> dict[str, str]:
+        """Start the selected protocol's link on the server; returns its QR.
 
-        For Signal: returns a link URL that still needs ``qr_to_ascii()``.
-        For WhatsApp: returns ``"ASCII:"`` + the pre-rendered QR text.
+        Signal: a link URL (``signal-cli link`` runs in the core).  WhatsApp:
+        a PNG/text QR, or an "already linked" info.  Telegram: a login URL.
         """
-        proto = self._selected_protocol
-        if proto == "signal":
-            return await self._get_signal_link_url()
-        elif proto == "whatsapp":
-            ascii_qr = await self._get_whatsapp_qr()
-            return f"ASCII:{ascii_qr}"
-        elif proto == "telegram":
-            return await self._get_telegram_qr_link()
-        return f"fake-{proto}-link"
-
-    async def _get_signal_link_url(self) -> str:
-        """Run ``signal-cli link`` in a thread, extract the sgnl:// URL."""
-        import asyncio as _asyncio
-
-        from protocols.rpc import find_signal_cli
-
-        def _run() -> str:
-            try:
-                self._signal_accounts_before_link = set(self._list_signal_accounts())
-            except Exception:
-                self._signal_accounts_before_link = set()
-                logger.debug("Could not snapshot Signal accounts", exc_info=True)
-            args = [
-                str(find_signal_cli()),
-                "link",
-                "-n",
-                self._device_name,
-            ]
-            logger.info("Starting signal-cli link: %s", args)
-            proc = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-            self._linking_proc = proc
-
-            link_found = None
-            for line in iter(proc.stdout.readline, ""):
-                line = line.rstrip()
-                match = re.search(r"((?:sgnl|signal)://link[^\s]*)", line)
-                if match:
-                    link_found = match.group(1)
-                    break
-                if "error" in line.lower() or "cannot" in line.lower():
-                    logger.warning("signal-cli reported an error during linking")
-
-            if link_found:
-                logger.info("Signal link URL found")
-                return link_found
-            raise RuntimeError(
-                "Could not find Signal link URL in signal-cli output. "
-                "Is signal-cli configured correctly?"
-            )
-
-        return await _asyncio.to_thread(_run)
-
-    async def _get_whatsapp_qr(self) -> str:
-        """Get a WhatsApp pairing QR.
-
-        If the session is already WORKING → info message.
-        If the session is FAILED / stopped → restarts and gets a fresh QR.
-        Otherwise tries the current QR first, then falls back to a fresh one.
-        """
-        import asyncio as _asyncio
-
-        app = self.app
-        wa = getattr(app, "whatsapp_backend", None)
-        if wa is None or wa._rest is None:
-            raise RuntimeError("WhatsApp backend not available")
-
-        def _run() -> str:
-            status = wa._rest.get_session_status() or {}
-            s = str(status.get("status") or "").lower()
-
-            if self._whatsapp_status_is_linked(status):
-                return "ALREADY_CONNECTED"
-
-            # If the session is in a dead/failed state, restart it
-            restart_states = {"failed", "stopped", "stop", ""}
-            if s in restart_states:
-                logger.info("WhatsApp session is %s, restarting for fresh QR...", s)
-                qr = wa._rest.get_fresh_pairing_qr(reset=True)
-                if isinstance(qr, bytes):
-                    from qr_utils import qr_png_to_ascii
-
-                    return qr_png_to_ascii(qr)
-                elif isinstance(qr, str):
-                    return qr
-                raise RuntimeError(f"Failed to restart session (status was: {s})")
-
-            # Try current QR, then fresh
-            qr = wa._rest.get_pairing_qr()
-            if isinstance(qr, bytes):
-                from qr_utils import qr_png_to_ascii
-
-                return qr_png_to_ascii(qr)
-            elif isinstance(qr, str):
-                return qr
-
-            # Last resort: fresh QR without reset
-            qr = wa._rest.get_fresh_pairing_qr(reset=False)
-            if isinstance(qr, bytes):
-                from qr_utils import qr_png_to_ascii
-
-                return qr_png_to_ascii(qr)
-            elif isinstance(qr, str):
-                return qr
-
-            raise RuntimeError(
-                f"No QR available (session status: {s or 'unknown'}). "
-                "The session may already be linked."
-            )
-
-        result = await _asyncio.to_thread(_run)
-        if result == "ALREADY_CONNECTED":
-            return "INFO: WhatsApp is already linked and working ✅\nNo QR needed."
-        return result
-
-    @staticmethod
-    def _whatsapp_status_is_linked(status: dict) -> bool:
-        """Require both WORKING state and an authenticated account identity."""
-        state = str(status.get("status") or "").lower()
-        return state == "working" and bool(status.get("me"))
-
-    async def _get_telegram_qr_link(self) -> str:
-        """Get a Telegram pairing QR link via the backend."""
-        import asyncio as _asyncio
-
-        app = self.app
-        tb = getattr(app, "telegram_backend", None)
-        if tb is None:
-            raise RuntimeError("Telegram backend not available")
-
-        # get_pairing_qr is sync (manages its own event loop internally)
-        # Run in thread to avoid blocking the UI
-        return await _asyncio.to_thread(tb.get_pairing_qr) or "ERROR: No QR data"
+        result = await self._call(
+            "link.start",
+            {
+                "protocol": self._selected_protocol,
+                "phone": phone,
+                "device_name": self._device_name,
+            },
+        )
+        return result["qr"]
 
     # ── Hooks ──────────────────────────────────────────────────────────────
 
@@ -951,16 +662,37 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
             return
         # Signal polling worker to stop
         self._phase = "done"
-        # Kill subprocess if still running
-        proc = getattr(self, "_linking_proc", None)
-        if proc is not None and proc.poll() is None:
-            logger.info("Killing signal-cli link subprocess (PID %s)", proc.pid)
-            try:
-                proc.terminate()
-            except Exception as _e:
-                logger.debug("Failed to terminate link subprocess", exc_info=True)
-        self._linking_proc = None
+        # Tell the server to drop the link (it kills a signal-cli subprocess)
+        active, self._active_link = self._active_link, None
+        if active is not None:
+            self._cancel_link_in_background(active)
         super().dismiss(result)
+
+    def _cancel_link_in_background(self, protocol: str) -> None:
+        """``link.cancel`` without making the UI thread wait for the server.
+
+        Fire and forget on a short-lived thread (the screen is going away, so
+        a screen worker would be cancelled with it); a failure is only logged.
+        """
+        client = self._client()
+
+        def _cancel() -> None:
+            try:
+                call_op(client, "link.cancel", {"protocol": protocol})
+            except Exception as _e:
+                logger.debug("Failed to cancel the device link", exc_info=True)
+
+        try:
+            running = self.app.is_running
+        except Exception as _e:  # no active app (unit tests)
+            logger.debug("No active app", exc_info=True)
+            running = False
+        if running:
+            thread = threading.Thread(target=_cancel, name="link-cancel", daemon=True)
+            self.cancel_thread = thread
+            thread.start()
+        else:
+            _cancel()
 
     # ── Event handlers ─────────────────────────────────────────────────────
 
@@ -1048,10 +780,6 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
 
     def _on_2fa_submit(self) -> None:
         """User submitted 2FA password — complete login."""
-        app = self.app
-        tb = getattr(app, "telegram_backend", None)
-        if tb is None:
-            return
         password = self.query_one("#link-2fa-input", Input).value.strip()
         if not password:
             return
@@ -1061,16 +789,20 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
         except Exception as _e:
             logger.debug("Failed to update 2FA verifying status", exc_info=True)
         # Run in thread to not block UI
-        self.run_worker(self._complete_2fa_worker(tb, password), exclusive=False)
+        self.run_worker(self._complete_2fa_worker(password), exclusive=False)
 
-    async def _complete_2fa_worker(self, tb, password: str) -> None:
-        """Worker: call complete_2fa and update UI."""
-        import asyncio as _asyncio
-
-        def _run():
-            return tb.complete_2fa(password)
-
-        success = await _asyncio.to_thread(_run)
+    async def _complete_2fa_worker(self, password: str) -> None:
+        """Worker: submit the 2FA password to the server and update UI."""
+        try:
+            success = (await self._call("link.submit_2fa", {"password": password}))[
+                "ok"
+            ]
+        except ApiError as exc:
+            try:
+                self.query_one("#link-qr-status", Static).update(f"❌ {exc.message}")
+            except Exception as _e:
+                logger.debug("Failed to update 2FA error status", exc_info=True)
+            return
         if success:
             try:
                 self.query_one("#link-qr-status", Static).update(
@@ -1079,7 +811,7 @@ class DeviceLinkPickerScreen(ModalScreen[None]):
                 self.query_one("#link-qr-code", Static).update("\n\n✅ Linked!\n")
             except Exception as _e:
                 logger.debug("Failed to update linked status", exc_info=True)
-            await _asyncio.sleep(2)
+            await asyncio.sleep(2)
             self.dismiss(None)
         else:
             try:

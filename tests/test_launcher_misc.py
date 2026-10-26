@@ -73,11 +73,11 @@ class TestServerHelpers:
         monkeypatch.setattr(server, "PROJECT_DIR", tmp_path)
         assert server._read_web_token() == ""
 
-    def test_stop_tui_without_lock_file_is_noop(self, tmp_path: Path, monkeypatch):
+    def test_stop_server_without_lock_file_is_noop(self, tmp_path: Path, monkeypatch):
         fake_lock = tmp_path / "signal-tui.lock"
         monkeypatch.setattr(server, "LOCK_FILE", fake_lock)
         monkeypatch.setattr(server, "_kill_tmux_session", lambda name="tui": None)
-        server._stop_tui()  # must not raise
+        assert server.stop_server() is True
 
     def test_docker_container_running_false_without_docker(self, monkeypatch):
         monkeypatch.setattr(server, "command_exists", lambda name: False)

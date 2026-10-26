@@ -5,6 +5,8 @@ from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from client_harness import api_for
+from event_harness import legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -14,6 +16,7 @@ from protocols.rpc import SignalRPCClient
 from protocols.signal import SignalBackend
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
+from server.bus import EventBus
 from tests.test_edit_contract import _MinimalBackend
 from web.api import create_api_router
 
@@ -102,8 +105,9 @@ def test_reaction_endpoint_validates_sends_persists_and_pushes(tmp_path):
     manager = SimpleNamespace(
         get=lambda protocol: signal if protocol == "signal" else None
     )
+    bus = EventBus()
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager, bus)
     app.include_router(create_api_router())
 
     with patch.object(backend, "DB_FILE", db_file):
@@ -117,7 +121,8 @@ def test_reaction_endpoint_validates_sends_persists_and_pushes(tmp_path):
             protocol="signal",
             msg_id="1234",
         )
-        with patch("web.api.push_event") as pushed, TestClient(app) as client:
+        sub = bus.subscribe()
+        with TestClient(app) as client:
             assert (
                 client.post(
                     "/api/messages/reaction",
@@ -158,4 +163,4 @@ def test_reaction_endpoint_validates_sends_persists_and_pushes(tmp_path):
         signal.send_reaction_sync.assert_called_once_with(
             "+3902", "1234", "👍", target_author="+3902"
         )
-        assert pushed.call_args.args[0]["type"] == "reaction_update"
+        assert legacy_frames(sub.drain())[-1]["type"] == "reaction_update"

@@ -23,6 +23,14 @@ PROTOCOL_SIGNAL = "signal"
 PROTOCOL_WHATSAPP = "whatsapp"
 PROTOCOL_TELEGRAM = "telegram"
 
+#: Device name registered with signal-cli when the user does not choose one.
+DEFAULT_SIGNAL_DEVICE_NAME = "Signal-TUI-Client"
+
+#: Image thumbnail size limits (terminal lines / columns) used when the server
+#: does not say otherwise (``server.config`` carries the configured values).
+DEFAULT_THUMBNAIL_MAX_LINES = 12
+DEFAULT_THUMBNAIL_MAX_COLS = 60
+
 #: ``msg_type`` of a service notice rendered centred, outside any bubble
 #: (e.g. WhatsApp "your security code with X changed").
 MSG_TYPE_SYSTEM = "system"
@@ -849,6 +857,8 @@ class ChatEvent:
     - ``"typing"``: a typing indicator (payload: ``{"action": "STARTED"|"STOPPED"}``).
     - ``"receipt"``: a delivery/read receipt (payload: list of updated messages).
     - ``"contact_update"``: contact metadata changed (payload: ``ChatContact`` dict).
+    - ``"sent-mirror"``: lightweight notification of a batch send mirror.
+    - ``"lid_warmup_done"``: the WhatsApp lid resolver run finished (no payload).
     """
 
     type: str

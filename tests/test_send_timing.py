@@ -1,7 +1,8 @@
-"""Regression tests: strumentazione timing di ``send_message_sync`` (PR #29).
+"""Regression tests: strumentazione timing del send (PR #29).
 
-Copre il blocco di misurazione della durata in ``_send_message_worker``:
-warning oltre 1s, debug sotto 1s.
+La misura della durata del send backend vive nell'operazione ``messages.send``
+(il TUI la chiama dal worker): warning oltre 1s, debug sotto 1s.  La transizione
+pending→sent avviene nel core dopo il send.
 """
 
 from __future__ import annotations
@@ -10,29 +11,20 @@ import logging
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from client_harness import client_for
+
 from models import PROTOCOL_WHATSAPP
-from tui.send import SendMixin
-
-
-def _handler(backend) -> SimpleNamespace:
-    handler = SimpleNamespace()
-    handler.manager = SimpleNamespace(get=MagicMock(return_value=backend))
-    handler._transition_outgoing_status = MagicMock(return_value=True)
-    handler._update_outgoing_message_id = MagicMock()
-    handler.call_from_thread = MagicMock()
-    handler._status = MagicMock()
-    return handler
 
 
 def _backend(send_result: str | None = "msg123", delay: float = 0.0):
     backend = MagicMock()
     backend.ingest_message = MagicMock(return_value=True)
+    backend.contacts = []
 
     def _delayed_send(*_args, **_kwargs):
         if delay:
@@ -43,50 +35,44 @@ def _backend(send_result: str | None = "msg123", delay: float = 0.0):
     return backend
 
 
+def _send(backend):
+    manager = MagicMock()
+    manager.get.return_value = backend
+    with (
+        patch("server.ops.send.transition_outgoing_status", return_value=True) as t,
+        patch.object(backend, "_persist_message", create=True),
+    ):
+        client_for(manager).call(
+            "messages.send",
+            {
+                "protocol": PROTOCOL_WHATSAPP,
+                "contact_id": "123@g.us",
+                "text": "ciao",
+                "retry": False,
+                "optimistic": {"timestamp": 1000},
+            },
+        )
+    return t
+
+
 class TestSendTimingInstrumentation:
     def test_slow_send_logs_warning(self, caplog):
         backend = _backend(delay=1.05)
-        handler = _handler(backend)
-        with caplog.at_level(logging.WARNING, logger="tui.send"):
-            SendMixin._send_message_worker(
-                handler,
-                "ciao",
-                1000,
-                None,
-                None,
-                protocol=PROTOCOL_WHATSAPP,
-                contact_id="123@g.us",
-            )
+        with caplog.at_level(logging.WARNING, logger="server.ops.send"):
+            _send(backend)
         assert any("send_message_sync slow" in rec.message for rec in caplog.records)
 
     def test_fast_send_logs_debug(self, caplog):
         backend = _backend()
-        handler = _handler(backend)
-        with caplog.at_level(logging.DEBUG, logger="tui.send"):
-            SendMixin._send_message_worker(
-                handler,
-                "ciao",
-                1000,
-                None,
-                None,
-                protocol=PROTOCOL_WHATSAPP,
-                contact_id="123@g.us",
-            )
+        with caplog.at_level(logging.DEBUG, logger="server.ops.send"):
+            _send(backend)
         assert any("send_message_sync took" in rec.message for rec in caplog.records)
 
     def test_transition_called_after_send(self):
         backend = _backend()
-        handler = _handler(backend)
-        SendMixin._send_message_worker(
-            handler,
-            "ciao",
-            1000,
-            None,
-            None,
-            protocol=PROTOCOL_WHATSAPP,
-            contact_id="123@g.us",
-        )
-        handler._transition_outgoing_status.assert_called_once_with(
+        transition = _send(backend)
+        transition.assert_called_once_with(
+            backend,
             PROTOCOL_WHATSAPP,
             "123@g.us",
             1000,
@@ -94,4 +80,5 @@ class TestSendTimingInstrumentation:
             "sent",
             ("pending",),
         )
-        backend.ingest_message.assert_called_once()
+        # seed ottimistico + attach dell'id reale
+        assert backend.ingest_message.call_count == 2

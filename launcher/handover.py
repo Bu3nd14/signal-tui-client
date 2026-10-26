@@ -1,4 +1,4 @@
-"""Move the TUI session between this machine and the remote (Hetzner) server.
+"""Move the server (`megachat serve`) between this machine and the remote (Hetzner) server.
 
 Ported from ``scripts/tui_handover.sh``. The shared account state (WAHA
 session, signal-cli daemon) must never run on two machines at once, so these
@@ -18,10 +18,10 @@ The IP can change (e.g. after a server snapshot/recreate): update
 from __future__ import annotations
 
 import os
+import shlex
 import socket
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from . import server as server_mod
@@ -37,38 +37,82 @@ CONF_FILE = Path(
     )
 )
 
+# Remote lock path: fixed (the ssh session does not inherit local overrides).
+_LOCK = "/tmp/signal-tui.lock"
+
+# Bash helpers shared by the remote scripts; mirror scripts/tui_handover.sh.
+# stop_serve: SIGINT the lock holder and wait for it to exit (30 s); a legacy
+# tmux 'tui' session is killed too.  Returns 1, lock left in place, when the
+# process survives (never leave two servers).  Only the lock path is rm'd.
+_REMOTE_FUNCS = f"""
+LOCK={shlex.quote(_LOCK)}
+lock_pid() {{
+    local pid=""
+    [ -f "$LOCK" ] && pid="$(cat "$LOCK" 2>/dev/null || true)"
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    echo "$pid"
+}}
+stop_serve() {{
+    local pid
+    if pid="$(lock_pid)"; then
+        kill -INT "$pid" 2>/dev/null || true
+        for _ in $(seq 1 {int(server_mod.STOP_TIMEOUT_S * 2)}); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.5
+        done
+        kill -0 "$pid" 2>/dev/null && return 1
+    fi
+    tmux kill-session -t tui 2>/dev/null || true
+    rm -f "$LOCK"
+    return 0
+}}
+"""
+
 REMOTE_STATUS = r"""
-[ -f /tmp/signal-tui.lock ] && echo "  TUI: ATTIVA (lock pid $(cat /tmp/signal-tui.lock))" || echo "  TUI: spenta"
+LOCK=/tmp/signal-tui.lock
+pid="$(cat "$LOCK" 2>/dev/null || true)"
+case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then echo "  Server: ATTIVO (lock pid $pid)"; else echo "  Server: spento"; fi
 pgrep -f "signal-cli.*daemon" >/dev/null && echo "  daemon signal-cli: attivo" || echo "  daemon signal-cli: spento"
 docker ps --format '{{.Names}}' 2>/dev/null | grep -q "signal-tui-whatsapp" && echo "  WAHA: attivo" || echo "  WAHA: spento"
 """
 
-REMOTE_STOP = f"""
-if [ -f /tmp/signal-tui.lock ]; then
-    kill -INT "$(cat /tmp/signal-tui.lock)" 2>/dev/null || true
-    for _ in $(seq 1 12); do [ ! -f /tmp/signal-tui.lock ] && break; sleep 0.5; done
-fi
-tmux kill-session -t tui 2>/dev/null || true
-rm -f /tmp/signal-tui.lock
+#: Exit code of REMOTE_STOP when the remote server refuses to stop.
+REMOTE_STOP_STUCK = 3
+
+REMOTE_STOP = (
+    _REMOTE_FUNCS
+    + f"""
+stop_serve || {{ echo "server remoto non si ferma (pid $(lock_pid))" >&2; exit {REMOTE_STOP_STUCK}; }}
 pkill -f "signal-cli.*daemon" 2>/dev/null || true
-cd {REMOTE_PROJECT_DIR} && docker compose down >/dev/null 2>&1 || true
+cd {shlex.quote(REMOTE_PROJECT_DIR)} && docker compose down >/dev/null 2>&1 || true
 echo "server spento"
 """
+)
 
 
 def _remote_start_script(*, docker_limits: bool = True) -> str:
     limits_flag = "" if docker_limits else " --no-docker-limits"
-    return f"""
-cd {REMOTE_PROJECT_DIR}
+    serve = shlex.join([".venv/bin/python", *server_mod.SERVE_ARGS])
+    log = shlex.quote(str(server_mod.SERVER_LOG))
+    return (
+        _REMOTE_FUNCS
+        + f"""
+cd {shlex.quote(REMOTE_PROJECT_DIR)} || {{ echo FAIL_TUI_SERVER; exit 0; }}
 python3 launcher.py whatsapp start --no-wait{limits_flag} >/dev/null 2>&1 || true
-tmux new-session -d -s tui "cd {REMOTE_PROJECT_DIR} && .venv/bin/python -m signal_tui --web --web-port 4242 --web-host 0.0.0.0"
-sleep 3
-if tmux list-sessions 2>/dev/null | grep -q "^tui:"; then
-    echo "OK_TUI_SERVER"
-else
-    echo "FAIL_TUI_SERVER"
-fi
+stop_serve || {{ echo FAIL_TUI_SERVER; exit 0; }}
+( nohup {serve} </dev/null >>{log} 2>&1 & )
+for _ in $(seq 1 {server_mod.READY_TIMEOUT_S}); do
+    if lock_pid >/dev/null && (exec 3<>/dev/tcp/127.0.0.1/{server_mod.SERVER_PORT}) 2>/dev/null; then
+        echo "OK_TUI_SERVER"
+        exit 0
+    fi
+    sleep 1
+done
+echo "FAIL_TUI_SERVER"
 """
+    )
 
 
 def _load_conf() -> dict[str, str]:
@@ -114,10 +158,11 @@ def _run_remote(script: str, *, capture: bool) -> subprocess.CompletedProcess:
 
 def status() -> int:
     print(f"=== LOCALE ({socket.gethostname()}) ===")
-    if server_mod.LOCK_FILE.exists():
-        print(f"  TUI: ATTIVA (lock pid {server_mod.LOCK_FILE.read_text().strip()})")
+    pid = server_mod.server_pid()
+    if pid is not None:
+        print(f"  Server: ATTIVO (lock pid {pid})")
     else:
-        print("  TUI: spenta")
+        print("  Server: spento")
     print(
         "  daemon signal-cli: attivo"
         if server_mod._pgrep("signal-cli.*daemon")
@@ -135,7 +180,12 @@ def status() -> int:
 
 def to_server(*, docker_limits: bool = True) -> int:
     info("Fermo il client LOCALE...")
-    server_mod._stop_tui()
+    if not server_mod.stop_server():
+        die(
+            f"Il server locale (pid {server_mod.server_pid()}) non si ferma: "
+            "handover interrotto, nulla è stato avviato sul server."
+        )
+        return 1
     subprocess.run(
         ["pkill", "-f", "signal-cli.*daemon"], capture_output=True, check=False
     )
@@ -153,7 +203,7 @@ def to_server(*, docker_limits: bool = True) -> int:
     if "OK_TUI_SERVER" not in result.stdout:
         if result.stderr:
             print(result.stderr, file=sys.stderr, end="")
-        die("Avvio della TUI sul server non riuscito.")
+        die("Avvio del server sul server remoto non riuscito.")
         return 1
 
     ok("Handover verso il server completato.")
@@ -165,42 +215,48 @@ def to_server(*, docker_limits: bool = True) -> int:
         f'"{REMOTE_PROJECT_DIR}/config.json"))["web"]["token"])\''
     )
     print("Log:     tail -f /tmp/signal-tui.log (sul server)")
+    print(
+        "TUI:     sul server, da /root/signal-tui-client, lancia "
+        "`.venv/bin/python megachat.py` (si collega al server in esecuzione)"
+    )
     return 0
 
 
 def to_local(*, docker_limits: bool = True) -> int:
     info(f"Fermo il client sul SERVER ({_hz_host()})...")
-    _run_remote(REMOTE_STOP, capture=False)
+    stop = _run_remote(REMOTE_STOP, capture=False)
+    if stop.returncode != 0:
+        die(
+            "Impossibile fermare il server remoto "
+            f"(ssh/stop codice {stop.returncode}): handover interrotto per non "
+            "avere due server attivi. Verifica con: python3 launcher.py handover status"
+        )
+        return 1
 
     info("Accendo il client LOCALE...")
     if whatsapp_mod.start(no_wait=False, docker_limits=docker_limits) == 0:
         ok("WAHA avviato e pronto")
     else:
-        info("avvio WAHA non riuscito o timeout; provo comunque a far partire la TUI")
+        info(
+            "avvio WAHA non riuscito o timeout; provo comunque a far partire il server"
+        )
         whatsapp_mod.start(no_wait=True, docker_limits=docker_limits)
 
-    subprocess.run(
-        [
-            "tmux",
-            "new-session",
-            "-d",
-            "-s",
-            "tui",
-            (
-                f"cd '{PROJECT_DIR}' && .venv/bin/python -m signal_tui "
-                "--web --web-port 4242 --web-host 0.0.0.0"
-            ),
-        ],
-        check=False,
-    )
-    time.sleep(2)
-    sessions = subprocess.run(
-        ["tmux", "list-sessions"], capture_output=True, text=True, check=False
-    ).stdout
-    if "tui:" not in sessions:
-        die(f"avvio TUI fallito in {PROJECT_DIR}")
+    if not server_mod.stop_server():
+        die(f"Il server locale (pid {server_mod.server_pid()}) non si ferma.")
         return 1
-    ok(f"TUI avviata (tmux 'tui') in {PROJECT_DIR}")
+    try:
+        up = server_mod.spawn_and_wait()
+    except OSError as exc:
+        die(f"avvio server fallito in {PROJECT_DIR}: {exc}")
+        return 1
+    if not up:
+        die(
+            f"avvio server fallito in {PROJECT_DIR}: controlla "
+            f"tail -50 /tmp/signal-tui.log {server_mod.SERVER_LOG}"
+        )
+        return 1
+    ok(f"Server avviato (megachat serve) in {PROJECT_DIR}")
 
     ok("Handover verso il locale completato.")
     print()
@@ -210,4 +266,5 @@ def to_local(*, docker_limits: bool = True) -> int:
         f'"{PROJECT_DIR}/config.json"))["web"]["token"])\''
     )
     print("Log:     tail -f /tmp/signal-tui.log")
+    print("TUI:     python3 megachat.py  (si collega al server in esecuzione)")
     return 0

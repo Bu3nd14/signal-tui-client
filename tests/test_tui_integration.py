@@ -5,6 +5,7 @@ tree) and are marked ``integration`` so they can be excluded from fast runs
 with ``-m "not integration"``.
 """
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -142,19 +143,28 @@ async def test_send_message_mocked(app_for_test_with_mocks):
         # ``call_from_thread`` is stubbed to run inline: in production the worker
         # runs on a real thread, so the real Textual ``call_from_thread`` is the
         # correct path — here we only neutralize the inline-worker limitation.
+        workers = []
         with (
-            patch.object(app, "run_worker", side_effect=lambda work, **kwargs: work()),
+            patch.object(
+                app,
+                "run_worker",
+                side_effect=lambda work, **kwargs: workers.append(work),
+            ),
             patch.object(
                 app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
             ),
         ):
             await pilot.press("enter")
+            # The worker calls ``messages.send`` (blocking): like production, run
+            # it on a thread of its own, not on the event loop.
+            for work in workers:
+                await asyncio.to_thread(work)
 
         await pilot.pause()
 
         contact = app.contacts[0]
-        # The optimistic seed (on_input_submitted, persist=False) plus the real-id
-        # ingestion in the send worker: Signal now enters the "real id" path, so
+        # The core's optimistic seed (messages.send, persist=False) plus the
+        # real-id ingestion after the send: Signal enters the "real id" path, so
         # ingest is called twice — first id-less, then with the real server id.
         assert signal_backend.ingest_message.call_count == 2
         assert signal_backend.ingest_message.call_args.args[0] == contact.id
@@ -272,13 +282,20 @@ async def test_multiline_message_is_sent_and_normalized(app_for_test_with_mocks)
 
         signal_backend.send_message_sync.return_value = "ts-1"
 
+        workers = []
         with (
-            patch.object(app, "run_worker", side_effect=lambda work, **kwargs: work()),
+            patch.object(
+                app,
+                "run_worker",
+                side_effect=lambda work, **kwargs: workers.append(work),
+            ),
             patch.object(
                 app, "call_from_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)
             ),
         ):
             await pilot.press("enter")
+            for work in workers:
+                await asyncio.to_thread(work)
 
         assert (
             signal_backend.send_message_sync.call_args.args[1] == "first\nsecond\nthird"

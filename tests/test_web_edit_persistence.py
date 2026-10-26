@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -28,7 +30,7 @@ def test_web_edit_persists_when_message_is_not_in_backend_cache(monkeypatch, tmp
     db_file = tmp_path / "messages.db"
     monkeypatch.setattr(backend, "DB_FILE", db_file)
     _init_db()
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "INSERT INTO messages(protocol, contact_number, text, is_mine, "
             "timestamp, msg_id, msg_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -37,7 +39,7 @@ def test_web_edit_persists_when_message_is_not_in_backend_cache(monkeypatch, tmp
 
     manager = Manager()
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     install_auth(app, TOKEN)
     app.include_router(create_api_router())
     with TestClient(app) as client:
@@ -56,7 +58,7 @@ def test_web_edit_persists_when_message_is_not_in_backend_cache(monkeypatch, tmp
     manager.backend.apply_edit.assert_called_once_with(
         "alice", "1000", "Dopo", is_mine=True
     )
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         persisted = connection.execute(
             "SELECT text, edited FROM messages WHERE msg_id = '1000'"
         ).fetchone()

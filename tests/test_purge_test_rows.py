@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 from purge_test_rows import (
@@ -52,7 +53,7 @@ _TELEGRAM_MSG_ID = "77"
 
 def _make_db(tmp_path: Path) -> Path:
     db_file = tmp_path / "messages.db"
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(_MESSAGES_DDL)
     return db_file
 
@@ -73,7 +74,7 @@ def _insert(
         "timestamp": timestamp,
         **extra,
     }
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             f"INSERT INTO messages ({', '.join(columns)}) "
             f"VALUES ({', '.join('?' for _ in columns)})",
@@ -82,12 +83,12 @@ def _insert(
 
 
 def _count(db_file: Path) -> int:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         return connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 
 
 def _select(db_file: Path, expression: str) -> list:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         return connection.execute(
             f"SELECT {expression} FROM messages ORDER BY id"
         ).fetchall()
@@ -109,7 +110,7 @@ def test_purge_backs_up_and_removes_only_known_whatsapp_rows(tmp_path):
 
     backup = next(tmp_path.glob("messages.db.bak-*"))
     remaining = _select(db_file, "protocol, contact_number")
-    with sqlite3.connect(backup) as connection:
+    with closing(sqlite3.connect(backup)) as connection, connection:
         backed_up = connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
 
     assert remaining == [("whatsapp", "111@lid"), ("signal", "db@lid")]
@@ -135,7 +136,7 @@ def test_purge_apply_creates_backup_and_deletes(tmp_path):
     assert purge(db_file, apply=True) == 3
 
     backup = next(tmp_path.glob("messages.db.bak-*"))
-    with sqlite3.connect(backup) as connection:
+    with closing(sqlite3.connect(backup)) as connection, connection:
         assert connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 3
     assert _count(db_file) == 0
 
@@ -224,7 +225,7 @@ def test_backup_database_avoids_existing_collision(tmp_path, monkeypatch):
 def test_purge_rolls_back_on_post_verify_mismatch(tmp_path):
     db_file = _make_db(tmp_path)
     _insert(db_file, "signal", "42", batch_id="batch-1")
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             "CREATE TRIGGER reinsert_test_row AFTER DELETE ON messages "
             "WHEN OLD.batch_id = 'batch-1' BEGIN "

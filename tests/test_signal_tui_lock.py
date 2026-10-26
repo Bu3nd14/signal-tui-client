@@ -23,7 +23,7 @@ class TestLockFile:
     def test_acquire_lock_success(self, tmp_path):
         """Lock acquisito quando nessun altro processo è in esecuzione."""
         lock_file = tmp_path / "test.lock"
-        with patch("signal_tui.LOCK_FILE", str(lock_file)):
+        with patch("server.lock.LOCK_FILE", str(lock_file)):
             result = _acquire_lock()
         assert result is True
         assert lock_file.exists()
@@ -36,7 +36,7 @@ class TestLockFile:
         lock_file.write_text("999999999")
 
         with (
-            patch("signal_tui.LOCK_FILE", str(lock_file)),
+            patch("server.lock.LOCK_FILE", str(lock_file)),
             patch("os.kill") as mock_kill,
         ):
             # os.kill(pid, 0) con processo vivo → non solleva eccezioni
@@ -51,7 +51,7 @@ class TestLockFile:
         lock_file.write_text("999999999")
 
         with (
-            patch("signal_tui.LOCK_FILE", str(lock_file)),
+            patch("server.lock.LOCK_FILE", str(lock_file)),
             patch("os.kill") as mock_kill,
         ):
             # os.kill(pid, 0) con processo morto → solleva OSError
@@ -67,7 +67,7 @@ class TestLockFile:
         lock_file = tmp_path / "test.lock"
         lock_file.write_text(str(os.getpid()))
 
-        with patch("signal_tui.LOCK_FILE", str(lock_file)):
+        with patch("server.lock.LOCK_FILE", str(lock_file)):
             _release_lock()
 
         assert not lock_file.exists()
@@ -77,7 +77,7 @@ class TestLockFile:
         lock_file = tmp_path / "test.lock"
         lock_file.write_text("999999999")
 
-        with patch("signal_tui.LOCK_FILE", str(lock_file)):
+        with patch("server.lock.LOCK_FILE", str(lock_file)):
             _release_lock()
 
         # Il file deve ancora esistere (non è il nostro lock)
@@ -88,7 +88,7 @@ class TestLockFile:
         lock_file = tmp_path / "test.lock"
 
         with (
-            patch("signal_tui.LOCK_FILE", str(lock_file)),
+            patch("server.lock.LOCK_FILE", str(lock_file)),
             patch("os.path.exists") as mock_exists,
         ):
             mock_exists.side_effect = Exception("Unexpected error")

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from client_harness import api_for
+from event_harness import EventApp, feed, legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -15,8 +18,8 @@ from models import ChatContact, ChatEvent
 from protocols.signal import SignalBackend
 from protocols.telegram import TelegramBackend
 from protocols.whatsapp import WhatsAppBackend
-from tui.events import EventHandlingMixin
-from web.api import _messages, create_api_router
+from server.messages import _messages
+from web.api import create_api_router
 
 
 def _db(monkeypatch, tmp_path: Path) -> Path:
@@ -50,10 +53,10 @@ def test_messages_refreshes_only_telegram_history(protocol, expected_calls):
         list_contacts=MagicMock(return_value=[]),
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
-    with patch("web.api._messages", return_value=[]), TestClient(app) as client:
+    with patch("server.messages._messages", return_value=[]), TestClient(app) as client:
         response = client.get(
             "/api/messages", params={"proto": protocol, "contact_id": "42"}
         )
@@ -71,10 +74,10 @@ def test_messages_refreshes_whatsapp_history_when_refresh_requested():
         list_contacts=MagicMock(return_value=[]),
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
-    with patch("web.api._messages", return_value=[]), TestClient(app) as client:
+    with patch("server.messages._messages", return_value=[]), TestClient(app) as client:
         response = client.get(
             "/api/messages",
             params={"proto": "whatsapp", "contact_id": "42", "refresh": "1"},
@@ -90,10 +93,10 @@ def test_messages_refresh_without_fetch_history_is_safe():
         list_contacts=MagicMock(return_value=[]),
     )
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
 
-    with patch("web.api._messages", return_value=[]), TestClient(app) as client:
+    with patch("server.messages._messages", return_value=[]), TestClient(app) as client:
         response = client.get(
             "/api/messages",
             params={"proto": "whatsapp", "contact_id": "42", "refresh": "1"},
@@ -121,7 +124,7 @@ def test_telegram_attachment_upgrade_works_in_both_event_orders(monkeypatch, tmp
         assert result == ("changed" if first.startswith("tgref:") else False)
         assert len(backend.cache["42"]) == 1
         assert backend.cache["42"][0]["attachment_id"] == str(mirrored)
-        with sqlite3.connect(db_file) as connection:
+        with closing(sqlite3.connect(db_file)) as connection, connection:
             assert connection.execute(
                 "SELECT attachment_id FROM messages"
             ).fetchone() == (str(mirrored),)
@@ -153,7 +156,7 @@ def test_signal_unresolved_echo_is_upgraded_to_sent_attachment(monkeypatch, tmp_
     assert backend.ingest_message("42", _media_data(mirrored.name), 1001) == "changed"
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["attachment_id"] == mirrored.name
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (
             mirrored.name,
         )
@@ -177,7 +180,7 @@ def test_signal_echo_never_adds_row_and_keeps_mirrored_file(monkeypatch, tmp_pat
     assert backend.ingest_message("42", echo, echo_ts) is False
     assert len(backend.cache["42"]) == 1
     assert backend.cache["42"][0]["attachment_id"] == mirrored.name
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute(
             "SELECT COUNT(*), attachment_id FROM messages"
         ).fetchone() == (1, mirrored.name)
@@ -193,7 +196,7 @@ def test_signal_outgoing_attachment_is_resolvable_or_null(monkeypatch, tmp_path)
 
     assert backend.ingest_message("42", unresolved, 77)
     assert backend.cache["42"][0]["attachment_id"] is None
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (
             None,
         )
@@ -203,7 +206,7 @@ def test_signal_outgoing_attachment_is_resolvable_or_null(monkeypatch, tmp_path)
 
 
 def _table_columns(db_file: Path) -> set[str]:
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         return {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
 
 
@@ -212,7 +215,7 @@ def test_batch_columns_added_to_modern_versioned_db(monkeypatch, tmp_path):
     comunque le colonne batch: la migrazione è incondizionata (stile
     ``edited``/``content_type``), non gated dall'early-return."""
     db_file = _db(monkeypatch, tmp_path)
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute(
             """CREATE TABLE messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -237,7 +240,7 @@ def test_batch_columns_added_to_modern_versioned_db(monkeypatch, tmp_path):
 
     columns = _table_columns(db_file)
     assert {"batch_id", "batch_index"} <= columns
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == (
             backend_mod._SCHEMA_VERSION
         )
@@ -411,13 +414,13 @@ def test_telegram_persists_content_type_and_api_marks_tgref_as_image(
     data = {**_media_data("tgref:42:77"), "content_type": "image/png"}
 
     assert backend.ingest_message("42", data, 1_000)
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute("SELECT content_type FROM messages").fetchone() == (
             "image/png",
         )
     assert _messages("telegram", "42")[0]["attachment"]["type"] == "image/png"
 
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         connection.execute("UPDATE messages SET content_type = NULL")
         connection.commit()
     assert _messages("telegram", "42")[0]["attachment"]["type"] == "image/*"
@@ -503,17 +506,7 @@ def test_web_does_not_hide_literal_media_caption(monkeypatch, tmp_path):
 def test_push_on_attachment_upgrade():
     contact = ChatContact(id="42", display_name="Test", protocol="telegram")
     backend = SimpleNamespace(ingest_message=MagicMock(return_value="changed"))
-    app = SimpleNamespace(
-        manager=SimpleNamespace(get=lambda _protocol: backend),
-        contacts=[contact],
-        selected_contact=None,
-        _contact_list_dirty=False,
-        _dirty_contact_keys=set(),
-        _cache={},
-        _typing_contacts={},
-        _typing_mumbling={},
-        _web_enabled=True,
-    )
+    app = EventApp(backend, [contact], _web_enabled=True)
     event = ChatEvent(
         type="message",
         protocol="telegram",
@@ -525,21 +518,16 @@ def test_push_on_attachment_upgrade():
         },
     )
 
-    with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_message_event(app, event)
+    sub = app.bus.subscribe()
+    assert feed(app, event)
 
-    push_event.assert_called_once()
+    assert len(legacy_frames(sub.drain())) == 1
     assert app._cache == {}
 
 
 def _receipt_app(updated, web_enabled=True):
     backend = SimpleNamespace(process_receipt=MagicMock(return_value=updated))
-    return SimpleNamespace(
-        manager=SimpleNamespace(get=lambda _protocol: backend),
-        _cache={},
-        selected_contact=None,
-        _web_enabled=web_enabled,
-    )
+    return EventApp(backend, _web_enabled=web_enabled)
 
 
 def test_receipt_event_pushes_normalized_web_update():
@@ -556,10 +544,10 @@ def test_receipt_event_pushes_normalized_web_update():
         payload={"message_ids": ["77"], "is_read": False},
     )
 
-    with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_receipt_event(app, event)
+    sub = app.bus.subscribe()
+    assert feed(app, event)
 
-    push_event.assert_called_once_with(
+    assert legacy_frames(sub.drain()) == [
         {
             "type": "receipt",
             "payload": {
@@ -576,7 +564,7 @@ def test_receipt_event_pushes_normalized_web_update():
                 ],
             },
         }
-    )
+    ]
 
 
 def test_receipt_event_does_not_push_when_web_is_disabled():
@@ -591,10 +579,11 @@ def test_receipt_event_does_not_push_when_web_is_disabled():
         payload={"message_ids": ["77"], "is_read": True},
     )
 
-    with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_receipt_event(app, event)
+    sub = app.bus.subscribe()
+    assert feed(app, event)
 
-    push_event.assert_not_called()
+    # No web server is attached to the bus: nothing is pushed to the web.
+    assert all(e.type != "web_push" for e in sub.drain())
 
 
 def _edit_app(web_enabled=True):
@@ -606,12 +595,7 @@ def _edit_app(web_enabled=True):
         "is_mine": False,
     }
     backend = SimpleNamespace(apply_edit=MagicMock(return_value=info))
-    return SimpleNamespace(
-        manager=SimpleNamespace(get=lambda _protocol: backend),
-        _cache={},
-        selected_contact=None,
-        _web_enabled=web_enabled,
-    )
+    return EventApp(backend, _web_enabled=web_enabled)
 
 
 def test_edit_event_pushes_web_update():
@@ -623,10 +607,10 @@ def test_edit_event_pushes_web_update():
         payload={"edit_message_id": 77, "text": "Dopo", "is_mine": False},
     )
 
-    with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_edit_event(app, event)
+    sub = app.bus.subscribe()
+    assert feed(app, event)
 
-    push_event.assert_called_once_with(
+    assert legacy_frames(sub.drain()) == [
         {
             "type": "message_edit",
             "payload": {
@@ -639,7 +623,7 @@ def test_edit_event_pushes_web_update():
                 "is_mine": False,
             },
         }
-    )
+    ]
 
 
 def test_edit_event_does_not_push_when_web_is_disabled():
@@ -651,10 +635,11 @@ def test_edit_event_does_not_push_when_web_is_disabled():
         payload={"edit_message_id": "77", "text": "Dopo"},
     )
 
-    with patch("web.bridge.push_event") as push_event:
-        assert EventHandlingMixin._handle_edit_event(app, event)
+    sub = app.bus.subscribe()
+    assert feed(app, event)
 
-    push_event.assert_not_called()
+    # No web server is attached to the bus: nothing is pushed to the web.
+    assert all(e.type != "web_push" for e in sub.drain())
 
 
 def test_whatsapp_echo_first_is_upgraded_to_sent_attachment(monkeypatch, tmp_path):
@@ -669,7 +654,7 @@ def test_whatsapp_echo_first_is_upgraded_to_sent_attachment(monkeypatch, tmp_pat
     assert backend.ingest_message("42", _media_data("waha-media-id"), 1000)
     assert backend.ingest_message("42", _media_data(mirrored.name), 1001) == "changed"
     assert backend.cache["42"][0]["attachment_id"] == mirrored.name
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute("SELECT attachment_id FROM messages").fetchone() == (
             mirrored.name,
         )
@@ -721,7 +706,7 @@ def test_whatsapp_dedup_fills_missing_quote_fields(monkeypatch, tmp_path):
     assert backend.ingest_message("42", ack, 2000)
     assert not backend.ingest_message("42", mirrored, 3000)
     assert backend.cache["42"][0]["quote_timestamp"] == 123000
-    with sqlite3.connect(db_file) as connection:
+    with closing(sqlite3.connect(db_file)) as connection, connection:
         assert connection.execute(
             "SELECT quote_text, quote_timestamp, quote_author, reply_to_message_id "
             "FROM messages"
@@ -904,7 +889,11 @@ const mediaStart = app.indexOf("const MEDIA_CACHE_LIMIT");
 const mediaEnd = app.indexOf("\nfunction attachmentName", mediaStart);
 const renderStart = app.indexOf("function messageNodeKey(");
 const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
-globalThis.state = {
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(),
   mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(), objectUrls: new Set(["blob:preview"]), mediaCache: new Map(),
   drafts: new Map(),
   optimistic: [{
@@ -1041,7 +1030,11 @@ const mediaStart = app.indexOf("const MEDIA_CACHE_LIMIT");
 const mediaEnd = app.indexOf("\nfunction attachmentName", mediaStart);
 const renderStart = app.indexOf("function messageNodeKey(");
 const renderEnd = app.indexOf("\nasync function loadMessages", renderStart);
-globalThis.state = {
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(),
   mediaRequests: new Set(), mediaLoads: new Map(), mediaFailures: new Set(),
   objectUrls: new Set(), mediaCache: new Map(), drafts: new Map(), optimistic: [],
   active: { protocol: "signal", id: "42" },
@@ -1135,7 +1128,11 @@ assert.ok(draftStart >= 0, "marker draftStart non trovato (draftKey)");
 assert.ok(draftEnd > draftStart, "marker draftEnd non trovato o mal posizionato (dropSentAttachments)");
 const controller = { aborted: false, abort() { this.aborted = true; } };
 const inflight = Promise.resolve();
-globalThis.state = {
+globalThis.stashComposerDraft = () => {};
+globalThis.restoreComposerDraft = () => {};
+globalThis.storeDraftText = () => {};
+globalThis.dropSentAttachments = () => {};
+globalThis.state = { drafts: new Map(),
   mediaRequests: new Set([controller]), mediaLoads: new Map([["old", inflight]]),
   active: null, messages: [], optimistic: [], optimisticSequence: 0,
   sending: false, stagedAttachments: [], replyTo: null, drafts: new Map(),

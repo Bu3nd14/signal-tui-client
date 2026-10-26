@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -200,7 +201,7 @@ def test_apply_reaction_add_change_and_remove(tmp_db):
     assert changed["reactions"] == [
         {"emoji": "❤️", "count": 1, "is_mine": False, "authors": ["Anna"]}
     ]
-    with sqlite3.connect(tmp_db) as conn:
+    with closing(sqlite3.connect(tmp_db)) as conn, conn:
         assert conn.execute("SELECT COUNT(*) FROM reactions").fetchone()[0] == 1
 
     removed = backend.apply_reaction(

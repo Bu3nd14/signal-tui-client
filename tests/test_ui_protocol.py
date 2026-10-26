@@ -12,7 +12,15 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import PROTOCOL_SIGNAL, PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
+from event_harness import feed
+
+from models import (
+    PROTOCOL_SIGNAL,
+    PROTOCOL_WHATSAPP,
+    ChatContact,
+    ChatEvent,
+    contact_cache_key,
+)
 from signal_tui import SignalTUI
 from ui_components import ContactListView, ContactListWidget, MessageWidget
 
@@ -151,8 +159,8 @@ class TestProtocolFilter:
         app._clear_chat = MagicMock()
         app._cancel_reply = MagicMock()
         app._load_messages_worker = MagicMock()
-        app.manager = MagicMock()
-        app.manager.get.return_value = MagicMock()
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = MagicMock()
         # run_worker è il wrapper async di Textual: usa un no-op sincrono così non
         # crea coroutine mai attese.
         app.run_worker = MagicMock()
@@ -188,8 +196,8 @@ class TestProtocolFilter:
         app._clear_chat = MagicMock()
         app._cancel_reply = MagicMock()
         app._load_messages_worker = MagicMock()
-        app.manager = MagicMock()
-        app.manager.get.return_value = MagicMock()
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = MagicMock()
         app.run_worker = MagicMock()
         app.run_worker.return_value = None
 
@@ -224,8 +232,8 @@ class TestProtocolFilter:
         app._clear_chat = MagicMock()
         app._cancel_reply = MagicMock()
         app._load_messages_worker = MagicMock()
-        app.manager = MagicMock()
-        app.manager.get.return_value = MagicMock()
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = MagicMock()
         app.run_worker = MagicMock()
         app.run_worker.return_value = None
 
@@ -321,8 +329,8 @@ class TestProtocolFilter:
         app._clear_chat = MagicMock()
         app._cancel_reply = MagicMock()
         app._load_messages_worker = MagicMock()
-        app.manager = MagicMock()
-        app.manager.get.return_value = MagicMock()
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = MagicMock()
         app.run_worker = MagicMock()
         app.run_worker.return_value = None
 
@@ -657,8 +665,9 @@ class TestWhatsAppHistoryLoad:
             ]
         }
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
+        backend.find_contact.return_value = c
 
         # evita operazioni su widget reali; call_from_thread esegue sincronico
         app._make_message_widget = MagicMock()
@@ -669,7 +678,7 @@ class TestWhatsAppHistoryLoad:
         app._load_messages_worker()
 
         # fetch_history è stato chiamato con il jid del contatto
-        backend.fetch_history.assert_called_once_with("16660245291231@lid", limit=50)
+        backend.fetch_history.assert_called_once_with("16660245291231@lid", 50)
 
         # il cache UI è stato popolato dallo specchio del backend
         assert len(app._cache[c.cache_key]) == 2
@@ -708,8 +717,9 @@ class TestWhatsAppHistoryLoad:
             ]
         }
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
+        backend.find_contact.return_value = c
 
         app._add_message = MagicMock()
         app._add_load_more_widget = MagicMock()
@@ -719,7 +729,7 @@ class TestWhatsAppHistoryLoad:
         app._load_messages_worker()
 
         # Nonostante il cache non vuoto, viene riscaricato lo storico remoto
-        backend.fetch_history.assert_called_once_with("16660245291231@lid", limit=50)
+        backend.fetch_history.assert_called_once_with("16660245291231@lid", 50)
 
         # il cache UI ora include anche il messaggio "da altro client"
         texts = [m["text"] for m in app._cache[c.cache_key]]
@@ -827,12 +837,13 @@ class TestSendOptimisticRouting:
 
         wa_backend = MagicMock()
         wa_backend.ingest_message = MagicMock(return_value=True)
-        wa_backend.send_message_sync = MagicMock()
+        wa_backend.send_message_sync = MagicMock(return_value=None)
+        wa_backend.contacts = []
         signal_backend = MagicMock()
 
-        app.manager = MagicMock()
-        app.manager.get.return_value = wa_backend  # manager.get(whatsapp) -> wa
-        app.signal_backend = signal_backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = wa_backend  # manager.get(whatsapp) -> wa
+        app.core.signal_backend = signal_backend
 
         # Evita side-effetti di on_input_submitted
         app._is_completion_visible = MagicMock(return_value=False)
@@ -849,11 +860,18 @@ class TestSendOptimisticRouting:
         with patch.object(stui, "replace_emoji_aliases", side_effect=lambda x: x):
             app.on_input_submitted(event)
 
-        # L'ottimista è andato al backend WHATSAPP (non a quello Signal)
-        wa_backend.ingest_message.assert_called_once()
-        assert wa_backend.ingest_message.call_args.args[0] == contact.id
-        # E il messaggio è mostrato subito
+        # Il messaggio è mostrato subito, senza toccare nessun backend
         assert app._add_message.call_count >= 1
+        wa_backend.ingest_message.assert_not_called()
+
+        # Il core (messages.send, dal worker) semina l'ottimista nel backend
+        # WHATSAPP (non in quello Signal) e invia da lì.
+        app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
+        with patch("server.ops.send.transition_outgoing_status", return_value=True):
+            app.run_worker.call_args.args[0]()
+        wa_backend.ingest_message.assert_called()
+        assert wa_backend.ingest_message.call_args_list[0].args[0] == contact.id
+        wa_backend.send_message_sync.assert_called_once()
         # Il Signal backend NON ha ricevuto l'ottimista
         signal_backend.ingest_message.assert_not_called()
 
@@ -869,8 +887,7 @@ class TestContactListFlush:
         del PRIMO flush, poi ferma il loop in modo deterministico."""
         import threading
 
-        app.manager = MagicMock()
-        app.manager.all.return_value = []  # nessun backend reale
+        app._core_sub = app.bus.subscribe()  # il worker consuma il bus del core
         app._contact_list_dirty = True
         app._dirty_contact_keys = set(dirty_keys)
         app._polling_active = True
@@ -950,7 +967,7 @@ class TestContactListFlush:
         assert len(reorders) == 1
 
     def test_message_for_other_contact_populates_dirty_keys(self):
-        """_handle_message_event per una chat non aperta registra il cache_key
+        """La vista del messaggio per una chat non aperta registra il cache_key
         nel set (così il flush usa la via incrementale)."""
         app = _make_app(self._whatsapp_contact("wa:1@s.whatsapp.net", "Anna"))
         app.selected_contact = None
@@ -962,26 +979,28 @@ class TestContactListFlush:
         backend._identify_contact.return_value = self._whatsapp_contact(
             "wa:1@s.whatsapp.net", "Anna"
         )
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
 
-        event = MagicMock()
-        event.protocol = PROTOCOL_WHATSAPP
-        event.contact_id = "wa:1@s.whatsapp.net"
-        event.payload = {
-            "contact": self._whatsapp_contact("wa:1@s.whatsapp.net", "Anna"),
-            "timestamp": 1234567890000,
-            "text": "hey",
-            "is_mine": False,
-            "sender": "Anna",
-            "quote_text": None,
-            "msg_type": "text",
-            "attachment_info": None,
-            "attachment_id": None,
-        }
+        event = ChatEvent(
+            type="message",
+            protocol=PROTOCOL_WHATSAPP,
+            contact_id="wa:1@s.whatsapp.net",
+            payload={
+                "contact": self._whatsapp_contact("wa:1@s.whatsapp.net", "Anna"),
+                "timestamp": 1234567890000,
+                "text": "hey",
+                "is_mine": False,
+                "sender": "Anna",
+                "quote_text": None,
+                "msg_type": "text",
+                "attachment_info": None,
+                "attachment_id": None,
+            },
+        )
 
         with patch.object(app, "call_from_thread"):
-            handled = app._handle_message_event(event)
+            handled = feed(app, event)
 
         assert handled is True
         assert app._contact_list_dirty is True
@@ -1066,8 +1085,9 @@ class TestWhatsAppLoadRetry:
             return backend.cache[c.id]
 
         backend.fetch_history = MagicMock(side_effect=fake_fetch)
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
+        backend.find_contact.return_value = c
         app._make_message_widget = MagicMock()
         app._add_load_more_widget = MagicMock()
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
@@ -1123,8 +1143,9 @@ class TestWhatsAppMountOrdering:
             ]
         }
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
+        backend.find_contact.return_value = c
         app._add_load_more_widget = MagicMock()
         app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
         app.query_one = MagicMock()  # per _clear_chat
@@ -1173,8 +1194,9 @@ class TestWhatsAppRenderFirst:
         backend = MagicMock()
         backend.cache = {c.id: list(backend_msgs)}
         backend.fetch_history = MagicMock(return_value=backend.cache[c.id])
-        app.manager = MagicMock()
-        app.manager.get.return_value = backend
+        app.core.manager = MagicMock()
+        app.core.manager.get.return_value = backend
+        backend.find_contact.return_value = c
 
         app._add_load_more_widget = MagicMock()
         app._clear_chat = MagicMock()
@@ -1214,14 +1236,14 @@ class TestWhatsAppRenderFirst:
             return MagicMock()
 
         app._make_message_widget = MagicMock(side_effect=fake_make_widget)
-        fetch = app.manager.get.return_value.fetch_history
+        fetch = app.core.manager.get.return_value.fetch_history
 
         app._load_messages_worker()
 
         # il cache è stato renderizzato PRIMA del fetch (paint istantaneo)
         assert order[0] == "gia in cache"
         # il fetch remoto è comunque avvenuto con limit=50
-        fetch.assert_called_once_with(c.id, limit=50)
+        fetch.assert_called_once_with(c.id, 50)
         # fase 2 (cache cambiato): full re-render ordinato con il nuovo messaggio
         assert order[-2:] == ["gia in cache", "nuovo"]
 

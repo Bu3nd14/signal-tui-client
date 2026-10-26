@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -38,9 +39,8 @@ def make_app(manager, service=None):
     from web.auth import install_auth
 
     app = FastAPI()
-    app.state.manager = manager
-    if service is not None:
-        app.state.transcription_service = service
+    app.state.api = api_for(manager)
+    app.state.api.transcription.service = service
     install_auth(app, TOKEN)
     app.include_router(create_api_router())
     return app
@@ -91,7 +91,11 @@ def test_post_returns_404_when_attachment_cannot_be_resolved():
     service.submit.assert_not_called()
 
 
-def test_post_submits_resolved_attachment(tmp_path: Path):
+def test_post_submits_resolved_attachment(tmp_path: Path, monkeypatch):
+    # The attachment must sit inside the protocol's media root (confinement).
+    monkeypatch.setattr(
+        "server.media._allowed_media_root", lambda _manager, _proto: tmp_path.resolve()
+    )
     audio = tmp_path / "audio.ogg"
     audio.write_bytes(b"audio")
     service = MagicMock()
@@ -106,7 +110,9 @@ def test_post_submits_resolved_attachment(tmp_path: Path):
 
     assert response.status_code == 200
     assert response.json() == {"status": "pending"}
-    service.submit.assert_called_once_with("telegram", "folder/audio-3", audio)
+    service.submit.assert_called_once_with(
+        "telegram", "folder/audio-3", audio.resolve()
+    )
 
 
 @pytest.mark.parametrize(

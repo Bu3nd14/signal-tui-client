@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,7 +47,7 @@ def _outgoing(
 def _db_rows() -> list[tuple[str | None, str | None]]:
     import protocols.db as backend_mod
 
-    with sqlite3.connect(backend_mod.DB_FILE) as conn:
+    with closing(sqlite3.connect(backend_mod.DB_FILE)) as conn, conn:
         return conn.execute(
             "SELECT msg_id, attachment_id FROM messages "
             "WHERE protocol = 'signal' ORDER BY timestamp"

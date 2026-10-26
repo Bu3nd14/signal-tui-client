@@ -23,8 +23,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from models import ChatContact
+from server.send_registry import SendRegistry, build_fingerprint
 from tests.test_web_plugin import AUTH, FakeManager, make_app
-from web.send_registry import SendRegistry, build_fingerprint
+from web.ops import get_api
 
 _PNG_1X1 = b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
@@ -88,7 +89,7 @@ def _run_node(source: str) -> None:
 def test_indep_duplicate_same_payload_single_send():
     manager = _manager()
     app = make_app(manager)
-    with patch("web.api.push_event"), TestClient(app) as client:
+    with patch("server.api.ChatAPI.publish_web_push"), TestClient(app) as client:
         first = _send(client, client_msg_id="cid-x")
         second = _send(client, client_msg_id="cid-x")
     assert first.status_code == 200 and first.json() == {"ok": True}
@@ -105,7 +106,7 @@ def test_indep_duplicate_same_payload_single_send():
 def test_indep_conflict_same_id_different_text_422_never_drops():
     manager = _manager()
     app = make_app(manager)
-    with patch("web.api.push_event"), TestClient(app) as client:
+    with patch("server.api.ChatAPI.publish_web_push"), TestClient(app) as client:
         first = _send(client, text="uno", client_msg_id="cid-c")
         second = _send(client, text="due", client_msg_id="cid-c")
     assert first.status_code == 200
@@ -119,7 +120,7 @@ def test_indep_conflict_same_id_different_text_422_never_drops():
 def test_indep_conflict_same_text_different_quote_422():
     manager = _manager()
     app = make_app(manager)
-    with patch("web.api.push_event"), TestClient(app) as client:
+    with patch("server.api.ChatAPI.publish_web_push"), TestClient(app) as client:
         first = _send(
             client, client_msg_id="cid-q", quote_message="a", quote_author="b"
         )
@@ -136,7 +137,7 @@ def test_indep_different_contact_is_separate_key_not_conflict():
     contatti diversi NON è un conflitto e produce due invii reali."""
     manager = _manager(("alice", "bob"))
     app = make_app(manager)
-    with patch("web.api.push_event"), TestClient(app) as client:
+    with patch("server.api.ChatAPI.publish_web_push"), TestClient(app) as client:
         first = _send(client, contact_id="alice", client_msg_id="cid-shared")
         second = _send(client, contact_id="bob", client_msg_id="cid-shared")
     assert first.status_code == 200 and second.status_code == 200
@@ -159,13 +160,13 @@ def test_indep_502_releases_inflight_and_allows_later_retry():
     manager.send_message_sync = send
     app = make_app(manager)
     with (
-        patch("web.api.push_event"),
-        patch("web.api.compute_delay", return_value=0.0),
-        patch("web.api.asyncio.sleep", new_callable=AsyncMock),
+        patch("server.api.ChatAPI.publish_web_push"),
+        patch("server.ops.send.compute_delay", return_value=0.0),
+        patch("server.ops.send.asyncio.sleep", new_callable=AsyncMock),
         TestClient(app) as client,
     ):
         first = _send(client, client_msg_id="cid-502")
-        registry = app.state.send_registry
+        registry = get_api(app).send_registry
         key = ("signal", "alice", "cid-502")
         assert first.status_code == 502
         # Il finally deve aver rilasciato il claim: nessun 409 bloccante.
@@ -187,10 +188,10 @@ def test_indep_inflight_409_then_release_allows_retry():
 
     manager.send_message_sync = send
     app = make_app(manager)
-    with patch("web.api.push_event"), TestClient(app) as client:
+    with patch("server.api.ChatAPI.publish_web_push"), TestClient(app) as client:
         # Forza la creazione del registry con un primo invio (chiave diversa).
         _send(client, text="seed-msg", client_msg_id="seed")
-        registry = app.state.send_registry
+        registry = get_api(app).send_registry
         key = ("signal", "alice", "cid-inflight")
         outcome, token = registry.claim_or_lookup(key, _fp(text="Ciao"))
         assert outcome == "claimed"
@@ -212,10 +213,10 @@ def test_indep_inflight_409_then_release_allows_retry():
 def test_indep_attachments_never_touch_registry():
     manager = _manager()
     app = make_app(manager)
-    with patch("web.api.push_event"), TestClient(app) as client:
+    with patch("server.api.ChatAPI.publish_web_push"), TestClient(app) as client:
         # Un testo con id A marchia la chiave (signal, alice, A) come sent.
         _send(client, client_msg_id="shared-id")
-        registry = app.state.send_registry
+        registry = get_api(app).send_registry
         # Un allegato con lo STESSO id non deve né leggere né mutare il registry.
         before = registry.snapshot(("signal", "alice", "shared-id"))
         for _ in range(2):
@@ -239,7 +240,7 @@ def test_indep_attachments_never_touch_registry():
 def test_indep_legacy_missing_client_msg_id_not_deduped():
     manager = _manager()
     app = make_app(manager)
-    with patch("web.api.push_event"), TestClient(app) as client:
+    with patch("server.api.ChatAPI.publish_web_push"), TestClient(app) as client:
         a = _send(client)
         b = _send(client)
     # Senza client_msg_id il server genera uuid distinti → nessuna dedup.
@@ -250,7 +251,7 @@ def test_indep_legacy_missing_client_msg_id_not_deduped():
 def test_indep_unicode_and_whitespace_text_distinct():
     manager = _manager()
     app = make_app(manager)
-    with patch("web.api.push_event"), TestClient(app) as client:
+    with patch("server.api.ChatAPI.publish_web_push"), TestClient(app) as client:
         a = _send(client, text="Ciao ", client_msg_id="cid-ws")
         b = _send(client, text="Ciao", client_msg_id="cid-ws")
     # Testo diverso (spazio) → fingerprint diverso → 422, mai drop.
@@ -822,7 +823,7 @@ async def test_indep_concurrent_same_id_produces_single_send():
     }
 
     transport = httpx.ASGITransport(app=app)
-    with patch("web.api.push_event"):
+    with patch("server.api.ChatAPI.publish_web_push"):
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test"
         ) as client:
@@ -1002,7 +1003,7 @@ vm.runInThisContext(code);
 
 
 def test_indep_registry_stale_sent_beyond_ttl_is_reclaimed():
-    from web.send_registry import SendRegistry
+    from server.send_registry import SendRegistry
 
     clock = _Clock()
     registry = SendRegistry(

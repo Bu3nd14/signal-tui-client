@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -41,7 +42,7 @@ def _message(msg_id: str, text: str = "ciao") -> dict:
 
 
 def _rows(db_file: Path) -> list[tuple]:
-    with sqlite3.connect(db_file) as conn:
+    with closing(sqlite3.connect(db_file)) as conn, conn:
         return conn.execute(
             "SELECT msg_id, text, status, edited FROM messages ORDER BY id"
         ).fetchall()

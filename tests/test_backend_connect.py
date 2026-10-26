@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -38,6 +38,14 @@ def _make_app() -> SignalTUI:
     return app
 
 
+def _ready(app: SignalTUI, backend: MagicMock) -> None:
+    """Run ``_on_backend_ready``: contacts reach the TUI through the core's
+    ``contacts.for_protocol`` operation, which reads ``manager.get(protocol)``."""
+    app.core.manager = MagicMock()
+    app.core.manager.get.return_value = backend
+    app._on_backend_ready(backend.protocol)
+
+
 def _make_backend(
     contacts: list[ChatContact], protocol: str = PROTOCOL_SIGNAL
 ) -> MagicMock:
@@ -56,7 +64,7 @@ class TestBackendReadyAutoSelect:
         # Un altro backend (WhatsApp) è ancora in connessione.
         app._pending_backends = {"whatsapp"}
 
-        app._on_backend_ready(_make_backend([mario, anna]))
+        _ready(app, _make_backend([mario, anna]))
 
         # Signal è pronto, ma WA non ha ancora riportato → nessuna selezione.
         app._select_contact.assert_not_called()
@@ -65,8 +73,11 @@ class TestBackendReadyAutoSelect:
         # L'ultimo backend riporta (ready o fallito) → seleziona il top.
         app._mark_backend_done("whatsapp")
 
-        app._select_contact.assert_called_once_with(anna)
-        assert app.selected_contact is anna
+        # The TUI list holds wire copies of the core's contacts (not ``anna``).
+        app._select_contact.assert_called_once()
+        assert app.selected_contact is not anna
+        assert app.selected_contact is not None
+        assert app.selected_contact.cache_key == anna.cache_key
 
     def test_last_backend_failure_still_selects_first_contact(self):
         app = _make_app()
@@ -96,105 +107,6 @@ class TestBackendReadyAutoSelect:
         app._mark_backend_connecting("whatsapp")
 
         assert app._pending_backends == {"signal", "whatsapp"}
-
-
-class TestTelegramConnectGuard:
-    """🛡️ _connect_telegram non deve avviare due worker in parallelo.
-
-    Due Ctrl+L→Esc ravvicinati avviavano due worker concorrenti che gareggiavano
-    sullo stesso stato del backend (client/loop), rompendo la ricezione live.
-    """
-
-    def _make_app(self) -> SignalTUI:
-        app = _make_app()
-        app.call_from_thread = MagicMock()
-        app.telegram_backend = MagicMock()
-        app.telegram_backend.protocol = PROTOCOL_SIGNAL
-        return app
-
-    def test_skips_when_already_connecting(self):
-        app = self._make_app()
-        app._tg_connecting = True
-
-        app._connect_telegram()
-
-        app.telegram_backend._connect_sync.assert_not_called()
-
-    def test_runs_and_resets_guard(self):
-        app = self._make_app()
-        app._tg_connecting = False
-
-        app._connect_telegram()
-
-        app.telegram_backend._connect_sync.assert_called_once()
-        assert app._tg_connecting is False
-
-    def test_guard_reset_on_failure(self):
-        app = self._make_app()
-        app._tg_connecting = False
-        app.telegram_backend._connect_sync.side_effect = RuntimeError("boom")
-
-        app._connect_telegram()
-
-        assert app._tg_connecting is False
-
-
-class TestReconnectTouchedBackends:
-    """🎯 _reconnect_touched_backends riconnette solo i backend toccati."""
-
-    def _make_app(self) -> SignalTUI:
-        app = _make_app()
-        app.run_worker = MagicMock()
-        app._connect_signal = MagicMock()
-        app._connect_whatsapp = MagicMock()
-        app._connect_telegram = MagicMock()
-        app.signal_backend = MagicMock()
-        app.whatsapp_backend = MagicMock()
-        app.telegram_backend = MagicMock()
-        return app
-
-    def test_empty_set_reconnects_nothing(self):
-        app = self._make_app()
-        app._reconnect_touched_backends(set())
-        app.run_worker.assert_not_called()
-
-    def test_telegram_only(self):
-        app = self._make_app()
-        app._reconnect_touched_backends({"telegram"})
-        app.run_worker.assert_called_once_with(
-            app._connect_telegram, exclusive=False, thread=True
-        )
-
-    def test_signal_only(self):
-        app = self._make_app()
-        app._reconnect_touched_backends({"signal"})
-        app.run_worker.assert_called_once_with(
-            app._connect_signal, exclusive=False, thread=True
-        )
-
-    def test_whatsapp_only(self):
-        app = self._make_app()
-        app._reconnect_touched_backends({"whatsapp"})
-        app.run_worker.assert_called_once_with(
-            app._connect_whatsapp, exclusive=False, thread=True
-        )
-
-    def test_multiple(self):
-        app = self._make_app()
-        app._reconnect_touched_backends({"signal", "telegram"})
-        assert app.run_worker.call_count == 2
-        app.run_worker.assert_any_call(
-            app._connect_signal, exclusive=False, thread=True
-        )
-        app.run_worker.assert_any_call(
-            app._connect_telegram, exclusive=False, thread=True
-        )
-
-    def test_missing_backend_skipped(self):
-        app = self._make_app()
-        app.telegram_backend = None
-        app._reconnect_touched_backends({"telegram"})
-        app.run_worker.assert_not_called()
 
 
 def _media_msg(
@@ -273,7 +185,7 @@ class TestBackendReadyMergeDedup:
             },
         )
 
-        app._on_backend_ready(backend)
+        _ready(app, backend)
 
         key = contact_cache_key(PROTOCOL_SIGNAL, cid)
         entries = app._cache[key]
@@ -288,7 +200,7 @@ class TestBackendReadyMergeDedup:
         msg = _media_msg(mid=msg_id, att="att-0115", text="Image: IMG_0115.jpg")
         backend = self._make_backend(PROTOCOL_SIGNAL, {cid: [msg, dict(msg)]})
 
-        app._on_backend_ready(backend)
+        _ready(app, backend)
 
         key = contact_cache_key(PROTOCOL_SIGNAL, cid)
         assert len(app._cache[key]) == 1
@@ -318,84 +230,9 @@ class TestBackendReadyMergeDedup:
         }
         backend = self._make_backend(PROTOCOL_WHATSAPP, {cid: [media, ack]})
 
-        app._on_backend_ready(backend)
+        _ready(app, backend)
 
         key = contact_cache_key(PROTOCOL_WHATSAPP, cid)
         entries = app._cache[key]
         assert len(entries) == 1
         assert entries[0]["msg_type"] == "image"
-
-
-class _FakeWhatsAppBackend:
-    """Stand-in with real ``is_working``/``needs_pairing`` properties."""
-
-    protocol = PROTOCOL_WHATSAPP
-
-    def __init__(self, *, needs_pairing: bool = False, is_working=True):
-        self.needs_pairing = needs_pairing
-        self._is_working = is_working
-
-    @property
-    def is_working(self) -> bool:
-        value = self._is_working
-        return bool(value() if callable(value) else value)
-
-
-class TestWhatsappBootConnect:
-    """🚀 ``_connect_whatsapp_boot``: connette appena WAHA è WORKING.
-
-    L'app può partire mentre WAHA sta ancora sincronizzando: il vecchio gate
-    ``is_working`` saltava la connessione senza retry (UI vuota fino al riavvio).
-    """
-
-    def _make(self, *, needs_pairing=False, is_working=True):
-        app = _make_app()
-        app.call_from_thread = MagicMock()
-        app._connect_whatsapp = MagicMock()
-        app.whatsapp_backend = _FakeWhatsAppBackend(
-            needs_pairing=needs_pairing, is_working=is_working
-        )
-        return app, app.whatsapp_backend
-
-    def test_connects_immediately_when_working(self):
-        app, _ = self._make(is_working=True)
-
-        app._connect_whatsapp_boot()
-
-        app._connect_whatsapp.assert_called_once_with()
-
-    def test_skips_pairing_sessions(self):
-        app, _ = self._make(needs_pairing=True, is_working=False)
-
-        app._connect_whatsapp_boot()
-
-        app._connect_whatsapp.assert_not_called()
-        app.call_from_thread.assert_called_once()
-
-    def test_waits_until_working_then_connects(self):
-        app, backend = self._make(is_working=False)
-        calls = {"n": 0}
-
-        def _is_working():
-            calls["n"] += 1
-            return calls["n"] >= 3
-
-        backend._is_working = _is_working
-        with patch("tui.backend_connect.time.sleep"):
-            app._connect_whatsapp_boot()
-
-        app._connect_whatsapp.assert_called_once_with()
-        assert calls["n"] == 3
-
-    def test_timeout_marks_backend_done(self):
-        app, _ = self._make(is_working=False)
-        with patch("tui.backend_connect.time.monotonic", side_effect=[0.0, 1e9]):
-            app._connect_whatsapp_boot()
-
-        app._connect_whatsapp.assert_not_called()
-        app.call_from_thread.assert_called_once()
-
-    def test_no_backend_is_noop(self):
-        app = _make_app()
-        app.whatsapp_backend = None
-        app._connect_whatsapp_boot()  # non deve sollevare

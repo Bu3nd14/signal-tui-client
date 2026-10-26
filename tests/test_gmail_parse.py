@@ -1,4 +1,4 @@
-"""MIME/header/validation tests for ``web.gmail`` (no network)."""
+"""MIME/header/validation tests for ``server.gmail`` (no network)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from email.message import EmailMessage
 
 import pytest
 
-from web import gmail
+from server import gmail
 
 
 def _raw(message: EmailMessage) -> bytes:

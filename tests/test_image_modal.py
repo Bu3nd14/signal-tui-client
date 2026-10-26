@@ -23,6 +23,8 @@ from textual.screen import ModalScreen, Screen
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from client_harness import inline_client_calls
+
 from tui.download import DownloadModeMixin
 from tui.images.detect import ImageSupport
 from tui.images.kitty_renderer import KittyRenderer
@@ -187,7 +189,7 @@ class TestOffAndClickRouting:
             "_hires_executor": _RecordingExecutor(),
         }
         defaults.update(extra)
-        return SimpleNamespace(**defaults)
+        return inline_client_calls(SimpleNamespace(**defaults), DownloadModeMixin)
 
     def test_off_click_shows_disabled_status(self, tmp_path):
         attachment = tmp_path / "photo.jpg"

@@ -227,3 +227,75 @@ def resolve_avatar(
     except Exception:
         logger.debug("Avatar resolution failed for %s", proto, exc_info=True)
         return None
+
+
+_BLOB_DIR_NAME = "avatar-blobs"
+_BLOB_KEEP = 256
+
+
+def _materialize(proto: str, data: bytes, content_type: str) -> Path | None:
+    """Write avatar *data* to a content-addressed file and return its path.
+
+    Signal avatars are read from signal-cli's own files as bytes; a blob needs a
+    path, so the bytes get a stable name (digest) under the cache directory.
+    The newest ``_BLOB_KEEP`` files are kept.  ``protocols.db.CACHE_DIR`` is
+    looked up at call time (like the rest of the cache layout).
+    """
+    import protocols.db as backend
+
+    digest = hashlib.sha1(data, usedforsecurity=False).hexdigest()
+    directory = Path(backend.CACHE_DIR) / _BLOB_DIR_NAME / proto
+    path = directory / f"{digest}.img"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        with _avatar_lock(path):
+            if path.is_file():
+                path.touch()
+                return path
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+        files = sorted(
+            (p for p in directory.glob("*.img") if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in files[_BLOB_KEEP:]:
+            stale.unlink(missing_ok=True)
+        return path
+    except OSError:
+        logger.debug("Unable to store %s avatar blob", proto, exc_info=True)
+        return None
+
+
+def resolve_avatar_file(
+    proto: str, manager: Any, contact_id: str
+) -> tuple[Path, str] | None:
+    """Like :func:`resolve_avatar`, but the picture as ``(local file, type)``.
+
+    WhatsApp and Telegram pictures already live in the avatar cache; Signal's
+    bytes are stored as a content-addressed blob file.  Best-effort: never
+    raises.
+    """
+    if not contact_id:
+        return None
+    try:
+        if proto == "whatsapp":
+            rest = getattr(manager.get("whatsapp"), "_rest", None)
+            path = resolve_whatsapp_avatar(rest, contact_id)
+            if path is None or not path.is_file():
+                return None
+            return path, "image/jpeg"
+        result = resolve_avatar(proto, manager, contact_id)
+        if result is None:
+            return None
+        data, content_type = result
+        if proto == "telegram":
+            cached = _avatar_path_for("telegram-avatars", contact_id)
+            if cached.is_file():
+                return cached, content_type
+        path = _materialize(proto, data, content_type)
+        return (path, content_type) if path is not None else None
+    except Exception:
+        logger.debug("Avatar file resolution failed for %s", proto, exc_info=True)
+        return None

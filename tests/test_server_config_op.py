@@ -1,0 +1,124 @@
+"""``server.config`` and the TUI's use of it for thumbnail limits."""
+
+from __future__ import annotations
+
+import ast
+import threading
+from pathlib import Path
+from unittest.mock import MagicMock
+
+from client_harness import StubClient, client_for
+
+from models import DEFAULT_THUMBNAIL_MAX_COLS, DEFAULT_THUMBNAIL_MAX_LINES
+from tui.chat_view import ChatViewMixin
+from tui.client_calls import ClientCallsMixin
+from tui.pickers import PickerMixin
+
+
+def test_op_returns_configured_limits(monkeypatch):
+    monkeypatch.setenv("THUMBNAIL_MAX_LINES", "20")
+    monkeypatch.setenv("THUMBNAIL_MAX_COLS", "80")
+    out = client_for(MagicMock()).call("server.config")
+    assert out["thumbnail_max_lines"] == 20
+    assert out["thumbnail_max_cols"] == 80
+
+
+def test_op_defaults_match_model_constants(monkeypatch, tmp_path):
+    monkeypatch.delenv("THUMBNAIL_MAX_LINES", raising=False)
+    monkeypatch.delenv("THUMBNAIL_MAX_COLS", raising=False)
+    monkeypatch.setattr("protocols.config.PROJECT_DIR", tmp_path)
+    out = client_for(MagicMock()).call("server.config")
+    assert out["thumbnail_max_lines"] == DEFAULT_THUMBNAIL_MAX_LINES
+    assert out["thumbnail_max_cols"] == DEFAULT_THUMBNAIL_MAX_COLS
+
+
+class _View(ClientCallsMixin, ChatViewMixin):
+    is_running = False
+
+    def __init__(self) -> None:
+        self._init_client_state()
+        self._thread_id = threading.get_ident()
+
+
+def test_tui_never_calls_the_client_for_thumbnail_limits():
+    view = _View()
+    view.client = StubClient({"thumbnail_max_lines": 7, "thumbnail_max_cols": 33})
+    assert view._thumbnail_limits() == (
+        DEFAULT_THUMBNAIL_MAX_LINES,
+        DEFAULT_THUMBNAIL_MAX_COLS,
+    )
+    assert view.client.calls == []
+
+
+def test_prefetched_config_sets_the_limits_once():
+    view = _View()
+    view.client = StubClient({"thumbnail_max_lines": 7, "thumbnail_max_cols": 33})
+    view._start_server_config_fetch()  # no running app: inline
+    assert view._thumbnail_limits() == (7, 33)
+    assert view._thumbnail_limits() == (7, 33)
+    assert [name for name, _ in view.client.calls] == ["server.config"]
+    assert view.client.timeouts == [5.0]
+
+
+def test_failed_prefetch_keeps_defaults_and_a_retry_applies():
+    view = _View()
+    view.client = StubClient(
+        RuntimeError("down"), {"thumbnail_max_lines": 5, "thumbnail_max_cols": 9}
+    )
+    view._start_server_config_fetch()
+    assert view._thumbnail_limits() == (
+        DEFAULT_THUMBNAIL_MAX_LINES,
+        DEFAULT_THUMBNAIL_MAX_COLS,
+    )
+    view._start_server_config_fetch()
+    assert view._thumbnail_limits() == (5, 9)
+
+
+def test_chat_view_has_no_backend_imports():
+    tree = ast.parse(Path("tui/chat_view.py").read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            assert not (node.module or "").startswith("protocols"), node.lineno
+
+
+def test_op_returns_picker_options(monkeypatch, tmp_path):
+    monkeypatch.setenv("PICKER_MAX_RESULTS", "7")
+    monkeypatch.setenv("PICKER_PREFERRED_BACKEND", " telegram ")
+    out = client_for(MagicMock()).call("server.config")
+    assert out["picker_max_results"] == 7
+    assert out["picker_preferred_backend"] == "telegram"
+
+
+def test_tui_configures_the_picker_from_the_server():
+    import contact_picker
+
+    class _App(ClientCallsMixin, PickerMixin):
+        is_running = False
+
+    app = _App()
+    app._init_client_state()
+    app._thread_id = threading.get_ident()
+    app.client = StubClient(
+        {
+            "thumbnail_max_lines": 1,
+            "thumbnail_max_cols": 2,
+            "picker_max_results": 9,
+            "picker_preferred_backend": "signal",
+        }
+    )
+    try:
+        app._start_server_config_fetch()
+        assert contact_picker._SETTINGS.max_results == 9
+        assert contact_picker._SETTINGS.preferred_backend == "signal"
+        app.client = StubClient(RuntimeError("down"))
+        app._start_server_config_fetch()  # keeps the previous settings
+        assert contact_picker._SETTINGS.max_results == 9
+    finally:
+        contact_picker.configure_picker()
+
+
+def test_contact_picker_has_no_protocols_import():
+    tree = ast.parse(Path("contact_picker.py").read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            assert not (node.module or "").startswith("protocols"), node.lineno

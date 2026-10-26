@@ -11,7 +11,8 @@ Covers:
 
 from __future__ import annotations
 
-import json
+import base64
+import itertools
 import sys
 from asyncio import run
 from pathlib import Path
@@ -26,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from device_link_screen import _PROTOCOL_ITEMS, DeviceLinkPickerScreen
+from server.client import ApiError
 
 
 class TestDeviceLinkPickerScreen:
@@ -110,17 +112,6 @@ class TestDeviceLinkPickerScreen:
         screen._selected_protocol = "whatsapp"
         data = screen._get_qr_data("")
         assert data == "WA:fake-pairing-code-12345-for-ui-testing"
-
-    def test_whatsapp_working_requires_authenticated_identity(self):
-        assert DeviceLinkPickerScreen._whatsapp_status_is_linked(
-            {"status": "WORKING", "me": {"id": "123@c.us"}}
-        )
-        assert not DeviceLinkPickerScreen._whatsapp_status_is_linked(
-            {"status": "WORKING", "me": None}
-        )
-        assert not DeviceLinkPickerScreen._whatsapp_status_is_linked(
-            {"status": "FAILED", "me": {"id": "123@c.us"}}
-        )
 
     def test_select_protocol_out_of_range_is_noop(self):
         """Selecting an invalid index does nothing."""
@@ -252,300 +243,13 @@ class TestDeviceLinkReconnectWiring:
             app._open_device_link()
         callback = app.push_screen.call_args[0][1]
         callback(None)
-        app._reconnect_touched_backends.assert_called_once_with({"telegram"})
-
-
-class TestSignalLinkPersistence:
-    def test_persists_only_linked_account_and_preserves_config(
-        self, tmp_path, monkeypatch
-    ):
-        from protocols import rpc as signal_rpc
-
-        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
-        config_file = tmp_path / "config.json"
-        config_file.write_text(
-            json.dumps({"web": {"token": "existing"}}), encoding="utf-8"
+        app._reconnect_touched_backends.assert_called_once_with(
+            {"telegram"}, after=fake_screen.cancel_thread
         )
-        completed = SimpleNamespace(
-            returncode=0,
-            stdout="+391111111111\n+392222222222\n",
-        )
-
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch.object(
-                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
-            ),
-            patch(
-                "device_link_screen.subprocess.run", return_value=completed
-            ) as run_cli,
-        ):
-            account = DeviceLinkPickerScreen._resolve_linked_signal_account(
-                "+39 222 222 2222"
-            )
-            DeviceLinkPickerScreen._persist_signal_account(account)
-
-        assert account == "+392222222222"
-        assert json.loads(config_file.read_text(encoding="utf-8")) == {
-            "web": {"token": "existing"},
-            "user_number": "+392222222222",
-        }
-        run_cli.assert_called_once_with(
-            ["signal-cli", "listAccounts"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-
-    def test_single_linked_account_does_not_require_phone_input(
-        self, tmp_path, monkeypatch
-    ):
-        from protocols import rpc as signal_rpc
-
-        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
-        completed = SimpleNamespace(returncode=0, stdout="+391111111111\n")
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch.object(
-                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
-            ),
-            patch("device_link_screen.subprocess.run", return_value=completed),
-        ):
-            account = DeviceLinkPickerScreen._resolve_linked_signal_account("")
-
-        assert account == "+391111111111"
-
-    def test_new_account_is_selected_from_pre_link_snapshot(
-        self, tmp_path, monkeypatch
-    ):
-        from protocols import rpc as signal_rpc
-
-        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
-        completed = SimpleNamespace(
-            returncode=0,
-            stdout="+391111111111\n+392222222222\n",
-        )
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch.object(
-                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
-            ),
-            patch("device_link_screen.subprocess.run", return_value=completed),
-        ):
-            account = DeviceLinkPickerScreen._resolve_linked_signal_account(
-                "", {"+391111111111"}
-            )
-
-        assert account == "+392222222222"
-
-    def test_new_account_overrides_stale_entered_phone(self, tmp_path, monkeypatch):
-        from protocols import rpc as signal_rpc
-
-        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
-        completed = SimpleNamespace(
-            returncode=0,
-            stdout="+391111111111\n+392222222222\n",
-        )
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch.object(
-                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
-            ),
-            patch("device_link_screen.subprocess.run", return_value=completed),
-        ):
-            account = DeviceLinkPickerScreen._resolve_linked_signal_account(
-                "+391111111111", {"+391111111111"}
-            )
-
-        assert account == "+392222222222"
-
-    def test_multiple_accounts_without_match_are_rejected(self, tmp_path, monkeypatch):
-        from protocols import rpc as signal_rpc
-
-        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
-        completed = SimpleNamespace(
-            returncode=0,
-            stdout="+391111111111\n+392222222222\n",
-        )
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch.object(
-                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
-            ),
-            patch("device_link_screen.subprocess.run", return_value=completed),
-            pytest.raises(RuntimeError, match="multiple linked accounts"),
-        ):
-            DeviceLinkPickerScreen._resolve_linked_signal_account("")
-
-        assert not (tmp_path / "config.json").exists()
-
-    def test_environment_account_conflict_is_rejected(self, tmp_path, monkeypatch):
-        from protocols import rpc as signal_rpc
-
-        monkeypatch.setenv("SIGNAL_USER_NUMBER", "+399999999999")
-        completed = SimpleNamespace(returncode=0, stdout="+391111111111\n")
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch.object(
-                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
-            ),
-            patch("device_link_screen.subprocess.run", return_value=completed),
-            pytest.raises(RuntimeError, match="SIGNAL_USER_NUMBER"),
-        ):
-            DeviceLinkPickerScreen._resolve_linked_signal_account("")
-
-    def test_finalize_updates_active_backend(self):
-        screen = DeviceLinkPickerScreen()
-        backend = SimpleNamespace(user_number="")
-        with (
-            patch.object(
-                screen,
-                "_resolve_linked_signal_account",
-                return_value="+391111111111",
-            ),
-            patch.object(screen, "_persist_signal_account") as persist,
-            patch.object(
-                DeviceLinkPickerScreen,
-                "app",
-                new_callable=PropertyMock,
-                return_value=SimpleNamespace(signal_backend=backend),
-            ),
-        ):
-            run(screen._finalize_signal_link(""))
-
-        assert screen._signal_number == "+391111111111"
-        assert backend.user_number == "+391111111111"
-        persist.assert_called_once_with("+391111111111")
-
-    def test_finalize_rejects_switch_before_persisting(self):
-        screen = DeviceLinkPickerScreen()
-        backend = SimpleNamespace(user_number="+391111111111")
-        with (
-            patch.object(
-                screen,
-                "_resolve_linked_signal_account",
-                return_value="+392222222222",
-            ),
-            patch.object(screen, "_persist_signal_account") as persist,
-            patch.object(
-                DeviceLinkPickerScreen,
-                "app",
-                new_callable=PropertyMock,
-                return_value=SimpleNamespace(signal_backend=backend),
-            ),
-            pytest.raises(RuntimeError, match="switching Signal accounts"),
-        ):
-            run(screen._finalize_signal_link(""))
-
-        persist.assert_not_called()
 
 
 class TestSignalLinkPersistenceEdgeCases:
     """Edge cases of the Signal link persistence patch (PR #214)."""
-
-    def test_list_signal_accounts_failure(self, tmp_path, monkeypatch):
-        """signal-cli listAccounts with non-zero exit raises RuntimeError."""
-        from protocols import rpc as signal_rpc
-
-        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
-        completed = SimpleNamespace(returncode=1, stdout="")
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch.object(
-                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
-            ),
-            patch("device_link_screen.subprocess.run", return_value=completed),
-            pytest.raises(RuntimeError, match="could not list the linked accounts"),
-        ):
-            DeviceLinkPickerScreen._list_signal_accounts()
-
-    def test_single_account_matching_previous_snapshot(self, tmp_path, monkeypatch):
-        """Only one account, already in the pre-link snapshot: use it."""
-        from protocols import rpc as signal_rpc
-
-        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
-        completed = SimpleNamespace(returncode=0, stdout="+391111111111\n")
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch.object(
-                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
-            ),
-            patch("device_link_screen.subprocess.run", return_value=completed),
-        ):
-            account = DeviceLinkPickerScreen._resolve_linked_signal_account(
-                "", {"+391111111111"}
-            )
-
-        assert account == "+391111111111"
-
-    def test_no_accounts_reported_is_rejected(self, tmp_path, monkeypatch):
-        """Empty listAccounts output raises RuntimeError."""
-        from protocols import rpc as signal_rpc
-
-        monkeypatch.delenv("SIGNAL_USER_NUMBER", raising=False)
-        completed = SimpleNamespace(returncode=0, stdout="")
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch.object(
-                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
-            ),
-            patch("device_link_screen.subprocess.run", return_value=completed),
-            pytest.raises(RuntimeError, match="did not report a linked account"),
-        ):
-            DeviceLinkPickerScreen._resolve_linked_signal_account("")
-
-    def test_persist_rejects_invalid_config(self, tmp_path, monkeypatch):
-        """Malformed config.json raises RuntimeError without overwriting."""
-        from protocols import rpc as signal_rpc
-
-        config_file = tmp_path / "config.json"
-        config_file.write_text("{not valid json", encoding="utf-8")
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            pytest.raises(RuntimeError, match="invalid or unreadable"),
-        ):
-            DeviceLinkPickerScreen._persist_signal_account("+391111111111")
-
-        assert config_file.read_text(encoding="utf-8") == "{not valid json"
-
-    def test_persist_rejects_non_dict_config(self, tmp_path, monkeypatch):
-        """config.json containing a non-object JSON value raises RuntimeError."""
-        from protocols import rpc as signal_rpc
-
-        config_file = tmp_path / "config.json"
-        config_file.write_text("[1, 2]", encoding="utf-8")
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            pytest.raises(RuntimeError, match="must contain a JSON object"),
-        ):
-            DeviceLinkPickerScreen._persist_signal_account("+391111111111")
-
-    def test_finalize_without_backend(self):
-        """Finalize works even when no Signal backend is attached."""
-        screen = DeviceLinkPickerScreen()
-        with (
-            patch.object(
-                screen,
-                "_resolve_linked_signal_account",
-                return_value="+391111111111",
-            ),
-            patch.object(screen, "_persist_signal_account"),
-            patch.object(
-                DeviceLinkPickerScreen,
-                "app",
-                new_callable=PropertyMock,
-                return_value=SimpleNamespace(signal_backend=None),
-            ),
-        ):
-            run(screen._finalize_signal_link(""))
-
-        assert screen._signal_number == "+391111111111"
-
-    def test_check_signal_done_without_proc(self):
-        """No linking subprocess yet: not done."""
-        screen = DeviceLinkPickerScreen()
-        assert run(screen._check_signal_done()) is False
 
     def test_poll_completion_finalize_error_updates_status(self):
         """Finalize failure shows the error on the QR status widget."""
@@ -616,93 +320,6 @@ class TestSignalLinkPersistenceEdgeCases:
             run(screen._poll_completion(""))
         screen.dismiss.assert_called_once_with(None)
 
-    def test_get_signal_link_url_snapshot_failure_continues(self):
-        """A failed pre-link snapshot does not block QR generation."""
-        screen = DeviceLinkPickerScreen()
-        stdout = MagicMock()
-        stdout.readline.side_effect = ["sgnl://linkdevice?uuid=abc", ""]
-        with (
-            patch.object(
-                DeviceLinkPickerScreen,
-                "_list_signal_accounts",
-                side_effect=RuntimeError("boom"),
-            ),
-            patch("device_link_screen.subprocess.Popen") as popen,
-            patch("protocols.rpc.find_signal_cli", return_value=Path("signal-cli")),
-        ):
-            popen.return_value.stdout = stdout
-            link = run(screen._get_signal_link_url())
-        assert link == "sgnl://linkdevice?uuid=abc"
-        assert screen._signal_accounts_before_link == set()
-
-    def test_get_signal_link_url_logs_error_lines(self):
-        """Error lines from signal-cli are tolerated while scanning for a link."""
-        screen = DeviceLinkPickerScreen()
-        stdout = MagicMock()
-        stdout.readline.side_effect = [
-            "some error occurred",
-            "sgnl://linkdevice?uuid=abc",
-            "",
-        ]
-        with (
-            patch.object(
-                DeviceLinkPickerScreen, "_list_signal_accounts", return_value=set()
-            ),
-            patch("device_link_screen.subprocess.Popen") as popen,
-            patch("protocols.rpc.find_signal_cli", return_value=Path("signal-cli")),
-        ):
-            popen.return_value.stdout = stdout
-            link = run(screen._get_signal_link_url())
-        assert link == "sgnl://linkdevice?uuid=abc"
-
-    def test_get_signal_link_url_no_link_raises(self):
-        """signal-cli output without a link URL raises RuntimeError."""
-        screen = DeviceLinkPickerScreen()
-        stdout = MagicMock()
-        stdout.readline.side_effect = ["no link here", ""]
-        with (
-            patch.object(
-                DeviceLinkPickerScreen, "_list_signal_accounts", return_value=set()
-            ),
-            patch("device_link_screen.subprocess.Popen") as popen,
-            patch("protocols.rpc.find_signal_cli", return_value=Path("signal-cli")),
-            pytest.raises(RuntimeError, match="Could not find Signal link URL"),
-        ):
-            popen.return_value.stdout = stdout
-            run(screen._get_signal_link_url())
-
-    def test_dismiss_during_finalize_defers(self):
-        """Dismiss while finalizing defers cleanup instead of killing the proc."""
-        screen = DeviceLinkPickerScreen()
-        proc = MagicMock()
-        proc.poll.return_value = None
-        screen._linking_proc = proc
-        screen._signal_finalizing = True
-        with patch("textual.screen.Screen.dismiss") as dismiss:
-            screen.dismiss(None)
-        assert screen._dismiss_after_finalize is True
-        proc.terminate.assert_not_called()
-        dismiss.assert_not_called()
-
-    def test_dismiss_terminate_failure_logs(self):
-        """A failing proc.terminate() does not prevent dismissal."""
-        screen = DeviceLinkPickerScreen()
-        proc = MagicMock()
-        proc.poll.return_value = None
-        proc.terminate.side_effect = Exception("kill failed")
-        screen._linking_proc = proc
-        with patch("textual.screen.Screen.dismiss") as dismiss:
-            screen.dismiss(None)
-        proc.terminate.assert_called_once()
-        dismiss.assert_called_once()
-
-    def test_dismiss_without_proc(self):
-        """Dismiss works when no linking subprocess was started."""
-        screen = DeviceLinkPickerScreen()
-        with patch("textual.screen.Screen.dismiss") as dismiss:
-            screen.dismiss(None)
-        dismiss.assert_called_once()
-
     def test_transition_to_qr_signal_does_not_mark_touched(self):
         """Signal QR flow is not added to touched protocols (handled on finalize)."""
         screen = DeviceLinkPickerScreen()
@@ -746,40 +363,6 @@ class TestSignalLinkPersistenceEdgeCases:
         ):
             run(screen._poll_completion(""))
         assert screen._signal_finalizing is False
-
-    def test_persist_creates_config_when_missing(self, tmp_path, monkeypatch):
-        """A missing config.json is created with just the user_number."""
-        from protocols import rpc as signal_rpc
-
-        config_file = tmp_path / "config.json"
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch.object(
-                signal_rpc, "find_signal_cli", return_value=Path("signal-cli")
-            ),
-        ):
-            DeviceLinkPickerScreen._persist_signal_account("+391111111111")
-
-        assert json.loads(config_file.read_text(encoding="utf-8")) == {
-            "user_number": "+391111111111"
-        }
-
-    def test_persist_cleans_temp_file_on_replace_failure(self, tmp_path, monkeypatch):
-        """A failed os.replace leaves no temporary files behind."""
-        from protocols import rpc as signal_rpc
-
-        with (
-            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
-            patch(
-                "device_link_screen.os.replace",
-                side_effect=OSError("disk full"),
-            ),
-            pytest.raises(OSError, match="disk full"),
-        ):
-            DeviceLinkPickerScreen._persist_signal_account("+391111111111")
-
-        leftovers = list(tmp_path.glob(".config.json.*"))
-        assert leftovers == []
 
 
 class TestDeviceLinkScreenFlows:
@@ -880,78 +463,90 @@ class TestDeviceLinkScreenFlows:
         screen._on_go_back.assert_called_once()
         screen.dismiss.assert_called_once_with(None)
 
-    def test_async_qr_dispatch_and_completion_checks(self):
-        screen = DeviceLinkPickerScreen()
-        screen._get_signal_link_url = AsyncMock(return_value="signal-url")
+    # The linking itself (signal-cli, WAHA, Telegram) runs in the core: see
+    # tests/test_link_service.py.  Below, the screen against a scripted server.
+
+    def test_start_link_sends_protocol_phone_and_device(self):
+        link = LinkStub(**{"link.start": {"qr": {"kind": "url", "data": "u"}}})
+        screen = DeviceLinkPickerScreen(client=link)
         screen._selected_protocol = "signal"
-        assert run(screen._get_qr_data_async("")) == "signal-url"
-        screen._get_whatsapp_qr = AsyncMock(return_value="ascii")
-        screen._selected_protocol = "whatsapp"
-        assert run(screen._get_qr_data_async("")) == "ASCII:ascii"
-        screen._get_telegram_qr_link = AsyncMock(return_value="telegram-url")
-        screen._selected_protocol = "telegram"
-        assert run(screen._get_qr_data_async("")) == "telegram-url"
+        screen._device_name = "My Laptop"
+        assert run(screen._start_link("+39123")) == {"kind": "url", "data": "u"}
+        assert link.calls == [
+            (
+                "link.start",
+                {"protocol": "signal", "phone": "+39123", "device_name": "My Laptop"},
+            )
+        ]
 
-        screen._linking_proc = MagicMock(poll=MagicMock(return_value=None))
-        assert run(screen._check_signal_done()) is False
-        screen._linking_proc.poll.return_value = 0
-        assert run(screen._check_signal_done()) is True
-
-    def test_fetch_qr_and_telegram_2fa(self):
+    def test_client_defaults_to_the_apps(self):
         screen = DeviceLinkPickerScreen()
-        code = MagicMock()
-        status = MagicMock()
+        app = SimpleNamespace(client="the-client")
+        with patch.object(
+            DeviceLinkPickerScreen, "app", new_callable=PropertyMock, return_value=app
+        ):
+            assert screen._client() == "the-client"
+
+    def test_render_qr_kinds(self):
+        render = DeviceLinkPickerScreen._render_qr
+        with patch("device_link_screen.qr_to_ascii", return_value="ASCII") as qr:
+            assert render({"kind": "url", "data": "sgnl://x"}) == "ASCII"
+        qr.assert_called_once_with("sgnl://x")
+        with patch("device_link_screen.qr_png_to_ascii", return_value="PNG") as png:
+            encoded = base64.b64encode(b"\x89PNG").decode()
+            assert render({"kind": "png", "data": encoded}) == "PNG"
+        png.assert_called_once_with(b"\x89PNG")
+        assert render({"kind": "text", "data": "raw"}) == "raw"
+        assert render({"kind": "info", "data": "hi"}) == "\n\nhi\n"
+        assert render({"kind": "error", "data": "bad"}) == "\n\n❌ bad\n"
+
+    @pytest.mark.parametrize(
+        ("qr", "shown"),
+        [
+            ({"kind": "url", "data": "sgnl://x"}, "ASCII"),
+            ({"kind": "text", "data": "QR"}, "QR"),
+        ],
+    )
+    def test_fetch_qr_shows_it_and_starts_polling(self, qr, shown):
+        screen = DeviceLinkPickerScreen(client=LinkStub(**{"link.start": {"qr": qr}}))
+        screen._selected_protocol = "signal"
+        code, status = MagicMock(), MagicMock()
         screen.query_one = MagicMock(side_effect=[code, status])
         screen.run_worker = MagicMock(side_effect=lambda coro, **kwargs: coro.close())
-        screen._get_qr_data_async = AsyncMock(return_value="ASCII:QR")
-        run(screen._fetch_real_qr(""))
-        code.update.assert_called_once_with("QR")
+        with patch("device_link_screen.qr_to_ascii", return_value="ASCII"):
+            run(screen._fetch_real_qr(""))
+        code.update.assert_called_once_with(shown)
+        status.update.assert_called_once_with("⏳ Waiting for scan from phone...")
+        screen.run_worker.assert_called_once()
 
-        tb = MagicMock()
-        screen.query_one = MagicMock(return_value=MagicMock(value="secret"))
-        with patch.object(
-            DeviceLinkPickerScreen,
-            "app",
-            new_callable=PropertyMock,
-            return_value=SimpleNamespace(telegram_backend=tb),
-        ):
-            screen._on_2fa_submit()
-        assert screen.run_worker.call_count == 2
-
-    def test_whatsapp_and_telegram_qr_helpers(self):
-        screen = DeviceLinkPickerScreen()
-        wa = SimpleNamespace(_rest=MagicMock())
-        wa._rest.get_session_status.return_value = {
-            "status": "working",
-            "me": {"id": "123@c.us"},
+    def test_fetch_qr_info_shows_message_and_does_not_poll(self):
+        info = {
+            "kind": "info",
+            "data": " WhatsApp is already linked ✅\nNo QR needed.\n",
         }
-        with patch.object(
-            DeviceLinkPickerScreen,
-            "app",
-            new_callable=PropertyMock,
-            return_value=SimpleNamespace(whatsapp_backend=wa),
-        ):
-            assert run(screen._get_whatsapp_qr()).startswith("INFO:")
+        screen = DeviceLinkPickerScreen(client=LinkStub(**{"link.start": {"qr": info}}))
+        screen._selected_protocol = "whatsapp"
+        code, status = MagicMock(), MagicMock()
+        screen.query_one = MagicMock(side_effect=[code, status])
+        screen.run_worker = MagicMock()
+        run(screen._fetch_real_qr(""))
+        code.update.assert_called_once_with(
+            "\n\nWhatsApp is already linked ✅\nNo QR needed.\n"
+        )
+        status.update.assert_called_once_with("")
+        screen.run_worker.assert_not_called()
 
-        wa._rest.get_session_status.return_value = {"status": "working", "me": None}
-        wa._rest.get_pairing_qr.return_value = "fresh-qr"
-        with patch.object(
-            DeviceLinkPickerScreen,
-            "app",
-            new_callable=PropertyMock,
-            return_value=SimpleNamespace(whatsapp_backend=wa),
-        ):
-            assert run(screen._get_whatsapp_qr()) == "fresh-qr"
-
-        tb = MagicMock()
-        tb.get_pairing_qr.return_value = "tg-url"
-        with patch.object(
-            DeviceLinkPickerScreen,
-            "app",
-            new_callable=PropertyMock,
-            return_value=SimpleNamespace(telegram_backend=tb),
-        ):
-            assert run(screen._get_telegram_qr_link()) == "tg-url"
+    def test_fetch_qr_failure_shows_the_server_message(self):
+        link = LinkStub(**{"link.start": ApiError("backend_error", "bad qr")})
+        screen = DeviceLinkPickerScreen(client=link)
+        screen._selected_protocol = "signal"
+        code, status = MagicMock(), MagicMock()
+        screen.query_one = MagicMock(side_effect=[code, status])
+        screen.run_worker = MagicMock()
+        run(screen._fetch_real_qr(""))
+        assert code.update.call_args.args[0] == "\n\n❌ bad qr\n"
+        status.update.assert_called_once_with("")
+        screen.run_worker.assert_not_called()
 
     def test_qr_populator_polling_and_fetch_paths(self):
         screen = DeviceLinkPickerScreen()
@@ -974,100 +569,439 @@ class TestDeviceLinkScreenFlows:
         assert screen._touched_protocols == {"signal"}
         screen.dismiss.assert_called_once_with(None)
 
-        screen.query_one = MagicMock(side_effect=[code, status])
-        screen.run_worker = MagicMock(side_effect=lambda coro, **kwargs: coro.close())
-        screen._get_qr_data_async = AsyncMock(return_value="signal-url")
-        with patch("device_link_screen.qr_to_ascii", return_value="ASCII"):
-            run(screen._fetch_real_qr(""))
-        code.update.assert_called_with("ASCII")
+    # ── completion checks ──────────────────────────────────────────────────
 
-        screen.query_one = MagicMock(side_effect=[code, status])
-        screen._get_qr_data_async = AsyncMock(side_effect=RuntimeError("bad qr"))
-        run(screen._fetch_real_qr(""))
-        assert "❌ bad qr" in code.update.call_args.args[0]
+    @pytest.mark.parametrize(
+        ("state", "done"), [("waiting", False), ("finalize", True), ("done", False)]
+    )
+    def test_check_signal_done(self, state, done):
+        link = LinkStub(
+            **{"link.poll": {"state": state, "needs_2fa": False, "qr": None}}
+        )
+        screen = DeviceLinkPickerScreen(client=link)
+        assert run(screen._check_signal_done()) is done
+        assert link.calls == [("link.poll", {"protocol": "signal"})]
 
-    def test_whatsapp_refresh_telegram_state_and_qr_variants(self):
-        screen = DeviceLinkPickerScreen()
-        status, code = MagicMock(), MagicMock()
-        screen._qr_start_time = 0
-        wa = SimpleNamespace(_rest=MagicMock())
-        wa._rest.get_session_status.return_value = {"status": "scan_qr"}
-        screen._get_whatsapp_qr_fresh = AsyncMock(return_value="INFO:fresh")
-        with (
-            patch.object(
-                DeviceLinkPickerScreen,
-                "app",
-                new_callable=PropertyMock,
-                return_value=SimpleNamespace(whatsapp_backend=wa),
-            ),
-            patch("device_link_screen.time.time", return_value=100),
-        ):
-            screen.query_one = MagicMock(return_value=code)
-            assert run(screen._check_whatsapp_done()) is False
-        code.update.assert_called_once()
+    def test_failed_poll_counts_as_waiting(self):
+        link = LinkStub(**{"link.poll": ApiError("conflict", "No link in progress")})
+        screen = DeviceLinkPickerScreen(client=link)
+        assert run(screen._check_signal_done()) is False
+        assert run(screen._check_whatsapp_done()) is False
+        assert run(screen._check_telegram_done()) is False
 
-        wa._rest.get_session_status.return_value = {
-            "status": "working",
-            "me": {"id": "123@c.us"},
-        }
-        with patch.object(
-            DeviceLinkPickerScreen,
-            "app",
-            new_callable=PropertyMock,
-            return_value=SimpleNamespace(whatsapp_backend=wa),
-        ):
-            assert run(screen._check_whatsapp_done()) is True
+    def test_check_whatsapp_done_and_waiting(self):
+        link = LinkStub(
+            **{
+                "link.poll": [
+                    {"state": "waiting", "needs_2fa": False, "qr": None},
+                    {"state": "done", "needs_2fa": False, "qr": None},
+                ]
+            }
+        )
+        screen = DeviceLinkPickerScreen(client=link)
+        screen.query_one = MagicMock(side_effect=Exception("nothing to touch"))
+        assert run(screen._check_whatsapp_done()) is False
+        assert run(screen._check_whatsapp_done()) is True
+        assert [c[1] for c in link.calls] == [{"protocol": "whatsapp"}] * 2
 
-        tb = MagicMock(_connected=False, _needs_2fa=True)
-        container = MagicMock()
-        screen._qr_start_time = 100
-        with (
-            patch.object(
-                DeviceLinkPickerScreen,
-                "app",
-                new_callable=PropertyMock,
-                return_value=SimpleNamespace(telegram_backend=tb),
-            ),
-            patch("device_link_screen.time.time", return_value=100),
-        ):
-            screen.query_one = MagicMock(side_effect=[status, container])
+    def test_check_whatsapp_done_shows_a_renewed_qr(self):
+        qr = {"kind": "text", "data": "fresh"}
+        link = LinkStub(
+            **{"link.poll": {"state": "waiting", "needs_2fa": False, "qr": qr}}
+        )
+        screen = DeviceLinkPickerScreen(client=link)
+        code = MagicMock()
+        screen.query_one = MagicMock(return_value=code)
+        assert run(screen._check_whatsapp_done()) is False
+        code.update.assert_called_once_with("fresh")
+        code.refresh.assert_called_once()
+
+    def test_check_telegram_done(self):
+        link = LinkStub(
+            **{"link.poll": {"state": "done", "needs_2fa": False, "qr": None}}
+        )
+        assert run(DeviceLinkPickerScreen(client=link)._check_telegram_done()) is True
+
+    def test_check_telegram_asks_for_2fa(self):
+        link = LinkStub(
+            **{"link.poll": {"state": "waiting", "needs_2fa": True, "qr": None}}
+        )
+        screen = DeviceLinkPickerScreen(client=link)
+        status, container = MagicMock(), MagicMock()
+        screen.query_one = MagicMock(side_effect=[status, container])
+        with patch("device_link_screen.Input") as make_input:
             assert run(screen._check_telegram_done()) is False
-        status.update.assert_called_once()
+        status.update.assert_called_once_with("🔐 2FA required — enter password below")
+        make_input.assert_called_once_with(
+            placeholder="Telegram 2FA password", password=True, id="link-2fa-input"
+        )
+        container.mount.assert_called_once_with(make_input.return_value)
+        make_input.return_value.focus.assert_called_once()
 
-        wa._rest.get_session_status.return_value = {"status": "pending"}
-        wa._rest.get_pairing_qr.return_value = "current-qr"
-        with patch.object(
-            DeviceLinkPickerScreen,
-            "app",
-            new_callable=PropertyMock,
-            return_value=SimpleNamespace(whatsapp_backend=wa),
-        ):
-            assert run(screen._get_whatsapp_qr()) == "current-qr"
-        wa._rest.get_session_status.return_value = {"status": "failed"}
-        wa._rest.get_fresh_pairing_qr.return_value = "fresh-qr"
-        with patch.object(
-            DeviceLinkPickerScreen,
-            "app",
-            new_callable=PropertyMock,
-            return_value=SimpleNamespace(whatsapp_backend=wa),
-        ):
-            assert run(screen._get_whatsapp_qr()) == "fresh-qr"
+    @pytest.mark.parametrize(
+        ("qr", "shown"),
+        [
+            (
+                {"kind": "info", "data": " Already logged in"},
+                "\n\n Already logged in\n",
+            ),
+            ({"kind": "error", "data": "flood wait"}, "\n\n❌ flood wait\n"),
+            ({"kind": "url", "data": "tg://login?token=2"}, "ASCII"),
+        ],
+    )
+    def test_check_telegram_shows_a_renewed_qr(self, qr, shown):
+        link = LinkStub(
+            **{"link.poll": {"state": "waiting", "needs_2fa": False, "qr": qr}}
+        )
+        screen = DeviceLinkPickerScreen(client=link)
+        code = MagicMock()
+        screen.query_one = MagicMock(return_value=code)
+        with patch("device_link_screen.qr_to_ascii", return_value="ASCII"):
+            assert run(screen._check_telegram_done()) is False
+        code.update.assert_called_once_with(shown)
 
-    def test_complete_2fa_and_dismiss_cleanup(self):
+    def test_finalize_asks_the_server_and_remembers_the_account(self):
+        link = LinkStub(**{"link.finalize": {"account": "+391111111111"}})
+        screen = DeviceLinkPickerScreen(client=link)
+        run(screen._finalize_signal_link("+39 111"))
+        assert screen._signal_number == "+391111111111"
+        assert link.calls == [
+            ("link.finalize", {"protocol": "signal", "phone": "+39 111"})
+        ]
+
+    def test_finalize_failure_propagates_with_the_server_message(self):
+        link = LinkStub(
+            **{
+                "link.finalize": ApiError(
+                    "backend_error",
+                    "switching Signal accounts in an active profile is not supported",
+                )
+            }
+        )
+        screen = DeviceLinkPickerScreen(client=link)
+        with pytest.raises(ApiError, match="switching Signal accounts"):
+            run(screen._finalize_signal_link(""))
+        assert screen._signal_number == ""
+
+    # ── 2FA ────────────────────────────────────────────────────────────────
+
+    def test_2fa_submit_runs_a_worker_and_ignores_empty_password(self):
         screen = DeviceLinkPickerScreen()
-        tb = MagicMock()
-        tb.complete_2fa.return_value = False
+        screen.run_worker = MagicMock(side_effect=lambda coro, **kwargs: coro.close())
+        status = MagicMock()
+        screen.query_one = MagicMock(
+            side_effect=[
+                MagicMock(value="  "),
+            ]
+        )
+        screen._on_2fa_submit()
+        screen.run_worker.assert_not_called()
+
+        screen.query_one = MagicMock(side_effect=[MagicMock(value="secret"), status])
+        screen._on_2fa_submit()
+        status.update.assert_called_once_with("⏳ Verifying 2FA password...")
+        screen.run_worker.assert_called_once()
+
+    def test_complete_2fa_wrong_password(self):
+        link = LinkStub(**{"link.submit_2fa": {"ok": False}})
+        screen = DeviceLinkPickerScreen(client=link)
         status, inp = MagicMock(), MagicMock()
         screen.query_one = MagicMock(side_effect=[status, inp])
         with patch("asyncio.sleep", AsyncMock()):
-            run(screen._complete_2fa_worker(tb, "wrong"))
+            run(screen._complete_2fa_worker("wrong"))
+        status.update.assert_called_once_with("❌ Wrong password — try again")
+        assert inp.value == ""
         inp.focus.assert_called_once()
+        assert link.calls == [("link.submit_2fa", {"password": "wrong"})]
 
-        proc = MagicMock()
-        proc.poll.return_value = None
-        proc.pid = 123
-        screen._linking_proc = proc
+    def test_complete_2fa_success_dismisses_after_a_pause(self):
+        screen = DeviceLinkPickerScreen(
+            client=LinkStub(**{"link.submit_2fa": {"ok": True}})
+        )
+        status, code = MagicMock(), MagicMock()
+        screen.query_one = MagicMock(side_effect=[status, code])
+        screen.dismiss = MagicMock()
+        sleep = AsyncMock()
+        with patch("asyncio.sleep", sleep):
+            run(screen._complete_2fa_worker("right"))
+        status.update.assert_called_once_with("✅ Device linked successfully!")
+        code.update.assert_called_once_with("\n\n✅ Linked!\n")
+        sleep.assert_awaited_once_with(2)
+        screen.dismiss.assert_called_once_with(None)
+
+    def test_complete_2fa_server_error_is_shown(self):
+        link = LinkStub(
+            **{
+                "link.submit_2fa": ApiError(
+                    "backend_down", "Telegram backend not available"
+                )
+            }
+        )
+        screen = DeviceLinkPickerScreen(client=link)
+        status = MagicMock()
+        screen.query_one = MagicMock(return_value=status)
+        screen.dismiss = MagicMock()
+        run(screen._complete_2fa_worker("x"))
+        status.update.assert_called_once_with("❌ Telegram backend not available")
+        screen.dismiss.assert_not_called()
+
+    # ── dismiss ────────────────────────────────────────────────────────────
+
+    def test_dismiss_cancels_the_started_link_once(self):
+        link = LinkStub(**{"link.cancel": {"ok": True}})
+        screen = DeviceLinkPickerScreen(client=link)
+        screen._active_link = "signal"
         with patch("textual.screen.Screen.dismiss") as dismiss:
             screen.dismiss(None)
-        proc.terminate.assert_called_once()
+            screen.dismiss(None)
+        assert link.calls == [("link.cancel", {"protocol": "signal"})]
+        assert dismiss.call_count == 2
+        assert screen._phase == "done"
+
+    def test_dismiss_without_a_started_link_does_not_call_the_server(self):
+        link = LinkStub()
+        screen = DeviceLinkPickerScreen(client=link)
+        with patch("textual.screen.Screen.dismiss") as dismiss:
+            screen.dismiss(None)
+        assert link.calls == []
         dismiss.assert_called_once()
+
+    def test_dismiss_survives_a_failing_cancel(self):
+        link = LinkStub(**{"link.cancel": ApiError("internal", "kill failed")})
+        screen = DeviceLinkPickerScreen(client=link)
+        screen._active_link = "signal"
+        with patch("textual.screen.Screen.dismiss") as dismiss:
+            screen.dismiss(None)
+        assert len(link.calls) == 1
+        dismiss.assert_called_once()
+
+    def test_dismiss_during_finalize_defers(self):
+        """Dismiss while finalizing defers cleanup instead of cancelling."""
+        link = LinkStub()
+        screen = DeviceLinkPickerScreen(client=link)
+        screen._active_link = "signal"
+        screen._signal_finalizing = True
+        with patch("textual.screen.Screen.dismiss") as dismiss:
+            screen.dismiss(None)
+        assert screen._dismiss_after_finalize is True
+        assert link.calls == []
+        dismiss.assert_not_called()
+
+    def test_transition_to_qr_remembers_the_active_link(self):
+        screen = DeviceLinkPickerScreen()
+        screen._selected_protocol = "signal"
+        with (
+            patch.object(screen, "_populate_qr_phase"),
+            patch.object(screen, "_show_phase"),
+            patch.object(screen, "run_worker"),
+            patch.object(screen, "_fetch_real_qr", new=MagicMock()),
+        ):
+            screen._transition_to_qr(phone="")
+        assert screen._active_link == "signal"
+
+    # ── whole flows against the real operations ────────────────────────────
+
+    def _real_flow_screen(self, manager):
+        from client_harness import client_for
+
+        screen = DeviceLinkPickerScreen(client=client_for(manager))
+        screen._phase = "qr"
+        screen.dismiss = MagicMock()
+        code, status = MagicMock(), MagicMock()
+        screen.query_one = MagicMock(
+            side_effect=lambda sel, *_: {
+                "#link-qr-code": code,
+                "#link-qr-status": status,
+            }[sel]
+        )
+        return screen, code, status
+
+    def test_whatsapp_flow_over_real_operations(self):
+        rest = MagicMock()
+        rest.get_session_status.side_effect = [
+            {"status": "scan_qr"},  # start
+            {"status": "scan_qr"},  # poll 1
+            {"status": "working", "me": {"id": "1@c.us"}},  # poll 2
+        ]
+        rest.get_pairing_qr.return_value = b"\x89PNG"
+        manager = MagicMock()
+        manager.get.side_effect = lambda p: (
+            SimpleNamespace(_rest=rest) if p == "whatsapp" else None
+        )
+        screen, code, status = self._real_flow_screen(manager)
+        screen._selected_protocol = "whatsapp"
+        screen.run_worker = MagicMock(side_effect=lambda coro, **k: coro.close())
+        with patch("device_link_screen.qr_png_to_ascii", return_value="WA-QR"):
+            run(screen._fetch_real_qr(""))
+        code.update.assert_called_once_with("WA-QR")
+        status.update.assert_called_once_with("⏳ Waiting for scan from phone...")
+
+        with patch("asyncio.sleep", AsyncMock()) as sleep:
+            run(screen._poll_completion(""))
+        assert sleep.await_count == 2  # one pause between polls, one before dismiss
+        status.update.assert_called_with("✅ Device linked successfully!")
+        screen.dismiss.assert_called_once_with(None)
+
+    def test_telegram_2fa_flow_over_real_operations(self):
+        tb = MagicMock(_connected=False, _needs_2fa=True)
+        tb.get_pairing_qr.return_value = "tg://login?token=1"
+        tb.complete_2fa.return_value = True
+        manager = MagicMock()
+        manager.get.side_effect = lambda p: tb if p == "telegram" else None
+        screen, code, status = self._real_flow_screen(manager)
+        screen._selected_protocol = "telegram"
+        screen.run_worker = MagicMock(side_effect=lambda coro, **k: coro.close())
+        with patch("device_link_screen.qr_to_ascii", return_value="TG-QR"):
+            run(screen._fetch_real_qr(""))
+        code.update.assert_called_once_with("TG-QR")
+
+        # first poll: the account asks for a password
+        container = MagicMock()
+        screen.query_one = MagicMock(
+            side_effect=lambda sel, *_: {
+                "#link-qr-status": status,
+                "#link-qr-container": container,
+            }[sel]
+        )
+        with patch("device_link_screen.Input") as make_input:
+            assert run(screen._check_telegram_done()) is False
+        container.mount.assert_called_once_with(make_input.return_value)
+        # not asked twice
+        assert run(screen._check_telegram_done()) is False
+        container.mount.assert_called_once()
+
+        screen.query_one = MagicMock(return_value=status)
+        with patch("asyncio.sleep", AsyncMock()):
+            run(screen._complete_2fa_worker("pw"))
+        tb.complete_2fa.assert_called_once_with("pw")
+        screen.dismiss.assert_called_once_with(None)
+
+    def test_signal_flow_over_real_operations(self, tmp_path):
+        from protocols import rpc as signal_rpc
+
+        proc = MagicMock()
+        proc.stdout.readline.side_effect = ["sgnl://linkdevice?uuid=abc", ""]
+        proc.poll.side_effect = itertools.chain([None], itertools.repeat(0))
+        backend = SimpleNamespace(user_number="")
+        manager = MagicMock()
+        manager.get.side_effect = lambda p: backend if p == "signal" else None
+        screen, code, _status = self._real_flow_screen(manager)
+        screen._selected_protocol = "signal"
+        screen.run_worker = MagicMock(side_effect=lambda coro, **k: coro.close())
+        with (
+            patch.object(signal_rpc, "PROJECT_DIR", tmp_path),
+            patch.object(signal_rpc, "find_signal_cli", return_value=Path("cli")),
+            patch("server.link.subprocess.Popen", return_value=proc),
+            patch(
+                "server.link.list_signal_accounts",
+                side_effect=[[], ["+391111111111"], ["+391111111111"]],
+            ),
+            patch("device_link_screen.qr_to_ascii", return_value="SIG-QR"),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            run(screen._fetch_real_qr("+39 111"))
+            code.update.assert_called_once_with("SIG-QR")
+            run(screen._poll_completion("+39 111"))
+        assert backend.user_number == "+391111111111"
+        assert screen._signal_number == "+391111111111"
+        assert screen._touched_protocols == {"signal"}
+        screen.dismiss.assert_called_once_with(None)
+
+    def test_poll_times_out_after_five_minutes(self):
+        link = LinkStub(
+            **{"link.poll": {"state": "waiting", "needs_2fa": False, "qr": None}}
+        )
+        screen = DeviceLinkPickerScreen(client=link)
+        screen._phase = "qr"
+        screen._selected_protocol = "whatsapp"
+        status = MagicMock()
+        screen.query_one = MagicMock(return_value=status)
+        screen.dismiss = MagicMock()
+        clock = iter([1000.0, 1000.0, 1100.0, 1299.0, 1301.0, 1301.0])
+        with (
+            patch("device_link_screen.time.time", side_effect=lambda: next(clock)),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            run(screen._poll_completion(""))
+        status.update.assert_called_once_with("❌ Timed out waiting for scan")
+        assert len(link.calls) == 3
+        screen.dismiss.assert_not_called()
+
+
+class LinkStub:
+    """Scripted ``client.call``: per op a value, an exception or a list of them."""
+
+    def __init__(self, **ops):
+        self.ops = ops
+        self.calls: list[tuple[str, dict]] = []
+        self.timeouts: list[float | None] = []
+
+    def call(self, name, data=None, *, timeout=None):
+        self.calls.append((name, data))
+        self.timeouts.append(timeout)
+        answer = self.ops[name]
+        if isinstance(answer, list):
+            answer = answer.pop(0)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
+class TestDeviceLinkOpening:
+    """Ctrl+L: the screen is built from ``link.status``; dismiss reconnects."""
+
+    def _app(self, status):
+        from signal_tui import SignalTUI
+
+        app = SignalTUI()
+        app.client = LinkStub(**{"link.status": {"protocols": status}})
+        app.push_screen = MagicMock()
+        return app
+
+    def test_screen_is_built_from_link_status(self):
+        app = self._app(
+            {
+                "signal": {"available": True, "account": "+39123", "linked": True},
+                "whatsapp": {"available": True, "account": "", "linked": None},
+                "telegram": {"available": False, "account": "", "linked": None},
+            }
+        )
+        with patch("tui.pickers.DeviceLinkPickerScreen") as screen_cls:
+            app._open_device_link()
+        screen_cls.assert_called_once_with(
+            signal_number="+39123",
+            has_whatsapp=True,
+            has_telegram=False,
+            client=app.client,
+        )
+        app.push_screen.assert_called_once()
+
+    def test_dismiss_reconnects_only_touched_protocols_through_the_server(self):
+        app = self._app(
+            {
+                p: {"available": True, "account": "", "linked": None}
+                for p in ("signal", "whatsapp", "telegram")
+            }
+        )
+        app.client.ops["link.reconnect"] = {"ok": True}
+        fake_screen = MagicMock()
+        fake_screen._touched_protocols = {"telegram", "whatsapp"}
+        with patch("tui.pickers.DeviceLinkPickerScreen", return_value=fake_screen):
+            app._open_device_link()
+        app.push_screen.call_args[0][1](None)
+        assert app.client.calls[-1] == (
+            "link.reconnect",
+            {"protocols": ["telegram", "whatsapp"]},
+        )
+        assert app.client.timeouts[-1] == 15.0
+
+    def test_dismiss_without_touched_protocols_reconnects_nothing(self):
+        app = self._app({})
+        app.client.ops["link.reconnect"] = {"ok": True}
+        app._reconnect_touched_backends(set())
+        assert [c[0] for c in app.client.calls] == []
+
+    def test_reconnect_failure_is_logged_not_raised(self):
+        app = self._app({})
+        app.client.ops["link.reconnect"] = ApiError("internal", "boom")
+        app._reconnect_touched_backends({"signal"})

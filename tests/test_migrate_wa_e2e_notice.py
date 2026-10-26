@@ -9,6 +9,7 @@ from __future__ import annotations
 import runpy
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -32,7 +33,7 @@ def _insert(
     quote_text: str | None = None,
 ) -> int:
     backend._init_db()
-    with sqlite3.connect(backend.DB_FILE) as connection:
+    with closing(sqlite3.connect(backend.DB_FILE)) as connection, connection:
         cursor = connection.execute(
             """
             INSERT INTO messages (
@@ -57,14 +58,14 @@ def _insert(
 
 
 def _system_rows() -> list[tuple[str, str]]:
-    with sqlite3.connect(backend.DB_FILE) as connection:
+    with closing(sqlite3.connect(backend.DB_FILE)) as connection, connection:
         return connection.execute(
             "SELECT text, sender FROM messages WHERE msg_type = 'system'"
         ).fetchall()
 
 
 def _row(message_id: int) -> tuple[str, str]:
-    with sqlite3.connect(backend.DB_FILE) as connection:
+    with closing(sqlite3.connect(backend.DB_FILE)) as connection, connection:
         return connection.execute(
             "SELECT text, msg_type FROM messages WHERE id = ?", (message_id,)
         ).fetchone()
@@ -113,7 +114,7 @@ def test_missing_db_main_returns_1():
 
 
 def test_operational_error_main_returns_2():
-    with sqlite3.connect(backend.DB_FILE) as connection:
+    with closing(sqlite3.connect(backend.DB_FILE)) as connection, connection:
         connection.execute("CREATE TABLE dummy(x)")
 
     assert migrate.main(["--apply"]) == 2
@@ -146,7 +147,7 @@ def test_selection_filters(overrides):
 
     assert migrate.cleanup(apply=True) == (0, 0)
 
-    with sqlite3.connect(backend.DB_FILE) as connection:
+    with closing(sqlite3.connect(backend.DB_FILE)) as connection, connection:
         text, msg_type, sender = connection.execute(
             "SELECT text, msg_type, sender FROM messages"
         ).fetchone()

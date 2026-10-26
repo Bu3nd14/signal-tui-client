@@ -179,6 +179,7 @@ def test_media_kind_backfill_is_idempotent():
     second = connection.execute(
         "SELECT media_kind FROM messages ORDER BY id"
     ).fetchall()
+    connection.close()
 
     assert first == second
     assert [row[0] for row in first] == [
@@ -217,6 +218,7 @@ def test_media_kind_correction_reclassifies_migrated_audio_documents():
     first = connection.execute("SELECT media_kind FROM messages").fetchall()
     _migrate_protocol_schema(connection)
     second = connection.execute("SELECT media_kind FROM messages").fetchall()
+    connection.close()
 
     assert first == second == [("audio",), ("audio",), ("document",)]
 
@@ -241,5 +243,6 @@ def test_media_kind_correction_backfills_null_audio_on_v4_database():
     first = connection.execute("SELECT media_kind FROM messages").fetchone()[0]
     _migrate_protocol_schema(connection)
     second = connection.execute("SELECT media_kind FROM messages").fetchone()[0]
+    connection.close()
 
     assert first == second == "audio"

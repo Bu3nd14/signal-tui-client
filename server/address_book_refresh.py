@@ -1,6 +1,7 @@
 """Dynamic address-book refresh: single daemon worker + scheduler.
 
-The worker covers the periodic trigger (catch-all) and the lazy trigger
+Domain work owned by :class:`~server.core.ChatCore` (mixed in), so a headless
+server keeps resolving contact names without any UI.  The worker covers the periodic trigger (catch-all) and the lazy trigger
 (scoped by the protocol of an unresolved incoming message).  The picker/web
 book use the force path directly (``list_address_book_sync(force=True)``).
 """
@@ -23,8 +24,8 @@ class DynamicAddressBookMixin:
     The state attributes (``_address_book_refresh_stop``, ``_address_book_refresh_wake``,
     ``_address_book_refresh_lock``, ``_address_book_last_periodic``,
     ``_address_book_last_lazy``, ``_address_book_pending_protocols`` and
-    ``_address_book_refresh_thread``) are initialized by ``SignalTUI.__init__``
-    so tests that patch ``on_mount`` stay thread-free.
+    ``_address_book_refresh_thread``) are initialized by ``ChatCore.__init__``
+    so constructing a core stays thread-free until ``start()``.
     """
 
     def start_address_book_refresh(self) -> None:

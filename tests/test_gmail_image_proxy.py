@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from web import gmail
+from server import gmail
 from web.gmail_api import create_gmail_image_router
 
 
@@ -19,6 +21,7 @@ def _token(url: str) -> str:
 
 def _client() -> TestClient:
     app = FastAPI()
+    app.state.api = api_for(SimpleNamespace())
     app.include_router(create_gmail_image_router())
     return TestClient(app)
 
@@ -37,7 +40,7 @@ def test_proxy_returns_raster_image_with_safety_headers():
         assert max_bytes > 0
         return b"\x89PNG\r\n\x1a\nfake", "image/png"
 
-    with patch("web.link_preview.fetch_external_image", new=fake_fetch):
+    with patch("server.link_preview.fetch_external_image", new=fake_fetch):
         response = _client().get("/gmail-image", params={"token": token})
 
     assert response.status_code == 200
@@ -53,7 +56,7 @@ def test_proxy_maps_fetch_failure_to_502():
     async def fake_fetch(url, max_bytes):
         return None
 
-    with patch("web.link_preview.fetch_external_image", new=fake_fetch):
+    with patch("server.link_preview.fetch_external_image", new=fake_fetch):
         response = _client().get("/gmail-image", params={"token": token})
 
     assert response.status_code == 502

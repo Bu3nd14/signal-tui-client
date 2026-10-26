@@ -1,10 +1,13 @@
 """SignalTUI main App — composes the functional mixins and owns app lifecycle."""
 
+import asyncio
 import logging
+import signal
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import ClassVar
+from typing import Any, ClassVar, Protocol
 
 from textual.app import App
 from textual.binding import Binding
@@ -26,21 +29,18 @@ from models import (
     ChatContact,
     protocol_emoji,
 )
-from protocols import (
-    BackendManager,
-    SignalBackend,
-    TelegramBackend,
-    WhatsAppBackend,
-)
-from protocols.config import signal_enabled, telegram_enabled, whatsapp_enabled
-from tui.address_book_refresh import DynamicAddressBookMixin
+from server.bus import EventBus
+from server.client import ChatClient, ClientSubscription, InProcessClient
+from server.core import ChatCore
 from tui.backend_connect import BackendConnectMixin
 from tui.chat_view import ChatViewMixin
+from tui.client_calls import ClientCallsMixin
 from tui.contacts import ContactListMixin
 from tui.css import APP_CSS
 from tui.download import DownloadModeMixin
 from tui.edit import EditMessageMixin
 from tui.events import EventHandlingMixin
+from tui.exit_flow import ExitFlowMixin
 from tui.images.cellsize import get_cell_size_ioctl
 from tui.images.detect import ImageSupport
 from tui.images.kitty_renderer import KittyRenderer, compute_source_rect
@@ -59,6 +59,28 @@ from ui_components import (
 logger = logging.getLogger(__name__)
 
 
+class WebAdapter(Protocol):
+    """What the TUI needs to host the web adapter next to its core.
+
+    Supplied by the composition root (``signal_tui``) so that ``tui`` never
+    imports ``web``: ``start`` is ``web.server.start_web_server``, ``stop``
+    is ``web.server.stop_web_server``.
+    """
+
+    def start(
+        self,
+        api: Any,
+        port: int,
+        token: str,
+        *,
+        host: str,
+        require_auth: bool,
+        bus: EventBus,
+    ) -> Any: ...
+
+    def stop(self, handle: Any) -> None: ...
+
+
 class SignalTUI(
     App,
     ChatViewMixin,
@@ -71,7 +93,8 @@ class SignalTUI(
     UnreadReplyMixin,
     DownloadModeMixin,
     PickerMixin,
-    DynamicAddressBookMixin,
+    ClientCallsMixin,
+    ExitFlowMixin,
 ):
     """Main Signal TUI App with JSON-RPC daemon over HTTP."""
 
@@ -102,6 +125,9 @@ class SignalTUI(
         web_host: str = "127.0.0.1",
         web_token: str = "",
         web_no_auth: bool = False,
+        web_adapter: WebAdapter | None = None,
+        client: ChatClient | None = None,
+        server_spawned: bool | None = None,
     ):
         super().__init__()
         # Terminal image backend detected in ``signal_tui`` before ``run()``.
@@ -117,6 +143,9 @@ class SignalTUI(
         self._web_token = web_token
         self._web_no_auth = web_no_auth
         self._web_server = None
+        # The embedded web adapter is injected by the composition root
+        # (``signal_tui``): the TUI itself never imports ``web``.
+        self._web_adapter = web_adapter
 
         # Native kitty image rendering state (phase 2).  The renderer is created
         # in ``on_mount`` when the terminal supports it; placements are reconciled
@@ -148,24 +177,32 @@ class SignalTUI(
         self._window_native_token = 0
         self._window_native_pending = 0
 
-        # Multi-protocol backend manager + the always-registered Signal backend.
-        self.manager = BackendManager()
-        self.signal_backend = SignalBackend()
-        self.manager.register(self.signal_backend)
-
-        # WhatsApp backend is registered only when configured (env/config.json);
-        # otherwise it's skipped gracefully and the Signal TUI keeps working.
-        self.whatsapp_backend: WhatsAppBackend | None = None
-        if whatsapp_enabled():
-            self.whatsapp_backend = WhatsAppBackend()
-            self.manager.register(self.whatsapp_backend)
-
-        # Telegram backend is registered only when credentials are configured;
-        # otherwise it's skipped gracefully.
-        self.telegram_backend: TelegramBackend | None = None
-        if telegram_enabled():
-            self.telegram_backend = TelegramBackend()
-            self.manager.register(self.telegram_backend)
+        # Headless core: owns the backends and their connect workers; the TUI
+        # reacts to its bus events (see ``BackendConnectMixin``).  The backend
+        # attributes below are aliases to the core's objects.
+        self.bus = EventBus()
+        # Only an in-process TUI builds the core; with a remote client the
+        # backends live in the server and no ChatCore exists in this process.
+        self.core: ChatCore | None = ChatCore(self.bus) if client is None else None
+        # The TUI consumes core events (and, in later steps, operations)
+        # through the client; ``bus``/``core`` stay for the not yet migrated
+        # direct uses.
+        # With an injected ``client`` (a remote server) the TUI does not own the
+        # core: it neither starts nor shuts it down and syncs from the server.
+        self._owns_core = client is None
+        # Whether this TUI started the server it is attached to (True), found it
+        # already running (False), or owns an in-process core (None).  The exit
+        # dialog's default (Quit vs Detach) depends on it.
+        self.server_spawned = server_spawned
+        self.client: ChatClient = (
+            InProcessClient(self._own_core()) if client is None else client
+        )
+        self._core_sub: ClientSubscription | None = None
+        self._init_client_state()
+        self._init_exit_state()
+        # Ctrl+C handler set by ``signal_tui.main``; ``on_mount`` installs it on
+        # the running loop (None in tests and embedded use).
+        self._sigint_callback: Callable[[], None] | None = None
 
         self.contacts: list[ChatContact] = []
         self.selected_contact: ChatContact | None = None
@@ -254,13 +291,6 @@ class SignalTUI(
         # O(N) CSS selector scans via query_one on every message mount.
         self._chat_log: Vertical | None = None
 
-        # WhatsApp link guard: prevents duplicate concurrent connect workers.
-        self._wa_connecting: bool = False
-
-        # Telegram link guard: prevents duplicate concurrent connect workers
-        # (two Ctrl+L→Esc in a row used to race on the shared client state).
-        self._tg_connecting: bool = False
-
         # Backends currently connecting (pending a ready/failure report).
         # Populated as each connect worker starts and drained when the backend
         # reports (ready OR failed); when empty, the startup auto-selection runs.
@@ -270,17 +300,6 @@ class SignalTUI(
         self._status_timer: Timer | None = None
         # True while a transient or persistent status message is on display.
         self._status_active: bool = False
-
-        # Dynamic address-book refresh (periodic + lazy) — see
-        # ``tui.address_book_refresh.DynamicAddressBookMixin``.  States live here
-        # (NOT in ``on_mount``) so tests patching ``on_mount`` stay thread-free.
-        self._address_book_refresh_stop = False
-        self._address_book_refresh_wake = threading.Event()
-        self._address_book_refresh_lock = threading.Lock()
-        self._address_book_last_periodic = 0.0
-        self._address_book_last_lazy = 0.0
-        self._address_book_pending_protocols: set[str] = set()
-        self._address_book_refresh_thread: threading.Thread | None = None
 
     def compose(self):
         yield Header()
@@ -292,19 +311,51 @@ class SignalTUI(
             yield Footer()
             yield StatusBar(id="status-bar")
 
+    def _own_core(self) -> ChatCore:
+        """The in-process core (only exists when the TUI owns it)."""
+        core = self.core
+        if core is None:
+            raise RuntimeError("this TUI is a client of a remote server: no core")
+        return core
+
+    def _install_sigint_on_loop(self) -> None:
+        """Move the Ctrl+C handler onto the asyncio loop.
+
+        Linux may deliver a process-directed SIGINT to any thread.  A plain
+        ``signal.signal`` handler only runs when the MAIN thread next executes
+        Python code, and an idle Textual loop can sit in ``select()``
+        indefinitely, so the handler (and the exit) never ran.
+        ``loop.add_signal_handler`` uses the loop's wakeup fd, which wakes the
+        loop whichever thread received the signal.
+        """
+        callback = self._sigint_callback
+        if callback is None:
+            return
+        try:
+            asyncio.get_running_loop().add_signal_handler(signal.SIGINT, callback)
+        except (NotImplementedError, RuntimeError, ValueError):
+            logger.debug("SIGINT loop handler unavailable", exc_info=True)
+
     def on_mount(self):
         """On startup, start poll worker and backend connections in parallel."""
         self._chat_log = self.query_one("#chat-log", Vertical)
+        self._install_sigint_on_loop()
+        # Settings (thumbnail sizes, picker options) come from the server in a
+        # worker; the defaults serve until they arrive.
+        self._start_server_config_fetch()
         if self._web_enabled:
-            from web.server import start_web_server
-
-            self._web_server = start_web_server(
-                self.manager,
-                self._web_port,
-                self._web_token,
-                host=self._web_host,
-                require_auth=not self._web_no_auth,
-            )
+            adapter = self._web_adapter
+            if adapter is None:
+                logger.error("Web UI enabled but no web adapter was provided")
+            else:
+                self._web_server = adapter.start(
+                    self._own_core().api,
+                    self._web_port,
+                    self._web_token,
+                    host=self._web_host,
+                    require_auth=not self._web_no_auth,
+                    bus=self.bus,
+                )
             if self._web_server is not None:
                 # Only the web-signal-tui-bg shell alias used to print the
                 # Bearer token; a plain `python3 signal_tui.py --web` launch
@@ -325,28 +376,18 @@ class SignalTUI(
         # Start poll worker immediately — Signal and WhatsApp events flow
         # as soon as their backends are ready (independent workers below).
         self._polling_active = True
+        # Subscribe BEFORE starting the core so no event is missed.  The poll
+        # worker is the single bus consumer (the core owns the event pump).
+        self._core_sub = self.client.subscribe()
         self.run_worker(self._poll_worker, exclusive=True, thread=True)
-        # Only connect backends that are already linked (skip slow daemon
-        # startup for unlinked accounts — they connect after Ctrl+L link).
-        if signal_enabled():
-            self.run_worker(self._connect_signal, exclusive=False, thread=True)
+        if self._owns_core:
+            self._own_core().start()
         else:
-            logger.info("Signal auto-connect disabled (signal_enabled() is False)")
-            self._mark_backend_done(self.signal_backend.protocol)
-        # WhatsApp: WAHA may still be syncing at boot.  The boot worker waits
-        # (bounded) for the session to become WORKING, then connects; the old
-        # strict ``is_working`` gate skipped the connect with no retry, leaving
-        # the UI empty until a manual restart.
-        if self.whatsapp_backend is not None:
-            self.run_worker(self._connect_whatsapp_boot, exclusive=False, thread=True)
-        if (
-            self.telegram_backend is not None
-            and not self.telegram_backend.needs_pairing
-        ):
-            self.run_worker(self._connect_telegram, exclusive=False, thread=True)
+            # The server's backends are already up: no ``backend_ready`` will
+            # come, so fetch contacts and chats the way a resync does.
+            self._schedule_resync("attach")
 
         self._init_native_renderer()
-        self.start_address_book_refresh()
 
     def _init_native_renderer(self) -> None:
         """Set up the kitty renderer when the terminal supports it (R3).
@@ -608,9 +649,8 @@ class SignalTUI(
             logger.debug("Failed to clear kitty images on exit", exc_info=True)
 
     def action_quit(self):
-        """Ctrl+Q: stop polling and exit cleanly."""
-        self._polling_active = False
-        self.exit()
+        """Ctrl+Q: exit.  A client of a server asks Detach/Quit first."""
+        self._request_exit()
 
     def action_toggle_unread_filter(self):
         """Ctrl+U: toggle the unread-only filter on the contact list."""
@@ -628,30 +668,33 @@ class SignalTUI(
     def on_exit_app(self):
         """On exit, stop polling and disconnect backends."""
         self._polling_active = False
-        self.stop_address_book_refresh()
+        self._cancel_exit_wait()
+        self.client.close()
         try:
             self._hires_executor.shutdown(wait=False)
         except Exception as _e:
             logger.debug("Hi-res executor shutdown failed", exc_info=True)
-        if self._web_enabled:
-            from web.server import stop_web_server
+        # Stop, web adapter, Telegram disconnect and cache prune: one core
+        # method, idempotent (the SIGINT handler may already have run it).
+        if self._owns_core:
+            self._own_core().shutdown(self._stop_web_adapter)
 
-            stop_web_server(self._web_server)
-        if self.telegram_backend is not None:
-            try:
-                self.telegram_backend.disconnect_sync()
-            except Exception as _e:
-                logger.debug("Telegram disconnect on exit failed", exc_info=True)
-        # No flush needed — SQLite writes are incremental
-        # Prune dello storico (bug #51): a chiusura app, quando nessun altro
-        # evento può arrivare. Best-effort: un errore non deve mai impedire
-        # l'uscita.
-        try:
-            from protocols.db import _prune_cache
+    def shutdown_from_signal(self) -> None:
+        """Ctrl+C: stop polling, shut the core down, exit the app.
 
-            _prune_cache()
-        except Exception:
-            logger.exception("Cache prune on exit failed (non-fatal)")
+        A client of a server only detaches (no dialog: a signal must never stop
+        a server other TUIs share)."""
+        self._polling_active = False
+        self._cancel_exit_wait()
+        if self._owns_core:
+            self._own_core().shutdown(self._stop_web_adapter)
+        self.exit()
+
+    def _stop_web_adapter(self) -> None:
+        """Stop the embedded web adapter (the core's shutdown hook)."""
+        adapter = self._web_adapter
+        if self._web_enabled and adapter is not None:
+            adapter.stop(self._web_server)
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         """Gate the global Ctrl+W / Ctrl+U / Ctrl+A filters while a picker is open.

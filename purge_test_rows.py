@@ -7,6 +7,7 @@ import argparse
 import sqlite3
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -60,8 +61,10 @@ def _backup_database(db_file: Path) -> Path:
 
     with (
         _DB_LOCK,
-        sqlite3.connect(db_file) as source,
-        sqlite3.connect(backup_file) as backup,
+        closing(sqlite3.connect(db_file)) as source,
+        closing(sqlite3.connect(backup_file)) as backup,
+        source,
+        backup,
     ):
         source.execute("PRAGMA busy_timeout = 5000")
         source.backup(backup)
@@ -79,7 +82,7 @@ def purge(db_file: Path | None = None, *, apply: bool = False) -> int:
         print(f"DB not found: {target}")
         return 0
 
-    with sqlite3.connect(target) as connection:
+    with closing(sqlite3.connect(target)) as connection, connection:
         connection.execute("PRAGMA busy_timeout = 5000")
         counts: dict[tuple, int] = {}
         for protocol, contact, extra in TEST_ROWS:
@@ -112,7 +115,7 @@ def purge(db_file: Path | None = None, *, apply: bool = False) -> int:
     print(f"Backup created: {backup_file}")
 
     try:
-        with sqlite3.connect(backup_file) as connection:
+        with closing(sqlite3.connect(backup_file)) as connection, connection:
             result = connection.execute("PRAGMA integrity_check").fetchone()[0]
     except sqlite3.Error as exc:
         print(f"ABORT: backup integrity check failed: {exc}")
@@ -122,7 +125,7 @@ def purge(db_file: Path | None = None, *, apply: bool = False) -> int:
         return -1
 
     removed = 0
-    with _DB_LOCK, sqlite3.connect(target) as connection:
+    with _DB_LOCK, closing(sqlite3.connect(target)) as connection, connection:
         connection.execute("PRAGMA busy_timeout = 5000")
         for protocol, contact, extra in TEST_ROWS:
             key = (protocol, contact, extra)

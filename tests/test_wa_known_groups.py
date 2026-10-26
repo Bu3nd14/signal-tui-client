@@ -26,6 +26,7 @@ from collections.abc import Callable
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -111,7 +112,7 @@ class _RecordingManager:
 
 def _app(manager) -> FastAPI:
     app = FastAPI()
-    app.state.manager = manager
+    app.state.api = api_for(manager)
     app.include_router(create_api_router())
     return app
 
@@ -376,7 +377,7 @@ class TestFindContactKnownGroups:
         backend._rest.list_contacts = MagicMock()
         backend._lid_resolve_remote = MagicMock()
         to_thread = MagicMock()
-        monkeypatch.setattr("web.api.asyncio.to_thread", to_thread)
+        monkeypatch.setattr("server.ops.send.asyncio.to_thread", to_thread)
 
         assert backend.find_contact("999999999999999999@g.us") is None
 
@@ -420,7 +421,10 @@ class TestWebSendKnownGroupsE2E:
         backend._known_groups[GROUP_JID] = group
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event") as pushed, TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push") as pushed,
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={
@@ -444,7 +448,10 @@ class TestWebSendKnownGroupsE2E:
         backend = _wa_backend(book=None)
         manager = _RecordingManager(backend)
 
-        with patch("web.api.push_event"), TestClient(_app(manager)) as client:
+        with (
+            patch("server.api.ChatAPI.publish_web_push"),
+            TestClient(_app(manager)) as client,
+        ):
             response = client.post(
                 "/api/send",
                 json={

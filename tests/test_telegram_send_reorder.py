@@ -35,7 +35,7 @@ def test_telegram_send_updates_last_ts_and_reorders_immediately():
 
     # ── App con manager fresco e backend Telegram (istanza __new__, no network) ──
     app = SignalTUI()
-    app.manager = BackendManager()
+    app.core.manager = BackendManager()
 
     telegram = TelegramBackend.__new__(TelegramBackend)
     telegram.protocol = PROTOCOL_TELEGRAM
@@ -44,7 +44,7 @@ def test_telegram_send_updates_last_ts_and_reorders_immediately():
     telegram._events = queue.Queue()
     telegram._contacts_by_id = {}
     telegram._seen_msg_ids = set()
-    app.manager.register(telegram)
+    app.core.manager.register(telegram)
 
     # ── Bruno (Signal) in cima, Anna (Telegram) più vecchia ──
     anna = ChatContact(id="111", display_name="Anna", protocol=PROTOCOL_TELEGRAM)

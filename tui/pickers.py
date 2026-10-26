@@ -13,12 +13,16 @@ from emoji_picker import (
 from models import (
     ChatContact,
 )
+from server.api import ApiError
+from server.events_api import contact_from_wire
 from ui_components import MessageTextArea
 
 logger = logging.getLogger("signal_tui")
 
 
 class PickerMixin:
+    _device_link_opening: bool = False
+
     def _is_emoji_picker_open(self) -> bool:
         """Check if the emoji picker modal screen is currently active."""
         return isinstance(self.screen, EmojiPickerScreen)
@@ -94,10 +98,17 @@ class PickerMixin:
         errors) back on the UI thread via ``call_from_thread`` — but only if the
         token is still current and the screen is still mounted.
         """
-        if self.whatsapp_backend is not None:
-            self.whatsapp_backend.start_lid_resolver()
-        contacts = self.manager.list_address_book_sync(protocols=scope, force=True)
-        errors = dict(self.manager.address_book_errors)
+        try:
+            result = self._call_op(
+                "contacts.address_book",
+                {"protocols": sorted(scope) if scope else None, "force": True},
+            )
+        except Exception as exc:
+            logger.warning("contacts.address_book failed", exc_info=True)
+            self._report_client_error(exc, "rubrica")
+            return
+        contacts = [contact_from_wire(w) for w in result["contacts"]]
+        errors = dict(result["errors"])
 
         def _apply() -> None:
             if token != self._address_book_token or not screen.is_mounted:
@@ -115,16 +126,51 @@ class PickerMixin:
     # ─── Device link picker ────────────────────────────────────────────────────
 
     def _open_device_link(self) -> None:
-        """Open the device link picker modal (Ctrl+L)."""
+        """Open the device link picker modal (Ctrl+L).
+
+        The picker needs ``link.status``, so the call runs in a worker and the
+        modal opens when it returns (instantly with the embedded core).
+        """
+        if self._device_link_opening:
+            return  # a second Ctrl+L while the first is still being answered
+        self._device_link_opening = True
+
+        def _work() -> None:
+            try:
+                status = self._call_op("link.status")["protocols"]
+            except ApiError as exc:
+                logger.warning("link.status failed: %s", exc)
+                if not self._report_client_error(exc, "collegamento dispositivo"):
+                    self._ui(self._status, f"❌ {exc.message}")
+                self._ui(self._device_link_closed)
+                return
+            except Exception:
+                logger.exception("link.status answer unusable")
+                self._ui(self._device_link_closed)
+                return
+            self._ui(self._push_device_link_screen, status)
+
+        self._offload(_work)
+
+    def _device_link_closed(self) -> None:
+        """UI thread: the device link flow is over (or never started)."""
+        self._device_link_opening = False
+
+    def _push_device_link_screen(self, status: dict) -> None:
+        """UI thread: open the device link modal for the server's link *status*."""
         screen = DeviceLinkPickerScreen(
-            signal_number=self.signal_backend.user_number,
-            has_whatsapp=self.whatsapp_backend is not None,
-            has_telegram=self.telegram_backend is not None,
+            signal_number=status["signal"]["account"],
+            has_whatsapp=status["whatsapp"]["available"],
+            has_telegram=status["telegram"]["available"],
+            client=self.client,
         )
 
         def _on_done(_: object) -> None:
             logger.info("LINK-DONE: callback fired")
-            self._reconnect_touched_backends(screen._touched_protocols)
+            self._device_link_closed()
+            self._reconnect_touched_backends(
+                screen._touched_protocols, after=screen.cancel_thread
+            )
 
         self.push_screen(screen, _on_done)
 

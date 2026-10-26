@@ -23,9 +23,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from client_harness import client_for
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from event_harness import feed
 
 from models import (
     PROTOCOL_SIGNAL,
@@ -36,18 +39,24 @@ from models import (
     contact_cache_key,
 )
 from protocols.whatsapp import WhatsAppBackend
-from tui.address_book_refresh import DynamicAddressBookMixin
+from server.address_book_refresh import DynamicAddressBookMixin
+from server.bus import EventBus
+from server.core import ChatCore
+from tui.client_calls import ClientCallsMixin
 from tui.events import EventHandlingMixin, _looks_unresolved, _signal_stable_key
 from tui.pickers import PickerMixin
+from tui.polling import PollingMixin
 
 # ─── Harness ─────────────────────────────────────────────────────────────────
 
 
-class _App(EventHandlingMixin):
+class _App(EventHandlingMixin, PollingMixin):
     """Minimal harness exposing only the attributes touched by the handlers."""
 
     def __init__(self, backend, contacts=None, *, web_enabled=False):
-        self.manager = SimpleNamespace(get=lambda _protocol: backend)
+        self.bus = EventBus()
+        self.core = ChatCore(self.bus)
+        self.core.manager = SimpleNamespace(get=lambda _protocol: backend)
         self.contacts = list(contacts or [])
         self.selected_contact = None
         self._contact_list_dirty = False
@@ -61,12 +70,11 @@ class _App(EventHandlingMixin):
         self._TYPING_MUMBLING_DURATION = 5.0
         self._web_enabled = web_enabled
         self.scheduled: list[str] = []
+        # The lazy trigger is domain work: it fires from ChatCore.process.
+        self.core.schedule_address_book_refresh = self.scheduled.append  # type: ignore[method-assign]
 
     def call_from_thread(self, *_args, **_kwargs):  # pragma: no cover - no-op
         return None
-
-    def schedule_address_book_refresh(self, protocol: str) -> None:
-        self.scheduled.append(protocol)
 
 
 def _message_event(
@@ -115,7 +123,7 @@ def _wa_backend() -> WhatsAppBackend:
 
 
 class TestMessageEventReanchor:
-    def test_message_event_updates_tui_object_not_payload_copy(self):
+    def test_message_event_updates_tui_object_and_backend_contact(self):
         tui_contact = ChatContact(
             id="1@c.us",
             display_name="Mario",
@@ -130,12 +138,13 @@ class TestMessageEventReanchor:
         event = _message_event(
             PROTOCOL_WHATSAPP, "1@c.us", contact=payload_contact, timestamp=5000
         )
-        assert app._handle_message_event(event) is True
+        assert feed(app, event) is True
 
         assert app.contacts[0] is tui_contact
         assert tui_contact.last_message_ts == 5000
-        # The payload copy must not have been mutated.
-        assert payload_contact.last_message_ts == 0
+        # The core advances the contact the backend holds (here the one it
+        # registered); the TUI only anchors to its own list object.
+        assert payload_contact.last_message_ts == 5000
 
     def test_message_event_appends_unknown_contact_once(self):
         backend = _wa_backend()
@@ -144,7 +153,7 @@ class TestMessageEventReanchor:
         app = _App(backend, contacts=[])
 
         event = _message_event(PROTOCOL_WHATSAPP, "2@c.us")
-        assert app._handle_message_event(event) is True
+        assert feed(app, event) is True
 
         assert len(app.contacts) == 1
         assert app.contacts[0].cache_key == contact_cache_key(
@@ -160,7 +169,7 @@ class TestContactUpdateEvent:
         app = _App(_wa_backend(), contacts=[])
         new = ChatContact(id="9@c.us", display_name="Nina", protocol=PROTOCOL_WHATSAPP)
 
-        assert app._handle_contact_update_event(_contact_update_event(new)) is True
+        assert feed(app, _contact_update_event(new)) is True
 
         assert app.contacts == [new]
         assert app._cache == {}
@@ -179,7 +188,7 @@ class TestContactUpdateEvent:
             id="1@c.us", display_name="Mario Rossi", protocol=PROTOCOL_WHATSAPP
         )
 
-        assert app._handle_contact_update_event(_contact_update_event(incoming)) is True
+        assert feed(app, _contact_update_event(incoming)) is True
 
         assert len(app.contacts) == 1
         assert app.contacts[0] is existing
@@ -198,7 +207,7 @@ class TestContactUpdateEvent:
             id="1@c.us", display_name="Mario", protocol=PROTOCOL_WHATSAPP
         )
 
-        app._handle_contact_update_event(_contact_update_event(incoming, phone="222"))
+        feed(app, _contact_update_event(incoming, phone="222"))
 
         assert existing.extras["phone"] == "111"
 
@@ -249,10 +258,10 @@ class TestSignalDedupOnContactUpdate:
         app = _App(_wa_backend(), contacts=[stale])
         app._contact_widgets["signal:uuid-123"] = object()
 
-        assert app._handle_contact_update_event(_contact_update_event(fresh)) is True
+        assert feed(app, _contact_update_event(fresh)) is True
 
         assert len(app.contacts) == 1
-        assert app.contacts[0] is fresh
+        assert app.contacts[0] == fresh
         # The stale widget + key are marked dirty so the row is re-rendered.
         assert "signal:uuid-123" not in app._contact_widgets
         assert "signal:uuid-123" in app._dirty_contact_keys
@@ -272,10 +281,10 @@ class TestSignalDedupOnContactUpdate:
         )
         app = _App(_wa_backend(), contacts=[stale])
 
-        app._handle_contact_update_event(_contact_update_event(fresh))
+        feed(app, _contact_update_event(fresh))
 
         assert len(app.contacts) == 1
-        assert app.contacts[0] is fresh
+        assert app.contacts[0] == fresh
 
     def test_different_person_is_not_deduped(self):
         other = ChatContact(
@@ -292,7 +301,7 @@ class TestSignalDedupOnContactUpdate:
         )
         app = _App(_wa_backend(), contacts=[other])
 
-        app._handle_contact_update_event(_contact_update_event(fresh))
+        feed(app, _contact_update_event(fresh))
 
         assert len(app.contacts) == 2
         assert other in app.contacts
@@ -352,7 +361,7 @@ class TestLazyTrigger:
         backend.register_contact = MagicMock(return_value=True)
         app = _App(backend, contacts=[])
 
-        app._handle_message_event(_message_event(PROTOCOL_WHATSAPP, "1@c.us"))
+        feed(app, _message_event(PROTOCOL_WHATSAPP, "1@c.us"))
 
         assert app.scheduled == [PROTOCOL_WHATSAPP]
 
@@ -365,10 +374,11 @@ class TestLazyTrigger:
         )
         app = _App(_wa_backend(), contacts=[resolved])
 
-        app._handle_message_event(
+        feed(
+            app,
             _message_event(
                 PROTOCOL_WHATSAPP, "1@c.us", contact=resolved, timestamp=2000
-            )
+            ),
         )
 
         assert app.scheduled == []
@@ -380,10 +390,11 @@ class TestLazyTrigger:
         )
         app = _App(_wa_backend(), contacts=[placeholder])
 
-        app._handle_message_event(
+        feed(
+            app,
             _message_event(
                 PROTOCOL_WHATSAPP, "1@c.us", contact=placeholder, timestamp=3000
-            )
+            ),
         )
 
         assert app.scheduled == [PROTOCOL_WHATSAPP]
@@ -397,8 +408,11 @@ class TestLazyTrigger:
         )
         app = _App(backend, contacts=[placeholder])
 
-        app._handle_message_event(
-            _message_event(PROTOCOL_TELEGRAM, "42", contact=placeholder, timestamp=4000)
+        feed(
+            app,
+            _message_event(
+                PROTOCOL_TELEGRAM, "42", contact=placeholder, timestamp=4000
+            ),
         )
 
         assert app.scheduled == [PROTOCOL_TELEGRAM]
@@ -446,7 +460,7 @@ def _wait_until(predicate, timeout: float = 2.0) -> bool:
 
 @pytest.fixture
 def patch_refresh_config(monkeypatch):
-    import tui.address_book_refresh as abr
+    import server.address_book_refresh as abr
 
     def _apply(interval: float, cooldown: float):
         monkeypatch.setattr(abr, "get_dynamic_refresh_interval_s", lambda: interval)
@@ -498,7 +512,7 @@ class TestScheduler:
         throttlerebbe per sempre (fino al periodico).  Un secondo wake
         ravvicinato deve invece restare throttled.
         """
-        import tui.address_book_refresh as abr
+        import server.address_book_refresh as abr
 
         # Forza un uptime piccolo: il test non deve dipendere dall'host.
         monkeypatch.setattr(abr.time, "monotonic", lambda: 5.0)
@@ -574,10 +588,13 @@ class TestScheduler:
 @pytest.mark.integration
 class TestDynamicAddressBookIntegration:
     def test_picker_worker_forces_address_book(self):
-        class _PickerHarness(PickerMixin):
+        class _PickerHarness(ClientCallsMixin, PickerMixin):
+            is_running = False
+
             def __init__(self, manager, token=1):
-                self.whatsapp_backend = None
-                self.manager = manager
+                self._init_client_state()
+                self._thread_id = threading.get_ident()
+                self.client = client_for(manager)
                 self._address_book_token = token
                 self.statuses: list[str] = []
 
@@ -609,7 +626,7 @@ class TestDynamicAddressBookIntegration:
         backend.register_contact = MagicMock(return_value=True)
         app = _App(backend, contacts=[])
 
-        app._handle_message_event(_message_event(PROTOCOL_WHATSAPP, "1@c.us"))
+        feed(app, _message_event(PROTOCOL_WHATSAPP, "1@c.us"))
         assert len(app.contacts) == 1
         placeholder = app.contacts[0]
         assert placeholder.display_name == "1@c.us"
@@ -617,8 +634,28 @@ class TestDynamicAddressBookIntegration:
         resolved = ChatContact(
             id="1@c.us", display_name="Mario", protocol=PROTOCOL_WHATSAPP
         )
-        app._handle_contact_update_event(_contact_update_event(resolved))
+        feed(app, _contact_update_event(resolved))
 
         assert len(app.contacts) == 1
         assert app.contacts[0] is placeholder
         assert placeholder.display_name == "Mario"
+
+
+class TestCoreOwnsRefreshWorker:
+    """The refresh worker lives and dies with the core (headless server)."""
+
+    def test_start_and_stop_drive_the_worker(self, monkeypatch):
+        import server.core as core_mod
+
+        monkeypatch.setattr(core_mod, "signal_enabled", lambda: False)
+        core = ChatCore(EventBus())
+        core.whatsapp_backend = None
+        core.telegram_backend = None
+        core.start()
+        try:
+            thread = core._address_book_refresh_thread
+            assert thread is not None and thread.is_alive()
+        finally:
+            core.stop()
+        thread.join(timeout=2)
+        assert not thread.is_alive()

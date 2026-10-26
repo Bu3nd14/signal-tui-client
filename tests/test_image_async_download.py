@@ -27,10 +27,14 @@ from unittest.mock import MagicMock, patch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+import pytest
+
 from models import PROTOCOL_SIGNAL, PROTOCOL_TELEGRAM
 from protocols import BackendManager, SignalBackend, TelegramBackend
 from signal_tui import SignalTUI
 from ui_components import ImageWidget
+
+pytestmark = pytest.mark.usefixtures("open_media_root")
 
 
 class _FakeChatLog:
@@ -51,7 +55,7 @@ class _FakeChatLog:
 def _make_app() -> SignalTUI:
     """App with a real manager, worker captured inline, no real backends."""
     app = SignalTUI()
-    app.manager = BackendManager()
+    app.core.manager = BackendManager()
     app.run_worker = MagicMock()
     app.call_from_thread = MagicMock(side_effect=lambda fn, *a, **k: fn(*a, **k))
     return app
@@ -70,7 +74,7 @@ class TestImageAsyncDownload:
     def test_render_mounts_placeholder_without_sync_download(self):
         """(a) placeholder subito (path=None, id valorizzato), niente download sync."""
         app = _make_app()
-        app.manager.get_attachment_path = MagicMock(return_value=None)
+        app.core.manager.get_attachment_path = MagicMock(return_value=None)
 
         log = _FakeChatLog()
         app._render_image_in_chat(
@@ -82,7 +86,7 @@ class TestImageAsyncDownload:
         )
 
         # No synchronous resolution on the UI thread.
-        app.manager.get_attachment_path.assert_not_called()
+        app.core.manager.get_attachment_path.assert_not_called()
         assert len(log.children) == 1
         widget = log.children[0]
         assert isinstance(widget, ImageWidget)
@@ -99,7 +103,7 @@ class TestImageAsyncDownload:
         app = _make_app()
         resolved = tmp_path / "photo.jpg"
         resolved.write_text("fake image")
-        app.manager.get_attachment_path = MagicMock(return_value=resolved)
+        app.core.manager.get_attachment_path = MagicMock(return_value=resolved)
 
         log = _FakeChatLog()
         app._render_image_in_chat(
@@ -121,7 +125,7 @@ class TestImageAsyncDownload:
     def test_resolve_none_keeps_fallback_and_clickable(self):
         """(c) path=None → fallback ``[🖼️ Image: {info}]``, ancora cliccabile."""
         app = _make_app()
-        app.manager.get_attachment_path = MagicMock(return_value=None)
+        app.core.manager.get_attachment_path = MagicMock(return_value=None)
 
         log = _FakeChatLog()
         app._render_image_in_chat(
@@ -167,7 +171,7 @@ class TestImageAsyncDownload:
         (att_dir / "att-1").write_text("fake")
 
         app = _make_app()
-        app.manager.register(SignalBackend())
+        app.core.manager.register(SignalBackend())
         log = _FakeChatLog()
 
         with patch("protocols.rpc.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
@@ -190,7 +194,7 @@ class TestImageAsyncDownload:
         att_dir.mkdir()
 
         app = _make_app()
-        app.manager.register(SignalBackend())
+        app.core.manager.register(SignalBackend())
         log = _FakeChatLog()
 
         with patch("protocols.rpc.SIGNAL_CLI_ATTACHMENTS_DIR", att_dir):
@@ -213,7 +217,7 @@ class TestImageAsyncDownload:
         f.write_text("fake")
 
         app = _make_app()
-        app.manager.register(TelegramBackend())
+        app.core.manager.register(TelegramBackend())
         log = _FakeChatLog()
 
         app._render_image_in_chat(
@@ -233,7 +237,7 @@ class TestImageAsyncDownload:
         missing = tmp_path / "nope.jpg"
 
         app = _make_app()
-        app.manager.register(TelegramBackend())
+        app.core.manager.register(TelegramBackend())
         log = _FakeChatLog()
 
         app._render_image_in_chat(

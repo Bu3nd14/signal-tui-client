@@ -8,6 +8,7 @@ kind, id assente → ``File`` e immagini non toccate.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -52,7 +53,7 @@ def _add(
 
 
 def _row(msg_id: str = "m1") -> tuple | None:
-    with sqlite3.connect(db.DB_FILE) as conn:
+    with closing(sqlite3.connect(db.DB_FILE)) as conn, conn:
         return conn.execute(
             "SELECT text, attachment_info FROM messages "
             "WHERE contact_number = ? AND msg_id = ?",

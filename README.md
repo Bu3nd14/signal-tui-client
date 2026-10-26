@@ -366,10 +366,17 @@ just prefer not to shell out.
 | Shell aliases only | `./install.sh --aliases` | `python3 launcher.py aliases` |
 | Start/stop WAHA | `./scripts/start_whatsapp.sh [--no-wait\|--stop]` | `python3 launcher.py whatsapp start\|stop [--no-wait]` |
 | Restart signal-cli + WAHA | `./scripts/restart_backend.sh [--no-wait]` | `python3 launcher.py backend-restart [--no-wait]` |
-| Run the client on a server | `./scripts/start_on_server.sh {start\|stop\|status}` | `python3 launcher.py server start\|stop\|status` |
-| Local ↔ remote handover | `./scripts/tui_handover.sh {to-server\|to-local\|status}` | `python3 launcher.py handover to-server\|to-local\|status` |
+| Run the server on a remote machine (disaster recovery) | `./scripts/start_on_server.sh {start\|stop\|status}` | `python3 launcher.py server start\|stop\|status` |
+| Local ↔ remote handover (moves `megachat serve`) | `./scripts/tui_handover.sh {to-server\|to-local\|status}` | `python3 launcher.py handover to-server\|to-local\|status` |
 | CPU/I-O profiling | `./profiling/run_pyspy.sh` / `run_strace.sh` `[duration]` | `python3 launcher.py profile pyspy\|strace [duration]` |
 | Regression tests | `./tests/run_regression_tests.sh` | `python3 launcher.py test` |
+
+The handover and `start_on_server.sh` start and stop the detached headless server (`megachat serve`,
+web on `0.0.0.0:4242`, Unix socket enabled), not a TUI inside tmux. Stopping is SIGINT to the lock pid,
+waiting for it to exit (a legacy tmux `tui` session is still killed, never started); if the server does
+not stop, the command aborts instead of risking two servers. To work interactively on the target
+machine run `python3 megachat.py` there: it attaches to the running server (Detach leaves it running,
+Quit stops it). See [`docs/HANDOVER.md`](docs/HANDOVER.md).
 
 Same flags, same behavior (the alias block it writes is byte-for-byte identical to `install.sh`'s),
 same exit codes — pick whichever entry point fits your environment. `python3 launcher.py --help`
@@ -433,11 +440,42 @@ password after scanning.
 ## Usage
 
 ```bash
-python3 signal_tui.py
+python3 megachat.py                  # the TUI: attach to a running server, or start one (see below)
+python3 signal_tui.py                # same thing
+python3 megachat.py --connect PATH   # attach to the server on this Unix socket; never start one
+python3 megachat.py --in-process     # debugging/tests: the chat core runs inside the TUI (no server)
+python3 megachat.py serve            # the headless server only (web UI, no TUI)
 ```
+
+The TUI is a client of the chat server. At startup it looks for a server on the Unix socket
+(`$MEGACHAT_SOCKET`, else `$XDG_RUNTIME_DIR/megachat/server.sock`, else
+`~/.local/state/megachat/server.sock`); if one answers it attaches, otherwise it starts
+`megachat serve` detached (same Python and checkout, no TUI, `--no-web` unless you pass `--web...`
+flags or `config.json` enables the web UI), waits for its socket (up to 30 s) and attaches. Ctrl+C only
+disconnects the TUI (the server keeps running); Ctrl+Q asks what to do, see
+[Leaving the TUI](#leaving-the-tui). Any number of TUIs can attach to the same server. Web options (`--web`, `--web-port`, ...) are forwarded to a server the TUI
+starts; they are ignored, with a note, when it attaches to one already running. A spawned server's
+output goes to `/tmp/megachat-serve.log`, the server's own log to `/tmp/signal-tui.log` and the
+TUI's to `/tmp/megachat-tui.log`.
 
 The app starts the `signal-cli` daemon automatically on first launch (for Signal) and a webhook
 HTTP server for WhatsApp push events. See the subsections below for details on each area.
+
+### Leaving the TUI
+
+`Ctrl+Q` opens a dialog (keys: `d`, `q`, `Esc`, arrows/`Tab`, `Enter`):
+
+| Choice | Effect |
+|--------|--------|
+| **Detach** (`d`) | Closes this TUI; the server keeps running (web UI, other TUIs, background sync) |
+| **Quit** (`q`) | Stops the server cleanly (as `Ctrl+C` does on `megachat serve`: prune, disconnect), then exits |
+| **Annulla** (`Esc`) | Back to the chat |
+
+The default button is Quit when this TUI started the server and Detach when it attached to one
+that was already running. If other clients are connected the dialog says so ("Altri N client
+connessi") and Quit asks for a second confirmation. `Ctrl+C` (SIGINT) never opens the dialog and
+never stops a server: it always detaches. If the server cannot be reached, `Ctrl+Q` just exits.
+`megachat --in-process` has no dialog (it owns the core and quits as before).
 
 <a id="tips"></a>
 
@@ -466,7 +504,8 @@ HTTP server for WhatsApp push events. See the subsections below for details on e
 | Click (on a status-bar segment) | Jump to that backend — unread view if it has unread, else its plain filter |
 | `Ctrl+L` | Link a new device (Signal / WhatsApp / Telegram) via QR code |
 | `Ctrl+N` / `Ctrl+P` | Navigate emoji suggestions / emoji picker categories |
-| `Ctrl+Q` / `Ctrl+C` | Quit |
+| `Ctrl+Q` | Exit: **Detach** / **Quit** / Cancel dialog — see [Leaving the TUI](#leaving-the-tui) |
+| `Ctrl+C` | Detach (disconnect this TUI; the server keeps running) |
 
 ### Composing messages
 
@@ -650,15 +689,36 @@ The automatic installer enables the Web UI in `config.json`, so a normal
 
 | Alias | What it does |
 |---|---|
-| `web-signal-tui` | Starts the TUI with the web server in the **foreground** on `0.0.0.0:4242` |
-| `web-signal-tui-bg` | Starts the TUI + web server in a **detached tmux session** (background) and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN` |
-| `web-signal-tui-stop` | Cleanly stops the tmux session and removes `/tmp/signal-tui.lock` |
+| `web-signal-tui` | Starts the TUI with the web server on `0.0.0.0:4242`: attaches to a running server or starts one that keeps running after the TUI exits (stop it with `web-signal-tui-stop`) |
+| `web-signal-tui-bg` | Starts the headless server (`megachat serve`: core + web server, no TUI) as a **detached background process** and **exports** the Bearer token to your shell as `SIGNAL_TUI_WEB_TOKEN` |
+| `web-signal-tui-stop` | Cleanly stops the background server (SIGINT; also kills a legacy tmux `tui` session if one exists) and removes `/tmp/signal-tui.lock` |
 
 `signal-tui-bg` and `signal-tui-stop` are shorter aliases for the two background commands.
-Starting the background command is idempotent: when the session is already active it still prints
+Starting the background command is idempotent: when the server is already running it still prints
 and exports the current token instead of failing.
 
 > The web server requires the optional dependencies in requirements-web.txt (installed by default; if you used --no-web: .venv/bin/pip install -r requirements-web.txt). Without them the TUI logs "optional dependencies are missing (web down)" and continues normally.
+
+### Headless server (`megachat serve`)
+
+The web UI no longer needs the TUI (or tmux) to stay alive. `megachat serve` runs the chat core and
+the web adapter without Textual, logs to `/tmp/signal-tui.log`, prints the web URL and Bearer token,
+and runs until SIGINT/SIGTERM (then stops the core and the web server, prunes the message cache and
+releases the lock):
+
+```bash
+python3 megachat.py serve                      # web on config.json host/port (default 127.0.0.1:4242)
+python3 megachat.py serve --web-host 0.0.0.0 --web-port 4242
+python3 -m server --web-no-auth                # same entry point, no token (trusted networks only)
+```
+
+Options: `--debug`, `--web-port`, `--web-host`, `--web-no-auth`, `--no-web` (no client can connect
+yet; logs a warning). The server holds the single-instance lock (`/tmp/signal-tui.lock`, override
+with `$MEGACHAT_LOCK_FILE`); attached TUIs never take it, only `megachat --in-process` does (so it
+cannot run next to a server). `python3 launcher.py server
+start|stop|status` starts/stops it (together with WAHA) as a detached background process; its
+stdout/stderr go to `/tmp/megachat-serve.log`. `megachat.py` with any other arguments starts the TUI
+as before (`python3 signal_tui.py` keeps working). Stopping the server (`web-signal-tui-stop`, SIGINT to the lock pid) disconnects every attached TUI; they show a reconnect message and resync if a new server appears.
 
 ### Fast cycle (background + token)
 
@@ -667,7 +727,7 @@ so the token is immediately ready for the Web UI login (it is printed to the con
 
 ```bash
 web-signal-tui-bg
-# TUI bg avviata — token: <the-token>
+# Server bg attivo — token: <the-token>
 
 curl -H "Authorization: Bearer $SIGNAL_TUI_WEB_TOKEN" http://127.0.0.1:4242/api/contacts
 ```
@@ -841,6 +901,22 @@ make coverage                               # test + coverage (gate 68%)
 
 This suite also runs in CI (`.github/workflows/ci.yml`, Python 3.12/3.13).
 
+### Verifica end-to-end
+
+```bash
+make smoke                                  # oppure: scripts/smoke_e2e.sh (PY=... per l'interprete)
+```
+
+Avvia processi reali (nessun backend configurato) in un `HOME`, un lock file e un socket temporanei
+sotto `/tmp/mcXXXX`: non tocca un'installazione vera né un'istanza in esecuzione. Scenari: `serve`
+(HTTP `/health`, `/api/status`, `/api/contacts`, `/ws`, `/ws/v2`, socket Unix con permessi 0600/0700 e
+runtime file, stop con SIGINT); TUI che avvia il server e lo lascia vivo all'uscita (Detach); seconda
+TUI che si attacca (un solo server); `--in-process` rifiutato mentre un server tiene il lock;
+`server.shutdown` dal socket (percorso Quit) che rimuove lock e socket; `--in-process` da solo; TUI
+che esce anche se il SIGINT arriva a un thread non principale. Dura circa un minuto, richiede `script`
+(util-linux) e `curl`, e fallisce se resta un processo, un lock o un socket. Gira anche in CI (job
+`smoke`).
+
 ### Optional "live" integration tests (real accounts)
 
 The tests in `tests/test_live_quote_media.py` (E1–E7) verify end-to-end behavior **against a real
@@ -893,9 +969,8 @@ creates a WAL-safe timestamped backup (`messages.db.bak-<timestamp>`) and runs a
 before deleting. Run it only in a maintenance window, with the app stopped:
 
 ```bash
-# 1. Stop the TUI (it embeds the web server — no separate process)
-tmux kill-session -t tui
-# or: pkill -f "python -m signal_tui"
+# 1. Stop the server/TUI (SIGINT to the pid in the lock file; the web server is embedded)
+signal-tui-stop        # or: kill -INT "$(cat /tmp/signal-tui.lock)"
 
 # 2. Gate: no process must hold the DB (the output must be empty)
 lsof ~/.local/share/signal-tui-client/messages.db
@@ -908,7 +983,7 @@ lsof ~/.local/share/signal-tui-client/messages.db
 
 # 5. Restart from the project root with the usual web options
 cd /home/rob/signal-tui-client
-tmux new-session -d -s tui ".venv/bin/python -m signal_tui --web --web-host 0.0.0.0 --web-port 4242"
+nohup .venv/bin/python megachat.py serve --web-host 0.0.0.0 --web-port 4242 >/dev/null 2>&1 &
 ```
 
 The script aborts (`-1`) if more rows than expected match, and is idempotent (a second run finds
@@ -919,7 +994,9 @@ zero rows). Never instantiate a backend outside `pytest`/the conftest: the autou
 
 ```
 signal-tui-client/
-├── signal_tui.py              # Entry point — main TUI application (Textual App), multi-protocol
+├── megachat.py                # Entry point — `megachat serve` (headless) or the TUI
+├── signal_tui.py              # TUI entry point — main TUI application (Textual App), multi-protocol
+├── server/                    # Headless core (ChatCore, EventBus, lock) + `serve` mode (main.py)
 ├── backend/                   # Shared backend: SQLite persistence, signal-cli RPC/subprocess,
 │                              #   webhook/HTTP server, receipts
 ├── backends/                  # Per-protocol backend implementations

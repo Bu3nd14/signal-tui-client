@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import purge_orphan_media as cli
@@ -10,7 +11,7 @@ from protocols.media_prune import MediaScope
 def _setup(tmp_path, monkeypatch, *, create_db=True, create_dir=True):
     db_file = tmp_path / "messages.db"
     if create_db:
-        with sqlite3.connect(db_file) as conn:
+        with closing(sqlite3.connect(db_file)) as conn, conn:
             conn.execute(
                 "CREATE TABLE messages (protocol TEXT, attachment_id TEXT, "
                 "quote_attachment_id TEXT, quote_attachment_path TEXT)"
