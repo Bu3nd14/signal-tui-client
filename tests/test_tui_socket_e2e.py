@@ -90,8 +90,11 @@ def server(tmp_path, monkeypatch):
 def app(server):
     from tui.app import SignalTUI
 
+    # The stop is detected through the dropped connection, not the heartbeat:
+    # a generous timeout keeps a stalled loop on a loaded machine (CI) from
+    # looking like a lost server.
     client = SocketClient.connect(
-        server.path, backoff=(0.05, 0.2), heartbeat_timeout=3, ping_interval=1
+        server.path, backoff=(0.05, 0.2), heartbeat_timeout=15, ping_interval=1
     )
     with (
         patch("server.core.BackendManager"),
@@ -113,7 +116,9 @@ def app(server):
     client.close()
 
 
-async def _until(pilot, predicate, seconds=8.0):
+async def _until(pilot, predicate, seconds=30.0):
+    # Returns as soon as *predicate* holds: the long bound only matters on a
+    # slow machine, where the 8 s it used to be was occasionally not enough.
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if predicate():
