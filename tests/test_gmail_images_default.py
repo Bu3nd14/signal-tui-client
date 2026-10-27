@@ -218,6 +218,7 @@ __CANCEL__
 __LOAD__
 let notices = [];
 function showNotice(message) { notices.push(String(message)); }
+function scheduleHtmlFit() {}
 const state = { readerSeq: 0 };
 let currentImages = [];
 const elements = {
@@ -560,6 +561,7 @@ function senderOf(detail) { return (detail && detail.from) || ""; }
 function joinAddresses(value) { return value || ""; }
 function renderRecipients(element, value) { element.textContent = value || "—"; }
 function collapseQuotes() {}
+function scheduleHtmlFit() {}
 function formatFullDate() { return ""; }
 function loadImages() { record("load"); }
 function renderAttachments() { record("attachments"); }
@@ -673,8 +675,8 @@ def test_index_html_removes_toggle_and_bumps_gmail_js():
 
     assert "gmail-images-toggle" not in index
     assert "Mostra immagini" not in index
-    assert "gmail.js?v=26" in index
-    assert "gmail.css?v=25" in index
+    assert "gmail.js?v=27" in index
+    assert "gmail.css?v=26" in index
 
 
 def test_gmail_js_has_no_orphan_toggle_remnants():

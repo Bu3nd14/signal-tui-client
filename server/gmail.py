@@ -174,13 +174,14 @@ _ALLOWED_HTML_ATTRIBUTES = {
     "font": {"color", "face", "size"},
     "col": {"align", "bgcolor", "span", "valign", "width"},
     "colgroup": {"align", "bgcolor", "span", "valign", "width"},
-    "div": {"data-quote"},
+    "div": {"data-bg", "data-quote"},
     "img": {"align", "alt", "data-src", "height", "width"},
     "li": {"value"},
     "ol": {"start"},
     "table": {
         "align",
         "bgcolor",
+        "data-bg",
         "border",
         "cellpadding",
         "cellspacing",
@@ -190,6 +191,7 @@ _ALLOWED_HTML_ATTRIBUTES = {
     "td": {
         "align",
         "bgcolor",
+        "data-bg",
         "colspan",
         "height",
         "rowspan",
@@ -199,6 +201,7 @@ _ALLOWED_HTML_ATTRIBUTES = {
     "th": {
         "align",
         "bgcolor",
+        "data-bg",
         "colspan",
         "height",
         "rowspan",
@@ -2024,6 +2027,37 @@ _QUOTE_BLOCK_CLASSES = frozenset({"gmail_quote", "yahoo_quoted"})
 _QUOTE_AFTER_IDS = frozenset({"divrplyfwdmsg", "appendonsend"})
 
 
+_BACKGROUND_TAGS = frozenset({"table", "td", "th", "div"})
+_STYLE_BACKGROUND_URL_RE = re.compile(
+    r"""background(?:-image)?\s*:[^;]*?url\(\s*(['"]?)(https?://[^'")\s]+)\1\s*\)""",
+    re.IGNORECASE,
+)
+_SAFE_BACKGROUND_URL_RE = re.compile(r"https?://[^\s\"'<>()]+", re.IGNORECASE)
+
+
+def _background_url(name: str, attributes: list[_ScannedAttribute]) -> str | None:
+    """Remote background image of a table/cell/div, to defer as ``data-bg``.
+
+    Newsletters draw hero banners as cell backgrounds (``<td
+    background="…">`` or ``background-image:url(…)``).  Both would load
+    straight from the sender, so the sanitizer drops them; like ``src`` →
+    ``data-src`` for images, the URL is moved into an inert ``data-bg`` that
+    the attribute filter signs for the proxy and the client applies.
+    """
+    if name not in _BACKGROUND_TAGS:
+        return None
+    values = {attr.lower_name: (attr.value or "").strip() for attr in attributes}
+    if "data-bg" in values:
+        return None
+    candidate = values.get("background", "")
+    if not candidate:
+        match = _STYLE_BACKGROUND_URL_RE.search(values.get("style", ""))
+        candidate = match.group(2) if match else ""
+    if not candidate or len(candidate) > _IMAGE_URL_MAX_LEN:
+        return None
+    return candidate if _SAFE_BACKGROUND_URL_RE.fullmatch(candidate) else None
+
+
 def _quote_marker(name: str, attributes: list[_ScannedAttribute]) -> str | None:
     """``data-quote`` value for the quoted-text containers of common clients.
 
@@ -2198,6 +2232,10 @@ def _pre_scan_html(raw: str, styles: list[str] | None = None) -> str:
                 if style_decls > _HTML_MAX_STYLE_DECLS_TOTAL:
                     return ""
                 out.append(body_tag)
+            elif (background := _background_url(name, attributes)) is not None:
+                tag = raw[index:end]
+                cut = 1 + len(name)
+                out.append(f'{tag[:cut]} data-bg="{background}"{tag[cut:]}')
             else:
                 out.append(raw[index:end])
             index = end
@@ -2847,6 +2885,63 @@ def _validate_text_indent(tokens: list[Any]) -> str | None:
     )
 
 
+_BACKGROUND_REPEAT = frozenset({"repeat", "no-repeat", "space", "round"})
+_BACKGROUND_REPEAT_AXIS = frozenset({"repeat-x", "repeat-y"})
+_BACKGROUND_POSITION = frozenset({"left", "right", "top", "bottom", "center"})
+
+
+def _validate_background_repeat(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    values: list[str] = []
+    for component in components:
+        token = component[0]
+        if token.type != "ident":
+            return None
+        values.append(token.lower_value)
+    if len(values) == 1 and values[0] in _BACKGROUND_REPEAT | _BACKGROUND_REPEAT_AXIS:
+        return values[0]
+    if len(values) == 2 and all(value in _BACKGROUND_REPEAT for value in values):
+        return " ".join(values)
+    return None
+
+
+def _validate_background_position(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= 2:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        token = component[0]
+        if token.type == "ident" and token.lower_value in _BACKGROUND_POSITION:
+            rendered.append(token.lower_value)
+            continue
+        value = _length_value(
+            token, minimum=-1600, maximum=1600, allow_percent=True, percent_min=0
+        )
+        if value is None:
+            return None
+        rendered.append(value)
+    return " ".join(rendered)
+
+
+def _validate_background_size(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if len(components) == 1 and components[0][0].type == "ident":
+        keyword = components[0][0].lower_value
+        return keyword if keyword in {"auto", "cover", "contain"} else None
+    if not 1 <= len(components) <= 2:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        value = _length_value(
+            component[0], minimum=0, maximum=1600, allow_percent=True, allow_auto=True
+        )
+        if value is None:
+            return None
+        rendered.append(value)
+    return " ".join(rendered)
+
+
 def _validate_opacity(tokens: list[Any]) -> str | None:
     token = _single_token(tokens)
     if token is None:
@@ -3167,6 +3262,11 @@ _STYLE_VALIDATORS = {
     "overflow": _keyword_validator(frozenset({"visible", "hidden", "auto"})),
     "visibility": _keyword_validator(frozenset({"visible", "hidden"})),
     "opacity": _validate_opacity,
+    # Layout of deferred backgrounds (data-bg); the image itself never comes
+    # from CSS: url() stays rejected.
+    "background-repeat": _validate_background_repeat,
+    "background-position": _validate_background_position,
+    "background-size": _validate_background_size,
     "float": _keyword_validator(frozenset({"left", "right", "none"})),
     "display": _keyword_validator(
         frozenset(
@@ -3413,6 +3513,9 @@ def _html_attribute_filter(
         ) or _GLOBAL_ATTR_VALIDATORS.get(normalized_attribute)
         if validator is not None:
             return validator(value)
+        if normalized_attribute == "data-bg":
+            # Deferred background (see _background_url): same signing as images.
+            return _filter_image_src(value, cid_urls)
         if normalized_tag == "img" and normalized_attribute == "data-src":
             return _filter_image_src(value, cid_urls)
         if len(value) > _ATTR_VALUE_MAX_LEN:
