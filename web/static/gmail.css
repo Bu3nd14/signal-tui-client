@@ -101,6 +101,7 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-tool[aria-expanded="true"] { background: var(--panel-raised); color: var(--text); }
 .gmail-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .gmail-tool:disabled { opacity: .4; cursor: not-allowed; }
+.gmail-tool[aria-busy="true"] { cursor: progress; }
 .gmail-tool.gmail-danger { border-color: transparent; color: var(--muted); }
 .gmail-tool.gmail-danger:hover:not(:disabled),
 .gmail-tool.gmail-danger:focus-visible { border-color: transparent; background: #4a2027; color: var(--danger); }
