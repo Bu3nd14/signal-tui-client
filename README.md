@@ -845,6 +845,15 @@ semaphore only bounds concurrency (4 per worker; the background prefetch adds up
 Inline `cid:` images (signatures, logos) are served by the same proxy with a signed token that
 expires after 24 hours, only when the MIME part's bytes are a raster image.
 
+Like the chat backends, Gmail shows a red dot on its tab when there is unread mail (hidden while
+the Gmail view is open), and its unread count is added to the Dock/app badge total. The count
+covers only the **200 newest messages the list shows**, so years of old unread mail do not keep
+the badge in the thousands. Gmail has no push channel, so the server checks the inbox every
+`GMAIL_UNREAD_POLL_S` seconds (default 60, `0` disables it) with a read-only `SELECT` and one
+`SEARCH UNSEEN` on that window, and pushes the count to the web client over the WebSocket;
+opening or deleting a message re-checks at once, and new mail refreshes the open Gmail list.
+IMAP IDLE would be instant but needs a dedicated, always-open connection.
+
 > After pulling a version that adds the HTML reader, install the new web dependencies once:
 > `.venv/bin/pip install -r requirements-web.txt` (or re-run `./install.sh`). `./install.sh --gmail`
 > installs `nh3`, `tinycss2` and `css-inline` automatically if they are missing.

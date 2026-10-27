@@ -101,6 +101,10 @@ def create_gmail_router() -> Any:
     async def status(request: Request) -> dict[str, Any]:
         return await call_op(request, "gmail.status")
 
+    @router.get("/unread")
+    async def unread(request: Request) -> dict[str, Any]:
+        return await call_op(request, "gmail.unread")
+
     @router.get("/messages")
     async def messages(
         request: Request,

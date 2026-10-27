@@ -108,12 +108,15 @@ def isolate_gmail_image_caches(monkeypatch: pytest.MonkeyPatch):
 
     Opening a message would otherwise start real network fetches for the
     images of the test HTML, and a cached image from one test would answer the
-    next test's request instead of its patched fetcher.
+    next test's request instead of its patched fetcher.  The unread polling
+    worker is disabled too: a test that starts a core on a machine where Gmail
+    is configured would otherwise poll the real mailbox.
     """
     from server import gmail
     from server.ops import gmail as gmail_ops
 
     monkeypatch.setenv("GMAIL_IMAGE_PREFETCH", "0")
+    monkeypatch.setenv("GMAIL_UNREAD_POLL_S", "0")
     gmail.clear_inline_image_cache()
     gmail_ops.clear_remote_image_cache()
     try:

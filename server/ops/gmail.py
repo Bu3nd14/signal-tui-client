@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
-from server import blobs
+from server import blobs, gmail_unread
 from server import gmail as _gmail
 from server.api import ApiError, ChatAPI, operation
 from server.models_api import (
@@ -245,6 +245,7 @@ async def gmail_messages_get(api: ChatAPI, req: GmailMessageRef) -> dict[str, An
 def gmail_messages_delete(api: ChatAPI, req: GmailMessageRef) -> dict[str, bool]:
     """Move one message to Trash (``not_found`` when it no longer exists)."""
     _run(_gmail.delete_message, req.uid, folder=req.folder)
+    gmail_unread.poke()
     return {"ok": True, "trashed": True}
 
 
@@ -259,7 +260,9 @@ def gmail_messages_bulk_delete(
     """Move several messages to Trash; unknown UIDs are reported as missing."""
     if req.folder is not None and not isinstance(req.folder, str):
         raise ApiError("invalid_request", "Cartella non valida")
-    return _run(_gmail.delete_messages, req.uids, folder=req.folder)
+    result = _run(_gmail.delete_messages, req.uids, folder=req.folder)
+    gmail_unread.poke()
+    return result
 
 
 @operation(
@@ -268,7 +271,24 @@ def gmail_messages_bulk_delete(
 def gmail_messages_mark_read(api: ChatAPI, req: GmailMessageRef) -> dict[str, bool]:
     """Set the ``\\Seen`` flag."""
     _run(_gmail.mark_read, req.uid, folder=req.folder)
+    gmail_unread.poke()
     return {"ok": True}
+
+
+@operation("gmail.unread", request=EmptyRequest, response=dict[str, Any])
+def gmail_unread_count(api: ChatAPI, req: EmptyRequest) -> dict[str, Any]:
+    """Unread count among the 200 listed messages, for the tab dot and badge.
+
+    The polling worker's last value when it has one, else one check
+    (``fetch_unread_status``).  ``configured: false`` (and 0) when Gmail is
+    not set up.
+    """
+    if not _gmail.status_snapshot()["configured"]:
+        return {"configured": False, "unread": 0}
+    latest = gmail_unread.latest()
+    if latest is None:
+        latest = _run(_gmail.fetch_unread_status)
+    return {"configured": True, "unread": int(latest.get("unread") or 0)}
 
 
 def _check_slots(attachment_count: int, slots_ok: bool) -> None:

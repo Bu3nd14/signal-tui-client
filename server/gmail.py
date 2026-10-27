@@ -881,6 +881,45 @@ def status_snapshot() -> dict[str, Any]:
     }
 
 
+def _first_int(data: Iterable[object]) -> int | None:
+    for item in data or ():
+        if isinstance(item, (bytes, bytearray)) and item.strip().isdigit():
+            return int(item)
+    return None
+
+
+def fetch_unread_status(folder: str | None = None) -> dict[str, int | None]:
+    """Unread count among the messages the list shows, plus ``UIDNEXT``.
+
+    Only the newest ``_LIST_WINDOW`` (200) messages count, like the list: a
+    mailbox with years of unread mail would otherwise keep the badge at
+    thousands.  Sequence numbers follow UID order, so the window is the
+    sequence range ``EXISTS-199:EXISTS``: a read-only ``SELECT`` (message count
+    and ``UIDNEXT``) plus one ``SEARCH UNSEEN`` on that range, no message data.
+    ``UIDNEXT`` grows when new mail arrives, so callers can tell "new mail"
+    from "read on another device".  Raises the usual Gmail errors.
+    """
+    settings = load_settings()
+    folder_value = validate_folder(folder or settings.folder)
+    with imap_connect(settings) as connection:
+        status, data = connection.select(_mailbox(folder_value), readonly=True)
+        if status != "OK":
+            raise GmailUpstreamError("Cartella non disponibile")
+        exists = _first_int(data)
+        if exists is None:
+            raise GmailUpstreamError("Stato cartella non disponibile")
+        _, uidnext_data = connection.response("UIDNEXT")
+        uidnext = _first_int(uidnext_data)
+        if exists == 0:
+            return {"unread": 0, "uidnext": uidnext}
+        first = max(1, exists - _LIST_WINDOW + 1)
+        status, data = connection.search(None, "UNSEEN", f"{first}:{exists}")
+    if status != "OK":
+        raise GmailUpstreamError("Stato cartella non disponibile")
+    matches = b" ".join(item for item in data or [] if isinstance(item, bytes))
+    return {"unread": len(matches.split()), "uidnext": uidnext}
+
+
 def validate_folder(folder: str | None = None) -> str:
     """Return a safe mailbox name or raise :class:`GmailValidationError`."""
     if folder is not None and not isinstance(folder, str):
