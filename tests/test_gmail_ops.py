@@ -58,6 +58,7 @@ def test_operations_are_registered(api):
         "gmail.attachment",
         "gmail.image",
         "gmail.unread",
+        "gmail.address_book",
     }
     assert api.operation("gmail.image").is_async
     assert not api.operation("gmail.messages.send").is_async
