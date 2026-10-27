@@ -76,6 +76,27 @@ def isolate_gmail_imap_pool():
 
 
 @pytest.fixture(autouse=True)
+def isolate_gmail_image_caches(monkeypatch: pytest.MonkeyPatch):
+    """Empty the Gmail image caches and disable the remote image prefetch.
+
+    Opening a message would otherwise start real network fetches for the
+    images of the test HTML, and a cached image from one test would answer the
+    next test's request instead of its patched fetcher.
+    """
+    from server import gmail
+    from server.ops import gmail as gmail_ops
+
+    monkeypatch.setenv("GMAIL_IMAGE_PREFETCH", "0")
+    gmail.clear_inline_image_cache()
+    gmail_ops.clear_remote_image_cache()
+    try:
+        yield
+    finally:
+        gmail.clear_inline_image_cache()
+        gmail_ops.clear_remote_image_cache()
+
+
+@pytest.fixture(autouse=True)
 def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate every test from the user's persistent cache and database."""
     import protocols.db as backend

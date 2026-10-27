@@ -6,6 +6,10 @@
   const FETCH_LIMIT = 200;
   const MAX_COMPOSE_FILES = 10;
   const MAX_IMAGES_PER_MESSAGE = 50;
+  // Reader header/attachments stay compact: names shown before "e altri N",
+  // and the attachment list starts collapsed above this many files.
+  const RECIPIENTS_PREVIEW = 3;
+  const ATTACHMENTS_OPEN_MAX = 4;
   const FOLDER_FALLBACK = "INBOX";
   const RENDER_KEY = "gmail-render-mode";
 
@@ -47,6 +51,7 @@
     delete: document.getElementById("gmail-delete"),
     attachments: document.getElementById("gmail-attachments"),
     attachmentList: document.getElementById("gmail-attachment-list"),
+    attachmentsToggle: document.getElementById("gmail-attachments-toggle"),
     composeDialog: document.getElementById("gmail-compose-dialog"),
     composeForm: document.getElementById("gmail-compose-form"),
     composeTitle: document.getElementById("gmail-compose-title"),
@@ -159,6 +164,69 @@
 
   function joinAddresses(value) {
     return displayAddress(value).trim();
+  }
+
+  // Split an address header on the commas that separate mailboxes, keeping
+  // commas inside quoted display names ("Rossi, Mario" <m@example.com>).
+  function splitAddresses(value) {
+    const text = joinAddresses(value);
+    const parts = [];
+    let current = "";
+    let quoted = false;
+    let angle = false;
+    for (const char of text) {
+      if (char === '"' && !angle) quoted = !quoted;
+      else if (char === "<" && !quoted) angle = true;
+      else if (char === ">" && !quoted) angle = false;
+      if (char === "," && !quoted && !angle) {
+        if (current.trim()) parts.push(current.trim());
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    if (current.trim()) parts.push(current.trim());
+    return parts;
+  }
+
+  // "Mario Rossi <mario@example.com>" → "Mario Rossi"; bare address otherwise.
+  function addressName(address) {
+    const named = /^(.*?)\s*<([^<>]*)>\s*$/.exec(address);
+    if (!named) return address;
+    const name = named[1].trim().replace(/^"(.*)"$/, "$1").trim();
+    return name || named[2].trim();
+  }
+
+  // Long To/Cc lists stay on one line: the first names plus "e altri N".
+  function renderRecipients(element, value) {
+    const addresses = splitAddresses(value);
+    element.replaceChildren();
+    if (!addresses.length) {
+      element.textContent = "—";
+      return;
+    }
+    const list = node("span", "gmail-recipients");
+    addresses.forEach((address, index) => {
+      const item = node("span", "gmail-recipient", addressName(address));
+      item.title = address;
+      item.hidden = index >= RECIPIENTS_PREVIEW;
+      list.append(item);
+    });
+    element.append(list);
+    const extra = addresses.length - RECIPIENTS_PREVIEW;
+    if (extra <= 0) return;
+    const more = node("button", "gmail-link-button", `e altri ${extra}`);
+    more.type = "button";
+    more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", () => {
+      const expanded = more.getAttribute("aria-expanded") !== "true";
+      [...list.children].forEach((item, index) => {
+        item.hidden = !expanded && index >= RECIPIENTS_PREVIEW;
+      });
+      more.setAttribute("aria-expanded", expanded ? "true" : "false");
+      more.textContent = expanded ? "mostra meno" : `e altri ${extra}`;
+    });
+    element.append(more);
   }
 
   function extractEmail(value) {
@@ -616,6 +684,8 @@
   function showReaderLoading() {
     elements.detailEmpty.hidden = true;
     elements.reader.hidden = false;
+    // The whole reader scrolls (header, attachments and body together).
+    elements.reader.scrollTop = 0;
     elements.reader.setAttribute("aria-busy", "true");
     elements.readerSubject.textContent = "Caricamento messaggio…";
     elements.readerFrom.textContent = "";
@@ -656,32 +726,74 @@
     if (!attachments.length) return;
     const uid = detail.uid !== undefined && detail.uid !== null ? detail.uid : state.selectedUid;
 
+    // Images shown by the body via cid: are listed apart, collapsed: they are
+    // part of the message, not files the sender attached.
+    const files = [];
+    const inlineImages = [];
     for (const attachment of attachments) {
       const index = Number(attachment && attachment.index);
       if (!Number.isInteger(index) || index < 0) continue;
       const filename = safeFilename(attachment && attachment.filename, `allegato-${index + 1}`);
-      const row = node("div", "gmail-attachment");
-      const info = node("div", "gmail-attachment-info");
-      const name = node("span", "gmail-attachment-name", filename);
-      name.title = filename;
-      info.append(name);
+      const chip = node("button", "gmail-attachment-chip");
+      chip.type = "button";
       const metaParts = [];
       if (attachment && attachment.content_type) metaParts.push(String(attachment.content_type));
+      let size = "";
       if (attachment && attachment.size !== undefined && attachment.size !== null) {
-        const size = formatBytes(attachment.size);
+        size = formatBytes(attachment.size);
         if (size) metaParts.push(size);
       }
-      info.append(node("span", "gmail-attachment-meta", metaParts.join(" · ") || "Allegato"));
-      const download = node("button", "gmail-button", "Scarica");
-      download.type = "button";
-      download.setAttribute("aria-label", `Scarica ${filename}`);
-      download.addEventListener("click", () => {
-        void downloadAttachment(uid, index, filename, download);
+      chip.title = `Scarica ${filename}${metaParts.length ? ` (${metaParts.join(" · ")})` : ""}`;
+      chip.setAttribute("aria-label", `Scarica ${filename}`);
+      chip.append(node("span", "gmail-attachment-name", filename));
+      if (size) chip.append(node("span", "gmail-attachment-meta", size));
+      chip.addEventListener("click", () => {
+        void downloadAttachment(uid, index, filename, chip);
       });
-      row.append(info, download);
-      elements.attachmentList.append(row);
+      (attachment && attachment.inline === true ? inlineImages : files).push(chip);
     }
-    if (!elements.attachmentList.childElementCount) elements.attachments.hidden = true;
+    if (!files.length && !inlineImages.length) {
+      elements.attachments.hidden = true;
+      return;
+    }
+
+    elements.attachmentList.append(...files);
+    if (inlineImages.length) {
+      for (const chip of inlineImages) {
+        chip.classList.add("is-inline");
+        chip.hidden = files.length > 0;
+      }
+      elements.attachmentList.append(...inlineImages);
+      if (files.length) {
+        const more = node(
+          "button",
+          "gmail-link-button",
+          `+ ${inlineImages.length} ${inlineImages.length === 1 ? "immagine" : "immagini"} nel testo`,
+        );
+        more.type = "button";
+        more.addEventListener("click", () => {
+          for (const chip of inlineImages) chip.hidden = false;
+          more.remove();
+        });
+        elements.attachmentList.append(more);
+      }
+    }
+    const label = files.length
+      ? `Allegati (${files.length})`
+      : `Immagini nel testo (${inlineImages.length})`;
+    setAttachmentsExpanded(files.length > 0 && files.length <= ATTACHMENTS_OPEN_MAX, label);
+  }
+
+  function setAttachmentsExpanded(expanded, label) {
+    const toggle = elements.attachmentsToggle;
+    if (label !== undefined) toggle.dataset.label = label;
+    toggle.textContent = toggle.dataset.label || "Allegati";
+    toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    elements.attachmentList.hidden = !expanded;
+  }
+
+  function toggleAttachments() {
+    setAttachmentsExpanded(elements.attachmentsToggle.getAttribute("aria-expanded") !== "true");
   }
 
   function safeImageUrl(value) {
@@ -744,10 +856,10 @@
     elements.reader.setAttribute("aria-busy", "false");
     elements.readerSubject.textContent = subjectOf(detail);
     elements.readerFrom.textContent = senderOf(detail) || "—";
-    elements.readerTo.textContent = joinAddresses(detail.to) || "—";
+    renderRecipients(elements.readerTo, detail.to);
     const cc = joinAddresses(detail.cc);
     elements.readerCcRow.hidden = !cc;
-    elements.readerCc.textContent = cc;
+    renderRecipients(elements.readerCc, detail.cc);
     elements.readerDate.textContent = formatFullDate(detail.date_ts) || "—";
 
     const text = typeof detail.text === "string" ? detail.text : "";
@@ -921,9 +1033,11 @@
   }
 
   async function downloadAttachment(uid, index, fallbackName, button) {
-    const originalText = button.textContent;
+    // Chips keep their size label: only the name shows the progress.
+    const label = button.querySelector(".gmail-attachment-name") || button;
+    const originalText = label.textContent;
     button.disabled = true;
-    button.textContent = "Download…";
+    label.textContent = "Download…";
     try {
       const response = await request(
         `api/gmail/messages/${encodeURIComponent(String(uid))}/attachments/${encodeURIComponent(String(index))}?folder=${encodeURIComponent(state.folder)}`,
@@ -946,7 +1060,7 @@
       if (error && error.name !== "AbortError") showError(error.message);
     } finally {
       button.disabled = false;
-      button.textContent = originalText;
+      label.textContent = originalText;
     }
   }
 
@@ -1302,6 +1416,7 @@
     if (state.detail) openCompose("reply", state.detail);
   });
   elements.renderToggle.addEventListener("click", toggleRenderMode);
+  elements.attachmentsToggle.addEventListener("click", toggleAttachments);
   elements.readerBody.addEventListener("click", (event) => {
     const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
     if (!anchor) return;

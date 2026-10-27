@@ -12,7 +12,7 @@
   <script>try{document.documentElement.dataset.skin=localStorage.getItem("signal-tui-web-skin")||"";}catch(e){}</script>
   <link rel="stylesheet" href="style.css?v=72">
   <link rel="stylesheet" href="teams-skin.css?v=24">
-  <link rel="stylesheet" href="gmail.css?v=18">
+  <link rel="stylesheet" href="gmail.css?v=19">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -150,15 +150,15 @@
             <p>Seleziona un messaggio per leggerlo.</p>
           </div>
           <article id="gmail-reader" class="gmail-reader" aria-busy="false" hidden>
-            <header class="gmail-reader-header">
-              <div class="gmail-reader-actions">
-                <button id="gmail-reader-back" class="gmail-icon-button" type="button" aria-label="Torna alla lista">‹</button>
-                <div class="gmail-reader-action-group">
-                  <button id="gmail-render-toggle" class="gmail-button" type="button" hidden>Testo</button>
-                  <button id="gmail-reply" class="gmail-button" type="button">Rispondi</button>
-                  <button id="gmail-delete" class="gmail-button gmail-danger" type="button">Elimina</button>
-                </div>
+            <div class="gmail-reader-actions">
+              <button id="gmail-reader-back" class="gmail-icon-button" type="button" aria-label="Torna alla lista">‹</button>
+              <div class="gmail-reader-action-group">
+                <button id="gmail-render-toggle" class="gmail-button" type="button" hidden>Testo</button>
+                <button id="gmail-reply" class="gmail-button" type="button">Rispondi</button>
+                <button id="gmail-delete" class="gmail-button gmail-danger" type="button">Elimina</button>
               </div>
+            </div>
+            <header class="gmail-reader-header">
               <h2 id="gmail-reader-subject" tabindex="-1"></h2>
               <dl class="gmail-meta">
                 <div><dt>Da</dt><dd id="gmail-reader-from"></dd></div>
@@ -167,11 +167,11 @@
                 <div><dt>Data</dt><dd id="gmail-reader-date"></dd></div>
               </dl>
             </header>
-            <div id="gmail-reader-body" class="gmail-reader-body"></div>
             <section id="gmail-attachments" class="gmail-attachments" aria-label="Allegati" hidden>
-              <h3>Allegati</h3>
+              <button id="gmail-attachments-toggle" class="gmail-attachments-toggle" type="button" aria-expanded="true" aria-controls="gmail-attachment-list">Allegati</button>
               <div id="gmail-attachment-list" class="gmail-attachment-list"></div>
             </section>
+            <div id="gmail-reader-body" class="gmail-reader-body"></div>
           </article>
         </section>
       </div>
@@ -316,6 +316,6 @@
   <script src="outbox.js?v=1" defer></script>
   <script src="message_cache.js?v=1" defer></script>
   <script src="app.js?v=133" defer></script>
-  <script src="gmail.js?v=18" defer></script>
+  <script src="gmail.js?v=19" defer></script>
 </body>
 </html>

@@ -830,18 +830,24 @@ scripts, `<style>` blocks, classes, iframes and external CSS are removed, while 
 attributes are preserved, within size/complexity caps. The reader can toggle between HTML and plain
 text. Remote images are loaded by default through the same-origin `/gmail-image` proxy, so the
 sender never sees the browser's IP: it sees the server's IP, at the time the message is opened.
-Tracking is therefore accepted, and `Cache-Control: no-store` plus a Testo↔HTML toggle mean each
-render can re-ping the tracker. Images are capped at **50 per message**, **25 MP each**, and the
+Tracking is therefore accepted. When a message is opened the server starts fetching its first 30
+remote images in the background and keeps them in memory (48 MB, 15 minutes), so the browser's
+requests find them ready; responses are sent with `Cache-Control: private, max-age=3600`, so
+reopening a message within the hour does not re-ping the tracker. Set `GMAIL_IMAGE_PREFETCH=0` to
+disable the prefetch. Images are capped at **50 per message**, **25 MP each**, and the
 proxy allows at most **4 concurrent Gmail image fetches**. Residual risks: the signed image URL
 does not expire and is not single-use, `/gmail-image` is mounted outside the Bearer-protected
 `/api` namespace, and there is no per-message aggregate budget: the theoretical ceiling is
 50 × 25 MP ≈ 1.25 Gpixel (~5 GB decoded RGBA) and 50 × 8 MiB = 400 MB of payload, while the
-semaphore only bounds concurrency (4 per worker). Emails that rely on `<style>` blocks or classes
-may look simpler than in Gmail.
+semaphore only bounds concurrency (4 per worker; the background prefetch adds up to 4 more). `<style>` blocks are inlined server-side with
+`css-inline` (only allow-listed properties, no `@media`/remote CSS) before sanitization; set
+`GMAIL_HTML_INLINE_CSS=0` to disable it. Responsive (`@media`) layouts are not reproduced.
+Inline `cid:` images (signatures, logos) are served by the same proxy with a signed token that
+expires after 24 hours, only when the MIME part's bytes are a raster image.
 
 > After pulling a version that adds the HTML reader, install the new web dependencies once:
 > `.venv/bin/pip install -r requirements-web.txt` (or re-run `./install.sh`). `./install.sh --gmail`
-> installs `nh3` and `tinycss2` automatically if they are missing.
+> installs `nh3`, `tinycss2` and `css-inline` automatically if they are missing.
 
 Optional at-rest encryption: `bash scripts/gmail_gpg_init.sh` (GPG passphrase; it also configures
 the gpg-agent cache, 7 days by default via `--cache-ttl`) or `bash scripts/gmail_tpm_init.sh`

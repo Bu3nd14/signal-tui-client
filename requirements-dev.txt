@@ -24,6 +24,7 @@ ruff==0.16.1
 # Usato dal reader Gmail (import lazy in server/gmail.py); serve a basedpyright.
 nh3>=0.3.7,<0.4
 tinycss2>=1.5.1,<2
+css-inline>=0.23,<0.24
 # PINNATO: gli aggiornamenti di basedpyright possono introdurre nuove diagnostiche;
 # la versione va bloccata per non far "muovere" il gate di type checking.
 basedpyright==1.39.10

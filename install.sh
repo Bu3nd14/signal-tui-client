@@ -659,6 +659,11 @@ setup_gmail() {
         "$py" -m pip install --quiet "nh3>=0.3.7,<0.4" "tinycss2>=1.5.1,<2" \
             || warn "nh3/tinycss2 non installati: il reader userà solo il testo. Riprova: $py -m pip install -r requirements-web.txt"
     fi
+    if ! "$py" -c "import css_inline" >/dev/null 2>&1; then
+        info "Installo css-inline (CSS dei blocchi <style> nel reader Gmail)…"
+        "$py" -m pip install --quiet "css-inline>=0.23,<0.24" \
+            || warn "css-inline non installato: i blocchi <style> delle email verranno ignorati."
+    fi
     "$py" "$PROJECT_DIR/scripts/gmail_setup.py"
 }
 
