@@ -674,7 +674,7 @@ def test_index_html_removes_toggle_and_bumps_gmail_js():
     assert "gmail-images-toggle" not in index
     assert "Mostra immagini" not in index
     assert "gmail.js?v=26" in index
-    assert "gmail.css?v=24" in index
+    assert "gmail.css?v=25" in index
 
 
 def test_gmail_js_has_no_orphan_toggle_remnants():
@@ -704,6 +704,11 @@ def test_server_html_keeps_data_src_without_remote_src():
     assert "https://tracker.example" not in cleaned
     css = _GMAIL_CSS_PATH.read_text(encoding="utf-8")
     assert ".gmail-reader-body.is-html img[data-src]:not([src])" in css
+    # Inline caps like max-width:951px (Mailchimp) must not keep images wider
+    # than the reader: the stylesheet rule outranks them with !important.
+    assert re.search(
+        r"\.gmail-reader-body\.is-html img \{\s*max-width: 100% !important;", css
+    )
     assert ".gmail-reader-body.is-html img.is-failed" in css
 
 

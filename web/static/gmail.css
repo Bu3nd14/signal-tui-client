@@ -586,8 +586,13 @@ body.gmail-active #gmail-view { display: flex; }
   background: var(--mail-raised);
   font-weight: 600;
 }
+/* !important: newsletters set inline caps like max-width:951px (Mailchimp)
+   that beat a plain stylesheet rule, so the image kept its intrinsic width,
+   widened every table around it and the mail overflowed horizontally.  An
+   author !important outranks inline styles, and the sanitizer strips the
+   mails' own !important, so they cannot fight back. */
 .gmail-reader-body.is-html img {
-  max-width: 100%;
+  max-width: 100% !important;
   height: auto;
 }
 .gmail-reader-body.is-html img[data-src]:not([src]) {
