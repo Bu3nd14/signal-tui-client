@@ -37,6 +37,7 @@ from email.message import EmailMessage, Message
 from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datetime
 from fractions import Fraction
 from functools import lru_cache
+from html import unescape as _html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -64,7 +65,11 @@ _MAX_BULK_DELETE = 200
 _LIST_WINDOW = 200
 _MAX_HTML_CHARS = 1_000_000
 _HTML_MAX_TAGS = 8_000
-_HTML_MAX_STYLE_ATTRS = 400
+# Inlined <style> CSS gives most elements a style attribute, so the count cap
+# is generous; the real work bound is the total declaration budget (same
+# tinycss2 work as the former 400 attributes x 32 declarations).
+_HTML_MAX_STYLE_ATTRS = 2_000
+_HTML_MAX_STYLE_DECLS_TOTAL = 12_800
 _HTML_MAX_TEXT_CHARS = 1_000_000
 _HTML_MAX_OUTPUT_CHARS = 1_000_000
 _HTML_MAX_DEPTH = 128
@@ -75,6 +80,9 @@ _IMAGE_URL_MAX_LEN = 4_096
 _STYLE_MAX_LEN = 1_024
 _STYLE_SERIALIZED_MAX = 2_048
 _STYLE_MAX_DECLS = 32
+# Limits for inlining <style> blocks (css-inline): stylesheet size and rules.
+_INLINE_CSS_MAX_CHARS = 65_536
+_INLINE_CSS_MAX_RULES = 1_000
 _GMAIL_LIST_CACHE_TTL_S = 15
 _INBOX_CACHE_MAX_ENTRIES = 16
 _LIST_FETCH_ITEM = (
@@ -1768,14 +1776,14 @@ def _render_img_tag(attributes: list[_ScannedAttribute], self_closing: bool) -> 
 _BODY_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?|[A-Za-z]{1,20}")
 
 
-def _render_body_tag(attributes: list[_ScannedAttribute]) -> tuple[str, bool]:
+def _render_body_tag(attributes: list[_ScannedAttribute]) -> tuple[str, bool, int]:
     """Render ``<body>`` as a ``<div>`` that keeps the page colors.
 
     nh3 drops ``<body>`` with its attributes, losing the background around the
     email "card".  ``bgcolor``/``text`` become leading declarations of the
     div's ``style`` (an explicit body style still wins); the style sanitizer
-    validates every value.  Returns the tag and whether a new ``style``
-    attribute was created (it counts towards the style-attribute cap).
+    validates every value.  Returns the tag, whether a new ``style`` attribute
+    was created and its declaration count (both count towards the caps).
     """
     declarations: list[str] = []
     existing = ""
@@ -1789,8 +1797,9 @@ def _render_body_tag(attributes: list[_ScannedAttribute]) -> tuple[str, bool]:
     if existing:
         declarations.append(existing)
     if not declarations:
-        return "<div>", False
-    return f'<div style="{";".join(declarations)}">', not existing
+        return "<div>", False, 0
+    style = ";".join(declarations)
+    return f'<div style="{style}">', not existing, _style_declaration_count(style)
 
 
 _OPTIONAL_END_TAGS = frozenset(
@@ -1815,18 +1824,29 @@ _OPTIONAL_END_TAGS = frozenset(
 )
 
 
-def _pre_scan_html(raw: str) -> str:
+def _style_declaration_count(value: str) -> int:
+    """Upper bound of the declarations in a ``style`` value.
+
+    Counted on the entity-decoded text (what tinycss2 parses), so sanitizing
+    never increases it: the output is re-accepted (idempotence).
+    """
+    return sum(1 for part in _html_unescape(value).split(";") if part.strip())
+
+
+def _pre_scan_html(raw: str, styles: list[str] | None = None) -> str:
     """Linear, quote-aware scan with complexity caps and image deferral.
 
     Any cap violation is fail-closed (``""``).  The scanner never backtracks
     and understands comments, CDATA, raw-text elements, void tags, unquoted
-    attributes and ``<`` characters in text.
+    attributes and ``<`` characters in text.  When ``styles`` is given, the
+    contents of real ``<style>`` elements are appended to it.
     """
     length = len(raw)
     out: list[str] = []
     index = 0
     tag_count = 0
     style_count = 0
+    style_decls = 0
     text_chars = 0
     depth = 0
     void_tags = {
@@ -1899,6 +1919,10 @@ def _pre_scan_html(raw: str) -> str:
                     style_count += 1
                     if style_count > _HTML_MAX_STYLE_ATTRS:
                         return ""
+                    if name != "body":
+                        style_decls += _style_declaration_count(attr.value or "")
+                        if style_decls > _HTML_MAX_STYLE_DECLS_TOTAL:
+                            return ""
             if name != "tbody":
                 tag_count += 1
                 if tag_count > _HTML_MAX_TAGS:
@@ -1915,11 +1939,14 @@ def _pre_scan_html(raw: str) -> str:
                 else:
                     out.append(raw[index:end])
             elif name == "body":
-                body_tag, added_style = _render_body_tag(attributes)
+                body_tag, added_style, body_decls = _render_body_tag(attributes)
                 if added_style:
                     style_count += 1
                     if style_count > _HTML_MAX_STYLE_ATTRS:
                         return ""
+                style_decls += body_decls
+                if style_decls > _HTML_MAX_STYLE_DECLS_TOTAL:
+                    return ""
                 out.append(body_tag)
             else:
                 out.append(raw[index:end])
@@ -1936,6 +1963,8 @@ def _pre_scan_html(raw: str) -> str:
                     text_chars += close_start - index
                     if text_chars > _HTML_MAX_TEXT_CHARS:
                         return ""
+                    if name == "style" and styles is not None:
+                        styles.append(raw[index:close_start])
                     out.append(raw[index:close_start])
                     close_parsed = _parse_tag(raw, close_start + 2)
                     if close_parsed is None:
@@ -3119,6 +3148,108 @@ def _html_attribute_filter(tag: str, attribute: str, value: str) -> str | None:
         return None
 
 
+# Selectors that depend on user interaction or generate content: an inliner
+# cannot evaluate them, and applying them unconditionally would be wrong.
+_STATEFUL_SELECTOR_RE = re.compile(
+    r"::|:(?:hover|focus|focus-within|focus-visible|active|visited|target|checked)\b",
+    re.IGNORECASE,
+)
+
+
+@lru_cache(maxsize=1)
+def _warn_missing_css_inline() -> None:
+    logger.warning("css-inline non installato: CSS dei blocchi <style> ignorato")
+
+
+def _filter_stylesheet(css: str) -> str:
+    """Reduce ``<style>`` CSS to plain rules with allow-listed declarations.
+
+    At-rules (``@media``, ``@import``, ``@font-face``…) and stateful selectors
+    are dropped; every declaration is validated and re-serialized as in
+    ``_sanitize_style`` (``!important`` is kept only to resolve the cascade:
+    the final style sanitizer strips it).  This keeps the inlined ``style``
+    attributes short; it is not the security boundary, which stays the
+    sanitizer run on the inlined document.
+    """
+    if not css or len(css) > _INLINE_CSS_MAX_CHARS:
+        return ""
+    import tinycss2
+
+    rendered: list[str] = []
+    for rule in tinycss2.parse_stylesheet(
+        css, skip_comments=True, skip_whitespace=True
+    ):
+        if rule.type != "qualified-rule":
+            continue
+        if len(rendered) >= _INLINE_CSS_MAX_RULES:
+            break
+        selectors = [
+            selector
+            for selector in (
+                tinycss2.serialize(part).strip()
+                for part in _split_literal(rule.prelude, ",")
+            )
+            if selector and not _STATEFUL_SELECTOR_RE.search(selector)
+        ]
+        if not selectors:
+            continue
+        declarations: list[str] = []
+        for declaration in tinycss2.parse_declaration_list(
+            rule.content, skip_comments=True, skip_whitespace=True
+        ):
+            if declaration.type != "declaration":
+                continue
+            name = declaration.lower_name
+            validator = _STYLE_VALIDATORS.get(name)
+            tokens = _strip_whitespace(declaration.value)
+            if validator is None or not tokens or not _tokens_are_safe(tokens):
+                continue
+            value = validator(tokens)
+            if value is None:
+                continue
+            important = " !important" if declaration.important else ""
+            declarations.append(f"{_STYLE_ALIASES.get(name, name)}:{value}{important}")
+        if declarations:
+            rendered.append(f"{', '.join(selectors)}{{{';'.join(declarations)}}}")
+    return "\n".join(rendered)
+
+
+def _scan_inlined_html(raw: str, styles: list[str]) -> str:
+    """Apply the email's ``<style>`` CSS as inline styles, then scan it again.
+
+    Returns ``""`` whenever inlining is disabled, unavailable or fails, so the
+    caller falls back to the document without inlining.
+    """
+    if os.environ.get("GMAIL_HTML_INLINE_CSS", "1").strip() == "0":
+        return ""
+    if os.environ.get("GMAIL_HTML_STYLES", "1").strip() == "0":
+        return ""
+    try:
+        import css_inline
+    except ImportError:
+        _warn_missing_css_inline()
+        return ""
+    try:
+        css = _filter_stylesheet("\n".join(styles))
+        if not css:
+            return ""
+        inliner = css_inline.CSSInliner(
+            inline_style_tags=False,
+            keep_style_tags=False,
+            keep_link_tags=False,
+            keep_at_rules=False,
+            load_remote_stylesheets=False,
+            extra_css=css,
+        )
+        inlined = inliner.inline(raw)
+        if not isinstance(inlined, str) or len(inlined) > _MAX_HTML_CHARS:
+            return ""
+        return _pre_scan_html(inlined)
+    except Exception:
+        logger.warning("Inlining CSS fallito", exc_info=True)
+        return ""
+
+
 def sanitize_html(raw: str) -> str:
     """Return a conservative, script-free HTML fragment for the reader.
 
@@ -3128,7 +3259,10 @@ def sanitize_html(raw: str) -> str:
     attributes, URL schemes and CSS; remote images are rewritten to signed
     same-origin proxy URLs in ``data-src`` and loaded by default in the client
     (tracking accepted by the user), never fetched directly by the browser.
-    Inline CSS is re-serialized from a strict allow-list with ``tinycss2``.
+    Inline CSS is re-serialized from a strict allow-list with ``tinycss2``;
+    ``<style>`` blocks are first inlined (``css-inline``) so their rules go
+    through the same allow-list.  If the inlined document is rejected, the
+    original one is sanitized instead.
     """
     if not raw or len(raw) > _MAX_HTML_CHARS:
         return ""
@@ -3141,13 +3275,25 @@ def sanitize_html(raw: str) -> str:
     except ImportError:
         logger.warning("nh3 non installato: rendering HTML disabilitato")
         return ""
+    styles: list[str] = []
     try:
-        scanned = _pre_scan_html(raw)
+        scanned = _pre_scan_html(raw, styles)
     except Exception:
         logger.warning("Scansione HTML fallita", exc_info=True)
         return ""
     if not scanned:
         return ""
+    if styles:
+        inlined = _scan_inlined_html(raw, styles)
+        if inlined:
+            result = _clean_scanned_html(nh3, inlined)
+            if result:
+                return result
+    return _clean_scanned_html(nh3, scanned)
+
+
+def _clean_scanned_html(nh3: Any, scanned: str) -> str:
+    """Run nh3 on a pre-scanned document and enforce the output invariants."""
     try:
         result = nh3.clean(
             scanned,

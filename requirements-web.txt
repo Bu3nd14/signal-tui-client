@@ -8,3 +8,6 @@ httpx2
 nh3>=0.3.7,<0.4
 # CSS inline del reader Gmail (parser/serializzatore Python puro).
 tinycss2>=1.5.1,<2
+# Inlining dei blocchi <style> del reader Gmail (Rust, wheel precompilate).
+# Opzionale: se manca, i blocchi <style> vengono ignorati come prima.
+css-inline>=0.23,<0.24

@@ -1474,7 +1474,9 @@ def test_p2_400_style_worst_case_is_correct_and_bounded() -> None:
     [
         "<img>" * 100_000,
         "<div>" * 20_000,
-        '<p style="color:red">x</p>' * 401,
+        '<p style="color:red">x</p>' * (gmail._HTML_MAX_STYLE_ATTRS + 1),
+        # Total declaration budget (400 x 32) exceeded with few attributes.
+        ('<p style="' + "color:red;" * 32 + '">x</p>') * 401,
     ],
 )
 def test_p3_adversarial_payloads_are_rejected_quickly(payload: str) -> None:

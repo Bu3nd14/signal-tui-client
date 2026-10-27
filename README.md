@@ -836,12 +836,13 @@ proxy allows at most **4 concurrent Gmail image fetches**. Residual risks: the s
 does not expire and is not single-use, `/gmail-image` is mounted outside the Bearer-protected
 `/api` namespace, and there is no per-message aggregate budget: the theoretical ceiling is
 50 × 25 MP ≈ 1.25 Gpixel (~5 GB decoded RGBA) and 50 × 8 MiB = 400 MB of payload, while the
-semaphore only bounds concurrency (4 per worker). Emails that rely on `<style>` blocks or classes
-may look simpler than in Gmail.
+semaphore only bounds concurrency (4 per worker). `<style>` blocks are inlined server-side with
+`css-inline` (only allow-listed properties, no `@media`/remote CSS) before sanitization; set
+`GMAIL_HTML_INLINE_CSS=0` to disable it. Responsive (`@media`) layouts are not reproduced.
 
 > After pulling a version that adds the HTML reader, install the new web dependencies once:
 > `.venv/bin/pip install -r requirements-web.txt` (or re-run `./install.sh`). `./install.sh --gmail`
-> installs `nh3` and `tinycss2` automatically if they are missing.
+> installs `nh3`, `tinycss2` and `css-inline` automatically if they are missing.
 
 Optional at-rest encryption: `bash scripts/gmail_gpg_init.sh` (GPG passphrase; it also configures
 the gpg-agent cache, 7 days by default via `--cache-ttl`) or `bash scripts/gmail_tpm_init.sh`
