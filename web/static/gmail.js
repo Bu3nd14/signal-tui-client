@@ -239,6 +239,14 @@
     elements.refresh.disabled = busy;
   }
 
+  function setMessageSelected(key, selected, wrapper, checkbox) {
+    if (selected) state.selectedUids.add(key);
+    else state.selectedUids.delete(key);
+    if (checkbox) checkbox.checked = selected;
+    if (wrapper) wrapper.classList.toggle("selected", selected);
+    updateSelectionActions();
+  }
+
   function syncRowSelection() {
     for (const item of elements.messages.querySelectorAll(".gmail-item")) {
       const checkbox = item.querySelector(".gmail-select");
@@ -483,6 +491,20 @@
     renderList();
   }
 
+  function messageAriaLabel(message, selected) {
+    const parts = [];
+    if (state.selectionMode) {
+      parts.push(selected
+        ? `Deseleziona messaggio di ${senderLabel(message)}.`
+        : `Seleziona messaggio di ${senderLabel(message)}.`);
+    }
+    if (!message.seen) parts.push("Non letto.");
+    parts.push(`Da ${senderLabel(message)}.`);
+    parts.push(`${subjectOf(message)}.`);
+    if (message.has_attachments) parts.push("Contiene allegati.");
+    return parts.join(" ");
+  }
+
   function messageItem(message) {
     const wrapper = node("div", "gmail-item");
     wrapper.setAttribute("role", "listitem");
@@ -500,10 +522,7 @@
         `Seleziona messaggio di ${senderLabel(message)}: ${subjectOf(message)}`,
       );
       checkbox.addEventListener("change", () => {
-        if (checkbox.checked) state.selectedUids.add(key);
-        else state.selectedUids.delete(key);
-        wrapper.classList.toggle("selected", checkbox.checked);
-        updateSelectionActions();
+        setMessageSelected(key, checkbox.checked, wrapper, checkbox);
       });
       if (checkbox.checked) wrapper.classList.add("selected");
     }
@@ -515,12 +534,10 @@
       button.classList.add("active");
       button.setAttribute("aria-current", "true");
     }
-    const labelParts = [];
-    if (!message.seen) labelParts.push("Non letto.");
-    labelParts.push(`Da ${senderLabel(message)}.`);
-    labelParts.push(`${subjectOf(message)}.`);
-    if (message.has_attachments) labelParts.push("Contiene allegati.");
-    button.setAttribute("aria-label", labelParts.join(" "));
+    button.setAttribute(
+      "aria-label",
+      messageAriaLabel(message, state.selectionMode && state.selectedUids.has(key)),
+    );
 
     const top = node("span", "gmail-row-top");
     top.append(node("span", "gmail-sender", senderLabel(message)));
@@ -535,6 +552,13 @@
     if (badges.childElementCount) button.append(badges);
 
     button.addEventListener("click", () => {
+      if (state.selectionMode) {
+        if (state.bulkDeleting) return;
+        const selected = !state.selectedUids.has(key);
+        setMessageSelected(key, selected, wrapper, checkbox);
+        button.setAttribute("aria-label", messageAriaLabel(message, selected));
+        return;
+      }
       void openMessage(message.uid);
     });
     if (checkbox) wrapper.append(checkbox);
