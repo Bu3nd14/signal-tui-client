@@ -53,6 +53,7 @@ const state = {
     const saved = localStorage.getItem(PROTOCOL_KEY);
     return PROTOCOLS.includes(saved) ? saved : "signal";
   })(),
+  backendStatuses: null,
   active: null,
   // True quando le immagini profilo sono nascoste (solo iniziali): nessuna
   // richiesta a /api/contact-avatar parte mentre è attiva.
@@ -543,6 +544,26 @@ function protocolIcon(protocol, size = 15) {
   return icons[protocol] || "";
 }
 
+function syncProtocolTabs() {
+  const statuses = state.backendStatuses;
+  if (!statuses) return false;
+  let changed = false;
+  const connected = PROTOCOLS.filter((protocol) => statuses[protocol] === true);
+  for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
+    tab.hidden = statuses[tab.dataset.protocol] !== true;
+  }
+  if (!connected.includes(state.protocolFilter)) {
+    const next = connected[0] ?? null;
+    if (next !== state.protocolFilter) {
+      state.protocolFilter = next;
+      if (next) localStorage.setItem(PROTOCOL_KEY, next);
+      else localStorage.removeItem(PROTOCOL_KEY);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 async function updateBackendStatuses() {
   const statuses = {
     signal: elements.linkStatusSignal,
@@ -551,6 +572,8 @@ async function updateBackendStatuses() {
   };
   if (!state.token) {
     for (const protocol of PROTOCOLS) statuses[protocol].textContent = "Non collegato";
+    state.backendStatuses = null;
+    syncProtocolTabs();
     return;
   }
   // Real backend connection state (protocols/base.py `is_connected`), not
@@ -562,8 +585,16 @@ async function updateBackendStatuses() {
     for (const protocol of PROTOCOLS) {
       statuses[protocol].textContent = data[protocol] ? "Collegato" : "Non collegato";
     }
+    state.backendStatuses = {
+      signal: data.signal === true,
+      whatsapp: data.whatsapp === true,
+      telegram: data.telegram === true,
+    };
+    if (syncProtocolTabs()) renderContacts();
   } catch {
     // Best-effort: leave the previously shown labels as-is on failure.
+    state.backendStatuses = null;
+    syncProtocolTabs();
   }
 }
 
@@ -696,7 +727,7 @@ function updateFavicon() {
 function renderContacts() {
   contactAvatarObserver?.disconnect();
   elements.contacts.replaceChildren();
-  updateBackendStatuses();
+  syncProtocolTabs();
   const base = state.searchResults ?? state.contacts;
   const sortedContacts = [...base].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
   let contacts = sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
@@ -3651,6 +3682,7 @@ function connectSocket() {
     elements.connection.className = "connection-state online";
     setDotColor(COLOR_GREEN);
     elements.connection.textContent = "live";
+    updateBackendStatuses();
     if (state.active) loadMessages(true);
     flushOutbox();
     scheduleBackgroundSync();
@@ -3756,7 +3788,10 @@ function connectSocket() {
   };
 }
 
-document.querySelector("#refresh-contacts").addEventListener("click", () => loadContacts());
+document.querySelector("#refresh-contacts").addEventListener("click", () => {
+  updateBackendStatuses();
+  loadContacts();
+});
 function closeMainMenu() {
   if (elements.mainMenu.hidden) return;
   elements.mainMenu.hidden = true;
@@ -3831,6 +3866,7 @@ elements.skinToggle.addEventListener("change", () => {
   document.documentElement.dataset.skin = state.skin ? "teams" : "";
 });
 document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") updateBackendStatuses();
   if (
     document.visibilityState === "visible"
     && state.active
@@ -4180,6 +4216,7 @@ elements.saveToken.addEventListener("click", () => {
   // Rotazione token deliberata → clear dell'outbox (D6). Il login iniziale
   // (nessun token precedente) non cancella nulla perché la coda è vuota.
   if (previousToken && previousToken !== token) void clearOutbox();
+  updateBackendStatuses();
   loadContacts();
   connectSocket();
 });
@@ -4210,6 +4247,7 @@ async function boot() {
     // Best-effort: fall through to the normal token-required flow below.
   }
   if (state.token) {
+    updateBackendStatuses();
     loadContacts();
     connectSocket();
   } else {
