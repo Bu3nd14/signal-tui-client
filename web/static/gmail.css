@@ -532,6 +532,8 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-html-content *,
 .gmail-html-content *::before,
 .gmail-html-content *::after { box-sizing: content-box; }
+/* The box gmail.js zooms down when a fixed-width mail is wider than it. */
+.gmail-html-content > .gmail-html-fit { width: 100%; }
 .gmail-reader-body.is-html p,
 .gmail-reader-body.is-html ul,
 .gmail-reader-body.is-html ol,

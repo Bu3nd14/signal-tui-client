@@ -866,10 +866,48 @@
     }
   }
 
+  // Mails designed for a fixed width (td width="700", 600px tables…) wider
+  // than the reader are scaled down to fit, as mobile mail apps do, instead
+  // of scrolling sideways.  Below HTML_FIT_MIN_ZOOM the text would be
+  // unreadable: the remaining overflow scrolls.
+  const HTML_FIT_MIN_ZOOM = 0.5;
+  let htmlFitFrame = 0;
+
+  function fitHtmlToWidth() {
+    const fit = elements.readerBody.querySelector(".gmail-html-fit");
+    if (!fit) return;
+    fit.style.zoom = "";
+    const available = fit.clientWidth;
+    const needed = fit.scrollWidth;
+    if (!available || needed <= available + 1) return;
+    fit.style.zoom = String(Math.max(HTML_FIT_MIN_ZOOM, available / needed));
+  }
+
+  function scheduleHtmlFit() {
+    if (htmlFitFrame) return;
+    htmlFitFrame = window.requestAnimationFrame(() => {
+      htmlFitFrame = 0;
+      fitHtmlToWidth();
+    });
+  }
+
   function loadImages() {
     const seq = state.readerSeq;
+    // Cell/table backgrounds (often a newsletter's hero banners): the server
+    // turned background="…" / background-image:url(…) into an inert data-bg
+    // with a signed proxy URL, applied here like an <img> src.
+    const backgrounds = [...elements.readerBody.querySelectorAll("[data-bg]")];
     const images = [...elements.readerBody.querySelectorAll("img[data-src]")];
+    const total = backgrounds.length + images.length;
     let loaded = 0;
+    for (const element of backgrounds) {
+      if (loaded >= MAX_IMAGES_PER_MESSAGE) break;
+      if (element.style.backgroundImage) continue;
+      const url = safeImageUrl(element.dataset.bg || "");
+      if (!url) continue;
+      element.style.backgroundImage = `url("${url}")`;
+      loaded += 1;
+    }
     for (const image of images) {
       if (loaded >= MAX_IMAGES_PER_MESSAGE) break;
       if (image.hasAttribute("src")) continue;
@@ -894,14 +932,15 @@
           if (!image.hasAttribute("src")) return;
           image.dataset.loaded = "1";
           image.classList.remove("is-failed");
+          scheduleHtmlFit(); // a loaded image may widen the mail
         },
         { once: true },
       );
       image.src = url;
       loaded += 1;
     }
-    if (images.length > MAX_IMAGES_PER_MESSAGE) {
-      showNotice(`Caricate ${loaded} di ${images.length} immagini.`);
+    if (total > MAX_IMAGES_PER_MESSAGE) {
+      showNotice(`Caricate ${loaded} di ${total} immagini.`);
     }
   }
 
@@ -929,9 +968,14 @@
       const parsed = new DOMParser().parseFromString(html, "text/html");
       const content = document.createElement("div");
       content.className = "gmail-html-content";
-      content.append(...parsed.body.childNodes);
-      collapseQuotes(content);
+      // Inner box the shrink-to-fit zoom applies to (see fitHtmlToWidth).
+      const fit = document.createElement("div");
+      fit.className = "gmail-html-fit";
+      fit.append(...parsed.body.childNodes);
+      collapseQuotes(fit);
+      content.append(fit);
       elements.readerBody.replaceChildren(content);
+      scheduleHtmlFit();
       elements.readerBody.classList.remove("is-empty");
       elements.readerBody.classList.add("is-html");
     } else {
@@ -1790,6 +1834,7 @@
       elements.more.focus();
     }
   });
+  window.addEventListener("resize", scheduleHtmlFit);
   elements.renderToggle.addEventListener("click", () => {
     setMoreMenu(false);
     toggleRenderMode();
