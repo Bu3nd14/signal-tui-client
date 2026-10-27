@@ -58,6 +58,10 @@ class Env:
         self.client = SimpleNamespace(name="client")
         monkeypatch.setattr(attach.SocketClient, "connect", self._connect)
         monkeypatch.setattr(attach.time, "sleep", lambda _s: None)
+        # Never the real /tmp/signal-tui.lock: a Megachat server running on the
+        # developer's machine holds it, and an early exit of the fake spawn
+        # would look like a lost spawn race (wait, then time out).
+        monkeypatch.setattr(lock, "LOCK_FILE", str(tmp_path / "megachat.lock"))
 
     def _connect(self, path, *, timeout=5.0, **_kw):
         self.connects.append(Path(path))
