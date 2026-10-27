@@ -1395,6 +1395,7 @@
     hideError();
     hideNotice();
     window.requestAnimationFrame(() => elements.back.focus());
+    window.dispatchEvent(new CustomEvent("gmail:view"));
     void loadStatus();
   }
 
@@ -1434,9 +1435,15 @@
     hideError();
     hideNotice();
     if (restoreTab) restoreProtocolTab();
+    // app.js shows/hides the tab unread dots depending on the open view.
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("gmail:view"));
   }
 
   elements.tab.addEventListener("click", activateGmail);
+  // The server's unread poller saw new mail: refresh the list if it is open.
+  window.addEventListener("gmail:new-mail", () => {
+    if (state.open && state.configured) void loadMessages({ force: true });
+  });
 
   elements.tabs.addEventListener("click", (event) => {
     if (!state.open) return;

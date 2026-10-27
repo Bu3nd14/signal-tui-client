@@ -65,6 +65,7 @@ from server.domain import (
     sync_recency,
 )
 from server.events_api import to_wire
+from server.gmail_unread import GmailUnreadWatcher
 
 logger = logging.getLogger("signal_tui")
 
@@ -126,6 +127,10 @@ class ChatCore(DynamicAddressBookMixin):
         self._shutdown_lock = threading.Lock()
         self._shutdown_done = False
 
+        # Gmail unread badge: periodic STATUS poll (see server.gmail_unread);
+        # no thread until start().
+        self.gmail_unread = GmailUnreadWatcher(self.api.publish_web_push)
+
         # Event pump (one daemon thread, see start()/stop()).
         self._pump_thread: threading.Thread | None = None
         self._pump_stop = threading.Event()
@@ -171,10 +176,12 @@ class ChatCore(DynamicAddressBookMixin):
         ):
             self._spawn(self.connect_telegram, "core-connect-telegram")
         self.start_address_book_refresh()
+        self.gmail_unread.start()
 
     def stop(self) -> None:
         """Stop the event pump; the thread exits within one 0.1s slice."""
         self.stop_address_book_refresh()
+        self.gmail_unread.stop()
         self._pump_stop.set()
         thread = self._pump_thread
         if thread is not None and thread is not threading.current_thread():

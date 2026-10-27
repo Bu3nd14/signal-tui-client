@@ -47,6 +47,8 @@ const REACTION_EMOJIS = [
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   contacts: [],
+  // Inbox unread count from the server's Gmail poller (gmail_unread events).
+  gmailUnread: 0,
   searchResults: null,
   contactQuery: "",
   protocolFilter: (() => {
@@ -703,7 +705,8 @@ function archivedRow(archived, back) {
 }
 
 function updateFavicon() {
-  const unreadTotal = state.contacts.reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0);
+  const unreadTotal = state.contacts.reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0)
+    + state.gmailUnread;
   // Badge stile app nativa sull'icona Dock/taskbar quando installata come PWA
   // (manifest.json). Non supportato ovunque (es. Firefox): feature-detect,
   // nessun effetto dove manca l'API.
@@ -722,6 +725,45 @@ function updateFavicon() {
   const color = shouldBeRed ? "%23e53935" : "%234f8cff";
   favicon.href = `data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Ccircle cx=%228%22 cy=%228%22 r=%227%22 fill=%22${color}%22/%3E%3C/svg%3E`;
   faviconRed = shouldBeRed;
+}
+
+function isGmailViewActive() {
+  return document.body.classList.contains("gmail-active");
+}
+
+// Red dot on a backend tab when it has unread messages and its list is not
+// on screen (the visible list already shows per-chat badges).  While the
+// Gmail view is open no chat list is visible, so every backend may show it.
+function updateTabDots() {
+  if (!elements.protocolTabs) return;
+  const gmailActive = isGmailViewActive();
+  for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
+    const dot = tab.querySelector(".unread-dot");
+    if (!dot) continue;
+    const total = state.contacts
+      .filter((contact) => contact.protocol === tab.dataset.protocol)
+      .reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0);
+    dot.hidden = !(total > 0 && (gmailActive || tab.dataset.protocol !== state.protocolFilter));
+  }
+  const gmailDot = elements.protocolTabs.querySelector("#gmail-tab .unread-dot");
+  if (gmailDot) gmailDot.hidden = !(state.gmailUnread > 0 && !gmailActive);
+}
+
+function setGmailUnread(value) {
+  const unread = Number(value);
+  state.gmailUnread = Number.isFinite(unread) ? Math.max(0, unread) : 0;
+  updateTabDots();
+  updateFavicon();
+}
+
+async function loadGmailUnread() {
+  try {
+    const response = await apiFetch("api/gmail/unread");
+    const data = await response.json();
+    setGmailUnread(data && data.configured ? data.unread : 0);
+  } catch {
+    // Gmail not configured/reachable: the badge simply stays as it was.
+  }
 }
 
 function renderContacts() {
@@ -745,16 +787,8 @@ function renderContacts() {
     const active = tab.dataset.protocol === state.protocolFilter;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
-    const dot = tab.querySelector(".unread-dot");
-    if (dot) {
-      const total = state.contacts
-        .filter((contact) => contact.protocol === tab.dataset.protocol)
-        .reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0);
-      // Pallino solo sui backend NON selezionati con non letti (quello attivo
-      // ha già i badge nella lista).
-      dot.hidden = !(total > 0 && tab.dataset.protocol !== state.protocolFilter);
-    }
   }
+  updateTabDots();
   elements.contactStatus.textContent = contacts.length
     ? ""
     : state.contactQuery
@@ -3686,6 +3720,8 @@ function connectSocket() {
     if (state.active) loadMessages(true);
     flushOutbox();
     scheduleBackgroundSync();
+    // Initial value, and catch-up after a reconnect (events may have been lost).
+    loadGmailUnread();
   };
   socket.onmessage = (event) => {
     state.lastWsActivity = Date.now();
@@ -3713,6 +3749,12 @@ function connectSocket() {
           }
           break;
         }
+        case "gmail_unread":
+          setGmailUnread(update.payload.unread);
+          // New mail (not just a read count change): the open Gmail view
+          // refreshes its list.
+          if (update.payload.new_mail) window.dispatchEvent(new CustomEvent("gmail:new-mail"));
+          break;
         case "lid_warmup_done":
           if (state.active?.protocol === "whatsapp" && state.active?.id?.endsWith("@g.us")) {
             loadMessages();
@@ -4126,6 +4168,9 @@ elements.fileInput.addEventListener("change", () => {
   void stageAttachments(files);
 });
 elements.cancelReply.addEventListener("click", cancelReply);
+// gmail.js announces when its view opens/closes: the tab dots depend on it.
+window.addEventListener("gmail:view", updateTabDots);
+
 if (elements.protocolTabs) {
   elements.protocolTabs.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-protocol]");
