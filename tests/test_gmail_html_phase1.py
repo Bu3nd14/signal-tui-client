@@ -359,7 +359,8 @@ def test_css_canonical_output_can_be_longer_than_input() -> None:
         # Resource loading / functions.
         "color:url(https://evil.example/x)",
         "background:url(https://evil.example/x)",
-        "background:red",
+        "background:red url(x)",
+        "background:red no-repeat",
         "background-image:url(https://evil.example/x)",
         "background-image:none",
         "border-image:url(https://evil.example/x)",
@@ -395,7 +396,8 @@ def test_css_canonical_output_can_be_longer_than_input() -> None:
         "width:10ch",
         "width:10vw",
         "width:10vmin",
-        "font-size:100%",
+        "font-size:300%",
+        "font-size:3em",
         "font-size:larger",
         "font-size:smaller",
         "font-size:400%",
@@ -662,7 +664,7 @@ def test_legacy_invalid_and_over_bound_values_are_removed() -> None:
         'border="999" cellpadding="-1" cellspacing="51" align="evil">'
         '<tr height="9999" bgcolor="#12345" valign="evil">'
         '<td colspan="0" rowspan="999" width="abc" height="9999" '
-        'bgcolor="red" align="evil" valign="evil">x</td>'
+        'bgcolor="notacolor" align="evil" valign="evil">x</td>'
         '<th scope="evil">h</th></tr></table>'
         '<ol start="99999"><li value="-99999">x</li></ol>'
         '<img width="10001" height="2001" align="evil">'
@@ -681,7 +683,7 @@ def test_legacy_invalid_and_over_bound_values_are_removed() -> None:
         'colspan="0"',
         'rowspan="999"',
         'width="abc"',
-        'bgcolor="red"',
+        'bgcolor="notacolor"',
         'scope="evil"',
         'start="99999"',
         'value="-99999"',

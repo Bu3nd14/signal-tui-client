@@ -124,6 +124,7 @@ _ALLOWED_HTML_TAGS = frozenset(
         "em",
         "figcaption",
         "figure",
+        "font",
         "h1",
         "h2",
         "h3",
@@ -159,8 +160,9 @@ _ALLOWED_HTML_TAGS = frozenset(
     }
 )
 _ALLOWED_HTML_ATTRIBUTES = {
-    "*": {"style"},
+    "*": {"dir", "style"},
     "a": {"href", "title"},
+    "font": {"color", "face", "size"},
     "col": {"align", "bgcolor", "span", "valign", "width"},
     "colgroup": {"align", "bgcolor", "span", "valign", "width"},
     "img": {"align", "alt", "data-src", "height", "width"},
@@ -1763,6 +1765,34 @@ def _render_img_tag(attributes: list[_ScannedAttribute], self_closing: bool) -> 
     return "".join(pieces)
 
 
+_BODY_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?|[A-Za-z]{1,20}")
+
+
+def _render_body_tag(attributes: list[_ScannedAttribute]) -> tuple[str, bool]:
+    """Render ``<body>`` as a ``<div>`` that keeps the page colors.
+
+    nh3 drops ``<body>`` with its attributes, losing the background around the
+    email "card".  ``bgcolor``/``text`` become leading declarations of the
+    div's ``style`` (an explicit body style still wins); the style sanitizer
+    validates every value.  Returns the tag and whether a new ``style``
+    attribute was created (it counts towards the style-attribute cap).
+    """
+    declarations: list[str] = []
+    existing = ""
+    for attr in attributes:
+        value = (attr.value or "").strip()
+        if attr.lower_name == "style":
+            existing = value.replace('"', "&quot;")
+        elif attr.lower_name in {"bgcolor", "text"} and _BODY_COLOR_RE.fullmatch(value):
+            prop = "background-color" if attr.lower_name == "bgcolor" else "color"
+            declarations.append(f"{prop}:{value}")
+    if existing:
+        declarations.append(existing)
+    if not declarations:
+        return "<div>", False
+    return f'<div style="{";".join(declarations)}">', not existing
+
+
 _OPTIONAL_END_TAGS = frozenset(
     {
         "caption",
@@ -1884,6 +1914,13 @@ def _pre_scan_html(raw: str) -> str:
                     out.append(_render_img_tag(attributes, self_closing))
                 else:
                     out.append(raw[index:end])
+            elif name == "body":
+                body_tag, added_style = _render_body_tag(attributes)
+                if added_style:
+                    style_count += 1
+                    if style_count > _HTML_MAX_STYLE_ATTRS:
+                        return ""
+                out.append(body_tag)
             else:
                 out.append(raw[index:end])
             index = end
@@ -1910,7 +1947,7 @@ def _pre_scan_html(raw: str) -> str:
                             depth -= 1
                         index = close_end
             continue
-        out.append(raw[index:end])
+        out.append("</div>" if name == "body" else raw[index:end])
         if name not in void_tags and name not in _OPTIONAL_END_TAGS and depth > 0:
             depth -= 1
         index = end
@@ -2381,10 +2418,31 @@ def _validate_font_family(tokens: list[Any]) -> str | None:
     return ", ".join(rendered)
 
 
+def _relative_value(
+    token: Any, *, em_min: float, em_max: float, percent_min: int, percent_max: int
+) -> str | None:
+    """Bounded ``em``/``%`` value (font-relative; bounds limit nesting growth)."""
+    value = _finite_number(token) if token.type == "percentage" else None
+    if token.type == "dimension" and token.unit.lower() == "em":
+        number = token.value
+        if not isinstance(number, (int, float)) or not math.isfinite(number):
+            return None
+        return _serialize(token) if em_min <= number <= em_max else None
+    if value is not None and percent_min <= value <= percent_max:
+        return _serialize(token)
+    return None
+
+
 def _validate_font_size(tokens: list[Any]) -> str | None:
     token = _single_token(tokens)
     if token is None:
         return None
+    if token.type == "percentage" or (
+        token.type == "dimension" and token.unit.lower() == "em"
+    ):
+        return _relative_value(
+            token, em_min=0.5, em_max=2.5, percent_min=50, percent_max=250
+        )
     if token.type == "ident":
         allowed = {
             "xx-small",
@@ -2427,6 +2485,12 @@ def _validate_line_height(tokens: list[Any]) -> str | None:
         if value is None or not 1 <= value <= 3:
             return None
         return _serialize(token)
+    if token.type == "percentage" or (
+        token.type == "dimension" and token.unit.lower() == "em"
+    ):
+        return _relative_value(
+            token, em_min=1, em_max=3, percent_min=100, percent_max=300
+        )
     return _length_value(token, minimum=1, maximum=200)
 
 
@@ -2473,6 +2537,40 @@ def _validate_size(tokens: list[Any]) -> str | None:
     return _length_value(
         token, minimum=0, maximum=1600, allow_percent=True, allow_auto=True
     )
+
+
+def _validate_max_size(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    if token.type == "ident" and token.lower_value == "none":
+        return "none"
+    return _length_value(token, minimum=0, maximum=1600, allow_percent=True)
+
+
+def _validate_text_indent(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    return _length_value(
+        token,
+        minimum=-256,
+        maximum=256,
+        allow_percent=True,
+        percent_min=-100,
+        percent_max=100,
+    )
+
+
+def _validate_opacity(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    value = _finite_number(token)
+    if value is None:
+        return None
+    limit = 100 if token.type == "percentage" else 1
+    return _serialize(token) if 0 <= value <= limit else None
 
 
 def _validate_margin(tokens: list[Any]) -> str | None:
@@ -2755,6 +2853,35 @@ _STYLE_VALIDATORS = {
     "vertical-align": _validate_vertical_align,
     "width": _validate_size,
     "height": _validate_size,
+    "max-width": _validate_max_size,
+    "max-height": _validate_max_size,
+    "min-width": _validate_size,
+    "min-height": _validate_size,
+    # Only the single-color form; re-serialized as background-color.
+    "background": _validate_color,
+    "text-indent": _validate_text_indent,
+    "list-style-type": _keyword_validator(
+        frozenset(
+            {
+                "none",
+                "disc",
+                "circle",
+                "square",
+                "decimal",
+                "decimal-leading-zero",
+                "lower-alpha",
+                "upper-alpha",
+                "lower-latin",
+                "upper-latin",
+                "lower-roman",
+                "upper-roman",
+            }
+        )
+    ),
+    "direction": _keyword_validator(frozenset({"ltr", "rtl"})),
+    "overflow": _keyword_validator(frozenset({"visible", "hidden", "auto"})),
+    "visibility": _keyword_validator(frozenset({"visible", "hidden"})),
+    "opacity": _validate_opacity,
     "float": _keyword_validator(frozenset({"left", "right", "none"})),
     "display": _keyword_validator(
         frozenset(
@@ -2785,6 +2912,8 @@ for _side in ("top", "right", "bottom", "left"):
 for _corner in ("top-left", "top-right", "bottom-right", "bottom-left"):
     _STYLE_VALIDATORS[f"border-{_corner}-radius"] = _validate_border_radius_longhand
 del _side, _corner
+# Shorthands accepted in a restricted form and emitted as their longhand.
+_STYLE_ALIASES = {"background": "background-color"}
 
 
 @lru_cache(maxsize=1)
@@ -2834,7 +2963,7 @@ def _sanitize_style(value: str) -> str | None:
             continue
         if serialized is None:
             continue
-        rendered.append(f"{name}:{serialized}")
+        rendered.append(f"{_STYLE_ALIASES.get(name, name)}:{serialized}")
     if not rendered:
         return None
     result = ";".join(rendered)
@@ -2872,7 +3001,24 @@ def _legacy_bgcolor(value: str) -> str | None:
     value = value.strip()
     if re.fullmatch(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?", value):
         return value.lower()
+    if value.lower() in _NAMED_COLORS:
+        return value.lower()
     return None
+
+
+def _legacy_font_face(value: str) -> str | None:
+    families = [family.strip() for family in value.split(",")]
+    if not 1 <= len(families) <= 8:
+        return None
+    for family in families:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,63}", family):
+            return None
+    return ", ".join(families)
+
+
+def _legacy_font_size(value: str) -> str | None:
+    value = value.strip()
+    return value if re.fullmatch(r"[+-]?[1-7]", value) else None
 
 
 def _legacy_enum(*choices: str) -> Any:
@@ -2941,6 +3087,13 @@ _LEGACY_ATTR_VALIDATORS = {
     ("img", "width"): _legacy_size_validator(10_000),
     ("img", "height"): _legacy_size_validator(2_000),
     ("img", "align"): _legacy_enum("left", "right", "top", "middle", "bottom"),
+    ("font", "color"): _legacy_bgcolor,
+    ("font", "face"): _legacy_font_face,
+    ("font", "size"): _legacy_font_size,
+}
+# Attributes allowed on every tag (``"*"`` in ``_ALLOWED_HTML_ATTRIBUTES``).
+_GLOBAL_ATTR_VALIDATORS = {
+    "dir": _legacy_enum("ltr", "rtl", "auto"),
 }
 
 
@@ -2952,7 +3105,9 @@ def _html_attribute_filter(tag: str, attribute: str, value: str) -> str | None:
             if os.environ.get("GMAIL_HTML_STYLES", "1").strip() == "0":
                 return None
             return _sanitize_style(value)
-        validator = _LEGACY_ATTR_VALIDATORS.get((normalized_tag, normalized_attribute))
+        validator = _LEGACY_ATTR_VALIDATORS.get(
+            (normalized_tag, normalized_attribute)
+        ) or _GLOBAL_ATTR_VALIDATORS.get(normalized_attribute)
         if validator is not None:
             return validator(value)
         if normalized_tag == "img" and normalized_attribute == "data-src":
