@@ -7,6 +7,7 @@ proxy serves the MIME part only when its bytes are a raster image.
 
 from __future__ import annotations
 
+import base64
 import struct
 import time
 import zlib
@@ -224,3 +225,100 @@ def test_proxy_maps_missing_part_to_404() -> None:
         response = _client().get("/gmail-image", params={"token": token})
 
     assert response.status_code == 404
+
+
+# ── prefetch cache ───────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _empty_inline_cache():
+    gmail.clear_inline_image_cache()
+    yield
+    gmail.clear_inline_image_cache()
+
+
+def _part(
+    walk_index: str,
+    maintype: str = "image",
+    *,
+    content_id: str | None = "logo@x",
+    disposition: str | None = "inline",
+    octets: int | None = 1000,
+) -> gmail._MimePart:
+    return gmail._MimePart(
+        walk_index=walk_index,
+        maintype=maintype,
+        subtype="png",
+        params=(),
+        disposition=disposition,
+        disposition_params=(),
+        content_id=content_id,
+        encoding="base64",
+        octets=octets,
+        filename=None,
+    )
+
+
+def test_inline_candidates_are_small_cid_images_not_marked_as_attachments() -> None:
+    big = gmail._INLINE_PREFETCH_PART_MAX + 1
+    parts = (
+        _part("2"),
+        _part("3", disposition=None),
+        _part("4", "application"),
+        _part("5", content_id=None),
+        _part("6", disposition="attachment"),
+        _part("7", octets=None),
+        _part("8", octets=big),
+    )
+    index = gmail._PartMap(parts=parts, render_parts=(), attachments=parts)
+
+    assert [p.walk_index for p in gmail._inline_image_candidates(index)] == ["2", "3"]
+
+
+def test_inline_candidates_respect_the_total_budget() -> None:
+    size = gmail._INLINE_PREFETCH_PART_MAX
+    count = gmail._INLINE_PREFETCH_TOTAL_MAX // size
+    parts = tuple(_part(str(i + 2), octets=size) for i in range(count + 1))
+    index = gmail._PartMap(parts=parts, render_parts=(), attachments=parts)
+
+    assert len(gmail._inline_image_candidates(index)) == count
+
+
+def test_cache_only_inline_attachments_from_payloads() -> None:
+    parts = (_part("2"), _part("3", content_id="other@x"))
+    index = gmail._PartMap(parts=parts, render_parts=(), attachments=parts)
+    payloads = {"2": base64.b64encode(_png()), "3": base64.b64encode(_png())}
+    attachments = [{"index": 0, "inline": True}, {"index": 1, "inline": False}]
+
+    gmail._cache_inline_images("INBOX", 5, index, attachments, payloads)
+
+    assert gmail.cached_inline_image("INBOX", 5, 0) == _png()
+    assert gmail.cached_inline_image("INBOX", 5, 1) is None
+
+
+def test_inline_cache_expires_and_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(gmail.time, "monotonic", lambda: clock[0])
+    gmail._inline_cache_put("INBOX", 1, 0, b"a" * 10)
+    clock[0] += gmail._INLINE_CACHE_TTL_S + 1
+    assert gmail.cached_inline_image("INBOX", 1, 0) is None
+
+    monkeypatch.setattr(gmail, "_INLINE_CACHE_MAX_BYTES", 25)
+    for index in range(3):
+        gmail._inline_cache_put("INBOX", 2, index, b"b" * 10)
+    assert gmail.cached_inline_image("INBOX", 2, 0) is None
+    assert gmail.cached_inline_image("INBOX", 2, 1) == b"b" * 10
+    assert gmail.cached_inline_image("INBOX", 2, 2) == b"b" * 10
+    assert gmail._inline_cache_bytes == 20
+
+
+def test_proxy_serves_prefetched_image_without_imap() -> None:
+    gmail._inline_cache_put("INBOX", 42, 3, _png())
+    token = _token(gmail.sign_part_image_url("INBOX", 42, 3))
+
+    with patch.object(gmail, "fetch_attachment") as fetch:
+        response = _client().get("/gmail-image", params={"token": token})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    fetch.assert_not_called()

@@ -1696,6 +1696,106 @@ def _cid_image_urls(
     return urls
 
 
+# Inline images are downloaded with the message itself (same IMAP FETCH as the
+# text parts) and kept here, so the image proxy serves them without opening
+# IMAP sessions of its own: one per image cost 0.5-0.8 s and, with the pool
+# capped at 4 connections, delayed the next message opened.  Bounded by bytes
+# and age; a miss (restart, eviction) falls back to fetch_attachment.
+_INLINE_PREFETCH_PART_MAX = 2 * 1024 * 1024
+_INLINE_PREFETCH_TOTAL_MAX = 6 * 1024 * 1024
+_INLINE_CACHE_MAX_BYTES = 32 * 1024 * 1024
+_INLINE_CACHE_TTL_S = 3600
+_inline_cache: OrderedDict[tuple[str, int, int], tuple[float, bytes]] = OrderedDict()
+_inline_cache_bytes = 0
+_inline_cache_lock = threading.Lock()
+
+
+def _inline_cache_put(folder: str, uid: int, index: int, data: bytes) -> None:
+    global _inline_cache_bytes
+    if not data or len(data) > _INLINE_PREFETCH_PART_MAX:
+        return
+    key = (folder, uid, index)
+    with _inline_cache_lock:
+        previous = _inline_cache.pop(key, None)
+        if previous is not None:
+            _inline_cache_bytes -= len(previous[1])
+        _inline_cache[key] = (time.monotonic(), data)
+        _inline_cache_bytes += len(data)
+        while _inline_cache_bytes > _INLINE_CACHE_MAX_BYTES and _inline_cache:
+            _, (_, evicted) = _inline_cache.popitem(last=False)
+            _inline_cache_bytes -= len(evicted)
+
+
+def cached_inline_image(folder: str, uid: int, index: int) -> bytes | None:
+    """Bytes of a prefetched inline image, or ``None`` (missing or expired)."""
+    global _inline_cache_bytes
+    key = (folder, uid, index)
+    with _inline_cache_lock:
+        entry = _inline_cache.get(key)
+        if entry is None:
+            return None
+        stored_at, data = entry
+        if time.monotonic() - stored_at > _INLINE_CACHE_TTL_S:
+            del _inline_cache[key]
+            _inline_cache_bytes -= len(data)
+            return None
+        _inline_cache.move_to_end(key)
+        return data
+
+
+def clear_inline_image_cache() -> None:
+    global _inline_cache_bytes
+    with _inline_cache_lock:
+        _inline_cache.clear()
+        _inline_cache_bytes = 0
+
+
+def _inline_image_candidates(index: _PartMap) -> list[_MimePart]:
+    """Parts worth fetching with the text: small images that may be ``cid:``.
+
+    Decided from BODYSTRUCTURE alone (before the HTML is known); only the
+    ones the HTML really references are cached afterwards.
+    """
+    selected: list[_MimePart] = []
+    total = 0
+    for part in index.attachments:
+        if (
+            part.maintype != "image"
+            or not part.content_id
+            or (part.disposition or "").lower() == "attachment"
+            or part.octets is None
+            or part.octets > _INLINE_PREFETCH_PART_MAX
+            or total + part.octets > _INLINE_PREFETCH_TOTAL_MAX
+        ):
+            continue
+        selected.append(part)
+        total += part.octets
+    return selected
+
+
+def _cache_inline_images(
+    folder: str,
+    uid: int,
+    index: _PartMap,
+    attachments: Iterable[dict[str, Any]],
+    payloads: Mapping[str, bytes],
+) -> None:
+    """Cache the prefetched payloads of the images marked ``inline``."""
+    for attachment in attachments:
+        if not attachment.get("inline"):
+            continue
+        position = attachment["index"]
+        part = index.attachments[position]
+        payload = payloads.get(part.walk_index)
+        if payload is None:
+            continue
+        try:
+            data = _decode_fetched_bytes(part, payload)
+        except _PartFetchError:
+            continue
+        _inline_cache_put(folder, uid, position, data)
+
+
 def _find_tag_end(raw: str, start: int) -> int:
     """Return the index just past ``>``, honouring quoted attribute values."""
     quote = ""
@@ -3855,11 +3955,16 @@ def _fetch_part_payloads(
 
 
 def _fetch_render_parts(
-    connection: imaplib.IMAP4, uid: int, index: _PartMap
+    connection: imaplib.IMAP4,
+    uid: int,
+    index: _PartMap,
+    extra: Iterable[_MimePart] = (),
 ) -> dict[str, bytes]:
+    """Fetch the text parts (plus *extra* parts) in one ``UID FETCH``."""
     selected = [part.walk_index for part in index.render_parts]
     if len(selected) > _MAX_RENDER_PARTS:
         raise _PartFetchError
+    selected += [part.walk_index for part in extra]
     return _fetch_part_payloads(connection, uid, selected)
 
 
@@ -4093,11 +4198,28 @@ def fetch_message(uid: int | str, folder: str | None = None) -> dict[str, Any]:
             structure = _fetch_structure(connection, uid_value)
             if structure is not None:
                 part_map = structure.index
+                candidates = _inline_image_candidates(part_map)
                 try:
-                    payloads = _fetch_render_parts(connection, uid_value, part_map)
-                    return _assemble_detail(
+                    try:
+                        payloads = _fetch_render_parts(
+                            connection, uid_value, part_map, candidates
+                        )
+                    except _PartFetchError:
+                        if not candidates:
+                            raise
+                        # The extra image parts must never cost the fast path.
+                        payloads = _fetch_render_parts(connection, uid_value, part_map)
+                    detail = _assemble_detail(
                         uid_value, structure, payloads, folder_value
                     )
+                    _cache_inline_images(
+                        folder_value,
+                        uid_value,
+                        part_map,
+                        detail["attachments"],
+                        payloads,
+                    )
+                    return detail
                 except _PartFetchError:
                     pass
 
@@ -4105,6 +4227,11 @@ def fetch_message(uid: int | str, folder: str | None = None) -> dict[str, Any]:
         parsed = _parse_full(
             record["raw"], part_map, folder=folder_value, uid=uid_value
         )
+        for attachment in parsed["attachments"]:
+            if attachment.get("inline"):
+                _inline_cache_put(
+                    folder_value, uid_value, attachment["index"], attachment["data"]
+                )
         return {
             "uid": record["uid"],
             "from": parsed["from"],

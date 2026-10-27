@@ -245,10 +245,13 @@ async def _inline_part_image(payload: str) -> tuple[bytes, str] | None:
     if part is None:
         raise ApiError("not_found", "Immagine non trovata")
     folder, uid, index = part
-    download = await asyncio.to_thread(
-        _run, _gmail.fetch_attachment, uid, index, folder=folder
-    )
-    data = download.data
+    # Normally prefetched with the message; IMAP only on a cache miss.
+    data = _gmail.cached_inline_image(folder, uid, index)
+    if data is None:
+        download = await asyncio.to_thread(
+            _run, _gmail.fetch_attachment, uid, index, folder=folder
+        )
+        data = download.data
     if not data or len(data) > IMAGE_PROXY_MAX_BYTES:
         return None
     content_type = link_preview._sniff_raster(data)

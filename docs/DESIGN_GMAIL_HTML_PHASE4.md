@@ -44,15 +44,44 @@ flowchart LR
 | Parte non immagine (SVG/HTML con script) servita come immagine | Tipo **dedotto dai byte** (`_sniff_raster`: PNG/JPEG/GIF/WebP), mai dal Content-Type dichiarato; altrimenti 502. La risposta mantiene `nosniff`, `no-store` e la CSP `default-src 'none'` del proxy. |
 | DoS / immagini enormi | Cap del proxy: 8 MB, 25 MP (dimensioni lette dall'header), semaforo 4, cap 50 immagini per messaggio nel client. |
 
-## 4. Limiti noti
+## 4. Prefetch e cache
 
-- Ogni immagine incorporata è una richiesta IMAP (`fetch_attachment`) a ogni apertura
-  (`no-store`). Le firme hanno di solito 1–3 immagini e il semaforo le serializza a 4 per volta.
-- `fetch_attachment` scarica la parte prima del controllo degli 8 MB (limite di download generale:
-  50 MB).
+Nella prima versione ogni immagine incorporata richiedeva una sessione IMAP propria (select,
+struttura, parte): **0,5–0,8 s** per immagine. Con il pool limitato a 4 connessioni, quattro
+immagini in parallelo richiedevano **~11 s** e l'apertura della mail successiva passava da
+~490 a ~940 ms (misurato su mail reali).
+
+Ora le immagini candidate vengono scaricate **nello stesso `UID FETCH` delle parti di testo**,
+quindi senza scambi aggiuntivi. Sono candidate (`_inline_image_candidates`, decise dalla sola
+BODYSTRUCTURE) le parti con queste caratteristiche:
+- `image/*` con Content-ID;
+- non `attachment`;
+- ≤ 2 MB ciascuna e ≤ 6 MB in tutto.
+
+Dopo il parsing vengono messe in una cache in memoria solo quelle con `inline: true`:
+- LRU da 32 MB, scadenza 1 h, chiave `(cartella, uid, indice)`;
+- il percorso di fetch completo usa i byte già scaricati.
+
+Il proxy legge prima dalla cache (`cached_inline_image`) e solo se manca, per esempio dopo un
+riavvio o un'eviction, ripiega su `fetch_attachment`. Se il FETCH esteso fallisce, la mail
+viene comunque scaricata senza le immagini.
+
+Misure su mail reali (2 immagini):
+
+| | Prima | Dopo |
+|---|---|---|
+| Apertura del messaggio, mediana | 513 ms | 580 ms |
+| Ogni immagine dal proxy | 500–800 ms | 0–1 ms |
+| 4 immagini in parallelo | ~11 s | 0,56 s |
+| Mail successiva aperta durante il caricamento | ~940 ms | ~500 ms |
+
+## 5. Limiti noti
+
+- In caso di cache miss, `fetch_attachment` scarica la parte prima del controllo degli 8 MB
+  (limite di download generale: 50 MB).
 - Il gruppo "+ N immagini nel testo" resta nel pannello allegati per poterle salvare.
 
-## 5. Test
+## 6. Test
 
 `tests/test_gmail_html_phase4.py`:
 - token: andata e ritorno, scadenza, payload malformati, nessuna firma per `src="gmail-part:…"`;
