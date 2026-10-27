@@ -349,24 +349,35 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-empty p { margin: 0; line-height: 1.5; }
 .gmail-empty-icon { font-size: 1.8rem; }
 
+/* One scroll for header, attachments and body: however long the recipient or
+   attachment lists are, scrolling gives the whole pane to the message.  Only
+   the action bar stays pinned. */
 .gmail-reader {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-.gmail-reader-header {
-  flex: none;
-  padding: 14px clamp(14px, 3vw, 30px);
-  border-bottom: 1px solid var(--line);
-  background: #0d141c99;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .gmail-reader-actions {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
+  flex: none;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 8px;
+  padding: 8px clamp(14px, 3vw, 30px);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.gmail-reader-header {
+  flex: none;
+  padding: 12px clamp(14px, 3vw, 30px);
+  border-bottom: 1px solid var(--line);
+  background: #0d141c99;
 }
 .gmail-reader-action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
 #gmail-reader-back { display: none; }
@@ -395,13 +406,27 @@ body.gmail-active #gmail-view { display: flex; }
   overflow-wrap: anywhere;
   font-size: .82rem;
 }
+/* Recipients: names only (full address on hover), extra ones behind
+   "e altri N".  Hidden items are always the tail, so the separator only
+   needs the previous sibling. */
+.gmail-recipient + .gmail-recipient:not([hidden])::before { content: ", "; }
+.gmail-link-button {
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: .76rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.gmail-link-button:hover { text-decoration: none; }
 
 .gmail-reader-body {
-  flex: 1;
-  min-height: 0;
+  flex: 1 0 auto;
   padding: 18px clamp(14px, 3vw, 30px);
   overflow-x: auto;
-  overflow-y: auto;
   overflow-wrap: anywhere;
   font-size: .9rem;
   line-height: 1.55;
@@ -525,40 +550,58 @@ body.gmail-active #gmail-view { display: flex; }
   border-top: 1px solid var(--mail-line);
 }
 
+/* Attachments: one wrapping row of chips above the body, collapsible. */
 .gmail-attachments {
   flex: none;
-  max-height: 34%;
-  padding: 12px clamp(14px, 3vw, 30px);
-  overflow-y: auto;
-  border-top: 1px solid var(--line);
+  padding: 8px clamp(14px, 3vw, 30px);
+  border-bottom: 1px solid var(--line);
   background: #0d141c66;
 }
-.gmail-attachments h3 {
-  margin: 0 0 8px;
+.gmail-attachments-toggle {
+  padding: 2px 0;
+  border: 0;
+  background: none;
   color: var(--muted);
+  font: inherit;
   font-size: .72rem;
   letter-spacing: .05em;
   text-transform: uppercase;
+  cursor: pointer;
 }
-.gmail-attachment-list { display: grid; gap: 6px; }
-.gmail-attachment {
+.gmail-attachments-toggle::before { content: "▸ "; }
+.gmail-attachments-toggle[aria-expanded="true"]::before { content: "▾ "; }
+.gmail-attachments-toggle:hover { color: var(--text); }
+.gmail-attachment-list {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--panel);
+  gap: 6px;
+  margin-top: 6px;
 }
-.gmail-attachment-info { flex: 1; min-width: 0; }
+.gmail-attachment-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: min(100%, 300px);
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.gmail-attachment-chip:hover { border-color: var(--accent); }
+.gmail-attachment-chip:disabled { opacity: .6; cursor: progress; }
+.gmail-attachment-chip.is-inline { border-style: dashed; }
 .gmail-attachment-name {
-  display: block;
+  min-width: 0;
   overflow: hidden;
-  font-size: .82rem;
+  font-size: .8rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.gmail-attachment-meta { display: block; color: var(--muted); font-size: .7rem; }
+.gmail-attachment-meta { flex: none; color: var(--muted); font-size: .7rem; }
 
 /* Compose */
 
@@ -702,9 +745,7 @@ body.gmail-active #gmail-view { display: flex; }
   #gmail-view.gmail-detail-open .gmail-detail-pane { display: flex; }
   #gmail-reader-back { display: inline-grid; }
 
-  .gmail-reader-header { padding-top: 12px; }
   .gmail-reader-body { padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
-  .gmail-attachments { max-height: 38%; }
 
   .gmail-compose-dialog {
     width: 100vw;

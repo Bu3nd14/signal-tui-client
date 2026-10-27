@@ -41,7 +41,7 @@ from html import unescape as _html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote_to_bytes
+from urllib.parse import unquote, unquote_to_bytes
 
 from filename_utils import sanitize_filename
 from protocols import config
@@ -3343,14 +3343,41 @@ def _clean_scanned_html(nh3: Any, scanned: str) -> str:
     return result
 
 
-def _extract_html(message: Message) -> str:
+def _raw_html(message: Message) -> str:
     parts: list[str] = []
     for part in message.walk():
         if part.is_multipart() or _is_attachment_part(part):
             continue
         if part.get_content_type() == "text/html":
             parts.append(_payload_text(part))
-    return sanitize_html("\n".join(parts))
+    return "\n".join(parts)
+
+
+def _extract_html(message: Message) -> str:
+    return sanitize_html(_raw_html(message))
+
+
+_CID_REFERENCE_RE = re.compile(r"""cid:([^\s"'<>()]+)""", re.IGNORECASE)
+
+
+def _mark_inline_images(attachments: list[dict[str, Any]], raw_html: str) -> None:
+    """Flag image parts that the HTML body shows via ``cid:`` as ``inline``.
+
+    A ``Content-ID`` alone is not enough (Apple Mail sets one on regular
+    attachments too): the part must be referenced by the raw HTML.
+    """
+    referenced = {
+        unquote(match).strip("<>").lower()
+        for match in _CID_REFERENCE_RE.findall(raw_html)
+    }
+    for attachment in attachments:
+        content_id = (attachment.get("content_id") or "").lower()
+        content_type = str(attachment.get("content_type") or "")
+        attachment["inline"] = bool(
+            content_id
+            and content_id in referenced
+            and content_type.startswith("image/")
+        )
 
 
 def _extract_text(message: Message) -> str:
@@ -3411,6 +3438,9 @@ def _extract_attachments(
 
 def _parse_full(raw: bytes, part_map: _PartMap | None = None) -> dict[str, Any]:
     message = message_from_bytes(raw)
+    raw_html = _raw_html(message)
+    attachments = _extract_attachments(message, part_map)
+    _mark_inline_images(attachments, raw_html)
     return {
         "from": decode_mime_header(message.get("From")),
         "to": decode_mime_header(message.get("To")),
@@ -3421,8 +3451,8 @@ def _parse_full(raw: bytes, part_map: _PartMap | None = None) -> dict[str, Any]:
         "in_reply_to": decode_mime_header(message.get("In-Reply-To")).strip(),
         "references": decode_mime_header(message.get("References")).strip(),
         "text": _extract_text(message),
-        "html": _extract_html(message),
-        "attachments": _extract_attachments(message, part_map),
+        "html": sanitize_html(raw_html),
+        "attachments": attachments,
     }
 
 
@@ -3835,6 +3865,7 @@ def _assemble_detail(
         }
         for index, part in enumerate(record.index.attachments)
     ]
+    _mark_inline_images(attachments, "\n".join(html))
     return {
         "uid": uid,
         "from": decode_mime_header(headers.get("From")),

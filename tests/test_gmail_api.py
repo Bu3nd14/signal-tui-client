@@ -2403,6 +2403,7 @@ def test_p3b_octets_nil_with_structure_is_partial_with_a_null_size(
             "content_type": "application/pdf",
             "size": None,
             "content_id": None,
+            "inline": False,
         }
     ]
     assert all(instance.full_body_fetches == 0 for instance in FakeIMAP.instances)

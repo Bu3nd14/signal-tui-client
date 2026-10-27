@@ -558,6 +558,7 @@ function restoreProtocolTab() {}
 function subjectOf(detail) { return (detail && detail.subject) || ""; }
 function senderOf(detail) { return (detail && detail.from) || ""; }
 function joinAddresses(value) { return value || ""; }
+function renderRecipients(element, value) { element.textContent = value || "—"; }
 function formatFullDate() { return ""; }
 function loadImages() { record("load"); }
 function renderAttachments() { record("attachments"); }
@@ -671,8 +672,8 @@ def test_index_html_removes_toggle_and_bumps_gmail_js():
 
     assert "gmail-images-toggle" not in index
     assert "Mostra immagini" not in index
-    assert "gmail.js?v=18" in index
-    assert "gmail.css?v=18" in index
+    assert "gmail.js?v=19" in index
+    assert "gmail.css?v=19" in index
 
 
 def test_gmail_js_has_no_orphan_toggle_remnants():
