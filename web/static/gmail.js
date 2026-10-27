@@ -1536,7 +1536,13 @@
     };
 
     input.addEventListener("input", update);
-    input.addEventListener("blur", close);
+    // Leaving the field drops the trailing ", " kept for the next address.
+    // Picking a suggestion does not blur it (options act on mousedown).
+    input.addEventListener("blur", () => {
+      close();
+      const tidy = tidyAddressField(input.value);
+      if (tidy !== input.value) input.value = tidy;
+    });
     input.addEventListener("keydown", (event) => {
       if (list.hidden) return;
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {

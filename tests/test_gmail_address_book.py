@@ -212,6 +212,59 @@ def _run(body: str) -> None:
     )
 
 
+def test_leaving_the_field_drops_the_trailing_comma() -> None:
+    _run_node(
+        r"""
+const assert = require("node:assert/strict");
+const ADDRESS_SUGGESTIONS_MAX = 8;
+class El {
+  constructor(tag) { this.tag = tag; this.children = []; this.attrs = {}; this.listeners = {}; this.hidden = false; this._text = ""; }
+  set textContent(v) { this._text = String(v); }
+  get textContent() { return this._text; }
+  append(...nodes) { this.children.push(...nodes); }
+  replaceChildren(...nodes) { this.children = [...nodes]; }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  removeAttribute(k) { delete this.attrs[k]; }
+  addEventListener(type, fn) { this.listeners[type] = fn; }
+}
+function node(tag, className, text) { const e = new El(tag); e.className = className; if (text != null) e.textContent = text; return e; }
+const input = Object.assign(new El("input"), {
+  id: "gmail-compose-to", value: "", selectionStart: 0,
+  after(list) { this.list = list; },
+  setSelectionRange(a) { this.selectionStart = a; },
+  focus() {},
+});
+const state = { addressBook: [{ email: "anna@example.com", name: "Anna", score: 1, last_ts: 1 }] };
+function splitAddresses(v) { return String(v).split(",").map((s) => s.trim()).filter(Boolean); }
+function extractEmail(v) { const m = /<([^>]+)>/.exec(v); return (m ? m[1] : v).trim(); }
+"""
+        + _js_functions(
+            "normalizeSearch",
+            "addressTokenRange",
+            "suggestAddresses",
+            "formatAddress",
+            "applySuggestion",
+            "tidyAddressField",
+            "emailsInField",
+            "attachAddressAutocomplete",
+        )
+        + r"""
+attachAddressAutocomplete(input);
+input.value = "an";
+input.selectionStart = 2;
+input.listeners.input();
+assert.equal(input.list.hidden, false);
+// Picking a suggestion (mousedown) keeps the ", " for the next address.
+input.list.children[0].listeners.mousedown({ preventDefault() {} });
+assert.equal(input.value, "Anna <anna@example.com>, ");
+// Leaving the field drops it.
+input.listeners.blur();
+assert.equal(input.value, "Anna <anna@example.com>");
+assert.equal(input.list.hidden, true);
+"""
+    )
+
+
 def test_address_fields_are_tidied_before_sending() -> None:
     _run(
         r"""
