@@ -26,7 +26,7 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -1643,6 +1643,59 @@ def verify_image_token(token: str) -> str:
         return ""
 
 
+# Inline (``cid:``) images are MIME parts of the message, served by the same
+# signed proxy.  Their payload is not a URL but ``gmail-part:`` + expiry, uid,
+# attachment index and folder.  Only the server signs it (remote URLs are
+# signed only when they are http/https), and unlike remote images it gives
+# access to mailbox content without the Bearer token, so it expires.
+_PART_IMAGE_PREFIX = "gmail-part:"
+_PART_IMAGE_TTL_S = 24 * 3600
+
+
+def sign_part_image_url(
+    folder: str, uid: int, index: int, *, now: float | None = None
+) -> str:
+    """Signed proxy URL for attachment *index* of message *uid* (expires)."""
+    expires = int((time.time() if now is None else now) + _PART_IMAGE_TTL_S)
+    return sign_image_url(f"{_PART_IMAGE_PREFIX}{expires}:{uid}:{index}:{folder}")
+
+
+def parse_part_image(
+    payload: str, *, now: float | None = None
+) -> tuple[str, int, int] | None:
+    """``(folder, uid, index)`` of a verified ``gmail-part:`` payload, if valid.
+
+    Returns ``None`` for remote-image payloads, expired or malformed ones.
+    """
+    if not payload.startswith(_PART_IMAGE_PREFIX):
+        return None
+    fields = payload[len(_PART_IMAGE_PREFIX) :].split(":", 3)
+    if len(fields) != 4:
+        return None
+    expires, uid, index, folder = fields
+    if not (expires.isdigit() and uid.isdigit() and index.isdigit()):
+        return None
+    if int(expires) < (time.time() if now is None else now):
+        return None
+    try:
+        folder = validate_folder(folder)
+    except GmailValidationError:
+        return None
+    return folder, int(uid), int(index)
+
+
+def _cid_image_urls(
+    attachments: Iterable[dict[str, Any]], folder: str, uid: int
+) -> dict[str, str]:
+    """Signed proxy URL of every inline image, keyed by lowercase Content-ID."""
+    urls: dict[str, str] = {}
+    for attachment in attachments:
+        content_id = str(attachment.get("content_id") or "").lower()
+        if attachment.get("inline") and content_id:
+            urls[content_id] = sign_part_image_url(folder, uid, attachment["index"])
+    return urls
+
+
 def _find_tag_end(raw: str, start: int) -> int:
     """Return the index just past ``>``, honouring quoted attribute values."""
     quote = ""
@@ -1988,8 +2041,14 @@ def _safe_image_source(value: str) -> bool:
     return value.startswith(("http://", "https://"))
 
 
-def _filter_image_src(value: str) -> str | None:
+def _filter_image_src(
+    value: str, cid_urls: Mapping[str, str] | None = None
+) -> str | None:
     value = value.strip()
+    if value[:4].lower() == "cid:":
+        # Inline image: only parts the caller mapped to a signed proxy URL.
+        content_id = unquote(value[4:]).strip("<>").lower()
+        return (cid_urls or {}).get(content_id)
     signed = _SIGNED_IMAGE_RE.fullmatch(value)
     if signed:
         token = f"{signed.group(1)}.{signed.group(2)}"
@@ -3131,6 +3190,7 @@ def _html_attribute_filter(
     attribute: str,
     value: str,
     style_cache: dict[str, str | None] | None = None,
+    cid_urls: Mapping[str, str] | None = None,
 ) -> str | None:
     """nh3 attribute callback; *style_cache* memoizes styles of one document.
 
@@ -3154,7 +3214,7 @@ def _html_attribute_filter(
         if validator is not None:
             return validator(value)
         if normalized_tag == "img" and normalized_attribute == "data-src":
-            return _filter_image_src(value)
+            return _filter_image_src(value, cid_urls)
         if len(value) > _ATTR_VALUE_MAX_LEN:
             return None
         return value
@@ -3267,7 +3327,7 @@ def _scan_inlined_html(raw: str, styles: list[str]) -> str:
         return ""
 
 
-def sanitize_html(raw: str) -> str:
+def sanitize_html(raw: str, cid_urls: Mapping[str, str] | None = None) -> str:
     """Return a conservative, script-free HTML fragment for the reader.
 
     Email HTML is fully attacker-controlled.  Rendering it with ``innerHTML``
@@ -3279,7 +3339,9 @@ def sanitize_html(raw: str) -> str:
     Inline CSS is re-serialized from a strict allow-list with ``tinycss2``;
     ``<style>`` blocks are first inlined (``css-inline``) so their rules go
     through the same allow-list.  If the inlined document is rejected, the
-    original one is sanitized instead.
+    original one is sanitized instead.  ``cid_urls`` maps the lowercase
+    Content-ID of inline images to their signed proxy URL; without it
+    ``cid:`` images are dropped.
     """
     if not raw or len(raw) > _MAX_HTML_CHARS:
         return ""
@@ -3303,13 +3365,15 @@ def sanitize_html(raw: str) -> str:
     if styles:
         inlined = _scan_inlined_html(raw, styles)
         if inlined:
-            result = _clean_scanned_html(nh3, inlined)
+            result = _clean_scanned_html(nh3, inlined, cid_urls)
             if result:
                 return result
-    return _clean_scanned_html(nh3, scanned)
+    return _clean_scanned_html(nh3, scanned, cid_urls)
 
 
-def _clean_scanned_html(nh3: Any, scanned: str) -> str:
+def _clean_scanned_html(
+    nh3: Any, scanned: str, cid_urls: Mapping[str, str] | None = None
+) -> str:
     """Run nh3 on a pre-scanned document and enforce the output invariants."""
     try:
         result = nh3.clean(
@@ -3317,7 +3381,9 @@ def _clean_scanned_html(nh3: Any, scanned: str) -> str:
             tags=set(_ALLOWED_HTML_TAGS),
             clean_content_tags=set(_CLEAN_CONTENT_TAGS),
             attributes=_ALLOWED_HTML_ATTRIBUTES,
-            attribute_filter=partial(_html_attribute_filter, style_cache={}),
+            attribute_filter=partial(
+                _html_attribute_filter, style_cache={}, cid_urls=cid_urls
+            ),
             url_schemes={"http", "https", "mailto"},
             url_relative="deny",
             link_rel="noopener noreferrer",
@@ -3436,11 +3502,23 @@ def _extract_attachments(
     return attachments
 
 
-def _parse_full(raw: bytes, part_map: _PartMap | None = None) -> dict[str, Any]:
+def _parse_full(
+    raw: bytes,
+    part_map: _PartMap | None = None,
+    *,
+    folder: str | None = None,
+    uid: int | None = None,
+) -> dict[str, Any]:
+    """Parse a full message; with *folder*/*uid* inline images get proxy URLs."""
     message = message_from_bytes(raw)
     raw_html = _raw_html(message)
     attachments = _extract_attachments(message, part_map)
     _mark_inline_images(attachments, raw_html)
+    cid_urls = (
+        _cid_image_urls(attachments, folder, uid)
+        if folder is not None and uid is not None
+        else None
+    )
     return {
         "from": decode_mime_header(message.get("From")),
         "to": decode_mime_header(message.get("To")),
@@ -3451,7 +3529,7 @@ def _parse_full(raw: bytes, part_map: _PartMap | None = None) -> dict[str, Any]:
         "in_reply_to": decode_mime_header(message.get("In-Reply-To")).strip(),
         "references": decode_mime_header(message.get("References")).strip(),
         "text": _extract_text(message),
-        "html": sanitize_html(raw_html),
+        "html": sanitize_html(raw_html, cid_urls),
         "attachments": attachments,
     }
 
@@ -3834,7 +3912,10 @@ def _safe_part_filename(part: _MimePart, index: int) -> str:
 
 
 def _assemble_detail(
-    uid: int, record: _StructureRecord, payloads: dict[str, bytes]
+    uid: int,
+    record: _StructureRecord,
+    payloads: dict[str, bytes],
+    folder: str | None = None,
 ) -> dict[str, Any]:
     headers = message_from_bytes(record.headers)
     plain: list[str] = []
@@ -3866,6 +3947,7 @@ def _assemble_detail(
         for index, part in enumerate(record.index.attachments)
     ]
     _mark_inline_images(attachments, "\n".join(html))
+    cid_urls = _cid_image_urls(attachments, folder, uid) if folder is not None else None
     return {
         "uid": uid,
         "from": decode_mime_header(headers.get("From")),
@@ -3877,7 +3959,7 @@ def _assemble_detail(
         "in_reply_to": decode_mime_header(headers.get("In-Reply-To")).strip(),
         "references": decode_mime_header(headers.get("References")).strip(),
         "text": text,
-        "html": sanitize_html("\n".join(html)),
+        "html": sanitize_html("\n".join(html), cid_urls),
         "attachments": attachments,
     }
 
@@ -4013,12 +4095,16 @@ def fetch_message(uid: int | str, folder: str | None = None) -> dict[str, Any]:
                 part_map = structure.index
                 try:
                     payloads = _fetch_render_parts(connection, uid_value, part_map)
-                    return _assemble_detail(uid_value, structure, payloads)
+                    return _assemble_detail(
+                        uid_value, structure, payloads, folder_value
+                    )
                 except _PartFetchError:
                     pass
 
         record = _fetch_full_on(connection, uid_value)
-        parsed = _parse_full(record["raw"], part_map)
+        parsed = _parse_full(
+            record["raw"], part_map, folder=folder_value, uid=uid_value
+        )
         return {
             "uid": record["uid"],
             "from": parsed["from"],

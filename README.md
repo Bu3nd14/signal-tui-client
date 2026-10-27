@@ -839,6 +839,8 @@ does not expire and is not single-use, `/gmail-image` is mounted outside the Bea
 semaphore only bounds concurrency (4 per worker). `<style>` blocks are inlined server-side with
 `css-inline` (only allow-listed properties, no `@media`/remote CSS) before sanitization; set
 `GMAIL_HTML_INLINE_CSS=0` to disable it. Responsive (`@media`) layouts are not reproduced.
+Inline `cid:` images (signatures, logos) are served by the same proxy with a signed token that
+expires after 24 hours, only when the MIME part's bytes are a raster image.
 
 > After pulling a version that adds the HTML reader, install the new web dependencies once:
 > `.venv/bin/pip install -r requirements-web.txt` (or re-run `./install.sh`). `./install.sh --gmail`

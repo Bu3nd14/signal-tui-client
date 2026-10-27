@@ -233,6 +233,33 @@ def gmail_attachment(api: ChatAPI, req: GmailAttachmentRequest) -> GmailAttachme
     return GmailAttachmentOut(**blob.model_dump(), filename=download.filename)
 
 
+async def _inline_part_image(payload: str) -> tuple[bytes, str] | None:
+    """Bytes of a ``cid:`` image part, only if it really is a raster image.
+
+    The type is sniffed from the bytes (never the declared Content-Type) and
+    the proxy byte/pixel caps apply, as for remote images.
+    """
+    from server import link_preview
+
+    part = _gmail.parse_part_image(payload)
+    if part is None:
+        raise ApiError("not_found", "Immagine non trovata")
+    folder, uid, index = part
+    download = await asyncio.to_thread(
+        _run, _gmail.fetch_attachment, uid, index, folder=folder
+    )
+    data = download.data
+    if not data or len(data) > IMAGE_PROXY_MAX_BYTES:
+        return None
+    content_type = link_preview._sniff_raster(data)
+    if content_type is None:
+        return None
+    dimensions = link_preview._raster_dimensions(data, content_type)
+    if dimensions and dimensions[0] * dimensions[1] > IMAGE_PROXY_MAX_PIXELS:
+        return None
+    return data, content_type
+
+
 @operation("gmail.image", request=GmailImageRequest, response=BlobOut)
 async def gmail_image(api: ChatAPI, req: GmailImageRequest) -> BlobOut:
     """A remote image of an email, through the HMAC-signed proxy token.
@@ -247,11 +274,14 @@ async def gmail_image(api: ChatAPI, req: GmailImageRequest) -> BlobOut:
     url = _gmail.verify_image_token(req.token)
     if not url:
         raise ApiError("not_found", "Immagine non trovata")
-    result = await link_preview.fetch_external_image(
-        url,
-        max_bytes=IMAGE_PROXY_MAX_BYTES,
-        max_pixels=IMAGE_PROXY_MAX_PIXELS,
-    )
+    if url.startswith(_gmail._PART_IMAGE_PREFIX):
+        result = await _inline_part_image(url)
+    else:
+        result = await link_preview.fetch_external_image(
+            url,
+            max_bytes=IMAGE_PROXY_MAX_BYTES,
+            max_pixels=IMAGE_PROXY_MAX_PIXELS,
+        )
     if not result:
         raise ApiError("backend_error", "Immagine non disponibile")
     data, content_type = result
