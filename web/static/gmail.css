@@ -408,12 +408,35 @@ body.gmail-active #gmail-view { display: flex; }
   white-space: pre-wrap;
 }
 .gmail-reader-body.is-empty { color: var(--muted); font-style: italic; }
-.gmail-reader-body.is-html { white-space: normal; }
+/* Email HTML is authored for a light page: render it on a light sheet so
+   inline colors (and unstyled text, which would inherit the dark theme's
+   light text) stay readable. */
+.gmail-reader-body.is-html {
+  white-space: normal;
+  /* "anywhere" shrinks min-content widths: auto-layout table columns collapse
+     and words break letter by letter. "break-word" only breaks on overflow. */
+  overflow-wrap: break-word;
+}
 .gmail-html-content {
+  --mail-text: #1f1f1f;
+  --mail-muted: #5f6368;
+  --mail-line: #dadce0;
+  --mail-raised: #f1f3f4;
+  --mail-link: #1a5fb4;
   width: 100%;
   max-width: 720px;
   margin: 0 auto;
+  padding: 16px;
+  border-radius: 10px;
+  background: #fff;
+  color: var(--mail-text);
+  color-scheme: light;
 }
+/* Email markup assumes the UA default box model, not the app's global
+   border-box (it changes the width of padded cells). */
+.gmail-html-content *,
+.gmail-html-content *::before,
+.gmail-html-content *::after { box-sizing: content-box; }
 .gmail-reader-body.is-html p,
 .gmail-reader-body.is-html ul,
 .gmail-reader-body.is-html ol,
@@ -438,48 +461,44 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-reader-body.is-html blockquote {
   margin: .85em 0;
   padding: .1em 0 .1em 12px;
-  border-left: 3px solid var(--line);
-  color: var(--muted);
+  border-left: 3px solid var(--mail-line);
+  color: var(--mail-muted);
 }
-.gmail-reader-body.is-html a { color: var(--accent); text-decoration: underline; }
+.gmail-reader-body.is-html a { color: var(--mail-link); text-decoration: underline; }
 .gmail-reader-body.is-html a:hover { text-decoration: none; }
-.gmail-reader-body.is-html table {
+/* Layout tables (the vast majority of marketing emails) get no rules beyond
+   the width clamp: any author rule would override their presentational
+   attributes (align="center", valign, bgcolor), which have lower priority.
+   Data-table styling is reserved for tables with a real <thead>; marketing
+   emails often use <th> as layout cells, so <th> alone is not a signal. */
+.gmail-reader-body.is-html table { max-width: 100%; }
+.gmail-reader-body.is-html table:has(> thead) {
   margin: .85em 0;
-  max-width: 100%;
   border-collapse: collapse;
   font-size: .82rem;
-}
-/* Layout tables (the vast majority of marketing emails) stay borderless.
-   Borders are reserved for tables with a real <thead>; marketing emails often
-   use <th> as layout cells, so <th> alone is not a reliable signal. */
-.gmail-reader-body.is-html th,
-.gmail-reader-body.is-html td {
-  padding: 0;
-  border: 0;
-  text-align: left;
-  vertical-align: top;
 }
 .gmail-reader-body.is-html table:has(> thead) > thead > tr > th,
 .gmail-reader-body.is-html table:has(> thead) > thead > tr > td,
 .gmail-reader-body.is-html table:has(> thead) > tbody > tr > th,
 .gmail-reader-body.is-html table:has(> thead) > tbody > tr > td {
   padding: 4px 7px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--mail-line);
+  text-align: left;
+  vertical-align: top;
 }
 .gmail-reader-body.is-html table:has(> thead) > thead > tr > th,
 .gmail-reader-body.is-html table:has(> thead) > tbody > tr > th {
-  background: var(--panel-raised);
+  background: var(--mail-raised);
   font-weight: 600;
 }
 .gmail-reader-body.is-html img {
   max-width: 100%;
   height: auto;
-  vertical-align: middle;
 }
 .gmail-reader-body.is-html img[data-src]:not([src]) {
   display: inline-block;
   min-height: 1em;
-  background: var(--panel-raised);
+  background: var(--mail-raised);
 }
 .gmail-reader-body.is-html img.is-failed {
   outline: 1px dashed var(--danger);
@@ -488,22 +507,22 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-reader-body.is-html pre {
   padding: 10px 12px;
   overflow-x: auto;
-  border: 1px solid var(--line);
+  border: 1px solid var(--mail-line);
   border-radius: 8px;
-  background: var(--panel-raised);
+  background: var(--mail-raised);
   white-space: pre;
 }
 .gmail-reader-body.is-html code {
   padding: 1px 4px;
   border-radius: 4px;
-  background: var(--panel-raised);
+  background: var(--mail-raised);
   font-size: .86em;
 }
 .gmail-reader-body.is-html pre code { padding: 0; background: transparent; }
 .gmail-reader-body.is-html hr {
   margin: 1em 0;
   border: 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--mail-line);
 }
 
 .gmail-attachments {

@@ -672,7 +672,7 @@ def test_index_html_removes_toggle_and_bumps_gmail_js():
     assert "gmail-images-toggle" not in index
     assert "Mostra immagini" not in index
     assert "gmail.js?v=18" in index
-    assert "gmail.css?v=17" in index
+    assert "gmail.css?v=18" in index
 
 
 def test_gmail_js_has_no_orphan_toggle_remnants():
