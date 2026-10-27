@@ -67,6 +67,76 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-danger:hover:not(:disabled),
 .gmail-danger:focus-visible { border-color: var(--danger); background: #4a2027; }
 
+/* Line icons (inline SVG, colour from the text). */
+.gmail-icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.gmail-icon circle { fill: currentColor; }
+.gmail-compose-button { display: inline-flex; align-items: center; gap: 6px; }
+.gmail-compose-button .gmail-icon { width: 16px; height: 16px; }
+
+/* Icon-only action buttons (reader bar, list refresh): label in title and
+   aria-label. */
+.gmail-tool {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.gmail-tool:hover:not(:disabled),
+.gmail-tool[aria-expanded="true"] { background: var(--panel-raised); color: var(--text); }
+.gmail-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.gmail-tool:disabled { opacity: .4; cursor: not-allowed; }
+.gmail-tool[aria-busy="true"] { cursor: progress; }
+.gmail-tool.gmail-danger { border-color: transparent; color: var(--muted); }
+.gmail-tool.gmail-danger:hover:not(:disabled),
+.gmail-tool.gmail-danger:focus-visible { border-color: transparent; background: #4a2027; color: var(--danger); }
+.gmail-tool-separator { flex: none; width: 1px; height: 20px; margin: 0 6px; background: var(--line); }
+
+/* "More actions" menu of the reader. */
+.gmail-more { position: relative; display: inline-flex; }
+.gmail-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  display: grid;
+  min-width: 210px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 12px 32px #000a;
+}
+.gmail-menu-item {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: .84rem;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.gmail-menu-item:hover,
+.gmail-menu-item:focus-visible { outline: none; background: var(--panel-raised); }
+
 .gmail-icon-button {
   display: inline-grid;
   flex: none;
@@ -349,26 +419,37 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-empty p { margin: 0; line-height: 1.5; }
 .gmail-empty-icon { font-size: 1.8rem; }
 
+/* One scroll for header, attachments and body: however long the recipient or
+   attachment lists are, scrolling gives the whole pane to the message.  Only
+   the action bar stays pinned. */
 .gmail-reader {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-}
-.gmail-reader-header {
-  flex: none;
-  padding: 14px clamp(14px, 3vw, 30px);
-  border-bottom: 1px solid var(--line);
-  background: #0d141c99;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .gmail-reader-actions {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
+  flex: none;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 8px;
+  padding: 8px clamp(14px, 3vw, 30px);
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
 }
-.gmail-reader-action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
+.gmail-reader-header {
+  flex: none;
+  padding: 12px clamp(14px, 3vw, 30px);
+  border-bottom: 1px solid var(--line);
+  background: #0d141c99;
+}
+.gmail-reader-action-group { display: flex; align-items: center; gap: 2px; margin-left: auto; }
 #gmail-reader-back { display: none; }
 #gmail-reader-subject {
   margin: 0;
@@ -395,25 +476,64 @@ body.gmail-active #gmail-view { display: flex; }
   overflow-wrap: anywhere;
   font-size: .82rem;
 }
+/* Recipients: names only (full address on hover), extra ones behind
+   "e altri N".  Hidden items are always the tail, so the separator only
+   needs the previous sibling. */
+.gmail-recipient + .gmail-recipient:not([hidden])::before { content: ", "; }
+.gmail-link-button {
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: .76rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.gmail-link-button:hover { text-decoration: none; }
 
 .gmail-reader-body {
-  flex: 1;
-  min-height: 0;
+  flex: 1 0 auto;
   padding: 18px clamp(14px, 3vw, 30px);
   overflow-x: auto;
-  overflow-y: auto;
   overflow-wrap: anywhere;
   font-size: .9rem;
   line-height: 1.55;
   white-space: pre-wrap;
 }
 .gmail-reader-body.is-empty { color: var(--muted); font-style: italic; }
-.gmail-reader-body.is-html { white-space: normal; }
+/* Email HTML is authored for a light page: render it on a light sheet so
+   inline colors (and unstyled text, which would inherit the dark theme's
+   light text) stay readable. */
+.gmail-reader-body.is-html {
+  white-space: normal;
+  /* "anywhere" shrinks min-content widths: auto-layout table columns collapse
+     and words break letter by letter. "break-word" only breaks on overflow. */
+  overflow-wrap: break-word;
+}
 .gmail-html-content {
+  --mail-text: #1f1f1f;
+  --mail-muted: #5f6368;
+  --mail-line: #dadce0;
+  --mail-raised: #f1f3f4;
+  --mail-link: #1a5fb4;
   width: 100%;
   max-width: 720px;
   margin: 0 auto;
+  padding: 16px;
+  border-radius: 10px;
+  background: #fff;
+  color: var(--mail-text);
+  color-scheme: light;
 }
+/* Email markup assumes the UA default box model, not the app's global
+   border-box (it changes the width of padded cells). */
+.gmail-html-content *,
+.gmail-html-content *::before,
+.gmail-html-content *::after { box-sizing: content-box; }
+/* The box gmail.js zooms down when a fixed-width mail is wider than it. */
+.gmail-html-content > .gmail-html-fit { width: 100%; }
 .gmail-reader-body.is-html p,
 .gmail-reader-body.is-html ul,
 .gmail-reader-body.is-html ol,
@@ -438,48 +558,49 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-reader-body.is-html blockquote {
   margin: .85em 0;
   padding: .1em 0 .1em 12px;
-  border-left: 3px solid var(--line);
-  color: var(--muted);
+  border-left: 3px solid var(--mail-line);
+  color: var(--mail-muted);
 }
-.gmail-reader-body.is-html a { color: var(--accent); text-decoration: underline; }
+.gmail-reader-body.is-html a { color: var(--mail-link); text-decoration: underline; }
 .gmail-reader-body.is-html a:hover { text-decoration: none; }
-.gmail-reader-body.is-html table {
+/* Layout tables (the vast majority of marketing emails) get no rules beyond
+   the width clamp: any author rule would override their presentational
+   attributes (align="center", valign, bgcolor), which have lower priority.
+   Data-table styling is reserved for tables with a real <thead>; marketing
+   emails often use <th> as layout cells, so <th> alone is not a signal. */
+.gmail-reader-body.is-html table { max-width: 100%; }
+.gmail-reader-body.is-html table:has(> thead) {
   margin: .85em 0;
-  max-width: 100%;
   border-collapse: collapse;
   font-size: .82rem;
-}
-/* Layout tables (the vast majority of marketing emails) stay borderless.
-   Borders are reserved for tables with a real <thead>; marketing emails often
-   use <th> as layout cells, so <th> alone is not a reliable signal. */
-.gmail-reader-body.is-html th,
-.gmail-reader-body.is-html td {
-  padding: 0;
-  border: 0;
-  text-align: left;
-  vertical-align: top;
 }
 .gmail-reader-body.is-html table:has(> thead) > thead > tr > th,
 .gmail-reader-body.is-html table:has(> thead) > thead > tr > td,
 .gmail-reader-body.is-html table:has(> thead) > tbody > tr > th,
 .gmail-reader-body.is-html table:has(> thead) > tbody > tr > td {
   padding: 4px 7px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--mail-line);
+  text-align: left;
+  vertical-align: top;
 }
 .gmail-reader-body.is-html table:has(> thead) > thead > tr > th,
 .gmail-reader-body.is-html table:has(> thead) > tbody > tr > th {
-  background: var(--panel-raised);
+  background: var(--mail-raised);
   font-weight: 600;
 }
+/* !important: newsletters set inline caps like max-width:951px (Mailchimp)
+   that beat a plain stylesheet rule, so the image kept its intrinsic width,
+   widened every table around it and the mail overflowed horizontally.  An
+   author !important outranks inline styles, and the sanitizer strips the
+   mails' own !important, so they cannot fight back. */
 .gmail-reader-body.is-html img {
-  max-width: 100%;
+  max-width: 100% !important;
   height: auto;
-  vertical-align: middle;
 }
 .gmail-reader-body.is-html img[data-src]:not([src]) {
   display: inline-block;
   min-height: 1em;
-  background: var(--panel-raised);
+  background: var(--mail-raised);
 }
 .gmail-reader-body.is-html img.is-failed {
   outline: 1px dashed var(--danger);
@@ -488,58 +609,93 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-reader-body.is-html pre {
   padding: 10px 12px;
   overflow-x: auto;
-  border: 1px solid var(--line);
+  border: 1px solid var(--mail-line);
   border-radius: 8px;
-  background: var(--panel-raised);
+  background: var(--mail-raised);
   white-space: pre;
 }
 .gmail-reader-body.is-html code {
   padding: 1px 4px;
   border-radius: 4px;
-  background: var(--panel-raised);
+  background: var(--mail-raised);
   font-size: .86em;
 }
 .gmail-reader-body.is-html pre code { padding: 0; background: transparent; }
 .gmail-reader-body.is-html hr {
   margin: 1em 0;
   border: 0;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--mail-line);
 }
+/* Folded quoted text: a small "•••" pill, as in Gmail. */
+.gmail-quote-toggle {
+  display: block;
+  margin: .6em 0;
+  padding: 0 9px;
+  border: 1px solid var(--mail-line);
+  border-radius: 999px;
+  background: var(--mail-raised);
+  color: var(--mail-muted);
+  font: inherit;
+  font-size: .8rem;
+  line-height: 1.4;
+  letter-spacing: .1em;
+  cursor: pointer;
+}
+.gmail-quote-toggle:hover { color: var(--mail-text); border-color: var(--mail-muted); }
+.gmail-quote-toggle[aria-expanded="true"] { background: transparent; }
 
+/* Attachments: one wrapping row of chips above the body, collapsible. */
 .gmail-attachments {
   flex: none;
-  max-height: 34%;
-  padding: 12px clamp(14px, 3vw, 30px);
-  overflow-y: auto;
-  border-top: 1px solid var(--line);
+  padding: 8px clamp(14px, 3vw, 30px);
+  border-bottom: 1px solid var(--line);
   background: #0d141c66;
 }
-.gmail-attachments h3 {
-  margin: 0 0 8px;
+.gmail-attachments-toggle {
+  padding: 2px 0;
+  border: 0;
+  background: none;
   color: var(--muted);
+  font: inherit;
   font-size: .72rem;
   letter-spacing: .05em;
   text-transform: uppercase;
+  cursor: pointer;
 }
-.gmail-attachment-list { display: grid; gap: 6px; }
-.gmail-attachment {
+.gmail-attachments-toggle::before { content: "▸ "; }
+.gmail-attachments-toggle[aria-expanded="true"]::before { content: "▾ "; }
+.gmail-attachments-toggle:hover { color: var(--text); }
+.gmail-attachment-list {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  background: var(--panel);
+  gap: 6px;
+  margin-top: 6px;
 }
-.gmail-attachment-info { flex: 1; min-width: 0; }
+.gmail-attachment-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: min(100%, 300px);
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.gmail-attachment-chip:hover { border-color: var(--accent); }
+.gmail-attachment-chip:disabled { opacity: .6; cursor: progress; }
+.gmail-attachment-chip.is-inline { border-style: dashed; }
 .gmail-attachment-name {
-  display: block;
+  min-width: 0;
   overflow: hidden;
-  font-size: .82rem;
+  font-size: .8rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.gmail-attachment-meta { display: block; color: var(--muted); font-size: .7rem; }
+.gmail-attachment-meta { flex: none; color: var(--muted); font-size: .7rem; }
 
 /* Compose */
 
@@ -602,6 +758,44 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-field input:focus,
 .gmail-field textarea:focus { border-color: var(--accent); }
 .gmail-field textarea { min-height: 160px; line-height: 1.45; resize: vertical; }
+/* Address suggestions: a dropdown over the fields below, like any
+   autocomplete.  Subject + message under Cc/Ccn are taller than the list, so
+   it stays inside the (scrolling) compose body. */
+.gmail-field:has(> .gmail-suggestions) { position: relative; }
+.gmail-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  z-index: 20;
+  display: grid;
+  max-height: 248px;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  list-style: none;
+  box-shadow: 0 10px 24px #0008;
+}
+.gmail-suggestion {
+  display: grid;
+  gap: 1px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.gmail-suggestion[aria-selected="true"],
+.gmail-suggestion:hover { background: var(--panel-raised); }
+.gmail-suggestion-name { font-size: .85rem; }
+.gmail-suggestion-email {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: .76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .gmail-compose-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .gmail-reply-ref {
   margin: 0;
@@ -682,10 +876,11 @@ body.gmail-active #gmail-view { display: flex; }
   #gmail-view.gmail-detail-open .gmail-list-pane { display: none; }
   #gmail-view.gmail-detail-open .gmail-detail-pane { display: flex; }
   #gmail-reader-back { display: inline-grid; }
+  /* With a message open the reader's own back button returns to the list:
+     a second "back to chats" arrow right above it would only confuse. */
+  #gmail-view.gmail-detail-open .gmail-back-button { display: none; }
 
-  .gmail-reader-header { padding-top: 12px; }
   .gmail-reader-body { padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
-  .gmail-attachments { max-height: 38%; }
 
   .gmail-compose-dialog {
     width: 100vw;

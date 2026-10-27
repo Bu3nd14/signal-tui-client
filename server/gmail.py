@@ -26,7 +26,7 @@ import threading
 import time
 import unicodedata
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -36,11 +36,12 @@ from email.header import decode_header, make_header
 from email.message import EmailMessage, Message
 from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datetime
 from fractions import Fraction
-from functools import lru_cache
+from functools import lru_cache, partial
+from html import unescape as _html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote_to_bytes
+from urllib.parse import unquote, unquote_to_bytes
 
 from filename_utils import sanitize_filename
 from protocols import config
@@ -64,7 +65,11 @@ _MAX_BULK_DELETE = 200
 _LIST_WINDOW = 200
 _MAX_HTML_CHARS = 1_000_000
 _HTML_MAX_TAGS = 8_000
-_HTML_MAX_STYLE_ATTRS = 400
+# Inlined <style> CSS gives most elements a style attribute, so the count cap
+# is generous; the real work bound is the total declaration budget (same
+# tinycss2 work as the former 400 attributes x 32 declarations).
+_HTML_MAX_STYLE_ATTRS = 2_000
+_HTML_MAX_STYLE_DECLS_TOTAL = 12_800
 _HTML_MAX_TEXT_CHARS = 1_000_000
 _HTML_MAX_OUTPUT_CHARS = 1_000_000
 _HTML_MAX_DEPTH = 128
@@ -75,6 +80,9 @@ _IMAGE_URL_MAX_LEN = 4_096
 _STYLE_MAX_LEN = 1_024
 _STYLE_SERIALIZED_MAX = 2_048
 _STYLE_MAX_DECLS = 32
+# Limits for inlining <style> blocks (css-inline): stylesheet size and rules.
+_INLINE_CSS_MAX_CHARS = 65_536
+_INLINE_CSS_MAX_RULES = 1_000
 _GMAIL_LIST_CACHE_TTL_S = 15
 _INBOX_CACHE_MAX_ENTRIES = 16
 _LIST_FETCH_ITEM = (
@@ -124,6 +132,7 @@ _ALLOWED_HTML_TAGS = frozenset(
         "em",
         "figcaption",
         "figure",
+        "font",
         "h1",
         "h2",
         "h3",
@@ -159,16 +168,20 @@ _ALLOWED_HTML_TAGS = frozenset(
     }
 )
 _ALLOWED_HTML_ATTRIBUTES = {
-    "*": {"style"},
+    "*": {"dir", "style"},
     "a": {"href", "title"},
+    "blockquote": {"data-quote"},
+    "font": {"color", "face", "size"},
     "col": {"align", "bgcolor", "span", "valign", "width"},
     "colgroup": {"align", "bgcolor", "span", "valign", "width"},
+    "div": {"data-bg", "data-quote"},
     "img": {"align", "alt", "data-src", "height", "width"},
     "li": {"value"},
     "ol": {"start"},
     "table": {
         "align",
         "bgcolor",
+        "data-bg",
         "border",
         "cellpadding",
         "cellspacing",
@@ -178,6 +191,7 @@ _ALLOWED_HTML_ATTRIBUTES = {
     "td": {
         "align",
         "bgcolor",
+        "data-bg",
         "colspan",
         "height",
         "rowspan",
@@ -187,6 +201,7 @@ _ALLOWED_HTML_ATTRIBUTES = {
     "th": {
         "align",
         "bgcolor",
+        "data-bg",
         "colspan",
         "height",
         "rowspan",
@@ -743,8 +758,21 @@ def _add_flag(flags: Iterable[str], flag: str) -> list[str]:
     return current
 
 
+def _remove_flag(flags: Iterable[str], flag: str) -> list[str]:
+    """Remove *flag* case-insensitively, keeping the other flags' order."""
+    lowered = flag.lower()
+    return [existing for existing in flags if existing.lower() != lowered]
+
+
 def _mark_read_cached(folder_value: str, account_fingerprint: str, uid: int) -> None:
     """Advance the epoch and patch the current folder entry in place."""
+    _set_seen_cached(folder_value, account_fingerprint, uid, True)
+
+
+def _set_seen_cached(
+    folder_value: str, account_fingerprint: str, uid: int, seen: bool
+) -> None:
+    """Patch the ``\\Seen`` state of *uid* in the cached folder entry."""
     global _inbox_epoch
     key = (folder_value, account_fingerprint)
     with _inbox_cache_lock:
@@ -755,12 +783,15 @@ def _mark_read_cached(folder_value: str, account_fingerprint: str, uid: int) -> 
         updated: list[dict[str, Any]] = []
         changed = False
         for message in entry.messages:
-            if message.get("uid") == uid and not message.get("seen"):
+            if message.get("uid") == uid and bool(message.get("seen")) != seen:
                 replacement = dict(message)
+                flags = message.get("flags", ())
                 replacement["flags"] = _canonical_flags(
-                    _add_flag(message.get("flags", ()), "\\Seen")
+                    _add_flag(flags, "\\Seen")
+                    if seen
+                    else _remove_flag(flags, "\\Seen")
                 )
-                replacement["seen"] = True
+                replacement["seen"] = seen
                 updated.append(replacement)
                 changed = True
             else:
@@ -869,6 +900,45 @@ def status_snapshot() -> dict[str, Any]:
     }
 
 
+def _first_int(data: Iterable[object]) -> int | None:
+    for item in data or ():
+        if isinstance(item, (bytes, bytearray)) and item.strip().isdigit():
+            return int(item)
+    return None
+
+
+def fetch_unread_status(folder: str | None = None) -> dict[str, int | None]:
+    """Unread count among the messages the list shows, plus ``UIDNEXT``.
+
+    Only the newest ``_LIST_WINDOW`` (200) messages count, like the list: a
+    mailbox with years of unread mail would otherwise keep the badge at
+    thousands.  Sequence numbers follow UID order, so the window is the
+    sequence range ``EXISTS-199:EXISTS``: a read-only ``SELECT`` (message count
+    and ``UIDNEXT``) plus one ``SEARCH UNSEEN`` on that range, no message data.
+    ``UIDNEXT`` grows when new mail arrives, so callers can tell "new mail"
+    from "read on another device".  Raises the usual Gmail errors.
+    """
+    settings = load_settings()
+    folder_value = validate_folder(folder or settings.folder)
+    with imap_connect(settings) as connection:
+        status, data = connection.select(_mailbox(folder_value), readonly=True)
+        if status != "OK":
+            raise GmailUpstreamError("Cartella non disponibile")
+        exists = _first_int(data)
+        if exists is None:
+            raise GmailUpstreamError("Stato cartella non disponibile")
+        _, uidnext_data = connection.response("UIDNEXT")
+        uidnext = _first_int(uidnext_data)
+        if exists == 0:
+            return {"unread": 0, "uidnext": uidnext}
+        first = max(1, exists - _LIST_WINDOW + 1)
+        status, data = connection.search(None, "UNSEEN", f"{first}:{exists}")
+    if status != "OK":
+        raise GmailUpstreamError("Stato cartella non disponibile")
+    matches = b" ".join(item for item in data or [] if isinstance(item, bytes))
+    return {"unread": len(matches.split()), "uidnext": uidnext}
+
+
 def validate_folder(folder: str | None = None) -> str:
     """Return a safe mailbox name or raise :class:`GmailValidationError`."""
     if folder is not None and not isinstance(folder, str):
@@ -892,8 +962,16 @@ def validate_header_value(value: str, field: str = "header") -> str:
     return value.strip()
 
 
+_ADDRESS_SEPARATORS_RE = re.compile(r"^[\s,]+|[\s,]+$")
+_ADDRESS_EMPTY_ITEMS_RE = re.compile(r",(?:\s*,)+")
+
+
 def _parse_addresses(raw: str, field: str) -> list[str]:
     value = validate_header_value(raw or "", field)
+    # Empty list items ("a@x.it," as left by the compose autocomplete, ",,"):
+    # Python's strict getaddresses (3.13+) rejects the WHOLE list as
+    # [('', '')] when the value ends with a comma, so drop them first.
+    value = _ADDRESS_EMPTY_ITEMS_RE.sub(",", _ADDRESS_SEPARATORS_RE.sub("", value))
     if not value:
         return []
     addresses = [
@@ -1633,6 +1711,159 @@ def verify_image_token(token: str) -> str:
         return ""
 
 
+# Inline (``cid:``) images are MIME parts of the message, served by the same
+# signed proxy.  Their payload is not a URL but ``gmail-part:`` + expiry, uid,
+# attachment index and folder.  Only the server signs it (remote URLs are
+# signed only when they are http/https), and unlike remote images it gives
+# access to mailbox content without the Bearer token, so it expires.
+_PART_IMAGE_PREFIX = "gmail-part:"
+_PART_IMAGE_TTL_S = 24 * 3600
+
+
+def sign_part_image_url(
+    folder: str, uid: int, index: int, *, now: float | None = None
+) -> str:
+    """Signed proxy URL for attachment *index* of message *uid* (expires)."""
+    expires = int((time.time() if now is None else now) + _PART_IMAGE_TTL_S)
+    return sign_image_url(f"{_PART_IMAGE_PREFIX}{expires}:{uid}:{index}:{folder}")
+
+
+def parse_part_image(
+    payload: str, *, now: float | None = None
+) -> tuple[str, int, int] | None:
+    """``(folder, uid, index)`` of a verified ``gmail-part:`` payload, if valid.
+
+    Returns ``None`` for remote-image payloads, expired or malformed ones.
+    """
+    if not payload.startswith(_PART_IMAGE_PREFIX):
+        return None
+    fields = payload[len(_PART_IMAGE_PREFIX) :].split(":", 3)
+    if len(fields) != 4:
+        return None
+    expires, uid, index, folder = fields
+    if not (expires.isdigit() and uid.isdigit() and index.isdigit()):
+        return None
+    if int(expires) < (time.time() if now is None else now):
+        return None
+    try:
+        folder = validate_folder(folder)
+    except GmailValidationError:
+        return None
+    return folder, int(uid), int(index)
+
+
+def _cid_image_urls(
+    attachments: Iterable[dict[str, Any]], folder: str, uid: int
+) -> dict[str, str]:
+    """Signed proxy URL of every inline image, keyed by lowercase Content-ID."""
+    urls: dict[str, str] = {}
+    for attachment in attachments:
+        content_id = str(attachment.get("content_id") or "").lower()
+        if attachment.get("inline") and content_id:
+            urls[content_id] = sign_part_image_url(folder, uid, attachment["index"])
+    return urls
+
+
+# Inline images are downloaded with the message itself (same IMAP FETCH as the
+# text parts) and kept here, so the image proxy serves them without opening
+# IMAP sessions of its own: one per image cost 0.5-0.8 s and, with the pool
+# capped at 4 connections, delayed the next message opened.  Bounded by bytes
+# and age; a miss (restart, eviction) falls back to fetch_attachment.
+_INLINE_PREFETCH_PART_MAX = 2 * 1024 * 1024
+_INLINE_PREFETCH_TOTAL_MAX = 6 * 1024 * 1024
+_INLINE_CACHE_MAX_BYTES = 32 * 1024 * 1024
+_INLINE_CACHE_TTL_S = 3600
+_inline_cache: OrderedDict[tuple[str, int, int], tuple[float, bytes]] = OrderedDict()
+_inline_cache_bytes = 0
+_inline_cache_lock = threading.Lock()
+
+
+def _inline_cache_put(folder: str, uid: int, index: int, data: bytes) -> None:
+    global _inline_cache_bytes
+    if not data or len(data) > _INLINE_PREFETCH_PART_MAX:
+        return
+    key = (folder, uid, index)
+    with _inline_cache_lock:
+        previous = _inline_cache.pop(key, None)
+        if previous is not None:
+            _inline_cache_bytes -= len(previous[1])
+        _inline_cache[key] = (time.monotonic(), data)
+        _inline_cache_bytes += len(data)
+        while _inline_cache_bytes > _INLINE_CACHE_MAX_BYTES and _inline_cache:
+            _, (_, evicted) = _inline_cache.popitem(last=False)
+            _inline_cache_bytes -= len(evicted)
+
+
+def cached_inline_image(folder: str, uid: int, index: int) -> bytes | None:
+    """Bytes of a prefetched inline image, or ``None`` (missing or expired)."""
+    global _inline_cache_bytes
+    key = (folder, uid, index)
+    with _inline_cache_lock:
+        entry = _inline_cache.get(key)
+        if entry is None:
+            return None
+        stored_at, data = entry
+        if time.monotonic() - stored_at > _INLINE_CACHE_TTL_S:
+            del _inline_cache[key]
+            _inline_cache_bytes -= len(data)
+            return None
+        _inline_cache.move_to_end(key)
+        return data
+
+
+def clear_inline_image_cache() -> None:
+    global _inline_cache_bytes
+    with _inline_cache_lock:
+        _inline_cache.clear()
+        _inline_cache_bytes = 0
+
+
+def _inline_image_candidates(index: _PartMap) -> list[_MimePart]:
+    """Parts worth fetching with the text: small images that may be ``cid:``.
+
+    Decided from BODYSTRUCTURE alone (before the HTML is known); only the
+    ones the HTML really references are cached afterwards.
+    """
+    selected: list[_MimePart] = []
+    total = 0
+    for part in index.attachments:
+        if (
+            part.maintype != "image"
+            or not part.content_id
+            or (part.disposition or "").lower() == "attachment"
+            or part.octets is None
+            or part.octets > _INLINE_PREFETCH_PART_MAX
+            or total + part.octets > _INLINE_PREFETCH_TOTAL_MAX
+        ):
+            continue
+        selected.append(part)
+        total += part.octets
+    return selected
+
+
+def _cache_inline_images(
+    folder: str,
+    uid: int,
+    index: _PartMap,
+    attachments: Iterable[dict[str, Any]],
+    payloads: Mapping[str, bytes],
+) -> None:
+    """Cache the prefetched payloads of the images marked ``inline``."""
+    for attachment in attachments:
+        if not attachment.get("inline"):
+            continue
+        position = attachment["index"]
+        part = index.attachments[position]
+        payload = payloads.get(part.walk_index)
+        if payload is None:
+            continue
+        try:
+            data = _decode_fetched_bytes(part, payload)
+        except _PartFetchError:
+            continue
+        _inline_cache_put(folder, uid, position, data)
+
+
 def _find_tag_end(raw: str, start: int) -> int:
     """Return the index just past ``>``, honouring quoted attribute values."""
     quote = ""
@@ -1763,6 +1994,94 @@ def _render_img_tag(attributes: list[_ScannedAttribute], self_closing: bool) -> 
     return "".join(pieces)
 
 
+_BODY_COLOR_RE = re.compile(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?|[A-Za-z]{1,20}")
+
+
+def _render_body_tag(attributes: list[_ScannedAttribute]) -> tuple[str, bool, int]:
+    """Render ``<body>`` as a ``<div>`` that keeps the page colors.
+
+    nh3 drops ``<body>`` with its attributes, losing the background around the
+    email "card".  ``bgcolor``/``text`` become leading declarations of the
+    div's ``style`` (an explicit body style still wins); the style sanitizer
+    validates every value.  Returns the tag, whether a new ``style`` attribute
+    was created and its declaration count (both count towards the caps).
+    """
+    declarations: list[str] = []
+    existing = ""
+    for attr in attributes:
+        value = (attr.value or "").strip()
+        if attr.lower_name == "style":
+            existing = value.replace('"', "&quot;")
+        elif attr.lower_name in {"bgcolor", "text"} and _BODY_COLOR_RE.fullmatch(value):
+            prop = "background-color" if attr.lower_name == "bgcolor" else "color"
+            declarations.append(f"{prop}:{value}")
+    if existing:
+        declarations.append(existing)
+    if not declarations:
+        return "<div>", False, 0
+    style = ";".join(declarations)
+    return f'<div style="{style}">', not existing, _style_declaration_count(style)
+
+
+_QUOTE_BLOCK_CLASSES = frozenset({"gmail_quote", "yahoo_quoted"})
+_QUOTE_AFTER_IDS = frozenset({"divrplyfwdmsg", "appendonsend"})
+
+
+_BACKGROUND_TAGS = frozenset({"table", "td", "th", "div"})
+_STYLE_BACKGROUND_URL_RE = re.compile(
+    r"""background(?:-image)?\s*:[^;]*?url\(\s*(['"]?)(https?://[^'")\s]+)\1\s*\)""",
+    re.IGNORECASE,
+)
+_SAFE_BACKGROUND_URL_RE = re.compile(r"https?://[^\s\"'<>()]+", re.IGNORECASE)
+
+
+def _background_url(name: str, attributes: list[_ScannedAttribute]) -> str | None:
+    """Remote background image of a table/cell/div, to defer as ``data-bg``.
+
+    Newsletters draw hero banners as cell backgrounds (``<td
+    background="…">`` or ``background-image:url(…)``).  Both would load
+    straight from the sender, so the sanitizer drops them; like ``src`` →
+    ``data-src`` for images, the URL is moved into an inert ``data-bg`` that
+    the attribute filter signs for the proxy and the client applies.
+    """
+    if name not in _BACKGROUND_TAGS:
+        return None
+    values = {attr.lower_name: (attr.value or "").strip() for attr in attributes}
+    if "data-bg" in values:
+        return None
+    candidate = values.get("background", "")
+    if not candidate:
+        match = _STYLE_BACKGROUND_URL_RE.search(values.get("style", ""))
+        candidate = match.group(2) if match else ""
+    if not candidate or len(candidate) > _IMAGE_URL_MAX_LEN:
+        return None
+    return candidate if _SAFE_BACKGROUND_URL_RE.fullmatch(candidate) else None
+
+
+def _quote_marker(name: str, attributes: list[_ScannedAttribute]) -> str | None:
+    """``data-quote`` value for the quoted-text containers of common clients.
+
+    Classes and ids are stripped by the sanitizer, so the reader can only
+    recognize quotes through this marker, added while the scanner still sees
+    them.  ``block``: the element is the quote (Gmail ``div.gmail_quote``,
+    Apple/Thunderbird ``blockquote type=cite``, Yahoo ``div.yahoo_quoted``).
+    ``after``: the quote is the element and everything after it (Outlook's
+    ``divRplyFwdMsg`` header, ``appendonsend``).
+    """
+    if name not in {"div", "blockquote"}:
+        return None
+    values = {attr.lower_name: (attr.value or "").strip() for attr in attributes}
+    if "data-quote" in values:
+        return None
+    if name == "blockquote":
+        return "block" if values.get("type", "").lower() == "cite" else None
+    if _QUOTE_BLOCK_CLASSES & set(values.get("class", "").split()):
+        return "block"
+    if values.get("id", "").lower() in _QUOTE_AFTER_IDS:
+        return "after"
+    return None
+
+
 _OPTIONAL_END_TAGS = frozenset(
     {
         "caption",
@@ -1785,18 +2104,29 @@ _OPTIONAL_END_TAGS = frozenset(
 )
 
 
-def _pre_scan_html(raw: str) -> str:
+def _style_declaration_count(value: str) -> int:
+    """Upper bound of the declarations in a ``style`` value.
+
+    Counted on the entity-decoded text (what tinycss2 parses), so sanitizing
+    never increases it: the output is re-accepted (idempotence).
+    """
+    return sum(1 for part in _html_unescape(value).split(";") if part.strip())
+
+
+def _pre_scan_html(raw: str, styles: list[str] | None = None) -> str:
     """Linear, quote-aware scan with complexity caps and image deferral.
 
     Any cap violation is fail-closed (``""``).  The scanner never backtracks
     and understands comments, CDATA, raw-text elements, void tags, unquoted
-    attributes and ``<`` characters in text.
+    attributes and ``<`` characters in text.  When ``styles`` is given, the
+    contents of real ``<style>`` elements are appended to it.
     """
     length = len(raw)
     out: list[str] = []
     index = 0
     tag_count = 0
     style_count = 0
+    style_decls = 0
     text_chars = 0
     depth = 0
     void_tags = {
@@ -1869,6 +2199,10 @@ def _pre_scan_html(raw: str) -> str:
                     style_count += 1
                     if style_count > _HTML_MAX_STYLE_ATTRS:
                         return ""
+                    if name != "body":
+                        style_decls += _style_declaration_count(attr.value or "")
+                        if style_decls > _HTML_MAX_STYLE_DECLS_TOTAL:
+                            return ""
             if name != "tbody":
                 tag_count += 1
                 if tag_count > _HTML_MAX_TAGS:
@@ -1884,6 +2218,24 @@ def _pre_scan_html(raw: str) -> str:
                     out.append(_render_img_tag(attributes, self_closing))
                 else:
                     out.append(raw[index:end])
+            elif (marker := _quote_marker(name, attributes)) is not None:
+                tag = raw[index:end]
+                cut = 1 + len(name)
+                out.append(f'{tag[:cut]} data-quote="{marker}"{tag[cut:]}')
+            elif name == "body":
+                body_tag, added_style, body_decls = _render_body_tag(attributes)
+                if added_style:
+                    style_count += 1
+                    if style_count > _HTML_MAX_STYLE_ATTRS:
+                        return ""
+                style_decls += body_decls
+                if style_decls > _HTML_MAX_STYLE_DECLS_TOTAL:
+                    return ""
+                out.append(body_tag)
+            elif (background := _background_url(name, attributes)) is not None:
+                tag = raw[index:end]
+                cut = 1 + len(name)
+                out.append(f'{tag[:cut]} data-bg="{background}"{tag[cut:]}')
             else:
                 out.append(raw[index:end])
             index = end
@@ -1899,6 +2251,8 @@ def _pre_scan_html(raw: str) -> str:
                     text_chars += close_start - index
                     if text_chars > _HTML_MAX_TEXT_CHARS:
                         return ""
+                    if name == "style" and styles is not None:
+                        styles.append(raw[index:close_start])
                     out.append(raw[index:close_start])
                     close_parsed = _parse_tag(raw, close_start + 2)
                     if close_parsed is None:
@@ -1910,7 +2264,7 @@ def _pre_scan_html(raw: str) -> str:
                             depth -= 1
                         index = close_end
             continue
-        out.append(raw[index:end])
+        out.append("</div>" if name == "body" else raw[index:end])
         if name not in void_tags and name not in _OPTIONAL_END_TAGS and depth > 0:
             depth -= 1
         index = end
@@ -1922,8 +2276,14 @@ def _safe_image_source(value: str) -> bool:
     return value.startswith(("http://", "https://"))
 
 
-def _filter_image_src(value: str) -> str | None:
+def _filter_image_src(
+    value: str, cid_urls: Mapping[str, str] | None = None
+) -> str | None:
     value = value.strip()
+    if value[:4].lower() == "cid:":
+        # Inline image: only parts the caller mapped to a signed proxy URL.
+        content_id = unquote(value[4:]).strip("<>").lower()
+        return (cid_urls or {}).get(content_id)
     signed = _SIGNED_IMAGE_RE.fullmatch(value)
     if signed:
         token = f"{signed.group(1)}.{signed.group(2)}"
@@ -2381,10 +2741,31 @@ def _validate_font_family(tokens: list[Any]) -> str | None:
     return ", ".join(rendered)
 
 
+def _relative_value(
+    token: Any, *, em_min: float, em_max: float, percent_min: int, percent_max: int
+) -> str | None:
+    """Bounded ``em``/``%`` value (font-relative; bounds limit nesting growth)."""
+    value = _finite_number(token) if token.type == "percentage" else None
+    if token.type == "dimension" and token.unit.lower() == "em":
+        number = token.value
+        if not isinstance(number, (int, float)) or not math.isfinite(number):
+            return None
+        return _serialize(token) if em_min <= number <= em_max else None
+    if value is not None and percent_min <= value <= percent_max:
+        return _serialize(token)
+    return None
+
+
 def _validate_font_size(tokens: list[Any]) -> str | None:
     token = _single_token(tokens)
     if token is None:
         return None
+    if token.type == "percentage" or (
+        token.type == "dimension" and token.unit.lower() == "em"
+    ):
+        return _relative_value(
+            token, em_min=0.5, em_max=2.5, percent_min=50, percent_max=250
+        )
     if token.type == "ident":
         allowed = {
             "xx-small",
@@ -2427,6 +2808,12 @@ def _validate_line_height(tokens: list[Any]) -> str | None:
         if value is None or not 1 <= value <= 3:
             return None
         return _serialize(token)
+    if token.type == "percentage" or (
+        token.type == "dimension" and token.unit.lower() == "em"
+    ):
+        return _relative_value(
+            token, em_min=1, em_max=3, percent_min=100, percent_max=300
+        )
     return _length_value(token, minimum=1, maximum=200)
 
 
@@ -2473,6 +2860,97 @@ def _validate_size(tokens: list[Any]) -> str | None:
     return _length_value(
         token, minimum=0, maximum=1600, allow_percent=True, allow_auto=True
     )
+
+
+def _validate_max_size(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    if token.type == "ident" and token.lower_value == "none":
+        return "none"
+    return _length_value(token, minimum=0, maximum=1600, allow_percent=True)
+
+
+def _validate_text_indent(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    return _length_value(
+        token,
+        minimum=-256,
+        maximum=256,
+        allow_percent=True,
+        percent_min=-100,
+        percent_max=100,
+    )
+
+
+_BACKGROUND_REPEAT = frozenset({"repeat", "no-repeat", "space", "round"})
+_BACKGROUND_REPEAT_AXIS = frozenset({"repeat-x", "repeat-y"})
+_BACKGROUND_POSITION = frozenset({"left", "right", "top", "bottom", "center"})
+
+
+def _validate_background_repeat(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    values: list[str] = []
+    for component in components:
+        token = component[0]
+        if token.type != "ident":
+            return None
+        values.append(token.lower_value)
+    if len(values) == 1 and values[0] in _BACKGROUND_REPEAT | _BACKGROUND_REPEAT_AXIS:
+        return values[0]
+    if len(values) == 2 and all(value in _BACKGROUND_REPEAT for value in values):
+        return " ".join(values)
+    return None
+
+
+def _validate_background_position(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if not 1 <= len(components) <= 2:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        token = component[0]
+        if token.type == "ident" and token.lower_value in _BACKGROUND_POSITION:
+            rendered.append(token.lower_value)
+            continue
+        value = _length_value(
+            token, minimum=-1600, maximum=1600, allow_percent=True, percent_min=0
+        )
+        if value is None:
+            return None
+        rendered.append(value)
+    return " ".join(rendered)
+
+
+def _validate_background_size(tokens: list[Any]) -> str | None:
+    components = _split_whitespace(tokens)
+    if len(components) == 1 and components[0][0].type == "ident":
+        keyword = components[0][0].lower_value
+        return keyword if keyword in {"auto", "cover", "contain"} else None
+    if not 1 <= len(components) <= 2:
+        return None
+    rendered: list[str] = []
+    for component in components:
+        value = _length_value(
+            component[0], minimum=0, maximum=1600, allow_percent=True, allow_auto=True
+        )
+        if value is None:
+            return None
+        rendered.append(value)
+    return " ".join(rendered)
+
+
+def _validate_opacity(tokens: list[Any]) -> str | None:
+    token = _single_token(tokens)
+    if token is None:
+        return None
+    value = _finite_number(token)
+    if value is None:
+        return None
+    limit = 100 if token.type == "percentage" else 1
+    return _serialize(token) if 0 <= value <= limit else None
 
 
 def _validate_margin(tokens: list[Any]) -> str | None:
@@ -2755,6 +3233,40 @@ _STYLE_VALIDATORS = {
     "vertical-align": _validate_vertical_align,
     "width": _validate_size,
     "height": _validate_size,
+    "max-width": _validate_max_size,
+    "max-height": _validate_max_size,
+    "min-width": _validate_size,
+    "min-height": _validate_size,
+    # Only the single-color form; re-serialized as background-color.
+    "background": _validate_color,
+    "text-indent": _validate_text_indent,
+    "list-style-type": _keyword_validator(
+        frozenset(
+            {
+                "none",
+                "disc",
+                "circle",
+                "square",
+                "decimal",
+                "decimal-leading-zero",
+                "lower-alpha",
+                "upper-alpha",
+                "lower-latin",
+                "upper-latin",
+                "lower-roman",
+                "upper-roman",
+            }
+        )
+    ),
+    "direction": _keyword_validator(frozenset({"ltr", "rtl"})),
+    "overflow": _keyword_validator(frozenset({"visible", "hidden", "auto"})),
+    "visibility": _keyword_validator(frozenset({"visible", "hidden"})),
+    "opacity": _validate_opacity,
+    # Layout of deferred backgrounds (data-bg); the image itself never comes
+    # from CSS: url() stays rejected.
+    "background-repeat": _validate_background_repeat,
+    "background-position": _validate_background_position,
+    "background-size": _validate_background_size,
     "float": _keyword_validator(frozenset({"left", "right", "none"})),
     "display": _keyword_validator(
         frozenset(
@@ -2785,6 +3297,8 @@ for _side in ("top", "right", "bottom", "left"):
 for _corner in ("top-left", "top-right", "bottom-right", "bottom-left"):
     _STYLE_VALIDATORS[f"border-{_corner}-radius"] = _validate_border_radius_longhand
 del _side, _corner
+# Shorthands accepted in a restricted form and emitted as their longhand.
+_STYLE_ALIASES = {"background": "background-color"}
 
 
 @lru_cache(maxsize=1)
@@ -2834,7 +3348,7 @@ def _sanitize_style(value: str) -> str | None:
             continue
         if serialized is None:
             continue
-        rendered.append(f"{name}:{serialized}")
+        rendered.append(f"{_STYLE_ALIASES.get(name, name)}:{serialized}")
     if not rendered:
         return None
     result = ";".join(rendered)
@@ -2872,7 +3386,24 @@ def _legacy_bgcolor(value: str) -> str | None:
     value = value.strip()
     if re.fullmatch(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?", value):
         return value.lower()
+    if value.lower() in _NAMED_COLORS:
+        return value.lower()
     return None
+
+
+def _legacy_font_face(value: str) -> str | None:
+    families = [family.strip() for family in value.split(",")]
+    if not 1 <= len(families) <= 8:
+        return None
+    for family in families:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,63}", family):
+            return None
+    return ", ".join(families)
+
+
+def _legacy_font_size(value: str) -> str | None:
+    value = value.strip()
+    return value if re.fullmatch(r"[+-]?[1-7]", value) else None
 
 
 def _legacy_enum(*choices: str) -> Any:
@@ -2941,22 +3472,52 @@ _LEGACY_ATTR_VALIDATORS = {
     ("img", "width"): _legacy_size_validator(10_000),
     ("img", "height"): _legacy_size_validator(2_000),
     ("img", "align"): _legacy_enum("left", "right", "top", "middle", "bottom"),
+    ("font", "color"): _legacy_bgcolor,
+    ("font", "face"): _legacy_font_face,
+    ("font", "size"): _legacy_font_size,
+    # Quoted-text marker added by the scanner (see _quote_marker).
+    ("div", "data-quote"): _legacy_enum("block", "after"),
+    ("blockquote", "data-quote"): _legacy_enum("block", "after"),
+}
+# Attributes allowed on every tag (``"*"`` in ``_ALLOWED_HTML_ATTRIBUTES``).
+_GLOBAL_ATTR_VALIDATORS = {
+    "dir": _legacy_enum("ltr", "rtl", "auto"),
 }
 
 
-def _html_attribute_filter(tag: str, attribute: str, value: str) -> str | None:
+def _html_attribute_filter(
+    tag: str,
+    attribute: str,
+    value: str,
+    style_cache: dict[str, str | None] | None = None,
+    cid_urls: Mapping[str, str] | None = None,
+) -> str | None:
+    """nh3 attribute callback; *style_cache* memoizes styles of one document.
+
+    Inlined ``<style>`` CSS repeats the same ``style`` value on many elements
+    (e.g. 533 attributes, 95 distinct), so parsing each value once matters.
+    """
     try:
         normalized_tag = tag.lower()
         normalized_attribute = attribute.lower()
         if normalized_attribute == "style":
             if os.environ.get("GMAIL_HTML_STYLES", "1").strip() == "0":
                 return None
-            return _sanitize_style(value)
-        validator = _LEGACY_ATTR_VALIDATORS.get((normalized_tag, normalized_attribute))
+            if style_cache is None:
+                return _sanitize_style(value)
+            if value not in style_cache:
+                style_cache[value] = _sanitize_style(value)
+            return style_cache[value]
+        validator = _LEGACY_ATTR_VALIDATORS.get(
+            (normalized_tag, normalized_attribute)
+        ) or _GLOBAL_ATTR_VALIDATORS.get(normalized_attribute)
         if validator is not None:
             return validator(value)
+        if normalized_attribute == "data-bg":
+            # Deferred background (see _background_url): same signing as images.
+            return _filter_image_src(value, cid_urls)
         if normalized_tag == "img" and normalized_attribute == "data-src":
-            return _filter_image_src(value)
+            return _filter_image_src(value, cid_urls)
         if len(value) > _ATTR_VALUE_MAX_LEN:
             return None
         return value
@@ -2964,7 +3525,112 @@ def _html_attribute_filter(tag: str, attribute: str, value: str) -> str | None:
         return None
 
 
-def sanitize_html(raw: str) -> str:
+# Selectors that depend on user interaction or generate content: an inliner
+# cannot evaluate them, and applying them unconditionally would be wrong.
+_STATEFUL_SELECTOR_RE = re.compile(
+    r"::|:(?:hover|focus|focus-within|focus-visible|active|visited|target|checked)\b",
+    re.IGNORECASE,
+)
+
+
+@lru_cache(maxsize=1)
+def _warn_missing_css_inline() -> None:
+    logger.warning("css-inline non installato: CSS dei blocchi <style> ignorato")
+
+
+# Pure function of the CSS text; newsletters from one sender share their
+# stylesheet, so a small cache skips the tinycss2 parse on the next ones.
+@lru_cache(maxsize=32)
+def _filter_stylesheet(css: str) -> str:
+    """Reduce ``<style>`` CSS to plain rules with allow-listed declarations.
+
+    At-rules (``@media``, ``@import``, ``@font-face``…) and stateful selectors
+    are dropped; every declaration is validated and re-serialized as in
+    ``_sanitize_style`` (``!important`` is kept only to resolve the cascade:
+    the final style sanitizer strips it).  This keeps the inlined ``style``
+    attributes short; it is not the security boundary, which stays the
+    sanitizer run on the inlined document.
+    """
+    if not css or len(css) > _INLINE_CSS_MAX_CHARS:
+        return ""
+    import tinycss2
+
+    rendered: list[str] = []
+    for rule in tinycss2.parse_stylesheet(
+        css, skip_comments=True, skip_whitespace=True
+    ):
+        if rule.type != "qualified-rule":
+            continue
+        if len(rendered) >= _INLINE_CSS_MAX_RULES:
+            break
+        selectors = [
+            selector
+            for selector in (
+                tinycss2.serialize(part).strip()
+                for part in _split_literal(rule.prelude, ",")
+            )
+            if selector and not _STATEFUL_SELECTOR_RE.search(selector)
+        ]
+        if not selectors:
+            continue
+        declarations: list[str] = []
+        for declaration in tinycss2.parse_declaration_list(
+            rule.content, skip_comments=True, skip_whitespace=True
+        ):
+            if declaration.type != "declaration":
+                continue
+            name = declaration.lower_name
+            validator = _STYLE_VALIDATORS.get(name)
+            tokens = _strip_whitespace(declaration.value)
+            if validator is None or not tokens or not _tokens_are_safe(tokens):
+                continue
+            value = validator(tokens)
+            if value is None:
+                continue
+            important = " !important" if declaration.important else ""
+            declarations.append(f"{_STYLE_ALIASES.get(name, name)}:{value}{important}")
+        if declarations:
+            rendered.append(f"{', '.join(selectors)}{{{';'.join(declarations)}}}")
+    return "\n".join(rendered)
+
+
+def _scan_inlined_html(raw: str, styles: list[str]) -> str:
+    """Apply the email's ``<style>`` CSS as inline styles, then scan it again.
+
+    Returns ``""`` whenever inlining is disabled, unavailable or fails, so the
+    caller falls back to the document without inlining.
+    """
+    if os.environ.get("GMAIL_HTML_INLINE_CSS", "1").strip() == "0":
+        return ""
+    if os.environ.get("GMAIL_HTML_STYLES", "1").strip() == "0":
+        return ""
+    try:
+        import css_inline
+    except ImportError:
+        _warn_missing_css_inline()
+        return ""
+    try:
+        css = _filter_stylesheet("\n".join(styles))
+        if not css:
+            return ""
+        inliner = css_inline.CSSInliner(
+            inline_style_tags=False,
+            keep_style_tags=False,
+            keep_link_tags=False,
+            keep_at_rules=False,
+            load_remote_stylesheets=False,
+            extra_css=css,
+        )
+        inlined = inliner.inline(raw)
+        if not isinstance(inlined, str) or len(inlined) > _MAX_HTML_CHARS:
+            return ""
+        return _pre_scan_html(inlined)
+    except Exception:
+        logger.warning("Inlining CSS fallito", exc_info=True)
+        return ""
+
+
+def sanitize_html(raw: str, cid_urls: Mapping[str, str] | None = None) -> str:
     """Return a conservative, script-free HTML fragment for the reader.
 
     Email HTML is fully attacker-controlled.  Rendering it with ``innerHTML``
@@ -2973,7 +3639,12 @@ def sanitize_html(raw: str) -> str:
     attributes, URL schemes and CSS; remote images are rewritten to signed
     same-origin proxy URLs in ``data-src`` and loaded by default in the client
     (tracking accepted by the user), never fetched directly by the browser.
-    Inline CSS is re-serialized from a strict allow-list with ``tinycss2``.
+    Inline CSS is re-serialized from a strict allow-list with ``tinycss2``;
+    ``<style>`` blocks are first inlined (``css-inline``) so their rules go
+    through the same allow-list.  If the inlined document is rejected, the
+    original one is sanitized instead.  ``cid_urls`` maps the lowercase
+    Content-ID of inline images to their signed proxy URL; without it
+    ``cid:`` images are dropped.
     """
     if not raw or len(raw) > _MAX_HTML_CHARS:
         return ""
@@ -2986,20 +3657,36 @@ def sanitize_html(raw: str) -> str:
     except ImportError:
         logger.warning("nh3 non installato: rendering HTML disabilitato")
         return ""
+    styles: list[str] = []
     try:
-        scanned = _pre_scan_html(raw)
+        scanned = _pre_scan_html(raw, styles)
     except Exception:
         logger.warning("Scansione HTML fallita", exc_info=True)
         return ""
     if not scanned:
         return ""
+    if styles:
+        inlined = _scan_inlined_html(raw, styles)
+        if inlined:
+            result = _clean_scanned_html(nh3, inlined, cid_urls)
+            if result:
+                return result
+    return _clean_scanned_html(nh3, scanned, cid_urls)
+
+
+def _clean_scanned_html(
+    nh3: Any, scanned: str, cid_urls: Mapping[str, str] | None = None
+) -> str:
+    """Run nh3 on a pre-scanned document and enforce the output invariants."""
     try:
         result = nh3.clean(
             scanned,
             tags=set(_ALLOWED_HTML_TAGS),
             clean_content_tags=set(_CLEAN_CONTENT_TAGS),
             attributes=_ALLOWED_HTML_ATTRIBUTES,
-            attribute_filter=_html_attribute_filter,
+            attribute_filter=partial(
+                _html_attribute_filter, style_cache={}, cid_urls=cid_urls
+            ),
             url_schemes={"http", "https", "mailto"},
             url_relative="deny",
             link_rel="noopener noreferrer",
@@ -3025,14 +3712,41 @@ def sanitize_html(raw: str) -> str:
     return result
 
 
-def _extract_html(message: Message) -> str:
+def _raw_html(message: Message) -> str:
     parts: list[str] = []
     for part in message.walk():
         if part.is_multipart() or _is_attachment_part(part):
             continue
         if part.get_content_type() == "text/html":
             parts.append(_payload_text(part))
-    return sanitize_html("\n".join(parts))
+    return "\n".join(parts)
+
+
+def _extract_html(message: Message) -> str:
+    return sanitize_html(_raw_html(message))
+
+
+_CID_REFERENCE_RE = re.compile(r"""cid:([^\s"'<>()]+)""", re.IGNORECASE)
+
+
+def _mark_inline_images(attachments: list[dict[str, Any]], raw_html: str) -> None:
+    """Flag image parts that the HTML body shows via ``cid:`` as ``inline``.
+
+    A ``Content-ID`` alone is not enough (Apple Mail sets one on regular
+    attachments too): the part must be referenced by the raw HTML.
+    """
+    referenced = {
+        unquote(match).strip("<>").lower()
+        for match in _CID_REFERENCE_RE.findall(raw_html)
+    }
+    for attachment in attachments:
+        content_id = (attachment.get("content_id") or "").lower()
+        content_type = str(attachment.get("content_type") or "")
+        attachment["inline"] = bool(
+            content_id
+            and content_id in referenced
+            and content_type.startswith("image/")
+        )
 
 
 def _extract_text(message: Message) -> str:
@@ -3091,8 +3805,23 @@ def _extract_attachments(
     return attachments
 
 
-def _parse_full(raw: bytes, part_map: _PartMap | None = None) -> dict[str, Any]:
+def _parse_full(
+    raw: bytes,
+    part_map: _PartMap | None = None,
+    *,
+    folder: str | None = None,
+    uid: int | None = None,
+) -> dict[str, Any]:
+    """Parse a full message; with *folder*/*uid* inline images get proxy URLs."""
     message = message_from_bytes(raw)
+    raw_html = _raw_html(message)
+    attachments = _extract_attachments(message, part_map)
+    _mark_inline_images(attachments, raw_html)
+    cid_urls = (
+        _cid_image_urls(attachments, folder, uid)
+        if folder is not None and uid is not None
+        else None
+    )
     return {
         "from": decode_mime_header(message.get("From")),
         "to": decode_mime_header(message.get("To")),
@@ -3103,8 +3832,8 @@ def _parse_full(raw: bytes, part_map: _PartMap | None = None) -> dict[str, Any]:
         "in_reply_to": decode_mime_header(message.get("In-Reply-To")).strip(),
         "references": decode_mime_header(message.get("References")).strip(),
         "text": _extract_text(message),
-        "html": _extract_html(message),
-        "attachments": _extract_attachments(message, part_map),
+        "html": sanitize_html(raw_html, cid_urls),
+        "attachments": attachments,
     }
 
 
@@ -3174,6 +3903,30 @@ def _reply_subject(subject: str) -> str:
     return f"Re: {subject}" if subject else "Re:"
 
 
+def _forward_subject(subject: str) -> str:
+    if subject.lower().startswith(("fwd:", "fw:", "i:")):
+        return subject
+    return f"Fwd: {subject}" if subject else "Fwd:"
+
+
+def append_forward(user_text: str, original: dict[str, Any]) -> str:
+    """Append the forwarded message (header block + original text) once."""
+    lines = ["---------- Messaggio inoltrato ----------"]
+    lines.append(f"Da: {original.get('from') or ''}")
+    date_ts = original.get("date_ts")
+    if date_ts:
+        lines.append(f"Data: {formatdate(float(date_ts), localtime=True)}")
+    lines.append(f"Oggetto: {original.get('subject') or ''}")
+    lines.append(f"A: {original.get('to') or ''}")
+    if original.get("cc"):
+        lines.append(f"Cc: {original['cc']}")
+    block = "\n".join(lines)
+    text = (original.get("text") or "").strip()
+    forwarded = f"{block}\n\n{text}" if text else block
+    body = (user_text or "").rstrip()
+    return f"{body}\n\n{forwarded}" if body else forwarded
+
+
 def _mailbox(folder: str) -> str:
     return f'"{folder}"'
 
@@ -3223,8 +3976,12 @@ def _parse_list_entry(raw: bytes) -> tuple[set[str], str] | None:
     return (flags, name) if name else None
 
 
-def _find_trash_mailbox(connection: imaplib.IMAP4) -> str:
-    """Return the special-use ``\\Trash`` mailbox, falling back to Gmail's name."""
+def _find_special_mailbox(connection: imaplib.IMAP4, flag: str, fallback: str) -> str:
+    """Return the special-use mailbox carrying *flag* (``\\trash``, ``\\sent``…).
+
+    Gmail localizes these names (``[Gmail]/Posta inviata``), so they are found
+    through their LIST attribute; *fallback* is Gmail's English name.
+    """
     try:
         status, data = connection.list('""', '"*"')
     except (imaplib.IMAP4.error, OSError):
@@ -3234,9 +3991,126 @@ def _find_trash_mailbox(connection: imaplib.IMAP4) -> str:
             if not isinstance(item, (bytes, bytearray)):
                 continue
             parsed = _parse_list_entry(bytes(item))
-            if parsed and "\\trash" in parsed[0]:
+            if parsed and flag in parsed[0]:
                 return parsed[1]
-    return "[Gmail]/Trash"
+    return fallback
+
+
+def _find_trash_mailbox(connection: imaplib.IMAP4) -> str:
+    """Return the special-use ``\\Trash`` mailbox, falling back to Gmail's name."""
+    return _find_special_mailbox(connection, "\\trash", "[Gmail]/Trash")
+
+
+# Address book for the compose autocomplete, built from the headers of the
+# latest messages: people we write to (Sent) weigh more than people who write
+# to us (Inbox From); other recipients of inbox mail weigh a little.  Google
+# Contacts would need OAuth (CardDAV/People API), not an app password.
+_ADDRESS_BOOK_WINDOW = 500
+_ADDRESS_BOOK_TTL_S = 15 * 60
+_ADDRESS_BOOK_MAX = 2000
+_ADDRESS_BOOK_FETCH_ITEM = "(BODY.PEEK[HEADER.FIELDS (FROM TO CC DATE)])"
+_NOREPLY_RE = re.compile(
+    r"(^|[._+-])(no-?reply|do-?not-?reply|mailer-daemon|bounces?)([._+-]|@)",
+    re.IGNORECASE,
+)
+_address_book_cache: tuple[float, str, list[dict[str, Any]]] | None = None
+_address_book_lock = threading.Lock()
+
+
+def clear_address_book_cache() -> None:
+    global _address_book_cache
+    with _address_book_lock:
+        _address_book_cache = None
+
+
+def _collect_addresses(
+    entries: dict[str, dict[str, Any]],
+    headers: bytes,
+    weights: dict[str, float],
+    own: str,
+) -> None:
+    message = message_from_bytes(headers)
+    date_ts = _date_to_ts(message.get("Date")) or 0
+    for header, weight in weights.items():
+        values = [str(value) for value in message.get_all(header, [])]
+        for raw_name, raw_email in getaddresses(values):
+            email = raw_email.strip().lower()
+            if (
+                not email
+                or "@" not in email
+                or email == own
+                or _NOREPLY_RE.search(email)
+                or any(char in email for char in ' <>,;"')
+            ):
+                continue
+            name = decode_mime_header(raw_name).strip().strip('"').strip()
+            entry = entries.setdefault(
+                email, {"email": email, "name": "", "score": 0.0, "last_ts": 0}
+            )
+            entry["score"] += weight
+            # Keep the name used in the most recent message that had one.
+            if name and name.lower() != email and date_ts >= entry["last_ts"]:
+                entry["name"] = name
+            entry["last_ts"] = max(entry["last_ts"], date_ts)
+
+
+def fetch_address_book(*, refresh: bool = False) -> list[dict[str, Any]]:
+    """Addresses from the latest Sent and Inbox headers, best first.
+
+    Read-only (``SELECT … READ-ONLY`` + ``BODY.PEEK`` of four header fields of
+    the last ``_ADDRESS_BOOK_WINDOW`` messages per folder); cached per account
+    for ``_ADDRESS_BOOK_TTL_S``.  The account's own address and no-reply
+    senders are left out.
+    """
+    global _address_book_cache
+    settings = load_settings()
+    fingerprint = _account_fingerprint(settings)
+    now = time.monotonic()
+    with _address_book_lock:
+        cached = _address_book_cache
+        if (
+            not refresh
+            and cached is not None
+            and cached[1] == fingerprint
+            and now - cached[0] < _ADDRESS_BOOK_TTL_S
+        ):
+            return [dict(entry) for entry in cached[2]]
+    own = settings.address.strip().lower()
+    entries: dict[str, dict[str, Any]] = {}
+    with imap_connect(settings) as connection:
+        sent = _find_special_mailbox(connection, "\\sent", "[Gmail]/Sent Mail")
+        sources = (
+            (sent, {"To": 3.0, "Cc": 2.0}),
+            (validate_folder(settings.folder), {"From": 1.0, "To": 0.25, "Cc": 0.25}),
+        )
+        for folder, weights in sources:
+            status, data = connection.select(_mailbox(folder), readonly=True)
+            if status != "OK":
+                continue
+            exists = _first_int(data) or 0
+            if not exists:
+                continue
+            first = max(1, exists - _ADDRESS_BOOK_WINDOW + 1)
+            status, data = connection.fetch(
+                f"{first}:{exists}", _ADDRESS_BOOK_FETCH_ITEM
+            )
+            if status != "OK":
+                continue
+            for item in data or []:
+                if (
+                    isinstance(item, tuple)
+                    and len(item) >= 2
+                    and isinstance(item[1], bytes)
+                ):
+                    _collect_addresses(entries, item[1], weights, own)
+    ranked = sorted(
+        entries.values(), key=lambda entry: (-entry["score"], -entry["last_ts"])
+    )[:_ADDRESS_BOOK_MAX]
+    for entry in ranked:
+        entry["score"] = round(entry["score"], 2)
+    with _address_book_lock:
+        _address_book_cache = (time.monotonic(), fingerprint, ranked)
+    return [dict(entry) for entry in ranked]
 
 
 def _uidvalidity(connection: imaplib.IMAP4) -> int:
@@ -3429,11 +4303,16 @@ def _fetch_part_payloads(
 
 
 def _fetch_render_parts(
-    connection: imaplib.IMAP4, uid: int, index: _PartMap
+    connection: imaplib.IMAP4,
+    uid: int,
+    index: _PartMap,
+    extra: Iterable[_MimePart] = (),
 ) -> dict[str, bytes]:
+    """Fetch the text parts (plus *extra* parts) in one ``UID FETCH``."""
     selected = [part.walk_index for part in index.render_parts]
     if len(selected) > _MAX_RENDER_PARTS:
         raise _PartFetchError
+    selected += [part.walk_index for part in extra]
     return _fetch_part_payloads(connection, uid, selected)
 
 
@@ -3486,7 +4365,10 @@ def _safe_part_filename(part: _MimePart, index: int) -> str:
 
 
 def _assemble_detail(
-    uid: int, record: _StructureRecord, payloads: dict[str, bytes]
+    uid: int,
+    record: _StructureRecord,
+    payloads: dict[str, bytes],
+    folder: str | None = None,
 ) -> dict[str, Any]:
     headers = message_from_bytes(record.headers)
     plain: list[str] = []
@@ -3517,6 +4399,8 @@ def _assemble_detail(
         }
         for index, part in enumerate(record.index.attachments)
     ]
+    _mark_inline_images(attachments, "\n".join(html))
+    cid_urls = _cid_image_urls(attachments, folder, uid) if folder is not None else None
     return {
         "uid": uid,
         "from": decode_mime_header(headers.get("From")),
@@ -3528,7 +4412,7 @@ def _assemble_detail(
         "in_reply_to": decode_mime_header(headers.get("In-Reply-To")).strip(),
         "references": decode_mime_header(headers.get("References")).strip(),
         "text": text,
-        "html": sanitize_html("\n".join(html)),
+        "html": sanitize_html("\n".join(html), cid_urls),
         "attachments": attachments,
     }
 
@@ -3662,14 +4546,40 @@ def fetch_message(uid: int | str, folder: str | None = None) -> dict[str, Any]:
             structure = _fetch_structure(connection, uid_value)
             if structure is not None:
                 part_map = structure.index
+                candidates = _inline_image_candidates(part_map)
                 try:
-                    payloads = _fetch_render_parts(connection, uid_value, part_map)
-                    return _assemble_detail(uid_value, structure, payloads)
+                    try:
+                        payloads = _fetch_render_parts(
+                            connection, uid_value, part_map, candidates
+                        )
+                    except _PartFetchError:
+                        if not candidates:
+                            raise
+                        # The extra image parts must never cost the fast path.
+                        payloads = _fetch_render_parts(connection, uid_value, part_map)
+                    detail = _assemble_detail(
+                        uid_value, structure, payloads, folder_value
+                    )
+                    _cache_inline_images(
+                        folder_value,
+                        uid_value,
+                        part_map,
+                        detail["attachments"],
+                        payloads,
+                    )
+                    return detail
                 except _PartFetchError:
                     pass
 
         record = _fetch_full_on(connection, uid_value)
-        parsed = _parse_full(record["raw"], part_map)
+        parsed = _parse_full(
+            record["raw"], part_map, folder=folder_value, uid=uid_value
+        )
+        for attachment in parsed["attachments"]:
+            if attachment.get("inline"):
+                _inline_cache_put(
+                    folder_value, uid_value, attachment["index"], attachment["data"]
+                )
         return {
             "uid": record["uid"],
             "from": parsed["from"],
@@ -3776,6 +4686,56 @@ def mark_read(uid: int | str, folder: str | None = None) -> None:
     _mark_read_cached(folder_value, _account_fingerprint(settings), uid_value)
 
 
+def mark_unread(uid: int | str, folder: str | None = None) -> None:
+    """Clear the ``\\Seen`` flag on a message (back to unread)."""
+    settings = load_settings()
+    uid_value = _validate_uid(uid)
+    folder_value = validate_folder(folder or settings.folder)
+    with imap_connect(settings) as connection:
+        status, _ = connection.select(_mailbox(folder_value), readonly=False)
+        if status != "OK":
+            raise GmailUpstreamError("Cartella non disponibile")
+        status, _ = connection.uid("STORE", str(uid_value), "-FLAGS", "(\\Seen)")
+        if status != "OK":
+            raise GmailUpstreamError("Aggiornamento flag fallito")
+
+    _set_seen_cached(folder_value, _account_fingerprint(settings), uid_value, False)
+
+
+def archive_message(uid: int | str, folder: str | None = None) -> None:
+    """Archive a message: remove Gmail's ``\\Inbox`` label (it stays in All Mail).
+
+    Uses Gmail's ``X-GM-LABELS`` IMAP extension instead of COPY + EXPUNGE:
+    it does not depend on the localized name of the All Mail folder, and does
+    not expunge other ``\\Deleted`` messages.  Only the inbox can be archived.
+    """
+    settings = load_settings()
+    uid_value = _validate_uid(uid)
+    folder_value = validate_folder(folder or settings.folder)
+    if folder_value.upper() != "INBOX":
+        raise GmailValidationError(
+            "Si possono archiviare solo i messaggi della Posta in arrivo"
+        )
+    try:
+        with imap_connect(settings) as connection:
+            status, _ = connection.select(_mailbox(folder_value), readonly=False)
+            if status != "OK":
+                raise GmailUpstreamError("Cartella non disponibile")
+            status, data = connection.uid("FETCH", str(uid_value), "(FLAGS)")
+            if status != "OK":
+                raise GmailUpstreamError("Lettura messaggio fallita")
+            if not _parse_fetch_data(list(data or [])):
+                raise GmailNotFound("Messaggio non trovato")
+            status, _ = connection.uid(
+                "STORE", str(uid_value), "-X-GM-LABELS", "(\\Inbox)"
+            )
+            if status != "OK":
+                raise GmailUpstreamError("Archiviazione fallita")
+    finally:
+        # Membership changed (or may have, on a partial failure).
+        _invalidate_inbox_all()
+
+
 def delete_messages(uids: object, folder: str | None = None) -> dict[str, Any]:
     """Move several messages to Gmail's Trash in a single IMAP connection.
 
@@ -3869,20 +4829,41 @@ def send_email(
     text: str = "",
     reply_to_uid: int | None = None,
     reply_to_folder: str | None = None,
+    forward_uid: int | None = None,
+    forward_folder: str | None = None,
     attachments: Iterable[tuple[str, bytes]] = (),
 ) -> str:
     """Send a message and return its ``Message-ID``.
 
     Replies fetch the original message, derive threading headers and append a
     ``> `` quote of the original plain text to *text* (once, server-side).
+    Forwards append the original header block and text, and attach the
+    original's files (not its inline images) within the usual attachment
+    limits.
     """
     settings = load_settings()
+    if reply_to_uid is not None and forward_uid is not None:
+        raise GmailValidationError("Risposta e inoltro non possono essere combinati")
     to_list = _parse_addresses(to, "to")
     cc_list = _parse_addresses(cc, "cc")
     bcc_list = _parse_addresses(bcc, "bcc")
     clean_subject = validate_header_value(subject or "", "subject")
     body = _validate_text(text or "")
     files = _validate_attachments(attachments)
+
+    if forward_uid is not None:
+        folder_value = validate_folder(forward_folder or settings.folder)
+        original = fetch_message(forward_uid, folder_value)
+        clean_subject = _forward_subject(clean_subject or original["subject"])
+        body = append_forward(body, original)
+        forwarded = [
+            fetch_attachment(forward_uid, attachment["index"], folder_value)
+            for attachment in original["attachments"]
+            if not attachment.get("inline")
+        ]
+        files = _validate_attachments(
+            [*files, *((item.filename, item.data) for item in forwarded)]
+        )
 
     in_reply_to = ""
     references = ""

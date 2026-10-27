@@ -47,7 +47,7 @@ def test_proxy_returns_raster_image_with_safety_headers():
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     assert response.headers["x-content-type-options"] == "nosniff"
-    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["cache-control"] == "private, max-age=3600"
     assert response.content.startswith(b"\x89PNG")
 
 

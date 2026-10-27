@@ -6,6 +6,10 @@
   const FETCH_LIMIT = 200;
   const MAX_COMPOSE_FILES = 10;
   const MAX_IMAGES_PER_MESSAGE = 50;
+  // Reader header/attachments stay compact: names shown before "e altri N",
+  // and the attachment list starts collapsed above this many files.
+  const RECIPIENTS_PREVIEW = 3;
+  const ATTACHMENTS_OPEN_MAX = 4;
   const FOLDER_FALLBACK = "INBOX";
   const RENDER_KEY = "gmail-render-mode";
 
@@ -44,9 +48,16 @@
     readerBody: document.getElementById("gmail-reader-body"),
     renderToggle: document.getElementById("gmail-render-toggle"),
     reply: document.getElementById("gmail-reply"),
+    replyAll: document.getElementById("gmail-reply-all"),
+    forward: document.getElementById("gmail-forward"),
+    archive: document.getElementById("gmail-archive"),
     delete: document.getElementById("gmail-delete"),
+    more: document.getElementById("gmail-more"),
+    moreMenu: document.getElementById("gmail-more-menu"),
+    markUnread: document.getElementById("gmail-mark-unread"),
     attachments: document.getElementById("gmail-attachments"),
     attachmentList: document.getElementById("gmail-attachment-list"),
+    attachmentsToggle: document.getElementById("gmail-attachments-toggle"),
     composeDialog: document.getElementById("gmail-compose-dialog"),
     composeForm: document.getElementById("gmail-compose-form"),
     composeTitle: document.getElementById("gmail-compose-title"),
@@ -88,9 +99,16 @@
     composeFiles: [],
     replyToUid: null,
     replyToFolder: null,
+    forwardUid: null,
+    forwardFolder: null,
+    // Compose autocomplete: [{email, name, score, last_ts}] from the server.
+    addressBook: [],
+    addressBookLoadedAt: 0,
+    addressBookLoading: false,
     sending: false,
     deleting: false,
     bulkDeleting: false,
+    archiving: false,
   };
 
   let errorTimer = null;
@@ -159,6 +177,69 @@
 
   function joinAddresses(value) {
     return displayAddress(value).trim();
+  }
+
+  // Split an address header on the commas that separate mailboxes, keeping
+  // commas inside quoted display names ("Rossi, Mario" <m@example.com>).
+  function splitAddresses(value) {
+    const text = joinAddresses(value);
+    const parts = [];
+    let current = "";
+    let quoted = false;
+    let angle = false;
+    for (const char of text) {
+      if (char === '"' && !angle) quoted = !quoted;
+      else if (char === "<" && !quoted) angle = true;
+      else if (char === ">" && !quoted) angle = false;
+      if (char === "," && !quoted && !angle) {
+        if (current.trim()) parts.push(current.trim());
+        current = "";
+      } else {
+        current += char;
+      }
+    }
+    if (current.trim()) parts.push(current.trim());
+    return parts;
+  }
+
+  // "Mario Rossi <mario@example.com>" → "Mario Rossi"; bare address otherwise.
+  function addressName(address) {
+    const named = /^(.*?)\s*<([^<>]*)>\s*$/.exec(address);
+    if (!named) return address;
+    const name = named[1].trim().replace(/^"(.*)"$/, "$1").trim();
+    return name || named[2].trim();
+  }
+
+  // Long To/Cc lists stay on one line: the first names plus "e altri N".
+  function renderRecipients(element, value) {
+    const addresses = splitAddresses(value);
+    element.replaceChildren();
+    if (!addresses.length) {
+      element.textContent = "—";
+      return;
+    }
+    const list = node("span", "gmail-recipients");
+    addresses.forEach((address, index) => {
+      const item = node("span", "gmail-recipient", addressName(address));
+      item.title = address;
+      item.hidden = index >= RECIPIENTS_PREVIEW;
+      list.append(item);
+    });
+    element.append(list);
+    const extra = addresses.length - RECIPIENTS_PREVIEW;
+    if (extra <= 0) return;
+    const more = node("button", "gmail-link-button", `e altri ${extra}`);
+    more.type = "button";
+    more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", () => {
+      const expanded = more.getAttribute("aria-expanded") !== "true";
+      [...list.children].forEach((item, index) => {
+        item.hidden = !expanded && index >= RECIPIENTS_PREVIEW;
+      });
+      more.setAttribute("aria-expanded", expanded ? "true" : "false");
+      more.textContent = expanded ? "mostra meno" : `e altri ${extra}`;
+    });
+    element.append(more);
   }
 
   function extractEmail(value) {
@@ -237,6 +318,14 @@
     );
     elements.deleteSelected.textContent = state.bulkDeleting ? "Eliminazione…" : "Elimina";
     elements.refresh.disabled = busy;
+  }
+
+  function setMessageSelected(key, selected, wrapper, checkbox) {
+    if (selected) state.selectedUids.add(key);
+    else state.selectedUids.delete(key);
+    if (checkbox) checkbox.checked = selected;
+    if (wrapper) wrapper.classList.toggle("selected", selected);
+    updateSelectionActions();
   }
 
   function syncRowSelection() {
@@ -409,7 +498,7 @@
       setAccountStatus("Non configurato");
       return;
     }
-    const parts = ["Configurato"];
+    const parts = [];
     if (status.address) parts.push(String(status.address));
     if (state.folder) parts.push(state.folder);
     if (status.connected === false) parts.push("connessione non disponibile");
@@ -465,7 +554,8 @@
 
   function renderPager() {
     const total = state.messages.length;
-    const visible = state.configured && total > 0;
+    // Only when there is more than one page to move between.
+    const visible = state.configured && total > 0 && pageCount() > 1;
     elements.pager.hidden = !visible;
     if (!visible) return;
     clampPageIndex();
@@ -481,6 +571,20 @@
     state.pageIndex = target;
     elements.messages.scrollTop = 0;
     renderList();
+  }
+
+  function messageAriaLabel(message, selected) {
+    const parts = [];
+    if (state.selectionMode) {
+      parts.push(selected
+        ? `Deseleziona messaggio di ${senderLabel(message)}.`
+        : `Seleziona messaggio di ${senderLabel(message)}.`);
+    }
+    if (!message.seen) parts.push("Non letto.");
+    parts.push(`Da ${senderLabel(message)}.`);
+    parts.push(`${subjectOf(message)}.`);
+    if (message.has_attachments) parts.push("Contiene allegati.");
+    return parts.join(" ");
   }
 
   function messageItem(message) {
@@ -500,10 +604,7 @@
         `Seleziona messaggio di ${senderLabel(message)}: ${subjectOf(message)}`,
       );
       checkbox.addEventListener("change", () => {
-        if (checkbox.checked) state.selectedUids.add(key);
-        else state.selectedUids.delete(key);
-        wrapper.classList.toggle("selected", checkbox.checked);
-        updateSelectionActions();
+        setMessageSelected(key, checkbox.checked, wrapper, checkbox);
       });
       if (checkbox.checked) wrapper.classList.add("selected");
     }
@@ -515,12 +616,10 @@
       button.classList.add("active");
       button.setAttribute("aria-current", "true");
     }
-    const labelParts = [];
-    if (!message.seen) labelParts.push("Non letto.");
-    labelParts.push(`Da ${senderLabel(message)}.`);
-    labelParts.push(`${subjectOf(message)}.`);
-    if (message.has_attachments) labelParts.push("Contiene allegati.");
-    button.setAttribute("aria-label", labelParts.join(" "));
+    button.setAttribute(
+      "aria-label",
+      messageAriaLabel(message, state.selectionMode && state.selectedUids.has(key)),
+    );
 
     const top = node("span", "gmail-row-top");
     top.append(node("span", "gmail-sender", senderLabel(message)));
@@ -535,6 +634,13 @@
     if (badges.childElementCount) button.append(badges);
 
     button.addEventListener("click", () => {
+      if (state.selectionMode) {
+        if (state.bulkDeleting) return;
+        const selected = !state.selectedUids.has(key);
+        setMessageSelected(key, selected, wrapper, checkbox);
+        button.setAttribute("aria-label", messageAriaLabel(message, selected));
+        return;
+      }
       void openMessage(message.uid);
     });
     if (checkbox) wrapper.append(checkbox);
@@ -592,6 +698,8 @@
   function showReaderLoading() {
     elements.detailEmpty.hidden = true;
     elements.reader.hidden = false;
+    // The whole reader scrolls (header, attachments and body together).
+    elements.reader.scrollTop = 0;
     elements.reader.setAttribute("aria-busy", "true");
     elements.readerSubject.textContent = "Caricamento messaggio…";
     elements.readerFrom.textContent = "";
@@ -632,32 +740,114 @@
     if (!attachments.length) return;
     const uid = detail.uid !== undefined && detail.uid !== null ? detail.uid : state.selectedUid;
 
+    // Images shown by the body via cid: are listed apart, collapsed: they are
+    // part of the message, not files the sender attached.
+    const files = [];
+    const inlineImages = [];
     for (const attachment of attachments) {
       const index = Number(attachment && attachment.index);
       if (!Number.isInteger(index) || index < 0) continue;
       const filename = safeFilename(attachment && attachment.filename, `allegato-${index + 1}`);
-      const row = node("div", "gmail-attachment");
-      const info = node("div", "gmail-attachment-info");
-      const name = node("span", "gmail-attachment-name", filename);
-      name.title = filename;
-      info.append(name);
+      const chip = node("button", "gmail-attachment-chip");
+      chip.type = "button";
       const metaParts = [];
       if (attachment && attachment.content_type) metaParts.push(String(attachment.content_type));
+      let size = "";
       if (attachment && attachment.size !== undefined && attachment.size !== null) {
-        const size = formatBytes(attachment.size);
+        size = formatBytes(attachment.size);
         if (size) metaParts.push(size);
       }
-      info.append(node("span", "gmail-attachment-meta", metaParts.join(" · ") || "Allegato"));
-      const download = node("button", "gmail-button", "Scarica");
-      download.type = "button";
-      download.setAttribute("aria-label", `Scarica ${filename}`);
-      download.addEventListener("click", () => {
-        void downloadAttachment(uid, index, filename, download);
+      chip.title = `Scarica ${filename}${metaParts.length ? ` (${metaParts.join(" · ")})` : ""}`;
+      chip.setAttribute("aria-label", `Scarica ${filename}`);
+      chip.append(node("span", "gmail-attachment-name", filename));
+      if (size) chip.append(node("span", "gmail-attachment-meta", size));
+      chip.addEventListener("click", () => {
+        void downloadAttachment(uid, index, filename, chip);
       });
-      row.append(info, download);
-      elements.attachmentList.append(row);
+      (attachment && attachment.inline === true ? inlineImages : files).push(chip);
     }
-    if (!elements.attachmentList.childElementCount) elements.attachments.hidden = true;
+    if (!files.length && !inlineImages.length) {
+      elements.attachments.hidden = true;
+      return;
+    }
+
+    elements.attachmentList.append(...files);
+    if (inlineImages.length) {
+      for (const chip of inlineImages) {
+        chip.classList.add("is-inline");
+        chip.hidden = files.length > 0;
+      }
+      elements.attachmentList.append(...inlineImages);
+      if (files.length) {
+        const more = node(
+          "button",
+          "gmail-link-button",
+          `+ ${inlineImages.length} ${inlineImages.length === 1 ? "immagine" : "immagini"} nel testo`,
+        );
+        more.type = "button";
+        more.addEventListener("click", () => {
+          for (const chip of inlineImages) chip.hidden = false;
+          more.remove();
+        });
+        elements.attachmentList.append(more);
+      }
+    }
+    const label = files.length
+      ? `Allegati (${files.length})`
+      : `Immagini nel testo (${inlineImages.length})`;
+    setAttachmentsExpanded(files.length > 0 && files.length <= ATTACHMENTS_OPEN_MAX, label);
+  }
+
+  // Quoted text (marked data-quote by the server) is folded behind a "•••"
+  // button, as in Gmail: "block" folds the element, "after" the element and
+  // everything after it (Outlook).  Nested quotes fold with their outer one,
+  // and nothing folds when the quote would be the whole message (forwards).
+  function collapseQuotes(root) {
+    const groups = [];
+    for (const marker of root.querySelectorAll("[data-quote]")) {
+      if (marker.parentElement && marker.parentElement.closest("[data-quote]")) continue;
+      if (groups.some((group) => group.includes(marker))) continue;
+      const group = [marker];
+      if (marker.getAttribute("data-quote") === "after") {
+        for (let next = marker.nextElementSibling; next; next = next.nextElementSibling) {
+          group.push(next);
+        }
+      }
+      groups.push(group);
+    }
+    if (!groups.length) return;
+    const quoted = groups.flat().reduce((total, element) => total + element.textContent.trim().length, 0);
+    if (root.textContent.trim().length - quoted <= 0) return;
+
+    for (const group of groups) {
+      const toggle = node("button", "gmail-quote-toggle", "•••");
+      toggle.type = "button";
+      toggle.title = "Mostra testo citato";
+      toggle.setAttribute("aria-label", "Mostra testo citato");
+      toggle.setAttribute("aria-expanded", "false");
+      for (const element of group) element.hidden = true;
+      toggle.addEventListener("click", () => {
+        const expanded = toggle.getAttribute("aria-expanded") !== "true";
+        for (const element of group) element.hidden = !expanded;
+        toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+        const label = expanded ? "Nascondi testo citato" : "Mostra testo citato";
+        toggle.title = label;
+        toggle.setAttribute("aria-label", label);
+      });
+      group[0].before(toggle);
+    }
+  }
+
+  function setAttachmentsExpanded(expanded, label) {
+    const toggle = elements.attachmentsToggle;
+    if (label !== undefined) toggle.dataset.label = label;
+    toggle.textContent = toggle.dataset.label || "Allegati";
+    toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+    elements.attachmentList.hidden = !expanded;
+  }
+
+  function toggleAttachments() {
+    setAttachmentsExpanded(elements.attachmentsToggle.getAttribute("aria-expanded") !== "true");
   }
 
   function safeImageUrl(value) {
@@ -676,10 +866,48 @@
     }
   }
 
+  // Mails designed for a fixed width (td width="700", 600px tables…) wider
+  // than the reader are scaled down to fit, as mobile mail apps do, instead
+  // of scrolling sideways.  Below HTML_FIT_MIN_ZOOM the text would be
+  // unreadable: the remaining overflow scrolls.
+  const HTML_FIT_MIN_ZOOM = 0.5;
+  let htmlFitFrame = 0;
+
+  function fitHtmlToWidth() {
+    const fit = elements.readerBody.querySelector(".gmail-html-fit");
+    if (!fit) return;
+    fit.style.zoom = "";
+    const available = fit.clientWidth;
+    const needed = fit.scrollWidth;
+    if (!available || needed <= available + 1) return;
+    fit.style.zoom = String(Math.max(HTML_FIT_MIN_ZOOM, available / needed));
+  }
+
+  function scheduleHtmlFit() {
+    if (htmlFitFrame) return;
+    htmlFitFrame = window.requestAnimationFrame(() => {
+      htmlFitFrame = 0;
+      fitHtmlToWidth();
+    });
+  }
+
   function loadImages() {
     const seq = state.readerSeq;
+    // Cell/table backgrounds (often a newsletter's hero banners): the server
+    // turned background="…" / background-image:url(…) into an inert data-bg
+    // with a signed proxy URL, applied here like an <img> src.
+    const backgrounds = [...elements.readerBody.querySelectorAll("[data-bg]")];
     const images = [...elements.readerBody.querySelectorAll("img[data-src]")];
+    const total = backgrounds.length + images.length;
     let loaded = 0;
+    for (const element of backgrounds) {
+      if (loaded >= MAX_IMAGES_PER_MESSAGE) break;
+      if (element.style.backgroundImage) continue;
+      const url = safeImageUrl(element.dataset.bg || "");
+      if (!url) continue;
+      element.style.backgroundImage = `url("${url}")`;
+      loaded += 1;
+    }
     for (const image of images) {
       if (loaded >= MAX_IMAGES_PER_MESSAGE) break;
       if (image.hasAttribute("src")) continue;
@@ -704,14 +932,15 @@
           if (!image.hasAttribute("src")) return;
           image.dataset.loaded = "1";
           image.classList.remove("is-failed");
+          scheduleHtmlFit(); // a loaded image may widen the mail
         },
         { once: true },
       );
       image.src = url;
       loaded += 1;
     }
-    if (images.length > MAX_IMAGES_PER_MESSAGE) {
-      showNotice(`Caricate ${loaded} di ${images.length} immagini.`);
+    if (total > MAX_IMAGES_PER_MESSAGE) {
+      showNotice(`Caricate ${loaded} di ${total} immagini.`);
     }
   }
 
@@ -720,10 +949,10 @@
     elements.reader.setAttribute("aria-busy", "false");
     elements.readerSubject.textContent = subjectOf(detail);
     elements.readerFrom.textContent = senderOf(detail) || "—";
-    elements.readerTo.textContent = joinAddresses(detail.to) || "—";
+    renderRecipients(elements.readerTo, detail.to);
     const cc = joinAddresses(detail.cc);
     elements.readerCcRow.hidden = !cc;
-    elements.readerCc.textContent = cc;
+    renderRecipients(elements.readerCc, detail.cc);
     elements.readerDate.textContent = formatFullDate(detail.date_ts) || "—";
 
     const text = typeof detail.text === "string" ? detail.text : "";
@@ -739,8 +968,14 @@
       const parsed = new DOMParser().parseFromString(html, "text/html");
       const content = document.createElement("div");
       content.className = "gmail-html-content";
-      content.append(...parsed.body.childNodes);
+      // Inner box the shrink-to-fit zoom applies to (see fitHtmlToWidth).
+      const fit = document.createElement("div");
+      fit.className = "gmail-html-fit";
+      fit.append(...parsed.body.childNodes);
+      collapseQuotes(fit);
+      content.append(fit);
       elements.readerBody.replaceChildren(content);
+      scheduleHtmlFit();
       elements.readerBody.classList.remove("is-empty");
       elements.readerBody.classList.add("is-html");
     } else {
@@ -748,13 +983,9 @@
       elements.readerBody.classList.remove("is-html");
       elements.readerBody.classList.toggle("is-empty", !text);
     }
+    // A "More actions" menu item: the label says what clicking it does.
     elements.renderToggle.hidden = !hasHtml;
-    elements.renderToggle.textContent = mode === "html" ? "Testo" : "HTML";
-    elements.renderToggle.setAttribute(
-      "aria-pressed",
-      mode === "html" ? "true" : "false",
-    );
-    elements.renderToggle.title = mode === "html" ? "Mostra solo testo" : "Mostra HTML";
+    elements.renderToggle.textContent = mode === "html" ? "Mostra come testo" : "Mostra HTML";
 
     if (mode === "html") loadImages();
     renderAttachments(detail);
@@ -820,6 +1051,51 @@
     }
   }
 
+  function setMoreMenu(open) {
+    elements.moreMenu.hidden = !open;
+    elements.more.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function messagePath(uid, action) {
+    return `api/gmail/messages/${encodeURIComponent(String(uid))}/${action}?folder=${encodeURIComponent(state.folder)}`;
+  }
+
+  async function archiveMessage() {
+    const uid = state.selectedUid;
+    if (uid === null || uid === undefined || state.archiving) return;
+    state.archiving = true;
+    elements.archive.disabled = true;
+    try {
+      await request(messagePath(uid, "archive"), { method: "POST" });
+      closeReader();
+      showNotice("Messaggio archiviato.");
+      await loadMessages({ force: true });
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      showError(error.message);
+    } finally {
+      state.archiving = false;
+      elements.archive.disabled = false;
+    }
+  }
+
+  async function markUnread() {
+    setMoreMenu(false);
+    const uid = state.selectedUid;
+    if (uid === null || uid === undefined) return;
+    try {
+      await request(messagePath(uid, "unread"), { method: "POST" });
+      const message = state.messages.find((item) => item.uid === uid);
+      if (message) message.seen = false;
+      // Back to the list, as in Gmail: reopening it would mark it read again.
+      closeReader();
+      showNotice("Segnato come non letto.");
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      showError(error.message);
+    }
+  }
+
   async function deleteMessage() {
     if (state.deleting) return;
     const uid = state.selectedUid;
@@ -827,10 +1103,11 @@
     if (!window.confirm("Spostare il messaggio nel cestino?")) return;
 
     state.deleting = true;
+    // An icon-only button: never rewrite its content (that would drop the
+    // SVG); disabled + aria-busy show the pending state.
     const button = elements.delete;
-    const label = button.textContent;
     button.disabled = true;
-    button.textContent = "Eliminazione…";
+    button.setAttribute("aria-busy", "true");
     try {
       await request(
         `api/gmail/messages/${encodeURIComponent(String(uid))}?folder=${encodeURIComponent(state.folder)}`,
@@ -851,7 +1128,7 @@
     } finally {
       state.deleting = false;
       button.disabled = false;
-      button.textContent = label;
+      button.removeAttribute("aria-busy");
     }
   }
 
@@ -897,9 +1174,11 @@
   }
 
   async function downloadAttachment(uid, index, fallbackName, button) {
-    const originalText = button.textContent;
+    // Chips keep their size label: only the name shows the progress.
+    const label = button.querySelector(".gmail-attachment-name") || button;
+    const originalText = label.textContent;
     button.disabled = true;
-    button.textContent = "Download…";
+    label.textContent = "Download…";
     try {
       const response = await request(
         `api/gmail/messages/${encodeURIComponent(String(uid))}/attachments/${encodeURIComponent(String(index))}?folder=${encodeURIComponent(state.folder)}`,
@@ -922,7 +1201,7 @@
       if (error && error.name !== "AbortError") showError(error.message);
     } finally {
       button.disabled = false;
-      button.textContent = originalText;
+      label.textContent = originalText;
     }
   }
 
@@ -1019,6 +1298,8 @@
       state.status = payload;
       state.configured = Boolean(payload.configured);
       state.folder = typeof payload.folder === "string" && payload.folder ? payload.folder : FOLDER_FALLBACK;
+      // Archiving removes the Inbox label: it only applies to the inbox.
+      elements.archive.hidden = state.folder.toUpperCase() !== "INBOX";
       renderAccountStatus();
       elements.composeNew.disabled = !state.configured;
 
@@ -1114,23 +1395,260 @@
     elements.composeError.hidden = false;
   }
 
+  const COMPOSE_TITLES = {
+    new: "Nuova email",
+    reply: "Rispondi",
+    replyAll: "Rispondi a tutti",
+    forward: "Inoltra",
+  };
+
+  function prefixedSubject(subject, prefix, already) {
+    const original = typeof subject === "string" ? subject.trim() : "";
+    if (already.test(original)) return original;
+    return original ? `${prefix} ${original}` : prefix;
+  }
+
+  // Reply all: the sender and the original To in "A", the original Cc in
+  // "Cc"; each address once, never the account's own.
+  function replyAllRecipients(detail) {
+    const own = String((state.status && state.status.address) || "").trim().toLowerCase();
+    const seen = new Set(own ? [own] : []);
+    const pick = (value) => splitAddresses(value)
+      .map((address) => extractEmail(address))
+      .filter((email) => {
+        const key = email.toLowerCase();
+        if (!email || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    const to = [...pick(detail.from), ...pick(detail.to)];
+    const cc = pick(detail.cc);
+    // Replying to all on a mail we sent to ourselves only: back to the sender.
+    if (!to.length && !cc.length) to.push(extractEmail(detail.from));
+    return { to, cc };
+  }
+
+  function forwardedFileCount(detail) {
+    const attachments = Array.isArray(detail.attachments) ? detail.attachments : [];
+    return attachments.filter((attachment) => attachment && attachment.inline !== true).length;
+  }
+
+  // ── Address autocomplete (A / Cc / Ccn) ──────────────────────────────────
+  // The server's address book comes from the latest Sent and Inbox headers;
+  // it is loaded once per compose (cached 15 min on the server) and filtered
+  // here as the user types.
+  const ADDRESS_SUGGESTIONS_MAX = 8;
+
+  function normalizeSearch(text) {
+    return String(text || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  }
+
+  // The comma-separated address the caret is in: [start, end) of the field.
+  function addressTokenRange(value, caret) {
+    const before = value.lastIndexOf(",", Math.max(0, caret - 1));
+    const after = value.indexOf(",", caret);
+    return { start: before + 1, end: after === -1 ? value.length : after };
+  }
+
+  function suggestAddresses(query, book, exclude) {
+    const q = normalizeSearch(query).trim();
+    if (!q || !Array.isArray(book)) return [];
+    const ranked = [];
+    for (const contact of book) {
+      if (!contact || !contact.email || exclude.has(contact.email)) continue;
+      const email = contact.email.toLowerCase();
+      const name = normalizeSearch(contact.name);
+      let rank = -1;
+      if (email.startsWith(q) || name.startsWith(q)) rank = 0;
+      else if (name.split(/\s+/).some((word) => word.startsWith(q))
+        || email.split(/[@._+-]/).some((part) => part.startsWith(q))) rank = 1;
+      else if (name.includes(q) || email.includes(q)) rank = 2;
+      if (rank >= 0) ranked.push({ contact, rank });
+    }
+    ranked.sort((a, b) => a.rank - b.rank
+      || (b.contact.score || 0) - (a.contact.score || 0)
+      || (b.contact.last_ts || 0) - (a.contact.last_ts || 0));
+    return ranked.slice(0, ADDRESS_SUGGESTIONS_MAX).map((item) => item.contact);
+  }
+
+  function formatAddress(contact) {
+    const name = String(contact.name || "").replace(/["<>\r\n]/g, "").trim();
+    if (!name) return contact.email;
+    const quoted = /[,;:@()[\]\\.]/.test(name) ? `"${name}"` : name;
+    return `${quoted} <${contact.email}>`;
+  }
+
+  // Replace the address under the caret with *contact*, then ", ".
+  function applySuggestion(value, caret, contact) {
+    const { start, end } = addressTokenRange(value, caret);
+    const head = value.slice(0, start).replace(/\s+$/, "");
+    const tail = value.slice(end).replace(/^,\s*/, "");
+    const inserted = `${head ? `${head} ` : ""}${formatAddress(contact)}, `;
+    return { value: inserted + tail, caret: inserted.length };
+  }
+
+  // Drop the ", " the autocomplete leaves after the last address (and any
+  // empty item): the server's address parser rejects a list ending in ",".
+  function tidyAddressField(value) {
+    return String(value || "")
+      .replace(/,(\s*,)+/g, ",")
+      .replace(/^[\s,]+|[\s,]+$/g, "");
+  }
+
+  function emailsInField(value) {
+    return new Set(splitAddresses(value).map((address) => extractEmail(address).toLowerCase()));
+  }
+
+  async function loadAddressBook() {
+    const fresh = state.addressBookLoadedAt && Date.now() - state.addressBookLoadedAt < 5 * 60 * 1000;
+    if (fresh || state.addressBookLoading) return;
+    state.addressBookLoading = true;
+    try {
+      const response = await request("api/gmail/address-book");
+      const payload = await response.json();
+      state.addressBook = Array.isArray(payload && payload.contacts) ? payload.contacts : [];
+      state.addressBookLoadedAt = Date.now();
+    } catch {
+      // No suggestions: typing addresses still works.
+    } finally {
+      state.addressBookLoading = false;
+    }
+  }
+
+  function attachAddressAutocomplete(input) {
+    const list = node("ul", "gmail-suggestions");
+    list.id = `${input.id}-suggestions`;
+    list.setAttribute("role", "listbox");
+    list.hidden = true;
+    input.after(list);
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    input.setAttribute("aria-controls", list.id);
+    let items = [];
+    let active = -1;
+
+    const close = () => {
+      items = [];
+      active = -1;
+      list.hidden = true;
+      list.replaceChildren();
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+    };
+    const highlight = (index) => {
+      active = index;
+      [...list.children].forEach((option, position) => {
+        option.setAttribute("aria-selected", position === index ? "true" : "false");
+      });
+      if (index >= 0) input.setAttribute("aria-activedescendant", list.children[index].id);
+      else input.removeAttribute("aria-activedescendant");
+    };
+    const accept = (index) => {
+      const contact = items[index];
+      if (!contact) return;
+      const next = applySuggestion(input.value, input.selectionStart ?? input.value.length, contact);
+      input.value = next.value;
+      input.setSelectionRange(next.caret, next.caret);
+      close();
+      input.focus();
+    };
+    const update = () => {
+      const caret = input.selectionStart ?? input.value.length;
+      const { start } = addressTokenRange(input.value, caret);
+      const query = input.value.slice(start, caret);
+      items = suggestAddresses(query, state.addressBook, emailsInField(input.value));
+      if (!items.length) {
+        close();
+        return;
+      }
+      list.replaceChildren(...items.map((contact, index) => {
+        const option = node("li", "gmail-suggestion");
+        option.id = `${list.id}-${index}`;
+        option.setAttribute("role", "option");
+        if (contact.name) option.append(node("span", "gmail-suggestion-name", contact.name));
+        option.append(node("span", "gmail-suggestion-email", contact.email));
+        // mousedown, not click: keep the focus (and the caret) in the input.
+        option.addEventListener("mousedown", (event) => {
+          event.preventDefault();
+          accept(index);
+        });
+        return option;
+      }));
+      list.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+      highlight(0);
+    };
+
+    input.addEventListener("input", update);
+    // Leaving the field drops the trailing ", " kept for the next address.
+    // Picking a suggestion does not blur it (options act on mousedown).
+    input.addEventListener("blur", () => {
+      close();
+      const tidy = tidyAddressField(input.value);
+      if (tidy !== input.value) input.value = tidy;
+    });
+    input.addEventListener("keydown", (event) => {
+      if (list.hidden) return;
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        highlight((active + step + items.length) % items.length);
+      } else if ((event.key === "Enter" || event.key === "Tab") && active >= 0) {
+        event.preventDefault();
+        accept(active);
+      } else if (event.key === "Escape") {
+        // Close the list, not the compose dialog.
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+      }
+    });
+    return close;
+  }
+
+  const closeAddressSuggestions = [
+    elements.composeTo,
+    elements.composeCc,
+    elements.composeBcc,
+  ].map(attachAddressAutocomplete);
+
   function openCompose(mode, detail) {
+    for (const close of closeAddressSuggestions) close();
+    void loadAddressBook();
     state.composeFiles = [];
     state.replyToUid = null;
     state.replyToFolder = null;
+    state.forwardUid = null;
+    state.forwardFolder = null;
     elements.composeForm.reset();
     resetCompose();
-    elements.composeTitle.textContent = mode === "reply" ? "Rispondi" : "Nuova email";
+    elements.composeTitle.textContent = COMPOSE_TITLES[mode] || COMPOSE_TITLES.new;
 
-    if (mode === "reply" && detail) {
-      const originalSubject = typeof detail.subject === "string" ? detail.subject.trim() : "";
-      elements.composeTo.value = extractEmail(detail.from);
-      elements.composeSubject.value = /^re:/i.test(originalSubject)
-        ? originalSubject
-        : (originalSubject ? `Re: ${originalSubject}` : "Re:");
-      state.replyToUid = detail.uid !== undefined && detail.uid !== null ? detail.uid : state.selectedUid;
+    const uid = detail && detail.uid !== undefined && detail.uid !== null ? detail.uid : state.selectedUid;
+    if ((mode === "reply" || mode === "replyAll") && detail) {
+      if (mode === "replyAll") {
+        const { to, cc } = replyAllRecipients(detail);
+        elements.composeTo.value = to.join(", ");
+        elements.composeCc.value = cc.join(", ");
+      } else {
+        elements.composeTo.value = extractEmail(detail.from);
+      }
+      elements.composeSubject.value = prefixedSubject(detail.subject, "Re:", /^re:/i);
+      state.replyToUid = uid;
       state.replyToFolder = state.folder;
-      elements.composeReplyRef.textContent = `Risposta a ${senderOf(detail)} — ${subjectOf(detail)}`;
+      const label = mode === "replyAll" ? "Risposta a tutti" : "Risposta a";
+      elements.composeReplyRef.textContent = mode === "replyAll"
+        ? `${label} — ${subjectOf(detail)}`
+        : `${label} ${senderOf(detail)} — ${subjectOf(detail)}`;
+      elements.composeReplyRef.hidden = false;
+    } else if (mode === "forward" && detail) {
+      elements.composeSubject.value = prefixedSubject(detail.subject, "Fwd:", /^(fwd?|i):/i);
+      state.forwardUid = uid;
+      state.forwardFolder = state.folder;
+      const files = forwardedFileCount(detail);
+      const suffix = files ? ` (con ${files} ${files === 1 ? "allegato" : "allegati"})` : "";
+      elements.composeReplyRef.textContent = `Inoltro di ${senderOf(detail)} — ${subjectOf(detail)}${suffix}`;
       elements.composeReplyRef.hidden = false;
     }
 
@@ -1143,7 +1661,7 @@
       }
     }
     window.requestAnimationFrame(() => {
-      if (mode === "reply") elements.composeText.focus();
+      if (mode === "reply" || mode === "replyAll") elements.composeText.focus();
       else elements.composeTo.focus();
     });
   }
@@ -1173,14 +1691,19 @@
     elements.composeError.textContent = "";
 
     const form = new FormData();
-    form.append("to", elements.composeTo.value.trim());
-    form.append("cc", elements.composeCc.value.trim());
-    form.append("bcc", elements.composeBcc.value.trim());
+    form.append("to", tidyAddressField(elements.composeTo.value));
+    form.append("cc", tidyAddressField(elements.composeCc.value));
+    form.append("bcc", tidyAddressField(elements.composeBcc.value));
     form.append("subject", elements.composeSubject.value.trim());
     form.append("text", elements.composeText.value);
     if (state.replyToUid !== null && state.replyToUid !== undefined) {
       form.append("reply_to_uid", String(state.replyToUid));
       form.append("reply_to_folder", state.replyToFolder || state.folder);
+    }
+    if (state.forwardUid !== null && state.forwardUid !== undefined) {
+      // The server adds the original text and attachments.
+      form.append("forward_uid", String(state.forwardUid));
+      form.append("forward_folder", state.forwardFolder || state.folder);
     }
     for (const file of state.composeFiles) {
       form.append("file[]", file, file.name);
@@ -1216,6 +1739,7 @@
     hideError();
     hideNotice();
     window.requestAnimationFrame(() => elements.back.focus());
+    window.dispatchEvent(new CustomEvent("gmail:view"));
     void loadStatus();
   }
 
@@ -1255,9 +1779,15 @@
     hideError();
     hideNotice();
     if (restoreTab) restoreProtocolTab();
+    // app.js shows/hides the tab unread dots depending on the open view.
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("gmail:view"));
   }
 
   elements.tab.addEventListener("click", activateGmail);
+  // The server's unread poller saw new mail: refresh the list if it is open.
+  window.addEventListener("gmail:new-mail", () => {
+    if (state.open && state.configured) void loadMessages({ force: true });
+  });
 
   elements.tabs.addEventListener("click", (event) => {
     if (!state.open) return;
@@ -1277,7 +1807,39 @@
   elements.reply.addEventListener("click", () => {
     if (state.detail) openCompose("reply", state.detail);
   });
-  elements.renderToggle.addEventListener("click", toggleRenderMode);
+  elements.replyAll.addEventListener("click", () => {
+    if (state.detail) openCompose("replyAll", state.detail);
+  });
+  elements.forward.addEventListener("click", () => {
+    if (state.detail) openCompose("forward", state.detail);
+  });
+  elements.archive.addEventListener("click", () => {
+    void archiveMessage();
+  });
+  elements.more.addEventListener("click", () => {
+    setMoreMenu(elements.moreMenu.hidden);
+  });
+  elements.markUnread.addEventListener("click", () => {
+    void markUnread();
+  });
+  // The menu closes on any click outside it and on Escape.
+  document.addEventListener("click", (event) => {
+    if (elements.moreMenu.hidden) return;
+    if (event.target instanceof Element && event.target.closest(".gmail-more")) return;
+    setMoreMenu(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !elements.moreMenu.hidden) {
+      setMoreMenu(false);
+      elements.more.focus();
+    }
+  });
+  window.addEventListener("resize", scheduleHtmlFit);
+  elements.renderToggle.addEventListener("click", () => {
+    setMoreMenu(false);
+    toggleRenderMode();
+  });
+  elements.attachmentsToggle.addEventListener("click", toggleAttachments);
   elements.readerBody.addEventListener("click", (event) => {
     const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
     if (!anchor) return;

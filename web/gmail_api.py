@@ -76,7 +76,11 @@ def create_gmail_image_router() -> Any:
             content=data,
             media_type=blob["content_type"],
             headers={
-                "Cache-Control": "no-store",
+                # A remote image's token is stable for its URL: the browser
+                # reuses it when the message is reopened (fewer fetches and
+                # fewer tracking pings).  "private" keeps shared caches, such
+                # as a tunnel or reverse proxy, from storing it.
+                "Cache-Control": "private, max-age=3600",
                 "Content-Security-Policy": "default-src 'none'",
                 "X-Content-Type-Options": "nosniff",
             },
@@ -96,6 +100,14 @@ def create_gmail_router() -> Any:
     @router.get("/status")
     async def status(request: Request) -> dict[str, Any]:
         return await call_op(request, "gmail.status")
+
+    @router.get("/unread")
+    async def unread(request: Request) -> dict[str, Any]:
+        return await call_op(request, "gmail.unread")
+
+    @router.get("/address-book")
+    async def address_book(request: Request) -> dict[str, Any]:
+        return await call_op(request, "gmail.address_book")
 
     @router.get("/messages")
     async def messages(
@@ -177,6 +189,22 @@ def create_gmail_router() -> Any:
             request, "gmail.messages.mark_read", {"uid": uid, "folder": folder}
         )
 
+    @router.post("/messages/{uid}/unread")
+    async def unread_message(
+        request: Request, uid: int, folder: str | None = None
+    ) -> dict[str, bool]:
+        return await call_op(
+            request, "gmail.messages.mark_unread", {"uid": uid, "folder": folder}
+        )
+
+    @router.post("/messages/{uid}/archive")
+    async def archive(
+        request: Request, uid: int, folder: str | None = None
+    ) -> dict[str, bool]:
+        return await call_op(
+            request, "gmail.messages.archive", {"uid": uid, "folder": folder}
+        )
+
     @router.post("/send")
     async def send(request: Request) -> dict[str, Any]:
         try:
@@ -197,14 +225,15 @@ def create_gmail_router() -> Any:
             value = form.get(name)
             return value if isinstance(value, str) else ""
 
-        reply_to_uid: int | None = None
-        reply_raw = field("reply_to_uid")
-        if reply_raw:
+        def optional_uid(name: str) -> int | None:
+            raw = field(name)
+            if not raw:
+                return None
             try:
-                reply_to_uid = int(reply_raw)
+                return int(raw)
             except ValueError:
                 raise HTTPException(
-                    status_code=400, detail="reply_to_uid non valido"
+                    status_code=400, detail=f"{name} non valido"
                 ) from None
 
         payload: dict[str, Any] = {
@@ -213,8 +242,10 @@ def create_gmail_router() -> Any:
             "bcc": field("bcc"),
             "subject": field("subject"),
             "text": field("text"),
-            "reply_to_uid": reply_to_uid,
+            "reply_to_uid": optional_uid("reply_to_uid"),
             "reply_to_folder": field("reply_to_folder") or None,
+            "forward_uid": optional_uid("forward_uid"),
+            "forward_folder": field("forward_folder") or None,
         }
         uploads = form.getlist("file[]")
         if uploads:

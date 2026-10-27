@@ -563,6 +563,9 @@ class GmailMessagesSendRequest(BaseModel):
     text: FormText = ""
     reply_to_uid: int | None = None
     reply_to_folder: str | None = None
+    #: Forward this message (its text and attachments are added server-side).
+    forward_uid: int | None = None
+    forward_folder: str | None = None
     attachments: list[AttachmentIn] = Field(default_factory=list)
 
 

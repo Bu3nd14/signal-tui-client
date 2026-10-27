@@ -218,6 +218,7 @@ __CANCEL__
 __LOAD__
 let notices = [];
 function showNotice(message) { notices.push(String(message)); }
+function scheduleHtmlFit() {}
 const state = { readerSeq: 0 };
 let currentImages = [];
 const elements = {
@@ -558,6 +559,9 @@ function restoreProtocolTab() {}
 function subjectOf(detail) { return (detail && detail.subject) || ""; }
 function senderOf(detail) { return (detail && detail.from) || ""; }
 function joinAddresses(value) { return value || ""; }
+function renderRecipients(element, value) { element.textContent = value || "—"; }
+function collapseQuotes() {}
+function scheduleHtmlFit() {}
 function formatFullDate() { return ""; }
 function loadImages() { record("load"); }
 function renderAttachments() { record("attachments"); }
@@ -671,8 +675,8 @@ def test_index_html_removes_toggle_and_bumps_gmail_js():
 
     assert "gmail-images-toggle" not in index
     assert "Mostra immagini" not in index
-    assert "gmail.js?v=17" in index
-    assert "gmail.css?v=17" in index
+    assert "gmail.js?v=27" in index
+    assert "gmail.css?v=26" in index
 
 
 def test_gmail_js_has_no_orphan_toggle_remnants():
@@ -702,6 +706,11 @@ def test_server_html_keeps_data_src_without_remote_src():
     assert "https://tracker.example" not in cleaned
     css = _GMAIL_CSS_PATH.read_text(encoding="utf-8")
     assert ".gmail-reader-body.is-html img[data-src]:not([src])" in css
+    # Inline caps like max-width:951px (Mailchimp) must not keep images wider
+    # than the reader: the stylesheet rule outranks them with !important.
+    assert re.search(
+        r"\.gmail-reader-body\.is-html img \{\s*max-width: 100% !important;", css
+    )
     assert ".gmail-reader-body.is-html img.is-failed" in css
 
 
@@ -904,12 +913,13 @@ async def test_image_proxy_limits_concurrent_fetches_to_four(monkeypatch):
 
     monkeypatch.setattr("server.link_preview.fetch_external_image", fake_fetch)
     app = _gmail_image_app()
-    token = _token("https://images.example/a.png")
+    # Distinct URLs: requests for the same URL share one fetch (and the cache).
+    tokens = [_token(f"https://images.example/{index}.png") for index in range(10)]
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         responses = await asyncio.gather(
-            *(client.get("/gmail-image", params={"token": token}) for _ in range(10))
+            *(client.get("/gmail-image", params={"token": token}) for token in tokens)
         )
 
     assert calls == 10

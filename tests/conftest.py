@@ -76,6 +76,57 @@ def isolate_gmail_imap_pool():
 
 
 @pytest.fixture(autouse=True)
+def stop_whatsapp_resolver_threads(monkeypatch: pytest.MonkeyPatch):
+    """Stop the WhatsApp resolver threads a test started, when it ends.
+
+    ``wa-media-resolver`` and ``wa-mention-lid-resolver`` are daemon loops that
+    only exit on ``disconnect_sync()``.  Left running, they kept retrying lookups
+    (real HTTP for backends built with a real REST client) during later tests,
+    and their ``WAHA request failed`` records landed in other tests' ``caplog``.
+    """
+    from protocols.whatsapp import WhatsAppBackend
+
+    started: list[WhatsAppBackend] = []
+    for name in ("_start_media_resolver", "_start_mention_lid_resolver"):
+        original = getattr(WhatsAppBackend, name)
+
+        def tracking(self, *args, _original=original, **kwargs):
+            started.append(self)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(WhatsAppBackend, name, tracking)
+    try:
+        yield
+    finally:
+        for backend in dict.fromkeys(started):
+            backend.disconnect_sync()
+
+
+@pytest.fixture(autouse=True)
+def isolate_gmail_image_caches(monkeypatch: pytest.MonkeyPatch):
+    """Empty the Gmail image caches and disable the remote image prefetch.
+
+    Opening a message would otherwise start real network fetches for the
+    images of the test HTML, and a cached image from one test would answer the
+    next test's request instead of its patched fetcher.  The unread polling
+    worker is disabled too: a test that starts a core on a machine where Gmail
+    is configured would otherwise poll the real mailbox.
+    """
+    from server import gmail
+    from server.ops import gmail as gmail_ops
+
+    monkeypatch.setenv("GMAIL_IMAGE_PREFETCH", "0")
+    monkeypatch.setenv("GMAIL_UNREAD_POLL_S", "0")
+    gmail.clear_inline_image_cache()
+    gmail_ops.clear_remote_image_cache()
+    try:
+        yield
+    finally:
+        gmail.clear_inline_image_cache()
+        gmail_ops.clear_remote_image_cache()
+
+
+@pytest.fixture(autouse=True)
 def isolate_backend_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Isolate every test from the user's persistent cache and database."""
     import protocols.db as backend

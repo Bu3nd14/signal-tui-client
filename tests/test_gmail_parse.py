@@ -208,6 +208,7 @@ def test_public_attachments_strips_payload():
         "content_type",
         "size",
         "content_id",
+        "inline",
     }
     # base64("data") = "ZGF0YQ==" + line break -> encoded wire size 10.
     assert public[0]["size"] == 10

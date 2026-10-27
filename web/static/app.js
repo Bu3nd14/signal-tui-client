@@ -47,12 +47,15 @@ const REACTION_EMOJIS = [
 const state = {
   token: localStorage.getItem(TOKEN_KEY) || "",
   contacts: [],
+  // Inbox unread count from the server's Gmail poller (gmail_unread events).
+  gmailUnread: 0,
   searchResults: null,
   contactQuery: "",
   protocolFilter: (() => {
     const saved = localStorage.getItem(PROTOCOL_KEY);
     return PROTOCOLS.includes(saved) ? saved : "signal";
   })(),
+  backendStatuses: null,
   active: null,
   // True quando le immagini profilo sono nascoste (solo iniziali): nessuna
   // richiesta a /api/contact-avatar parte mentre è attiva.
@@ -543,6 +546,26 @@ function protocolIcon(protocol, size = 15) {
   return icons[protocol] || "";
 }
 
+function syncProtocolTabs() {
+  const statuses = state.backendStatuses;
+  if (!statuses) return false;
+  let changed = false;
+  const connected = PROTOCOLS.filter((protocol) => statuses[protocol] === true);
+  for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
+    tab.hidden = statuses[tab.dataset.protocol] !== true;
+  }
+  if (!connected.includes(state.protocolFilter)) {
+    const next = connected[0] ?? null;
+    if (next !== state.protocolFilter) {
+      state.protocolFilter = next;
+      if (next) localStorage.setItem(PROTOCOL_KEY, next);
+      else localStorage.removeItem(PROTOCOL_KEY);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 async function updateBackendStatuses() {
   const statuses = {
     signal: elements.linkStatusSignal,
@@ -551,6 +574,8 @@ async function updateBackendStatuses() {
   };
   if (!state.token) {
     for (const protocol of PROTOCOLS) statuses[protocol].textContent = "Non collegato";
+    state.backendStatuses = null;
+    syncProtocolTabs();
     return;
   }
   // Real backend connection state (protocols/base.py `is_connected`), not
@@ -562,8 +587,16 @@ async function updateBackendStatuses() {
     for (const protocol of PROTOCOLS) {
       statuses[protocol].textContent = data[protocol] ? "Collegato" : "Non collegato";
     }
+    state.backendStatuses = {
+      signal: data.signal === true,
+      whatsapp: data.whatsapp === true,
+      telegram: data.telegram === true,
+    };
+    if (syncProtocolTabs()) renderContacts();
   } catch {
     // Best-effort: leave the previously shown labels as-is on failure.
+    state.backendStatuses = null;
+    syncProtocolTabs();
   }
 }
 
@@ -672,7 +705,8 @@ function archivedRow(archived, back) {
 }
 
 function updateFavicon() {
-  const unreadTotal = state.contacts.reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0);
+  const unreadTotal = state.contacts.reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0)
+    + state.gmailUnread;
   // Badge stile app nativa sull'icona Dock/taskbar quando installata come PWA
   // (manifest.json). Non supportato ovunque (es. Firefox): feature-detect,
   // nessun effetto dove manca l'API.
@@ -693,10 +727,49 @@ function updateFavicon() {
   faviconRed = shouldBeRed;
 }
 
+function isGmailViewActive() {
+  return document.body.classList.contains("gmail-active");
+}
+
+// Red dot on a backend tab when it has unread messages and its list is not
+// on screen (the visible list already shows per-chat badges).  While the
+// Gmail view is open no chat list is visible, so every backend may show it.
+function updateTabDots() {
+  if (!elements.protocolTabs) return;
+  const gmailActive = isGmailViewActive();
+  for (const tab of elements.protocolTabs.querySelectorAll("[data-protocol]")) {
+    const dot = tab.querySelector(".unread-dot");
+    if (!dot) continue;
+    const total = state.contacts
+      .filter((contact) => contact.protocol === tab.dataset.protocol)
+      .reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0);
+    dot.hidden = !(total > 0 && (gmailActive || tab.dataset.protocol !== state.protocolFilter));
+  }
+  const gmailDot = elements.protocolTabs.querySelector("#gmail-tab .unread-dot");
+  if (gmailDot) gmailDot.hidden = !(state.gmailUnread > 0 && !gmailActive);
+}
+
+function setGmailUnread(value) {
+  const unread = Number(value);
+  state.gmailUnread = Number.isFinite(unread) ? Math.max(0, unread) : 0;
+  updateTabDots();
+  updateFavicon();
+}
+
+async function loadGmailUnread() {
+  try {
+    const response = await apiFetch("api/gmail/unread");
+    const data = await response.json();
+    setGmailUnread(data && data.configured ? data.unread : 0);
+  } catch {
+    // Gmail not configured/reachable: the badge simply stays as it was.
+  }
+}
+
 function renderContacts() {
   contactAvatarObserver?.disconnect();
   elements.contacts.replaceChildren();
-  updateBackendStatuses();
+  syncProtocolTabs();
   const base = state.searchResults ?? state.contacts;
   const sortedContacts = [...base].sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
   let contacts = sortedContacts.filter((contact) => contact.protocol === state.protocolFilter);
@@ -714,16 +787,8 @@ function renderContacts() {
     const active = tab.dataset.protocol === state.protocolFilter;
     tab.classList.toggle("active", active);
     tab.setAttribute("aria-selected", String(active));
-    const dot = tab.querySelector(".unread-dot");
-    if (dot) {
-      const total = state.contacts
-        .filter((contact) => contact.protocol === tab.dataset.protocol)
-        .reduce((sum, contact) => sum + unreadOutsideArchive(contact), 0);
-      // Pallino solo sui backend NON selezionati con non letti (quello attivo
-      // ha già i badge nella lista).
-      dot.hidden = !(total > 0 && tab.dataset.protocol !== state.protocolFilter);
-    }
   }
+  updateTabDots();
   elements.contactStatus.textContent = contacts.length
     ? ""
     : state.contactQuery
@@ -3651,9 +3716,12 @@ function connectSocket() {
     elements.connection.className = "connection-state online";
     setDotColor(COLOR_GREEN);
     elements.connection.textContent = "live";
+    updateBackendStatuses();
     if (state.active) loadMessages(true);
     flushOutbox();
     scheduleBackgroundSync();
+    // Initial value, and catch-up after a reconnect (events may have been lost).
+    loadGmailUnread();
   };
   socket.onmessage = (event) => {
     state.lastWsActivity = Date.now();
@@ -3681,6 +3749,12 @@ function connectSocket() {
           }
           break;
         }
+        case "gmail_unread":
+          setGmailUnread(update.payload.unread);
+          // New mail (not just a read count change): the open Gmail view
+          // refreshes its list.
+          if (update.payload.new_mail) window.dispatchEvent(new CustomEvent("gmail:new-mail"));
+          break;
         case "lid_warmup_done":
           if (state.active?.protocol === "whatsapp" && state.active?.id?.endsWith("@g.us")) {
             loadMessages();
@@ -3756,7 +3830,10 @@ function connectSocket() {
   };
 }
 
-document.querySelector("#refresh-contacts").addEventListener("click", () => loadContacts());
+document.querySelector("#refresh-contacts").addEventListener("click", () => {
+  updateBackendStatuses();
+  loadContacts();
+});
 function closeMainMenu() {
   if (elements.mainMenu.hidden) return;
   elements.mainMenu.hidden = true;
@@ -3831,6 +3908,7 @@ elements.skinToggle.addEventListener("change", () => {
   document.documentElement.dataset.skin = state.skin ? "teams" : "";
 });
 document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") updateBackendStatuses();
   if (
     document.visibilityState === "visible"
     && state.active
@@ -4090,6 +4168,9 @@ elements.fileInput.addEventListener("change", () => {
   void stageAttachments(files);
 });
 elements.cancelReply.addEventListener("click", cancelReply);
+// gmail.js announces when its view opens/closes: the tab dots depend on it.
+window.addEventListener("gmail:view", updateTabDots);
+
 if (elements.protocolTabs) {
   elements.protocolTabs.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-protocol]");
@@ -4180,6 +4261,7 @@ elements.saveToken.addEventListener("click", () => {
   // Rotazione token deliberata → clear dell'outbox (D6). Il login iniziale
   // (nessun token precedente) non cancella nulla perché la coda è vuota.
   if (previousToken && previousToken !== token) void clearOutbox();
+  updateBackendStatuses();
   loadContacts();
   connectSocket();
 });
@@ -4210,6 +4292,7 @@ async function boot() {
     // Best-effort: fall through to the normal token-required flow below.
   }
   if (state.token) {
+    updateBackendStatuses();
     loadContacts();
     connectSocket();
   } else {
