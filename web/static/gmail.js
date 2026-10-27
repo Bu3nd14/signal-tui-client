@@ -784,6 +784,46 @@
     setAttachmentsExpanded(files.length > 0 && files.length <= ATTACHMENTS_OPEN_MAX, label);
   }
 
+  // Quoted text (marked data-quote by the server) is folded behind a "•••"
+  // button, as in Gmail: "block" folds the element, "after" the element and
+  // everything after it (Outlook).  Nested quotes fold with their outer one,
+  // and nothing folds when the quote would be the whole message (forwards).
+  function collapseQuotes(root) {
+    const groups = [];
+    for (const marker of root.querySelectorAll("[data-quote]")) {
+      if (marker.parentElement && marker.parentElement.closest("[data-quote]")) continue;
+      if (groups.some((group) => group.includes(marker))) continue;
+      const group = [marker];
+      if (marker.getAttribute("data-quote") === "after") {
+        for (let next = marker.nextElementSibling; next; next = next.nextElementSibling) {
+          group.push(next);
+        }
+      }
+      groups.push(group);
+    }
+    if (!groups.length) return;
+    const quoted = groups.flat().reduce((total, element) => total + element.textContent.trim().length, 0);
+    if (root.textContent.trim().length - quoted <= 0) return;
+
+    for (const group of groups) {
+      const toggle = node("button", "gmail-quote-toggle", "•••");
+      toggle.type = "button";
+      toggle.title = "Mostra testo citato";
+      toggle.setAttribute("aria-label", "Mostra testo citato");
+      toggle.setAttribute("aria-expanded", "false");
+      for (const element of group) element.hidden = true;
+      toggle.addEventListener("click", () => {
+        const expanded = toggle.getAttribute("aria-expanded") !== "true";
+        for (const element of group) element.hidden = !expanded;
+        toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+        const label = expanded ? "Nascondi testo citato" : "Mostra testo citato";
+        toggle.title = label;
+        toggle.setAttribute("aria-label", label);
+      });
+      group[0].before(toggle);
+    }
+  }
+
   function setAttachmentsExpanded(expanded, label) {
     const toggle = elements.attachmentsToggle;
     if (label !== undefined) toggle.dataset.label = label;
@@ -876,6 +916,7 @@
       const content = document.createElement("div");
       content.className = "gmail-html-content";
       content.append(...parsed.body.childNodes);
+      collapseQuotes(content);
       elements.readerBody.replaceChildren(content);
       elements.readerBody.classList.remove("is-empty");
       elements.readerBody.classList.add("is-html");
