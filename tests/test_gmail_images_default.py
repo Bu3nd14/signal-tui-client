@@ -905,12 +905,13 @@ async def test_image_proxy_limits_concurrent_fetches_to_four(monkeypatch):
 
     monkeypatch.setattr("server.link_preview.fetch_external_image", fake_fetch)
     app = _gmail_image_app()
-    token = _token("https://images.example/a.png")
+    # Distinct URLs: requests for the same URL share one fetch (and the cache).
+    tokens = [_token(f"https://images.example/{index}.png") for index in range(10)]
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         responses = await asyncio.gather(
-            *(client.get("/gmail-image", params={"token": token}) for _ in range(10))
+            *(client.get("/gmail-image", params={"token": token}) for token in tokens)
         )
 
     assert calls == 10

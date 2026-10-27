@@ -322,7 +322,7 @@ def test_image_route_matches_operation_and_cleans_up(client, api, monkeypatch):
     assert response.status_code == 200
     assert response.content == _PNG
     assert response.headers["content-type"] == "image/png"
-    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["cache-control"] == "private, max-age=3600"
     assert response.headers["content-security-policy"] == "default-src 'none'"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert _leftover_blobs() == []
@@ -330,7 +330,8 @@ def test_image_route_matches_operation_and_cleans_up(client, api, monkeypatch):
     blob = api.call_json("gmail.image", {"token": token})
     assert Path(blob["path"]).read_bytes() == _PNG
     assert (blob["content_type"], blob["size"]) == ("image/png", len(_PNG))
-    assert fetched == [("https://images.example/a.png", 8 * 1024 * 1024)] * 2
+    # The second request is served by the remote image cache.
+    assert fetched == [("https://images.example/a.png", 8 * 1024 * 1024)]
 
 
 @pytest.mark.parametrize(

@@ -76,7 +76,11 @@ def create_gmail_image_router() -> Any:
             content=data,
             media_type=blob["content_type"],
             headers={
-                "Cache-Control": "no-store",
+                # A remote image's token is stable for its URL: the browser
+                # reuses it when the message is reopened (fewer fetches and
+                # fewer tracking pings).  "private" keeps shared caches, such
+                # as a tunnel or reverse proxy, from storing it.
+                "Cache-Control": "private, max-age=3600",
                 "Content-Security-Policy": "default-src 'none'",
                 "X-Content-Type-Options": "nosniff",
             },
