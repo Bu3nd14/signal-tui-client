@@ -750,9 +750,16 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-field input:focus,
 .gmail-field textarea:focus { border-color: var(--accent); }
 .gmail-field textarea { min-height: 160px; line-height: 1.45; resize: vertical; }
-/* Address suggestions: in the flow under the field (the compose body
-   scrolls, an overlay would be clipped for Cc/Ccn). */
+/* Address suggestions: a dropdown over the fields below, like any
+   autocomplete.  Subject + message under Cc/Ccn are taller than the list, so
+   it stays inside the (scrolling) compose body. */
+.gmail-field:has(> .gmail-suggestions) { position: relative; }
 .gmail-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  z-index: 20;
   display: grid;
   max-height: 248px;
   margin: 0;
