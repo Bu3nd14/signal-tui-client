@@ -854,6 +854,13 @@ the badge in the thousands. Gmail has no push channel, so the server checks the 
 opening or deleting a message re-checks at once, and new mail refreshes the open Gmail list.
 IMAP IDLE would be instant but needs a dedicated, always-open connection.
 
+The reader's action bar uses icons (with tooltips): reply, reply all, forward, archive, delete,
+and a "more" menu with *Segna come non letto* and the HTML/text view switch. Reply all addresses
+the sender and the original recipients (Cc kept), never your own address. Forward adds the
+original header block and text and **attaches the original files** (not the inline images),
+within the usual 10-file / 25 MB limits. Archive removes Gmail's Inbox label (`X-GM-LABELS`), so
+the message stays in All Mail; it is offered only in the inbox.
+
 > After pulling a version that adds the HTML reader, install the new web dependencies once:
 > `.venv/bin/pip install -r requirements-web.txt` (or re-run `./install.sh`). `./install.sh --gmail`
 > installs `nh3`, `tinycss2` and `css-inline` automatically if they are missing.

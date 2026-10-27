@@ -275,6 +275,24 @@ def gmail_messages_mark_read(api: ChatAPI, req: GmailMessageRef) -> dict[str, bo
     return {"ok": True}
 
 
+@operation(
+    "gmail.messages.mark_unread", request=GmailMessageRef, response=dict[str, bool]
+)
+def gmail_messages_mark_unread(api: ChatAPI, req: GmailMessageRef) -> dict[str, bool]:
+    """Clear the ``\\Seen`` flag (back to unread)."""
+    _run(_gmail.mark_unread, req.uid, folder=req.folder)
+    gmail_unread.poke()
+    return {"ok": True}
+
+
+@operation("gmail.messages.archive", request=GmailMessageRef, response=dict[str, bool])
+def gmail_messages_archive(api: ChatAPI, req: GmailMessageRef) -> dict[str, bool]:
+    """Archive an inbox message (remove the Inbox label; it stays in All Mail)."""
+    _run(_gmail.archive_message, req.uid, folder=req.folder)
+    gmail_unread.poke()
+    return {"ok": True}
+
+
 @operation("gmail.unread", request=EmptyRequest, response=dict[str, Any])
 def gmail_unread_count(api: ChatAPI, req: EmptyRequest) -> dict[str, Any]:
     """Unread count among the 200 listed messages, for the tab dot and badge.
@@ -370,6 +388,8 @@ def gmail_messages_send(api: ChatAPI, req: GmailMessagesSendRequest) -> dict[str
         text=req.text,
         reply_to_uid=req.reply_to_uid,
         reply_to_folder=req.reply_to_folder or None,
+        forward_uid=req.forward_uid,
+        forward_folder=req.forward_folder or None,
         attachments=files,
     )
     return {"ok": True, "message_id": message_id}

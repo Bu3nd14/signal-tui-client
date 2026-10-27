@@ -48,7 +48,13 @@
     readerBody: document.getElementById("gmail-reader-body"),
     renderToggle: document.getElementById("gmail-render-toggle"),
     reply: document.getElementById("gmail-reply"),
+    replyAll: document.getElementById("gmail-reply-all"),
+    forward: document.getElementById("gmail-forward"),
+    archive: document.getElementById("gmail-archive"),
     delete: document.getElementById("gmail-delete"),
+    more: document.getElementById("gmail-more"),
+    moreMenu: document.getElementById("gmail-more-menu"),
+    markUnread: document.getElementById("gmail-mark-unread"),
     attachments: document.getElementById("gmail-attachments"),
     attachmentList: document.getElementById("gmail-attachment-list"),
     attachmentsToggle: document.getElementById("gmail-attachments-toggle"),
@@ -93,9 +99,12 @@
     composeFiles: [],
     replyToUid: null,
     replyToFolder: null,
+    forwardUid: null,
+    forwardFolder: null,
     sending: false,
     deleting: false,
     bulkDeleting: false,
+    archiving: false,
   };
 
   let errorTimer = null;
@@ -485,7 +494,7 @@
       setAccountStatus("Non configurato");
       return;
     }
-    const parts = ["Configurato"];
+    const parts = [];
     if (status.address) parts.push(String(status.address));
     if (state.folder) parts.push(state.folder);
     if (status.connected === false) parts.push("connessione non disponibile");
@@ -541,7 +550,8 @@
 
   function renderPager() {
     const total = state.messages.length;
-    const visible = state.configured && total > 0;
+    // Only when there is more than one page to move between.
+    const visible = state.configured && total > 0 && pageCount() > 1;
     elements.pager.hidden = !visible;
     if (!visible) return;
     clampPageIndex();
@@ -925,13 +935,9 @@
       elements.readerBody.classList.remove("is-html");
       elements.readerBody.classList.toggle("is-empty", !text);
     }
+    // A "More actions" menu item: the label says what clicking it does.
     elements.renderToggle.hidden = !hasHtml;
-    elements.renderToggle.textContent = mode === "html" ? "Testo" : "HTML";
-    elements.renderToggle.setAttribute(
-      "aria-pressed",
-      mode === "html" ? "true" : "false",
-    );
-    elements.renderToggle.title = mode === "html" ? "Mostra solo testo" : "Mostra HTML";
+    elements.renderToggle.textContent = mode === "html" ? "Mostra come testo" : "Mostra HTML";
 
     if (mode === "html") loadImages();
     renderAttachments(detail);
@@ -993,6 +999,51 @@
       if (sequence !== state.readerSeq) return;
       if (error && error.name === "AbortError") return;
       showReaderError(error.message);
+      showError(error.message);
+    }
+  }
+
+  function setMoreMenu(open) {
+    elements.moreMenu.hidden = !open;
+    elements.more.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function messagePath(uid, action) {
+    return `api/gmail/messages/${encodeURIComponent(String(uid))}/${action}?folder=${encodeURIComponent(state.folder)}`;
+  }
+
+  async function archiveMessage() {
+    const uid = state.selectedUid;
+    if (uid === null || uid === undefined || state.archiving) return;
+    state.archiving = true;
+    elements.archive.disabled = true;
+    try {
+      await request(messagePath(uid, "archive"), { method: "POST" });
+      closeReader();
+      showNotice("Messaggio archiviato.");
+      await loadMessages({ force: true });
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      showError(error.message);
+    } finally {
+      state.archiving = false;
+      elements.archive.disabled = false;
+    }
+  }
+
+  async function markUnread() {
+    setMoreMenu(false);
+    const uid = state.selectedUid;
+    if (uid === null || uid === undefined) return;
+    try {
+      await request(messagePath(uid, "unread"), { method: "POST" });
+      const message = state.messages.find((item) => item.uid === uid);
+      if (message) message.seen = false;
+      // Back to the list, as in Gmail: reopening it would mark it read again.
+      closeReader();
+      showNotice("Segnato come non letto.");
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
       showError(error.message);
     }
   }
@@ -1198,6 +1249,8 @@
       state.status = payload;
       state.configured = Boolean(payload.configured);
       state.folder = typeof payload.folder === "string" && payload.folder ? payload.folder : FOLDER_FALLBACK;
+      // Archiving removes the Inbox label: it only applies to the inbox.
+      elements.archive.hidden = state.folder.toUpperCase() !== "INBOX";
       renderAccountStatus();
       elements.composeNew.disabled = !state.configured;
 
@@ -1293,23 +1346,78 @@
     elements.composeError.hidden = false;
   }
 
+  const COMPOSE_TITLES = {
+    new: "Nuova email",
+    reply: "Rispondi",
+    replyAll: "Rispondi a tutti",
+    forward: "Inoltra",
+  };
+
+  function prefixedSubject(subject, prefix, already) {
+    const original = typeof subject === "string" ? subject.trim() : "";
+    if (already.test(original)) return original;
+    return original ? `${prefix} ${original}` : prefix;
+  }
+
+  // Reply all: the sender and the original To in "A", the original Cc in
+  // "Cc"; each address once, never the account's own.
+  function replyAllRecipients(detail) {
+    const own = String((state.status && state.status.address) || "").trim().toLowerCase();
+    const seen = new Set(own ? [own] : []);
+    const pick = (value) => splitAddresses(value)
+      .map((address) => extractEmail(address))
+      .filter((email) => {
+        const key = email.toLowerCase();
+        if (!email || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    const to = [...pick(detail.from), ...pick(detail.to)];
+    const cc = pick(detail.cc);
+    // Replying to all on a mail we sent to ourselves only: back to the sender.
+    if (!to.length && !cc.length) to.push(extractEmail(detail.from));
+    return { to, cc };
+  }
+
+  function forwardedFileCount(detail) {
+    const attachments = Array.isArray(detail.attachments) ? detail.attachments : [];
+    return attachments.filter((attachment) => attachment && attachment.inline !== true).length;
+  }
+
   function openCompose(mode, detail) {
     state.composeFiles = [];
     state.replyToUid = null;
     state.replyToFolder = null;
+    state.forwardUid = null;
+    state.forwardFolder = null;
     elements.composeForm.reset();
     resetCompose();
-    elements.composeTitle.textContent = mode === "reply" ? "Rispondi" : "Nuova email";
+    elements.composeTitle.textContent = COMPOSE_TITLES[mode] || COMPOSE_TITLES.new;
 
-    if (mode === "reply" && detail) {
-      const originalSubject = typeof detail.subject === "string" ? detail.subject.trim() : "";
-      elements.composeTo.value = extractEmail(detail.from);
-      elements.composeSubject.value = /^re:/i.test(originalSubject)
-        ? originalSubject
-        : (originalSubject ? `Re: ${originalSubject}` : "Re:");
-      state.replyToUid = detail.uid !== undefined && detail.uid !== null ? detail.uid : state.selectedUid;
+    const uid = detail && detail.uid !== undefined && detail.uid !== null ? detail.uid : state.selectedUid;
+    if ((mode === "reply" || mode === "replyAll") && detail) {
+      if (mode === "replyAll") {
+        const { to, cc } = replyAllRecipients(detail);
+        elements.composeTo.value = to.join(", ");
+        elements.composeCc.value = cc.join(", ");
+      } else {
+        elements.composeTo.value = extractEmail(detail.from);
+      }
+      elements.composeSubject.value = prefixedSubject(detail.subject, "Re:", /^re:/i);
+      state.replyToUid = uid;
       state.replyToFolder = state.folder;
-      elements.composeReplyRef.textContent = `Risposta a ${senderOf(detail)} — ${subjectOf(detail)}`;
+      const label = mode === "replyAll" ? "Risposta a tutti" : "Risposta a";
+      elements.composeReplyRef.textContent = mode === "replyAll"
+        ? `${label} — ${subjectOf(detail)}`
+        : `${label} ${senderOf(detail)} — ${subjectOf(detail)}`;
+      elements.composeReplyRef.hidden = false;
+    } else if (mode === "forward" && detail) {
+      elements.composeSubject.value = prefixedSubject(detail.subject, "Fwd:", /^(fwd?|i):/i);
+      state.forwardUid = uid;
+      state.forwardFolder = state.folder;
+      const files = forwardedFileCount(detail);
+      const suffix = files ? ` (con ${files} ${files === 1 ? "allegato" : "allegati"})` : "";
+      elements.composeReplyRef.textContent = `Inoltro di ${senderOf(detail)} — ${subjectOf(detail)}${suffix}`;
       elements.composeReplyRef.hidden = false;
     }
 
@@ -1322,7 +1430,7 @@
       }
     }
     window.requestAnimationFrame(() => {
-      if (mode === "reply") elements.composeText.focus();
+      if (mode === "reply" || mode === "replyAll") elements.composeText.focus();
       else elements.composeTo.focus();
     });
   }
@@ -1360,6 +1468,11 @@
     if (state.replyToUid !== null && state.replyToUid !== undefined) {
       form.append("reply_to_uid", String(state.replyToUid));
       form.append("reply_to_folder", state.replyToFolder || state.folder);
+    }
+    if (state.forwardUid !== null && state.forwardUid !== undefined) {
+      // The server adds the original text and attachments.
+      form.append("forward_uid", String(state.forwardUid));
+      form.append("forward_folder", state.forwardFolder || state.folder);
     }
     for (const file of state.composeFiles) {
       form.append("file[]", file, file.name);
@@ -1463,7 +1576,37 @@
   elements.reply.addEventListener("click", () => {
     if (state.detail) openCompose("reply", state.detail);
   });
-  elements.renderToggle.addEventListener("click", toggleRenderMode);
+  elements.replyAll.addEventListener("click", () => {
+    if (state.detail) openCompose("replyAll", state.detail);
+  });
+  elements.forward.addEventListener("click", () => {
+    if (state.detail) openCompose("forward", state.detail);
+  });
+  elements.archive.addEventListener("click", () => {
+    void archiveMessage();
+  });
+  elements.more.addEventListener("click", () => {
+    setMoreMenu(elements.moreMenu.hidden);
+  });
+  elements.markUnread.addEventListener("click", () => {
+    void markUnread();
+  });
+  // The menu closes on any click outside it and on Escape.
+  document.addEventListener("click", (event) => {
+    if (elements.moreMenu.hidden) return;
+    if (event.target instanceof Element && event.target.closest(".gmail-more")) return;
+    setMoreMenu(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !elements.moreMenu.hidden) {
+      setMoreMenu(false);
+      elements.more.focus();
+    }
+  });
+  elements.renderToggle.addEventListener("click", () => {
+    setMoreMenu(false);
+    toggleRenderMode();
+  });
   elements.attachmentsToggle.addEventListener("click", toggleAttachments);
   elements.readerBody.addEventListener("click", (event) => {
     const anchor = event.target instanceof Element ? event.target.closest("a[href]") : null;
