@@ -101,6 +101,10 @@
     replyToFolder: null,
     forwardUid: null,
     forwardFolder: null,
+    // Compose autocomplete: [{email, name, score, last_ts}] from the server.
+    addressBook: [],
+    addressBookLoadedAt: 0,
+    addressBookLoading: false,
     sending: false,
     deleting: false,
     bulkDeleting: false,
@@ -1384,7 +1388,189 @@
     return attachments.filter((attachment) => attachment && attachment.inline !== true).length;
   }
 
+  // ── Address autocomplete (A / Cc / Ccn) ──────────────────────────────────
+  // The server's address book comes from the latest Sent and Inbox headers;
+  // it is loaded once per compose (cached 15 min on the server) and filtered
+  // here as the user types.
+  const ADDRESS_SUGGESTIONS_MAX = 8;
+
+  function normalizeSearch(text) {
+    return String(text || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  }
+
+  // The comma-separated address the caret is in: [start, end) of the field.
+  function addressTokenRange(value, caret) {
+    const before = value.lastIndexOf(",", Math.max(0, caret - 1));
+    const after = value.indexOf(",", caret);
+    return { start: before + 1, end: after === -1 ? value.length : after };
+  }
+
+  function suggestAddresses(query, book, exclude) {
+    const q = normalizeSearch(query).trim();
+    if (!q || !Array.isArray(book)) return [];
+    const ranked = [];
+    for (const contact of book) {
+      if (!contact || !contact.email || exclude.has(contact.email)) continue;
+      const email = contact.email.toLowerCase();
+      const name = normalizeSearch(contact.name);
+      let rank = -1;
+      if (email.startsWith(q) || name.startsWith(q)) rank = 0;
+      else if (name.split(/\s+/).some((word) => word.startsWith(q))
+        || email.split(/[@._+-]/).some((part) => part.startsWith(q))) rank = 1;
+      else if (name.includes(q) || email.includes(q)) rank = 2;
+      if (rank >= 0) ranked.push({ contact, rank });
+    }
+    ranked.sort((a, b) => a.rank - b.rank
+      || (b.contact.score || 0) - (a.contact.score || 0)
+      || (b.contact.last_ts || 0) - (a.contact.last_ts || 0));
+    return ranked.slice(0, ADDRESS_SUGGESTIONS_MAX).map((item) => item.contact);
+  }
+
+  function formatAddress(contact) {
+    const name = String(contact.name || "").replace(/["<>\r\n]/g, "").trim();
+    if (!name) return contact.email;
+    const quoted = /[,;:@()[\]\\.]/.test(name) ? `"${name}"` : name;
+    return `${quoted} <${contact.email}>`;
+  }
+
+  // Replace the address under the caret with *contact*, then ", ".
+  function applySuggestion(value, caret, contact) {
+    const { start, end } = addressTokenRange(value, caret);
+    const head = value.slice(0, start).replace(/\s+$/, "");
+    const tail = value.slice(end).replace(/^,\s*/, "");
+    const inserted = `${head ? `${head} ` : ""}${formatAddress(contact)}, `;
+    return { value: inserted + tail, caret: inserted.length };
+  }
+
+  // Drop the ", " the autocomplete leaves after the last address (and any
+  // empty item): the server's address parser rejects a list ending in ",".
+  function tidyAddressField(value) {
+    return String(value || "")
+      .replace(/,(\s*,)+/g, ",")
+      .replace(/^[\s,]+|[\s,]+$/g, "");
+  }
+
+  function emailsInField(value) {
+    return new Set(splitAddresses(value).map((address) => extractEmail(address).toLowerCase()));
+  }
+
+  async function loadAddressBook() {
+    const fresh = state.addressBookLoadedAt && Date.now() - state.addressBookLoadedAt < 5 * 60 * 1000;
+    if (fresh || state.addressBookLoading) return;
+    state.addressBookLoading = true;
+    try {
+      const response = await request("api/gmail/address-book");
+      const payload = await response.json();
+      state.addressBook = Array.isArray(payload && payload.contacts) ? payload.contacts : [];
+      state.addressBookLoadedAt = Date.now();
+    } catch {
+      // No suggestions: typing addresses still works.
+    } finally {
+      state.addressBookLoading = false;
+    }
+  }
+
+  function attachAddressAutocomplete(input) {
+    const list = node("ul", "gmail-suggestions");
+    list.id = `${input.id}-suggestions`;
+    list.setAttribute("role", "listbox");
+    list.hidden = true;
+    input.after(list);
+    input.setAttribute("role", "combobox");
+    input.setAttribute("aria-autocomplete", "list");
+    input.setAttribute("aria-expanded", "false");
+    input.setAttribute("aria-controls", list.id);
+    let items = [];
+    let active = -1;
+
+    const close = () => {
+      items = [];
+      active = -1;
+      list.hidden = true;
+      list.replaceChildren();
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+    };
+    const highlight = (index) => {
+      active = index;
+      [...list.children].forEach((option, position) => {
+        option.setAttribute("aria-selected", position === index ? "true" : "false");
+      });
+      if (index >= 0) input.setAttribute("aria-activedescendant", list.children[index].id);
+      else input.removeAttribute("aria-activedescendant");
+    };
+    const accept = (index) => {
+      const contact = items[index];
+      if (!contact) return;
+      const next = applySuggestion(input.value, input.selectionStart ?? input.value.length, contact);
+      input.value = next.value;
+      input.setSelectionRange(next.caret, next.caret);
+      close();
+      input.focus();
+    };
+    const update = () => {
+      const caret = input.selectionStart ?? input.value.length;
+      const { start } = addressTokenRange(input.value, caret);
+      const query = input.value.slice(start, caret);
+      items = suggestAddresses(query, state.addressBook, emailsInField(input.value));
+      if (!items.length) {
+        close();
+        return;
+      }
+      list.replaceChildren(...items.map((contact, index) => {
+        const option = node("li", "gmail-suggestion");
+        option.id = `${list.id}-${index}`;
+        option.setAttribute("role", "option");
+        if (contact.name) option.append(node("span", "gmail-suggestion-name", contact.name));
+        option.append(node("span", "gmail-suggestion-email", contact.email));
+        // mousedown, not click: keep the focus (and the caret) in the input.
+        option.addEventListener("mousedown", (event) => {
+          event.preventDefault();
+          accept(index);
+        });
+        return option;
+      }));
+      list.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+      highlight(0);
+    };
+
+    input.addEventListener("input", update);
+    // Leaving the field drops the trailing ", " kept for the next address.
+    // Picking a suggestion does not blur it (options act on mousedown).
+    input.addEventListener("blur", () => {
+      close();
+      const tidy = tidyAddressField(input.value);
+      if (tidy !== input.value) input.value = tidy;
+    });
+    input.addEventListener("keydown", (event) => {
+      if (list.hidden) return;
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        highlight((active + step + items.length) % items.length);
+      } else if ((event.key === "Enter" || event.key === "Tab") && active >= 0) {
+        event.preventDefault();
+        accept(active);
+      } else if (event.key === "Escape") {
+        // Close the list, not the compose dialog.
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+      }
+    });
+    return close;
+  }
+
+  const closeAddressSuggestions = [
+    elements.composeTo,
+    elements.composeCc,
+    elements.composeBcc,
+  ].map(attachAddressAutocomplete);
+
   function openCompose(mode, detail) {
+    for (const close of closeAddressSuggestions) close();
+    void loadAddressBook();
     state.composeFiles = [];
     state.replyToUid = null;
     state.replyToFolder = null;
@@ -1460,9 +1646,9 @@
     elements.composeError.textContent = "";
 
     const form = new FormData();
-    form.append("to", elements.composeTo.value.trim());
-    form.append("cc", elements.composeCc.value.trim());
-    form.append("bcc", elements.composeBcc.value.trim());
+    form.append("to", tidyAddressField(elements.composeTo.value));
+    form.append("cc", tidyAddressField(elements.composeCc.value));
+    form.append("bcc", tidyAddressField(elements.composeBcc.value));
     form.append("subject", elements.composeSubject.value.trim());
     form.append("text", elements.composeText.value);
     if (state.replyToUid !== null && state.replyToUid !== undefined) {

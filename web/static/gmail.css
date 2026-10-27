@@ -750,6 +750,44 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-field input:focus,
 .gmail-field textarea:focus { border-color: var(--accent); }
 .gmail-field textarea { min-height: 160px; line-height: 1.45; resize: vertical; }
+/* Address suggestions: a dropdown over the fields below, like any
+   autocomplete.  Subject + message under Cc/Ccn are taller than the list, so
+   it stays inside the (scrolling) compose body. */
+.gmail-field:has(> .gmail-suggestions) { position: relative; }
+.gmail-suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  left: 0;
+  z-index: 20;
+  display: grid;
+  max-height: 248px;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel);
+  list-style: none;
+  box-shadow: 0 10px 24px #0008;
+}
+.gmail-suggestion {
+  display: grid;
+  gap: 1px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.gmail-suggestion[aria-selected="true"],
+.gmail-suggestion:hover { background: var(--panel-raised); }
+.gmail-suggestion-name { font-size: .85rem; }
+.gmail-suggestion-email {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: .76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .gmail-compose-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .gmail-reply-ref {
   margin: 0;

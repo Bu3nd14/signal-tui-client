@@ -959,8 +959,16 @@ def validate_header_value(value: str, field: str = "header") -> str:
     return value.strip()
 
 
+_ADDRESS_SEPARATORS_RE = re.compile(r"^[\s,]+|[\s,]+$")
+_ADDRESS_EMPTY_ITEMS_RE = re.compile(r",(?:\s*,)+")
+
+
 def _parse_addresses(raw: str, field: str) -> list[str]:
     value = validate_header_value(raw or "", field)
+    # Empty list items ("a@x.it," as left by the compose autocomplete, ",,"):
+    # Python's strict getaddresses (3.13+) rejects the WHOLE list as
+    # [('', '')] when the value ends with a comma, so drop them first.
+    value = _ADDRESS_EMPTY_ITEMS_RE.sub(",", _ADDRESS_SEPARATORS_RE.sub("", value))
     if not value:
         return []
     addresses = [
@@ -3865,8 +3873,12 @@ def _parse_list_entry(raw: bytes) -> tuple[set[str], str] | None:
     return (flags, name) if name else None
 
 
-def _find_trash_mailbox(connection: imaplib.IMAP4) -> str:
-    """Return the special-use ``\\Trash`` mailbox, falling back to Gmail's name."""
+def _find_special_mailbox(connection: imaplib.IMAP4, flag: str, fallback: str) -> str:
+    """Return the special-use mailbox carrying *flag* (``\\trash``, ``\\sent``…).
+
+    Gmail localizes these names (``[Gmail]/Posta inviata``), so they are found
+    through their LIST attribute; *fallback* is Gmail's English name.
+    """
     try:
         status, data = connection.list('""', '"*"')
     except (imaplib.IMAP4.error, OSError):
@@ -3876,9 +3888,126 @@ def _find_trash_mailbox(connection: imaplib.IMAP4) -> str:
             if not isinstance(item, (bytes, bytearray)):
                 continue
             parsed = _parse_list_entry(bytes(item))
-            if parsed and "\\trash" in parsed[0]:
+            if parsed and flag in parsed[0]:
                 return parsed[1]
-    return "[Gmail]/Trash"
+    return fallback
+
+
+def _find_trash_mailbox(connection: imaplib.IMAP4) -> str:
+    """Return the special-use ``\\Trash`` mailbox, falling back to Gmail's name."""
+    return _find_special_mailbox(connection, "\\trash", "[Gmail]/Trash")
+
+
+# Address book for the compose autocomplete, built from the headers of the
+# latest messages: people we write to (Sent) weigh more than people who write
+# to us (Inbox From); other recipients of inbox mail weigh a little.  Google
+# Contacts would need OAuth (CardDAV/People API), not an app password.
+_ADDRESS_BOOK_WINDOW = 500
+_ADDRESS_BOOK_TTL_S = 15 * 60
+_ADDRESS_BOOK_MAX = 2000
+_ADDRESS_BOOK_FETCH_ITEM = "(BODY.PEEK[HEADER.FIELDS (FROM TO CC DATE)])"
+_NOREPLY_RE = re.compile(
+    r"(^|[._+-])(no-?reply|do-?not-?reply|mailer-daemon|bounces?)([._+-]|@)",
+    re.IGNORECASE,
+)
+_address_book_cache: tuple[float, str, list[dict[str, Any]]] | None = None
+_address_book_lock = threading.Lock()
+
+
+def clear_address_book_cache() -> None:
+    global _address_book_cache
+    with _address_book_lock:
+        _address_book_cache = None
+
+
+def _collect_addresses(
+    entries: dict[str, dict[str, Any]],
+    headers: bytes,
+    weights: dict[str, float],
+    own: str,
+) -> None:
+    message = message_from_bytes(headers)
+    date_ts = _date_to_ts(message.get("Date")) or 0
+    for header, weight in weights.items():
+        values = [str(value) for value in message.get_all(header, [])]
+        for raw_name, raw_email in getaddresses(values):
+            email = raw_email.strip().lower()
+            if (
+                not email
+                or "@" not in email
+                or email == own
+                or _NOREPLY_RE.search(email)
+                or any(char in email for char in ' <>,;"')
+            ):
+                continue
+            name = decode_mime_header(raw_name).strip().strip('"').strip()
+            entry = entries.setdefault(
+                email, {"email": email, "name": "", "score": 0.0, "last_ts": 0}
+            )
+            entry["score"] += weight
+            # Keep the name used in the most recent message that had one.
+            if name and name.lower() != email and date_ts >= entry["last_ts"]:
+                entry["name"] = name
+            entry["last_ts"] = max(entry["last_ts"], date_ts)
+
+
+def fetch_address_book(*, refresh: bool = False) -> list[dict[str, Any]]:
+    """Addresses from the latest Sent and Inbox headers, best first.
+
+    Read-only (``SELECT … READ-ONLY`` + ``BODY.PEEK`` of four header fields of
+    the last ``_ADDRESS_BOOK_WINDOW`` messages per folder); cached per account
+    for ``_ADDRESS_BOOK_TTL_S``.  The account's own address and no-reply
+    senders are left out.
+    """
+    global _address_book_cache
+    settings = load_settings()
+    fingerprint = _account_fingerprint(settings)
+    now = time.monotonic()
+    with _address_book_lock:
+        cached = _address_book_cache
+        if (
+            not refresh
+            and cached is not None
+            and cached[1] == fingerprint
+            and now - cached[0] < _ADDRESS_BOOK_TTL_S
+        ):
+            return [dict(entry) for entry in cached[2]]
+    own = settings.address.strip().lower()
+    entries: dict[str, dict[str, Any]] = {}
+    with imap_connect(settings) as connection:
+        sent = _find_special_mailbox(connection, "\\sent", "[Gmail]/Sent Mail")
+        sources = (
+            (sent, {"To": 3.0, "Cc": 2.0}),
+            (validate_folder(settings.folder), {"From": 1.0, "To": 0.25, "Cc": 0.25}),
+        )
+        for folder, weights in sources:
+            status, data = connection.select(_mailbox(folder), readonly=True)
+            if status != "OK":
+                continue
+            exists = _first_int(data) or 0
+            if not exists:
+                continue
+            first = max(1, exists - _ADDRESS_BOOK_WINDOW + 1)
+            status, data = connection.fetch(
+                f"{first}:{exists}", _ADDRESS_BOOK_FETCH_ITEM
+            )
+            if status != "OK":
+                continue
+            for item in data or []:
+                if (
+                    isinstance(item, tuple)
+                    and len(item) >= 2
+                    and isinstance(item[1], bytes)
+                ):
+                    _collect_addresses(entries, item[1], weights, own)
+    ranked = sorted(
+        entries.values(), key=lambda entry: (-entry["score"], -entry["last_ts"])
+    )[:_ADDRESS_BOOK_MAX]
+    for entry in ranked:
+        entry["score"] = round(entry["score"], 2)
+    with _address_book_lock:
+        _address_book_cache = (time.monotonic(), fingerprint, ranked)
+    return [dict(entry) for entry in ranked]
 
 
 def _uidvalidity(connection: imaplib.IMAP4) -> int:

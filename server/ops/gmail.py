@@ -293,6 +293,16 @@ def gmail_messages_archive(api: ChatAPI, req: GmailMessageRef) -> dict[str, bool
     return {"ok": True}
 
 
+@operation("gmail.address_book", request=EmptyRequest, response=dict[str, Any])
+def gmail_address_book(api: ChatAPI, req: EmptyRequest) -> dict[str, Any]:
+    """Addresses for the compose autocomplete (latest Sent and Inbox headers).
+
+    ``contacts``: ``{email, name, score, last_ts}`` best first; the client
+    filters them as the user types.  Cached server-side for 15 minutes.
+    """
+    return {"contacts": _run(_gmail.fetch_address_book)}
+
+
 @operation("gmail.unread", request=EmptyRequest, response=dict[str, Any])
 def gmail_unread_count(api: ChatAPI, req: EmptyRequest) -> dict[str, Any]:
     """Unread count among the 200 listed messages, for the tab dot and badge.
