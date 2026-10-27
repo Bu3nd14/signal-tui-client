@@ -301,15 +301,21 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
       return availableMatches.length === 1 ? availableMatches[0] : undefined;
     };
     const textQuoteMatch = uniqueAvailable(textQuoteMatches);
-    const textQuoteFallback = protocol === "whatsapp" && textQuoteSignature != null
+    // WhatsApp: l'eco (o la riga letta prima che il mirror completi la quote)
+    // puo' avere una quote diversa da quella optimistic, per esempio senza
+    // quote_timestamp (il replyTo WAHA non lo porta) o con la caption al posto
+    // del placeholder media.  Ultima risorsa, per reply testuali E media:
+    // l'unica riga nuova con lo stesso testo.
+    const quoteAgnosticFallback = protocol === "whatsapp"
       ? uniqueAvailable(realByQuoteAgnosticSignature.get(messageQuoteAgnosticSignature(item)) || [])
       : undefined;
     const realId = protocol === "whatsapp" && textQuoteSignature != null
-      ? textQuoteMatch ?? textQuoteFallback
+      ? textQuoteMatch ?? quoteAgnosticFallback
       : exactMatches.find(available)
         ?? looseMatches.find(available)
         ?? mediaQuoteMatches.find(available)
-        ?? uniqueAvailable(quoteLessMatches);
+        ?? uniqueAvailable(quoteLessMatches)
+        ?? quoteAgnosticFallback;
     if (realId === undefined) continue;
     const { optimistic_id: ignored, ...confirmed } = item;
     void ignored;

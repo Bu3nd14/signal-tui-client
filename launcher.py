@@ -5,7 +5,9 @@
     python3 launcher.py aliases                       # was install.sh --aliases
     python3 launcher.py whatsapp start|stop [--no-wait]      # was scripts/start_whatsapp.sh
     python3 launcher.py backend-restart [--no-wait]   # was scripts/restart_backend.sh
-    python3 launcher.py server start|stop|status      # was scripts/start_on_server.sh
+    python3 launcher.py server start [--web-host H] [--web-port P] [...]
+    python3 launcher.py server stop [--keep-whatsapp]
+    python3 launcher.py server status                 # was scripts/start_on_server.sh
     python3 launcher.py handover to-server|to-local|status  # was scripts/tui_handover.sh
     python3 launcher.py profile pyspy|strace [duration]     # was profiling/run_*.sh
     python3 launcher.py test                           # was tests/run_regression_tests.sh
@@ -29,6 +31,29 @@ import sys
 
 from launcher import backend, handover, install, server, test, whatsapp
 from launcher import profile as profile_mod
+
+
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid port: {value!r}") from None
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 1 and 65535")
+    return port
+
+
+def _add_compose_file(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--compose-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Extra docker compose file layered on WAHA's (repeatable); "
+            "to make it permanent set WAHA_COMPOSE_FILES in .env"
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -87,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
             "nesting=1."
         ),
     )
+    _add_compose_file(p_install)
 
     sub.add_parser("aliases", help="Install only the web reader shell aliases")
 
@@ -101,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Start WAHA without CPU/RAM caps (default: applied)",
     )
+    _add_compose_file(p_wa_start)
     wa_sub.add_parser("stop")
 
     p_backend = sub.add_parser(
@@ -113,6 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Restart WAHA without CPU/RAM caps (default: applied)",
     )
+    _add_compose_file(p_backend)
 
     p_server = sub.add_parser(
         "server",
@@ -125,12 +153,62 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Start WAHA without CPU/RAM caps (default: applied)",
     )
+    _add_compose_file(p_server_start)
     p_server_start.add_argument(
         "--no-token",
         action="store_true",
         help="Do not print the Web UI token (reduces duplicate output)",
     )
-    server_sub.add_parser("stop")
+    p_server_start.add_argument(
+        "--web-host",
+        default=server.SERVER_HOST,
+        metavar="HOST",
+        help=f"Web UI bind address (default: {server.SERVER_HOST})",
+    )
+    p_server_start.add_argument(
+        "--web-port",
+        type=_port,
+        default=server.SERVER_PORT,
+        metavar="PORT",
+        help=f"Web UI listen port (default: {server.SERVER_PORT})",
+    )
+    p_server_start.add_argument(
+        "--web-no-auth",
+        action="store_true",
+        help=(
+            "Disable the Web UI Bearer token (INSECURE: anyone who can reach "
+            "the host/port gets full read/send access; trusted networks only)"
+        ),
+    )
+    p_server_start.add_argument(
+        "--no-web", action="store_true", help="Do not start the Web UI"
+    )
+    socket_group = p_server_start.add_mutually_exclusive_group()
+    socket_group.add_argument(
+        "--socket", metavar="PATH", help="Unix socket path for attached TUIs"
+    )
+    socket_group.add_argument(
+        "--no-socket", action="store_true", help="Do not start the Unix socket"
+    )
+    p_server_start.add_argument(
+        "--debug", action="store_true", help="Debug logging in /tmp/signal-tui.log"
+    )
+    p_server_start.add_argument(
+        "--no-whatsapp",
+        action="store_true",
+        help="Do not start WAHA (e.g. Signal/Telegram only, or WAHA managed elsewhere)",
+    )
+    p_server_start.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run the server in this terminal instead of detached (Ctrl+C stops it)",
+    )
+    p_server_stop = server_sub.add_parser("stop")
+    p_server_stop.add_argument(
+        "--keep-whatsapp",
+        action="store_true",
+        help="Stop only the server and leave WAHA running",
+    )
     server_sub.add_parser("status")
 
     p_handover = sub.add_parser(
@@ -150,6 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Start WAHA locally without CPU/RAM caps (default: applied)",
     )
+    _add_compose_file(p_handover_to_local)
     handover_sub.add_parser("status")
 
     p_profile = sub.add_parser("profile", help="CPU (py-spy) / I/O (strace) profiling")
@@ -167,6 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    whatsapp.add_compose_files(getattr(args, "compose_file", None) or [])
 
     if args.command == "install":
         return install.run(args)
@@ -187,9 +267,20 @@ def main(argv: list[str] | None = None) -> int:
             return server.start_all(
                 docker_limits=not args.no_docker_limits,
                 print_token=not args.no_token,
+                opts=server.ServeOptions(
+                    web_host=args.web_host,
+                    web_port=args.web_port,
+                    web_no_auth=args.web_no_auth,
+                    no_web=args.no_web,
+                    no_socket=args.no_socket,
+                    socket=args.socket,
+                    debug=args.debug,
+                ),
+                whatsapp=not args.no_whatsapp,
+                foreground=args.foreground,
             )
         if args.server_command == "stop":
-            return server.stop_all()
+            return server.stop_all(whatsapp=not args.keep_whatsapp)
         return server.status()
     if args.command == "handover":
         if args.handover_command == "to-server":

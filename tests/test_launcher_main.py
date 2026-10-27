@@ -124,7 +124,15 @@ class TestMainDispatch:
             lambda **kwargs: calls.append(kwargs) or 0,
         )
         launcher_cli.main(["server", "start"])
-        assert calls == [{"docker_limits": True, "print_token": True}]
+        assert calls == [
+            {
+                "docker_limits": True,
+                "print_token": True,
+                "opts": launcher_cli.server.ServeOptions(),
+                "whatsapp": True,
+                "foreground": False,
+            }
+        ]
 
     def test_server_start_no_token_flag(self, launcher_cli, monkeypatch):
         calls = []
@@ -134,11 +142,39 @@ class TestMainDispatch:
             lambda **kwargs: calls.append(kwargs) or 0,
         )
         launcher_cli.main(["server", "start", "--no-token"])
-        assert calls == [{"docker_limits": True, "print_token": False}]
+        assert calls[0]["print_token"] is False
+
+    def test_compose_file_flag_reaches_compose_args(
+        self, launcher_cli, monkeypatch, tmp_path
+    ):
+        # main() writes os.environ directly: register the key for restore.
+        monkeypatch.setenv("WAHA_COMPOSE_FILES", "")
+        monkeypatch.setattr(launcher_cli.whatsapp, "PROJECT_DIR", tmp_path)
+        monkeypatch.chdir(tmp_path)
+        seen = []
+        monkeypatch.setattr(
+            launcher_cli.whatsapp,
+            "start",
+            lambda **k: seen.append(launcher_cli.whatsapp.compose_args()) or 0,
+        )
+        launcher_cli.main(
+            ["whatsapp", "start", "--compose-file", "a.yml", "--compose-file", "b.yml"]
+        )
+        assert seen[0][-4:] == [
+            "-f",
+            str((tmp_path / "a.yml").resolve()),
+            "-f",
+            str((tmp_path / "b.yml").resolve()),
+        ]
 
     def test_server_stop_dispatches(self, launcher_cli, monkeypatch):
-        monkeypatch.setattr(launcher_cli.server, "stop_all", lambda: 0)
+        calls = []
+        monkeypatch.setattr(
+            launcher_cli.server, "stop_all", lambda **kw: calls.append(kw) or 0
+        )
         assert launcher_cli.main(["server", "stop"]) == 0
+        assert launcher_cli.main(["server", "stop", "--keep-whatsapp"]) == 0
+        assert calls == [{"whatsapp": True}, {"whatsapp": False}]
 
     def test_server_status_dispatches(self, launcher_cli, monkeypatch):
         monkeypatch.setattr(launcher_cli.server, "status", lambda: 0)
