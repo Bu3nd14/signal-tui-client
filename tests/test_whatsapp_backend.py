@@ -4930,7 +4930,13 @@ def test_request_http_error_logs_local_status_and_single_line(caplog):
     ):
         assert client._request("GET", "/api/messages") is None
 
-    record = next(r for r in caplog.records if "WAHA request failed" in r.getMessage())
+    # Only this request's record: caplog also sees other threads' logging.
+    record = next(
+        r
+        for r in caplog.records
+        if "WAHA request failed" in r.getMessage()
+        and "path=/api/messages " in r.getMessage()
+    )
     assert "status=500" in record.getMessage()
     assert "status=200" not in record.getMessage()
     assert "first line second line" in record.getMessage()
