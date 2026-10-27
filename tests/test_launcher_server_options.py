@@ -93,10 +93,20 @@ class TestServeArgs:
             ("0.0.0.0", "127.0.0.1"),
             ("localhost", "127.0.0.1"),
             ("10.1.2.3", "10.1.2.3"),
+            ("127.0.0.1,192.168.1.10", "127.0.0.1"),
+            ("0.0.0.0, ::", "127.0.0.1"),
         ],
     )
     def test_probe_host(self, host, probe):
         assert ServeOptions(web_host=host).probe_host() == probe
+
+    def test_web_hosts_splits_a_comma_separated_list(self):
+        opts = ServeOptions(web_host="127.0.0.1, 192.168.1.10,")
+        assert opts.web_hosts() == ["127.0.0.1", "192.168.1.10"]
+
+    def test_web_url_prefers_a_non_loopback_host(self):
+        opts = ServeOptions(web_host="127.0.0.1,192.168.1.10", web_port=8080)
+        assert server._web_url(opts) == "http://192.168.1.10:8080"
 
 
 class TestStartWithOptions:

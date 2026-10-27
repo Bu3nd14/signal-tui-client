@@ -423,11 +423,15 @@ def web_host() -> str:
 
     ``127.0.0.1`` keeps the web server local-only; set ``web.host`` in the
     config (or use ``--web-host``) to bind on another interface, e.g.
-    ``0.0.0.0`` when exposing it over a VPN or tunnel.
+    ``0.0.0.0`` when exposing it over a VPN or tunnel.  Several interfaces
+    are a list (``["127.0.0.1", "192.168.1.10"]``) or a comma-separated
+    string; either is returned comma-separated.
     """
     value = _web_config().get("host", "127.0.0.1")
     if value is None:
         return "127.0.0.1"
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(item) for item in value) or "127.0.0.1"
     return str(value)
 
 

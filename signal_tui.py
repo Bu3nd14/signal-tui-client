@@ -88,7 +88,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--web-port", type=int, help="web UI listen port")
     parser.add_argument(
-        "--web-host", type=str, help="web UI bind host (default 127.0.0.1)"
+        "--web-host",
+        type=str,
+        help=(
+            "web UI bind host (default 127.0.0.1); comma-separate several to "
+            "listen on each, e.g. 127.0.0.1,192.168.1.10"
+        ),
     )
     parser.add_argument(
         "--web-no-auth",

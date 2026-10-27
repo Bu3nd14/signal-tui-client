@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -34,12 +36,60 @@ class WebServerHandle:
 _active_server: WebServerHandle | None = None
 
 
+def parse_hosts(host: str | Sequence[str]) -> list[str]:
+    """Split a bind host setting into the addresses to listen on.
+
+    *host* is one address, a comma-separated list (``--web-host
+    127.0.0.1,192.168.1.10``) or a sequence of either; duplicates are dropped
+    and an empty setting means every interface (``0.0.0.0``).
+    """
+    items = [host] if isinstance(host, str) else list(host)
+    hosts: list[str] = []
+    for item in items:
+        for part in str(item).split(","):
+            part = part.strip()
+            if part and part not in hosts:
+                hosts.append(part)
+    return hosts or ["0.0.0.0"]
+
+
+def format_hosts(hosts: Sequence[str], port: int) -> str:
+    """``http://HOST:PORT`` for every host, IPv6 literals bracketed."""
+    return ", ".join(
+        f"http://[{h}]:{port}" if ":" in h else f"http://{h}:{port}" for h in hosts
+    )
+
+
+def _bind_sockets(hosts: Sequence[str], port: int) -> list[socket.socket]:
+    """Bind and listen on *port* for every host; close them all on failure."""
+    sockets: list[socket.socket] = []
+    try:
+        for host in hosts:
+            family, kind, proto, _, addr = socket.getaddrinfo(
+                host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
+            )[0]
+            sock = socket.socket(family, kind, proto)
+            sockets.append(sock)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                # ``::`` next to ``0.0.0.0`` must not also claim the IPv4 port.
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            sock.bind(addr)
+            sock.listen(2048)
+            sock.set_inheritable(True)
+    except BaseException:
+        for sock in sockets:
+            sock.close()
+        raise
+    return sockets
+
+
 def start_web_server(
     api: ChatAPI,
     port: int = 4242,
     token: str | None = None,
     *,
-    host: str = "127.0.0.1",
+    host: str | Sequence[str] = "127.0.0.1",
     require_auth: bool = True,
     bus: EventBus | None = None,
 ) -> WebServerHandle | None:
@@ -53,8 +103,14 @@ def start_web_server(
     token requirement entirely — every REST/media/WebSocket request is
     accepted with no credential. Explicit opt-in only; the token is still
     required by default.
+
+    *host* may name several addresses (comma-separated or a sequence, see
+    :func:`parse_hosts`); the server listens on all of them.
     """
     global _active_server
+
+    hosts = parse_hosts(host)
+    urls = format_hosts(hosts, port)
 
     token = token or os.environ.get("SIGNAL_TUI_WEB_TOKEN", "")
     if require_auth and not token:
@@ -123,7 +179,7 @@ def start_web_server(
 
     config = uvicorn.Config(
         app,
-        host=host,
+        host=hosts[0],
         port=port,
         log_level="info",
         # ``log_config=None`` evita il ``dictConfig`` di uvicorn, che altrimenti
@@ -147,29 +203,32 @@ def start_web_server(
         # by hand. Log it here too so it's always discoverable.
         if require_auth:
             logger.info(
-                "Web server listening on http://%s:%d — Bearer token: %s",
-                host,
-                port,
+                "Web server listening on %s — Bearer token: %s",
+                urls,
                 token,
             )
         else:
             logger.warning(
-                "Web server listening on http://%s:%d — NO AUTH (--web-no-auth): "
+                "Web server listening on %s — NO AUTH (--web-no-auth): "
                 "anyone who can reach this address/port has full read/send access",
-                host,
-                port,
+                urls,
             )
         ready.set()
 
     def run() -> None:
         monitor: asyncio.Task | None = None
+        sockets: list[socket.socket] = []
         try:
             prepare_upload_directory()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             handle.loop = loop
+            # One host: uvicorn binds it itself. Several: bind them here and
+            # hand uvicorn the listening sockets.
+            if len(hosts) > 1:
+                sockets = _bind_sockets(hosts, port)
             monitor = loop.create_task(mark_started())
-            loop.run_until_complete(server.serve())
+            loop.run_until_complete(server.serve(sockets=sockets or None))
         except BaseException:
             handle.status = "down"
             ready.set()
@@ -177,12 +236,13 @@ def start_web_server(
                 logger.exception("Web server thread failed (web down)")
             else:
                 logger.error(
-                    "Web server failed to bind to %s:%d (web down; port may be in use)",
-                    host,
-                    port,
+                    "Web server failed to bind to %s (web down; port may be in use)",
+                    urls,
                 )
         finally:
             handle.status = "down"
+            for sock in sockets:
+                sock.close()
             loop = handle.loop
             if loop is not None:
                 try:
