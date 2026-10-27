@@ -170,9 +170,11 @@ _ALLOWED_HTML_TAGS = frozenset(
 _ALLOWED_HTML_ATTRIBUTES = {
     "*": {"dir", "style"},
     "a": {"href", "title"},
+    "blockquote": {"data-quote"},
     "font": {"color", "face", "size"},
     "col": {"align", "bgcolor", "span", "valign", "width"},
     "colgroup": {"align", "bgcolor", "span", "valign", "width"},
+    "div": {"data-quote"},
     "img": {"align", "alt", "data-src", "height", "width"},
     "li": {"value"},
     "ol": {"start"},
@@ -1955,6 +1957,34 @@ def _render_body_tag(attributes: list[_ScannedAttribute]) -> tuple[str, bool, in
     return f'<div style="{style}">', not existing, _style_declaration_count(style)
 
 
+_QUOTE_BLOCK_CLASSES = frozenset({"gmail_quote", "yahoo_quoted"})
+_QUOTE_AFTER_IDS = frozenset({"divrplyfwdmsg", "appendonsend"})
+
+
+def _quote_marker(name: str, attributes: list[_ScannedAttribute]) -> str | None:
+    """``data-quote`` value for the quoted-text containers of common clients.
+
+    Classes and ids are stripped by the sanitizer, so the reader can only
+    recognize quotes through this marker, added while the scanner still sees
+    them.  ``block``: the element is the quote (Gmail ``div.gmail_quote``,
+    Apple/Thunderbird ``blockquote type=cite``, Yahoo ``div.yahoo_quoted``).
+    ``after``: the quote is the element and everything after it (Outlook's
+    ``divRplyFwdMsg`` header, ``appendonsend``).
+    """
+    if name not in {"div", "blockquote"}:
+        return None
+    values = {attr.lower_name: (attr.value or "").strip() for attr in attributes}
+    if "data-quote" in values:
+        return None
+    if name == "blockquote":
+        return "block" if values.get("type", "").lower() == "cite" else None
+    if _QUOTE_BLOCK_CLASSES & set(values.get("class", "").split()):
+        return "block"
+    if values.get("id", "").lower() in _QUOTE_AFTER_IDS:
+        return "after"
+    return None
+
+
 _OPTIONAL_END_TAGS = frozenset(
     {
         "caption",
@@ -2091,6 +2121,10 @@ def _pre_scan_html(raw: str, styles: list[str] | None = None) -> str:
                     out.append(_render_img_tag(attributes, self_closing))
                 else:
                     out.append(raw[index:end])
+            elif (marker := _quote_marker(name, attributes)) is not None:
+                tag = raw[index:end]
+                cut = 1 + len(name)
+                out.append(f'{tag[:cut]} data-quote="{marker}"{tag[cut:]}')
             elif name == "body":
                 body_tag, added_style, body_decls = _render_body_tag(attributes)
                 if added_style:
@@ -3278,6 +3312,9 @@ _LEGACY_ATTR_VALIDATORS = {
     ("font", "color"): _legacy_bgcolor,
     ("font", "face"): _legacy_font_face,
     ("font", "size"): _legacy_font_size,
+    # Quoted-text marker added by the scanner (see _quote_marker).
+    ("div", "data-quote"): _legacy_enum("block", "after"),
+    ("blockquote", "data-quote"): _legacy_enum("block", "after"),
 }
 # Attributes allowed on every tag (``"*"`` in ``_ALLOWED_HTML_ATTRIBUTES``).
 _GLOBAL_ATTR_VALIDATORS = {

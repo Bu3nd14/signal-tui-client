@@ -549,6 +549,23 @@ body.gmail-active #gmail-view { display: flex; }
   border: 0;
   border-top: 1px solid var(--mail-line);
 }
+/* Folded quoted text: a small "•••" pill, as in Gmail. */
+.gmail-quote-toggle {
+  display: block;
+  margin: .6em 0;
+  padding: 0 9px;
+  border: 1px solid var(--mail-line);
+  border-radius: 999px;
+  background: var(--mail-raised);
+  color: var(--mail-muted);
+  font: inherit;
+  font-size: .8rem;
+  line-height: 1.4;
+  letter-spacing: .1em;
+  cursor: pointer;
+}
+.gmail-quote-toggle:hover { color: var(--mail-text); border-color: var(--mail-muted); }
+.gmail-quote-toggle[aria-expanded="true"] { background: transparent; }
 
 /* Attachments: one wrapping row of chips above the body, collapsible. */
 .gmail-attachments {
