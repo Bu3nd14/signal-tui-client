@@ -163,7 +163,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--web-host",
         default=server.SERVER_HOST,
         metavar="HOST",
-        help=f"Web UI bind address (default: {server.SERVER_HOST})",
+        help=(
+            f"Web UI bind address (default: {server.SERVER_HOST}); "
+            "comma-separate several, e.g. 127.0.0.1,192.168.1.10"
+        ),
     )
     p_server_start.add_argument(
         "--web-port",

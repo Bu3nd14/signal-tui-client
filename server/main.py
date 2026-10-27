@@ -40,7 +40,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true", help="enable debug logging")
     parser.add_argument("--web-port", type=int, help="web UI listen port")
     parser.add_argument(
-        "--web-host", type=str, help="web UI bind host (default 127.0.0.1)"
+        "--web-host",
+        type=str,
+        help=(
+            "web UI bind host (default 127.0.0.1); comma-separate several to "
+            "listen on each, e.g. 127.0.0.1,192.168.1.10"
+        ),
     )
     parser.add_argument(
         "--web-no-auth",
@@ -185,11 +190,12 @@ def serve(
                 )
         elif exit_code == 0:
             from protocols.config import web_host, web_port, web_token
-            from web.server import start_web_server
+            from web.server import format_hosts, parse_hosts, start_web_server
 
             host = args.web_host if args.web_host is not None else web_host()
             port = args.web_port if args.web_port is not None else web_port()
             token = web_token()
+            urls = format_hosts(parse_hosts(host), port)
             web_handle = start_web_server(
                 core.api,
                 port,
@@ -201,8 +207,7 @@ def serve(
             if web_handle is None or web_handle.status == "down":
                 logger.error("Web adapter failed to start (see log); exiting")
                 print(
-                    f"❌ Web adapter failed to start on {host}:{port} "
-                    f"(see {LOG_FILE}).",
+                    f"❌ Web adapter failed to start on {urls} (see {LOG_FILE}).",
                     file=sys.stderr,
                 )
                 exit_code = 1
@@ -213,11 +218,9 @@ def serve(
                     + len(handle.websocket_v2_connections)
                 )
                 if args.web_no_auth:
-                    line = (
-                        f"🌐 Web UI: http://{host}:{port} — ⚠️ NO AUTH (--web-no-auth)"
-                    )
+                    line = f"🌐 Web UI: {urls} — ⚠️ NO AUTH (--web-no-auth)"
                 else:
-                    line = f"🌐 Web UI: http://{host}:{port} — token: {token}"
+                    line = f"🌐 Web UI: {urls} — token: {token}"
                 logger.info(line)
                 print(line, flush=True)
 

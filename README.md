@@ -748,6 +748,7 @@ Start, stop and inspect it through the launcher — one command for every way of
 ```bash
 python3 launcher.py server start                         # WAHA + server, detached, web on 0.0.0.0:4242
 python3 launcher.py server start --web-host 127.0.0.1 --web-port 8080
+python3 launcher.py server start --web-host 127.0.0.1,192.168.1.10   # several interfaces
 python3 launcher.py server start --web-no-auth           # no token (trusted networks only, warns)
 python3 launcher.py server start --foreground            # in this terminal; Ctrl+C stops it
 python3 launcher.py server start --no-whatsapp --no-web  # no WAHA, no web UI (socket only)
@@ -756,7 +757,9 @@ python3 launcher.py server stop                          # server + WAHA
 python3 launcher.py server stop --keep-whatsapp          # server only
 ```
 
-`server start` options: `--web-host` (default `0.0.0.0`), `--web-port` (default `4242`),
+`server start` options: `--web-host` (default `0.0.0.0`; comma-separate addresses to listen on
+several interfaces, or set `web.host` in `config.json` to a list such as
+`["127.0.0.1", "192.168.1.10"]`), `--web-port` (default `4242`),
 `--web-no-auth`, `--no-web`, `--socket PATH` / `--no-socket`, `--debug`, `--no-whatsapp`,
 `--foreground`, `--no-token` (don't print the token), `--no-docker-limits`. The `--web-*`,
 `--socket`, `--no-socket`, `--no-web` and `--debug` options are passed to `megachat serve`; a

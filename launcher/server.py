@@ -65,11 +65,17 @@ class ServeOptions:
             args.append("--debug")
         return args
 
+    def web_hosts(self) -> list[str]:
+        """Every bind address of ``web_host`` (comma-separated)."""
+        hosts = [h.strip() for h in self.web_host.split(",") if h.strip()]
+        return hosts or [""]
+
     def probe_host(self) -> str:
         """Address to connect to when checking that the web UI listens."""
-        if self.web_host in ("0.0.0.0", "::", "", "localhost"):
+        host = self.web_hosts()[0]
+        if host in ("0.0.0.0", "::", "", "localhost"):
             return "127.0.0.1"
-        return self.web_host
+        return host
 
 
 #: Arguments of the default detached server (web on all interfaces; the Unix
@@ -245,7 +251,12 @@ def _docker_container_running(name: str) -> bool:
 
 
 def _web_url(opts: ServeOptions) -> str:
-    host = _local_ip() if opts.web_host in ("0.0.0.0", "::", "") else opts.web_host
+    # The address worth sharing: the first one other machines can reach.
+    hosts = opts.web_hosts()
+    loopback = ("127.0.0.1", "::1", "localhost")
+    host = next((h for h in hosts if h not in loopback), hosts[0])
+    if host in ("0.0.0.0", "::", ""):
+        host = _local_ip()
     return f"http://{host}:{opts.web_port}"
 
 
@@ -273,7 +284,9 @@ def start_all(
         else:
             info("WAHA non partito (vedi docker compose logs whatsapp)")
 
-    loopback = opts.web_host in ("127.0.0.1", "::1", "localhost")
+    loopback = all(
+        host in ("127.0.0.1", "::1", "localhost") for host in opts.web_hosts()
+    )
     if opts.web_no_auth and not opts.no_web and not loopback:
         warn(
             "Web UI senza token su un indirizzo raggiungibile dalla rete: chiunque "
