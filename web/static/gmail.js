@@ -1059,10 +1059,11 @@
     if (!window.confirm("Spostare il messaggio nel cestino?")) return;
 
     state.deleting = true;
+    // An icon-only button: never rewrite its content (that would drop the
+    // SVG); disabled + aria-busy show the pending state.
     const button = elements.delete;
-    const label = button.textContent;
     button.disabled = true;
-    button.textContent = "Eliminazione…";
+    button.setAttribute("aria-busy", "true");
     try {
       await request(
         `api/gmail/messages/${encodeURIComponent(String(uid))}?folder=${encodeURIComponent(state.folder)}`,
@@ -1083,7 +1084,7 @@
     } finally {
       state.deleting = false;
       button.disabled = false;
-      button.textContent = label;
+      button.removeAttribute("aria-busy");
     }
   }
 
