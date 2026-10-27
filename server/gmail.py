@@ -755,8 +755,21 @@ def _add_flag(flags: Iterable[str], flag: str) -> list[str]:
     return current
 
 
+def _remove_flag(flags: Iterable[str], flag: str) -> list[str]:
+    """Remove *flag* case-insensitively, keeping the other flags' order."""
+    lowered = flag.lower()
+    return [existing for existing in flags if existing.lower() != lowered]
+
+
 def _mark_read_cached(folder_value: str, account_fingerprint: str, uid: int) -> None:
     """Advance the epoch and patch the current folder entry in place."""
+    _set_seen_cached(folder_value, account_fingerprint, uid, True)
+
+
+def _set_seen_cached(
+    folder_value: str, account_fingerprint: str, uid: int, seen: bool
+) -> None:
+    """Patch the ``\\Seen`` state of *uid* in the cached folder entry."""
     global _inbox_epoch
     key = (folder_value, account_fingerprint)
     with _inbox_cache_lock:
@@ -767,12 +780,15 @@ def _mark_read_cached(folder_value: str, account_fingerprint: str, uid: int) -> 
         updated: list[dict[str, Any]] = []
         changed = False
         for message in entry.messages:
-            if message.get("uid") == uid and not message.get("seen"):
+            if message.get("uid") == uid and bool(message.get("seen")) != seen:
                 replacement = dict(message)
+                flags = message.get("flags", ())
                 replacement["flags"] = _canonical_flags(
-                    _add_flag(message.get("flags", ()), "\\Seen")
+                    _add_flag(flags, "\\Seen")
+                    if seen
+                    else _remove_flag(flags, "\\Seen")
                 )
-                replacement["seen"] = True
+                replacement["seen"] = seen
                 updated.append(replacement)
                 changed = True
             else:
@@ -3776,6 +3792,30 @@ def _reply_subject(subject: str) -> str:
     return f"Re: {subject}" if subject else "Re:"
 
 
+def _forward_subject(subject: str) -> str:
+    if subject.lower().startswith(("fwd:", "fw:", "i:")):
+        return subject
+    return f"Fwd: {subject}" if subject else "Fwd:"
+
+
+def append_forward(user_text: str, original: dict[str, Any]) -> str:
+    """Append the forwarded message (header block + original text) once."""
+    lines = ["---------- Messaggio inoltrato ----------"]
+    lines.append(f"Da: {original.get('from') or ''}")
+    date_ts = original.get("date_ts")
+    if date_ts:
+        lines.append(f"Data: {formatdate(float(date_ts), localtime=True)}")
+    lines.append(f"Oggetto: {original.get('subject') or ''}")
+    lines.append(f"A: {original.get('to') or ''}")
+    if original.get("cc"):
+        lines.append(f"Cc: {original['cc']}")
+    block = "\n".join(lines)
+    text = (original.get("text") or "").strip()
+    forwarded = f"{block}\n\n{text}" if text else block
+    body = (user_text or "").rstrip()
+    return f"{body}\n\n{forwarded}" if body else forwarded
+
+
 def _mailbox(folder: str) -> str:
     return f'"{folder}"'
 
@@ -4414,6 +4454,56 @@ def mark_read(uid: int | str, folder: str | None = None) -> None:
     _mark_read_cached(folder_value, _account_fingerprint(settings), uid_value)
 
 
+def mark_unread(uid: int | str, folder: str | None = None) -> None:
+    """Clear the ``\\Seen`` flag on a message (back to unread)."""
+    settings = load_settings()
+    uid_value = _validate_uid(uid)
+    folder_value = validate_folder(folder or settings.folder)
+    with imap_connect(settings) as connection:
+        status, _ = connection.select(_mailbox(folder_value), readonly=False)
+        if status != "OK":
+            raise GmailUpstreamError("Cartella non disponibile")
+        status, _ = connection.uid("STORE", str(uid_value), "-FLAGS", "(\\Seen)")
+        if status != "OK":
+            raise GmailUpstreamError("Aggiornamento flag fallito")
+
+    _set_seen_cached(folder_value, _account_fingerprint(settings), uid_value, False)
+
+
+def archive_message(uid: int | str, folder: str | None = None) -> None:
+    """Archive a message: remove Gmail's ``\\Inbox`` label (it stays in All Mail).
+
+    Uses Gmail's ``X-GM-LABELS`` IMAP extension instead of COPY + EXPUNGE:
+    it does not depend on the localized name of the All Mail folder, and does
+    not expunge other ``\\Deleted`` messages.  Only the inbox can be archived.
+    """
+    settings = load_settings()
+    uid_value = _validate_uid(uid)
+    folder_value = validate_folder(folder or settings.folder)
+    if folder_value.upper() != "INBOX":
+        raise GmailValidationError(
+            "Si possono archiviare solo i messaggi della Posta in arrivo"
+        )
+    try:
+        with imap_connect(settings) as connection:
+            status, _ = connection.select(_mailbox(folder_value), readonly=False)
+            if status != "OK":
+                raise GmailUpstreamError("Cartella non disponibile")
+            status, data = connection.uid("FETCH", str(uid_value), "(FLAGS)")
+            if status != "OK":
+                raise GmailUpstreamError("Lettura messaggio fallita")
+            if not _parse_fetch_data(list(data or [])):
+                raise GmailNotFound("Messaggio non trovato")
+            status, _ = connection.uid(
+                "STORE", str(uid_value), "-X-GM-LABELS", "(\\Inbox)"
+            )
+            if status != "OK":
+                raise GmailUpstreamError("Archiviazione fallita")
+    finally:
+        # Membership changed (or may have, on a partial failure).
+        _invalidate_inbox_all()
+
+
 def delete_messages(uids: object, folder: str | None = None) -> dict[str, Any]:
     """Move several messages to Gmail's Trash in a single IMAP connection.
 
@@ -4507,20 +4597,41 @@ def send_email(
     text: str = "",
     reply_to_uid: int | None = None,
     reply_to_folder: str | None = None,
+    forward_uid: int | None = None,
+    forward_folder: str | None = None,
     attachments: Iterable[tuple[str, bytes]] = (),
 ) -> str:
     """Send a message and return its ``Message-ID``.
 
     Replies fetch the original message, derive threading headers and append a
     ``> `` quote of the original plain text to *text* (once, server-side).
+    Forwards append the original header block and text, and attach the
+    original's files (not its inline images) within the usual attachment
+    limits.
     """
     settings = load_settings()
+    if reply_to_uid is not None and forward_uid is not None:
+        raise GmailValidationError("Risposta e inoltro non possono essere combinati")
     to_list = _parse_addresses(to, "to")
     cc_list = _parse_addresses(cc, "cc")
     bcc_list = _parse_addresses(bcc, "bcc")
     clean_subject = validate_header_value(subject or "", "subject")
     body = _validate_text(text or "")
     files = _validate_attachments(attachments)
+
+    if forward_uid is not None:
+        folder_value = validate_folder(forward_folder or settings.folder)
+        original = fetch_message(forward_uid, folder_value)
+        clean_subject = _forward_subject(clean_subject or original["subject"])
+        body = append_forward(body, original)
+        forwarded = [
+            fetch_attachment(forward_uid, attachment["index"], folder_value)
+            for attachment in original["attachments"]
+            if not attachment.get("inline")
+        ]
+        files = _validate_attachments(
+            [*files, *((item.filename, item.data) for item in forwarded)]
+        )
 
     in_reply_to = ""
     references = ""

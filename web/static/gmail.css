@@ -67,6 +67,75 @@ body.gmail-active #gmail-view { display: flex; }
 .gmail-danger:hover:not(:disabled),
 .gmail-danger:focus-visible { border-color: var(--danger); background: #4a2027; }
 
+/* Line icons (inline SVG, colour from the text). */
+.gmail-icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.gmail-icon circle { fill: currentColor; }
+.gmail-compose-button { display: inline-flex; align-items: center; gap: 6px; }
+.gmail-compose-button .gmail-icon { width: 16px; height: 16px; }
+
+/* Icon-only action buttons (reader bar, list refresh): label in title and
+   aria-label. */
+.gmail-tool {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.gmail-tool:hover:not(:disabled),
+.gmail-tool[aria-expanded="true"] { background: var(--panel-raised); color: var(--text); }
+.gmail-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.gmail-tool:disabled { opacity: .4; cursor: not-allowed; }
+.gmail-tool.gmail-danger { border-color: transparent; color: var(--muted); }
+.gmail-tool.gmail-danger:hover:not(:disabled),
+.gmail-tool.gmail-danger:focus-visible { border-color: transparent; background: #4a2027; color: var(--danger); }
+.gmail-tool-separator { flex: none; width: 1px; height: 20px; margin: 0 6px; background: var(--line); }
+
+/* "More actions" menu of the reader. */
+.gmail-more { position: relative; display: inline-flex; }
+.gmail-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  display: grid;
+  min-width: 210px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 12px 32px #000a;
+}
+.gmail-menu-item {
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: .84rem;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.gmail-menu-item:hover,
+.gmail-menu-item:focus-visible { outline: none; background: var(--panel-raised); }
+
 .gmail-icon-button {
   display: inline-grid;
   flex: none;
@@ -379,7 +448,7 @@ body.gmail-active #gmail-view { display: flex; }
   border-bottom: 1px solid var(--line);
   background: #0d141c99;
 }
-.gmail-reader-action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
+.gmail-reader-action-group { display: flex; align-items: center; gap: 2px; margin-left: auto; }
 #gmail-reader-back { display: none; }
 #gmail-reader-subject {
   margin: 0;
@@ -761,6 +830,9 @@ body.gmail-active #gmail-view { display: flex; }
   #gmail-view.gmail-detail-open .gmail-list-pane { display: none; }
   #gmail-view.gmail-detail-open .gmail-detail-pane { display: flex; }
   #gmail-reader-back { display: inline-grid; }
+  /* With a message open the reader's own back button returns to the list:
+     a second "back to chats" arrow right above it would only confuse. */
+  #gmail-view.gmail-detail-open .gmail-back-button { display: none; }
 
   .gmail-reader-body { padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }
 

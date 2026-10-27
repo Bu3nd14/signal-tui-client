@@ -12,7 +12,7 @@
   <script>try{document.documentElement.dataset.skin=localStorage.getItem("signal-tui-web-skin")||"";}catch(e){}</script>
   <link rel="stylesheet" href="style.css?v=72">
   <link rel="stylesheet" href="teams-skin.css?v=24">
-  <link rel="stylesheet" href="gmail.css?v=20">
+  <link rel="stylesheet" href="gmail.css?v=21">
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -110,8 +110,10 @@
           <p id="gmail-account-status" class="gmail-account-status">Non configurato</p>
         </div>
         <div class="gmail-toolbar-actions">
-          <button id="gmail-refresh" class="gmail-button" type="button">Ricarica</button>
-          <button id="gmail-compose-new" class="gmail-button gmail-primary" type="button" disabled>Scrivi</button>
+          <button id="gmail-compose-new" class="gmail-button gmail-primary gmail-compose-button" type="button" disabled>
+            <svg class="gmail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            <span>Scrivi</span>
+          </button>
         </div>
       </header>
       <div id="gmail-error" class="gmail-error" role="alert" hidden>
@@ -126,6 +128,9 @@
           <div class="gmail-list-top">
             <span id="gmail-list-summary" aria-live="polite">Pronto.</span>
             <span id="gmail-list-spinner" class="spinner gmail-spinner" aria-hidden="true" hidden></span>
+            <button id="gmail-refresh" class="gmail-tool" type="button" aria-label="Ricarica" title="Ricarica">
+              <svg class="gmail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            </button>
             <button id="gmail-delete-selected" class="gmail-select-toggle gmail-danger" type="button" hidden>Elimina</button>
             <button id="gmail-select-toggle" class="gmail-select-toggle" type="button" aria-pressed="false">Seleziona</button>
           </div>
@@ -153,9 +158,31 @@
             <div class="gmail-reader-actions">
               <button id="gmail-reader-back" class="gmail-icon-button" type="button" aria-label="Torna alla lista">‹</button>
               <div class="gmail-reader-action-group">
-                <button id="gmail-render-toggle" class="gmail-button" type="button" hidden>Testo</button>
-                <button id="gmail-reply" class="gmail-button" type="button">Rispondi</button>
-                <button id="gmail-delete" class="gmail-button gmail-danger" type="button">Elimina</button>
+                <button id="gmail-reply" class="gmail-tool" type="button" aria-label="Rispondi" title="Rispondi">
+                  <svg class="gmail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>
+                </button>
+                <button id="gmail-reply-all" class="gmail-tool" type="button" aria-label="Rispondi a tutti" title="Rispondi a tutti">
+                  <svg class="gmail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 14 2 9l5-5"/><path d="M12 14 7 9l5-5"/><path d="M22 20v-7a4 4 0 0 0-4-4H7"/></svg>
+                </button>
+                <button id="gmail-forward" class="gmail-tool" type="button" aria-label="Inoltra" title="Inoltra">
+                  <svg class="gmail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/></svg>
+                </button>
+                <span class="gmail-tool-separator" aria-hidden="true"></span>
+                <button id="gmail-archive" class="gmail-tool" type="button" aria-label="Archivia" title="Archivia">
+                  <svg class="gmail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
+                </button>
+                <button id="gmail-delete" class="gmail-tool gmail-danger" type="button" aria-label="Elimina" title="Elimina">
+                  <svg class="gmail-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                </button>
+                <div class="gmail-more">
+                  <button id="gmail-more" class="gmail-tool" type="button" aria-label="Altre azioni" title="Altre azioni" aria-haspopup="menu" aria-expanded="false" aria-controls="gmail-more-menu">
+                    <svg class="gmail-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/></svg>
+                  </button>
+                  <div id="gmail-more-menu" class="gmail-menu" role="menu" hidden>
+                    <button id="gmail-mark-unread" class="gmail-menu-item" type="button" role="menuitem">Segna come non letto</button>
+                    <button id="gmail-render-toggle" class="gmail-menu-item" type="button" role="menuitem" hidden>Mostra come testo</button>
+                  </div>
+                </div>
               </div>
             </div>
             <header class="gmail-reader-header">
@@ -316,6 +343,6 @@
   <script src="outbox.js?v=1" defer></script>
   <script src="message_cache.js?v=1" defer></script>
   <script src="app.js?v=134" defer></script>
-  <script src="gmail.js?v=21" defer></script>
+  <script src="gmail.js?v=22" defer></script>
 </body>
 </html>

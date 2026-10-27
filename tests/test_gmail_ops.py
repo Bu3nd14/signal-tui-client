@@ -51,6 +51,8 @@ def test_operations_are_registered(api):
         "gmail.messages.delete",
         "gmail.messages.bulk_delete",
         "gmail.messages.mark_read",
+        "gmail.messages.mark_unread",
+        "gmail.messages.archive",
         "gmail.messages.send",
         "gmail.messages.send.check",
         "gmail.attachment",
@@ -267,6 +269,8 @@ def test_send_reads_the_stored_files(api, sent, tmp_path):
             "text": "hi",
             "reply_to_uid": 9,
             "reply_to_folder": None,
+            "forward_uid": None,
+            "forward_folder": None,
             "attachments": [("a.txt", b"one"), ("attachment", b"two")],
         }
     ]
