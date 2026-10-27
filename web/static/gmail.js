@@ -1442,6 +1442,14 @@
     return { value: inserted + tail, caret: inserted.length };
   }
 
+  // Drop the ", " the autocomplete leaves after the last address (and any
+  // empty item): the server's address parser rejects a list ending in ",".
+  function tidyAddressField(value) {
+    return String(value || "")
+      .replace(/,(\s*,)+/g, ",")
+      .replace(/^[\s,]+|[\s,]+$/g, "");
+  }
+
   function emailsInField(value) {
     return new Set(splitAddresses(value).map((address) => extractEmail(address).toLowerCase()));
   }
@@ -1632,9 +1640,9 @@
     elements.composeError.textContent = "";
 
     const form = new FormData();
-    form.append("to", elements.composeTo.value.trim());
-    form.append("cc", elements.composeCc.value.trim());
-    form.append("bcc", elements.composeBcc.value.trim());
+    form.append("to", tidyAddressField(elements.composeTo.value));
+    form.append("cc", tidyAddressField(elements.composeCc.value));
+    form.append("bcc", tidyAddressField(elements.composeBcc.value));
     form.append("subject", elements.composeSubject.value.trim());
     form.append("text", elements.composeText.value);
     if (state.replyToUid !== null && state.replyToUid !== undefined) {

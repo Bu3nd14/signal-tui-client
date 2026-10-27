@@ -959,8 +959,16 @@ def validate_header_value(value: str, field: str = "header") -> str:
     return value.strip()
 
 
+_ADDRESS_SEPARATORS_RE = re.compile(r"^[\s,]+|[\s,]+$")
+_ADDRESS_EMPTY_ITEMS_RE = re.compile(r",(?:\s*,)+")
+
+
 def _parse_addresses(raw: str, field: str) -> list[str]:
     value = validate_header_value(raw or "", field)
+    # Empty list items ("a@x.it," as left by the compose autocomplete, ",,"):
+    # Python's strict getaddresses (3.13+) rejects the WHOLE list as
+    # [('', '')] when the value ends with a comma, so drop them first.
+    value = _ADDRESS_EMPTY_ITEMS_RE.sub(",", _ADDRESS_SEPARATORS_RE.sub("", value))
     if not value:
         return []
     addresses = [

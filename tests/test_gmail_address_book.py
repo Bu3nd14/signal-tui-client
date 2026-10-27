@@ -149,6 +149,50 @@ def test_address_book_op(monkeypatch) -> None:
     assert result == {"contacts": [{"email": "a@example.com", "name": "A"}]}
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # What the autocomplete leaves, before and after the client's trim():
+        # Python 3.13's strict getaddresses rejected "…>," as a whole.
+        ("Anna <anna@example.com>, ", ["anna@example.com"]),
+        ("Anna <anna@example.com>,", ["anna@example.com"]),
+        ("a@x.it,, b@y.it", ["a@x.it", "b@y.it"]),
+        (", a@x.it ,", ["a@x.it"]),
+        ('"Rossi, Mario" <m@x.it>, Anna <a@x.it>,', ["m@x.it", "a@x.it"]),
+        (" , ", []),
+    ],
+)
+def test_address_lists_tolerate_empty_items(raw, expected) -> None:
+    assert gmail._parse_addresses(raw, "to") == expected
+
+
+def test_invalid_addresses_are_still_rejected() -> None:
+    with pytest.raises(gmail.GmailValidationError):
+        gmail._parse_addresses("not-an-address,", "to")
+
+
+def test_send_accepts_the_autocomplete_output(monkeypatch) -> None:
+    sent: list[object] = []
+
+    @contextmanager
+    def fake_smtp(settings=None):
+        yield SimpleNamespace(send_message=sent.append)
+
+    monkeypatch.setattr(gmail, "smtp_connect", fake_smtp)
+    monkeypatch.setattr(gmail, "load_settings", lambda: _SETTINGS)
+
+    gmail.send_email(
+        to='"Rossi, Mario" <mario@example.com>, Anna <anna@example.com>,',
+        cc="Chiara <chiara@example.com>,",
+        subject="Ciao",
+        text="Ciao",
+    )
+
+    (message,) = sent
+    assert message["To"] == "mario@example.com, anna@example.com"
+    assert message["Cc"] == "chiara@example.com"
+
+
 # ── client matching (Node) ───────────────────────────────────────────────────
 
 
@@ -162,8 +206,20 @@ def _run(body: str) -> None:
             "suggestAddresses",
             "formatAddress",
             "applySuggestion",
+            "tidyAddressField",
         )
         + body
+    )
+
+
+def test_address_fields_are_tidied_before_sending() -> None:
+    _run(
+        r"""
+assert.equal(tidyAddressField("Anna <anna@example.com>, "), "Anna <anna@example.com>");
+assert.equal(tidyAddressField(" , a@x.it,, b@y.it , "), "a@x.it, b@y.it");
+assert.equal(tidyAddressField('"Rossi, Mario" <m@x.it>, '), '"Rossi, Mario" <m@x.it>');
+assert.equal(tidyAddressField(""), "");
+"""
     )
 
 
