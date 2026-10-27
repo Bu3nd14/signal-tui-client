@@ -36,7 +36,7 @@ from email.header import decode_header, make_header
 from email.message import EmailMessage, Message
 from email.utils import formatdate, getaddresses, make_msgid, parsedate_to_datetime
 from fractions import Fraction
-from functools import lru_cache
+from functools import lru_cache, partial
 from html import unescape as _html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -3126,14 +3126,28 @@ _GLOBAL_ATTR_VALIDATORS = {
 }
 
 
-def _html_attribute_filter(tag: str, attribute: str, value: str) -> str | None:
+def _html_attribute_filter(
+    tag: str,
+    attribute: str,
+    value: str,
+    style_cache: dict[str, str | None] | None = None,
+) -> str | None:
+    """nh3 attribute callback; *style_cache* memoizes styles of one document.
+
+    Inlined ``<style>`` CSS repeats the same ``style`` value on many elements
+    (e.g. 533 attributes, 95 distinct), so parsing each value once matters.
+    """
     try:
         normalized_tag = tag.lower()
         normalized_attribute = attribute.lower()
         if normalized_attribute == "style":
             if os.environ.get("GMAIL_HTML_STYLES", "1").strip() == "0":
                 return None
-            return _sanitize_style(value)
+            if style_cache is None:
+                return _sanitize_style(value)
+            if value not in style_cache:
+                style_cache[value] = _sanitize_style(value)
+            return style_cache[value]
         validator = _LEGACY_ATTR_VALIDATORS.get(
             (normalized_tag, normalized_attribute)
         ) or _GLOBAL_ATTR_VALIDATORS.get(normalized_attribute)
@@ -3161,6 +3175,9 @@ def _warn_missing_css_inline() -> None:
     logger.warning("css-inline non installato: CSS dei blocchi <style> ignorato")
 
 
+# Pure function of the CSS text; newsletters from one sender share their
+# stylesheet, so a small cache skips the tinycss2 parse on the next ones.
+@lru_cache(maxsize=32)
 def _filter_stylesheet(css: str) -> str:
     """Reduce ``<style>`` CSS to plain rules with allow-listed declarations.
 
@@ -3300,7 +3317,7 @@ def _clean_scanned_html(nh3: Any, scanned: str) -> str:
             tags=set(_ALLOWED_HTML_TAGS),
             clean_content_tags=set(_CLEAN_CONTENT_TAGS),
             attributes=_ALLOWED_HTML_ATTRIBUTES,
-            attribute_filter=_html_attribute_filter,
+            attribute_filter=partial(_html_attribute_filter, style_cache={}),
             url_schemes={"http", "https", "mailto"},
             url_relative="deny",
             link_rel="noopener noreferrer",

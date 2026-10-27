@@ -275,3 +275,31 @@ def test_inlining_large_newsletter_is_bounded() -> None:
 
     assert _style_value(cleaned, "color") == "#123"
     assert elapsed < 3.0
+
+
+def test_repeated_styles_are_parsed_once_per_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    original = gmail._sanitize_style
+
+    def counting(value: str) -> str | None:
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(gmail, "_sanitize_style", counting)
+    cleaned = gmail.sanitize_html(_document("p{color:#123}", "<p>x</p>" * 50))
+
+    assert cleaned.count('style="color:#123"') == 50
+    assert len(calls) == 1
+
+
+def test_style_cache_does_not_leak_across_documents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = '<p style="color:red">x</p>'
+    assert _style_value(gmail.sanitize_html(raw), "color") == "red"
+
+    monkeypatch.setitem(gmail._STYLE_VALIDATORS, "color", lambda tokens: None)
+
+    assert gmail.sanitize_html(raw) == "<p>x</p>"
