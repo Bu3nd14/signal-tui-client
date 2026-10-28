@@ -1126,7 +1126,6 @@
     state.messages = kept;
     if (state.selectedUid !== null && keys.has(uidKey(state.selectedUid))) closeReader();
     renderList();
-    showNotice(keys.size === 1 ? "Spostato nel cestino." : `${keys.size} messaggi spostati nel cestino.`);
     void flushDeletes();
   }
 
@@ -1194,7 +1193,6 @@
           for (const key of batch) state.pendingDeletes.get(key).settledSeq = state.listSeq;
           trashed = true;
         } catch (error) {
-          hideNotice();
           restoreDeleted(batch);
           showError(deleteErrorMessage(error));
         }

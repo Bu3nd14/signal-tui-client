@@ -81,7 +81,6 @@ function closeReader() { log.push("close"); state.selectedUid = null; }
 function renderList() { log.push(["render", state.messages.map((m) => m.uid)]); }
 function showNotice(text) { log.push(["notice", text]); }
 function showError(text) { log.push(["error", text]); }
-function hideNotice() { log.push("hide-notice"); }
 async function loadMessages(options) { log.push(["reload", options]); }
 const uids = () => state.messages.map((m) => m.uid);
 const idle = () => new Promise((resolve) => {
@@ -118,7 +117,7 @@ deleteMessage();
 // Synchronously gone: no wait for IMAP.
 assert.deepEqual(uids(), [7, 3]);
 assert.ok(log.includes("close"));
-assert.deepEqual(log.find((e) => e[0] === "notice"), ["notice", "Spostato nel cestino."]);
+assert.equal(log.some((e) => e[0] === "notice"), false);  // no banner
 assert.equal(calls.length, 1);
 assert.deepEqual(calls[0], {
   path: "api/gmail/messages/bulk-delete", uids: [5], folder: "INBOX", keepalive: true,
@@ -160,7 +159,6 @@ idle().then(() => {
   assert.deepEqual(uids(), [7, 5, 3]);         // back at its original index
   assert.equal(state.pendingDeletes.size, 0);
   assert.equal(log.filter((e) => e[0] === "error").length, 1);
-  assert.ok(log.includes("hide-notice"));  // "Spostato nel cestino." is withdrawn
   assert.equal(log.some((e) => e[0] === "reload"), false);
 });
 """
@@ -230,7 +228,7 @@ deleteSelected();
 assert.deepEqual(uids(), [5]);
 assert.equal(state.selectionMode, false);
 assert.equal(state.selectedUids.size, 0);
-assert.deepEqual(log.find((e) => e[0] === "notice"), ["notice", "2 messaggi spostati nel cestino."]);
+assert.equal(log.some((e) => e[0] === "notice"), false);
 idle().then(() => {
   assert.deepEqual(calls.map((c) => c.uids), [[7, 3]]);
 });
@@ -393,9 +391,10 @@ loadMessages({ force: true }).then(() => {
 def test_index_and_handlers_wire_the_optimistic_delete() -> None:
     script = _GMAIL_JS_PATH.read_text(encoding="utf-8")
     index = (_ROOT / "web" / "static" / "index.html").read_text(encoding="utf-8")
-    assert "gmail.js?v=28" in index
+    assert "gmail.js?v=29" in index
     assert "    deleteMessage();\n" in script
     assert "    deleteSelected();\n" in script
     assert "bulkDeleting" not in script
     assert "state.deleting" not in script
     assert "window.confirm(" not in script
+    assert "spostat" not in script.lower()
