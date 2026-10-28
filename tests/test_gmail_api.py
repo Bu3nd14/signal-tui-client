@@ -1630,6 +1630,86 @@ def test_send_reply_does_not_double_re_prefix(client, fake_imap, fake_smtp, conf
     assert fake_smtp.instances[-1].message["Subject"] == "Re: Hello"
 
 
+# Long headers arrive folded over several lines; copied as-is they made
+# EmailMessage raise ValueError, so every reply to such a mail failed.
+_FOLDED_ORIGINAL = (
+    b"From: Mario Rossi <mario@example.com>\r\n"
+    b"To: me@example.com\r\n"
+    b"Subject: Una riunione molto lunga\r\n con oggetto ripiegato\r\n"
+    b"Date: Fri, 23 Oct 2026 10:00:00 +0000\r\n"
+    b"Message-ID: <long@example.com>\r\n"
+    b"References: <a@example.com>\r\n <b@example.com>\r\n\t<c@example.com>\r\n"
+    b"Content-Type: text/plain; charset=utf-8\r\n"
+    b"\r\n"
+    b"original line\r\n"
+)
+
+
+def test_send_reply_to_a_mail_with_folded_headers(
+    client, fake_imap, fake_smtp, configured
+):
+    fake_imap.messages[9] = _FOLDED_ORIGINAL
+
+    response = client.post(
+        "/api/gmail/send", data={"text": "Risposta", "reply_to_uid": "9"}
+    )
+
+    assert response.status_code == 200, response.text
+    message = fake_smtp.instances[-1].message
+    assert message["Subject"] == "Re: Una riunione molto lunga con oggetto ripiegato"
+    assert message["In-Reply-To"] == "<long@example.com>"
+    references = str(message["References"])
+    assert "\r" not in references and "\n" not in references
+    assert references.split() == [
+        "<a@example.com>",
+        "<b@example.com>",
+        "<c@example.com>",
+        "<long@example.com>",
+    ]
+    assert b"long@example.com" in message.as_bytes()
+
+
+def test_send_forward_of_a_mail_with_a_folded_subject(
+    client, fake_imap, fake_smtp, configured
+):
+    fake_imap.messages[9] = _FOLDED_ORIGINAL
+
+    response = client.post(
+        "/api/gmail/send",
+        data={"to": "dest@example.com", "text": "Guarda", "forward_uid": "9"},
+    )
+
+    assert response.status_code == 200, response.text
+    message = fake_smtp.instances[-1].message
+    assert message["Subject"] == "Fwd: Una riunione molto lunga con oggetto ripiegato"
+
+
+def test_message_detail_headers_are_unfolded(client, fake_imap, configured):
+    fake_imap.messages[9] = _FOLDED_ORIGINAL
+
+    response = client.get("/api/gmail/messages/9?folder=INBOX")
+
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail["subject"] == "Una riunione molto lunga con oggetto ripiegato"
+    assert detail["references"] == "<a@example.com> <b@example.com>\t<c@example.com>"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("one line", "one line"),
+        ("folded\r\n line", "folded line"),
+        ("lf only\n\tfolded", "lf only\tfolded"),
+        ("stray\rbreak\nhere", "stray break here"),
+        ("=?utf-8?q?Riunione?=\r\n =?utf-8?q?_di_progetto?=", "Riunione di progetto"),
+        ("=?utf-8?b?Q2l0dMOg?=\r\n plain", "Città plain"),
+    ],
+)
+def test_decode_mime_header_unfolds(raw: str, expected: str) -> None:
+    assert gmail.decode_mime_header(raw) == expected
+
+
 def test_send_rejects_header_injection(client, fake_smtp, configured):
     response = client.post(
         "/api/gmail/send",

@@ -230,6 +230,9 @@ _CLEAN_CONTENT_TAGS = {
 }
 
 _FOLDER_RE = re.compile(r"^[A-Za-z0-9._/\- ]+$")
+# RFC 5322 folding (CRLF before whitespace) and any stray line break.
+_HEADER_FOLD_RE = re.compile(r"\r?\n(?=[ \t])")
+_HEADER_BREAK_RE = re.compile(r"[\r\n]+")
 _SIGNED_IMAGE_RE = re.compile(
     r"^/?gmail-image\?token=([A-Za-z0-9_-]+)\.([0-9a-f]{32})(?:&v=\d+)?$"
 )
@@ -1044,12 +1047,22 @@ def _validate_text(text: str) -> str:
     return text
 
 
+def unfold_header(value: str) -> str:
+    """Unfold a header value onto one line.
+
+    Long headers (References of a thread, long subjects) arrive folded over
+    several lines; copied as-is into a reply they make ``EmailMessage`` raise
+    ``ValueError`` (header values may not contain CR/LF).
+    """
+    return _HEADER_BREAK_RE.sub(" ", _HEADER_FOLD_RE.sub("", value))
+
+
 def decode_mime_header(value: str | None) -> str:
-    """Decode RFC 2047 headers, tolerating unknown charsets."""
+    """Decode RFC 2047 headers, tolerating unknown charsets, unfolded."""
     if not value:
         return ""
     try:
-        return str(make_header(decode_header(value)))
+        return unfold_header(str(make_header(decode_header(value))))
     except (LookupError, UnicodeDecodeError, ValueError):
         parts: list[str] = []
         for text, charset in decode_header(value):
@@ -1060,7 +1073,7 @@ def decode_mime_header(value: str | None) -> str:
                     parts.append(text.decode("utf-8", errors="replace"))
             else:
                 parts.append(text)
-        return "".join(parts)
+        return unfold_header("".join(parts))
 
 
 def _date_to_ts(value: str | None) -> int | None:
@@ -4854,7 +4867,9 @@ def send_email(
     if forward_uid is not None:
         folder_value = validate_folder(forward_folder or settings.folder)
         original = fetch_message(forward_uid, folder_value)
-        clean_subject = _forward_subject(clean_subject or original["subject"])
+        clean_subject = _forward_subject(
+            clean_subject or unfold_header(original["subject"])
+        )
         body = append_forward(body, original)
         forwarded = [
             fetch_attachment(forward_uid, attachment["index"], folder_value)
@@ -4869,14 +4884,17 @@ def send_email(
     references = ""
     if reply_to_uid is not None:
         original = fetch_message(reply_to_uid, reply_to_folder or settings.folder)
-        original_message_id = original["message_id"]
+        # Headers copied from the original must be single-line.
+        original_message_id = unfold_header(original["message_id"]).strip()
         if not to_list:
             to_list = _parse_addresses(original["from"], "to")
-        clean_subject = _reply_subject(clean_subject or original["subject"])
+        clean_subject = _reply_subject(
+            clean_subject or unfold_header(original["subject"])
+        )
         body = append_quote(body, original["text"])
         if original_message_id:
             in_reply_to = original_message_id
-            previous = original["references"]
+            previous = unfold_header(original["references"]).strip()
             references = (
                 f"{previous} {original_message_id}" if previous else original_message_id
             )
