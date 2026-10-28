@@ -135,6 +135,14 @@ def _bubbles(app):
     ]
 
 
+def _shown_once(app, *texts):
+    # Re-rendering the chat clears and remounts it, and Textual drops the old
+    # bubbles one tick after the new ones are listed: wait for a settled log
+    # instead of counting in that window (each text exactly once).
+    bubbles = _bubbles(app)
+    return all(bubbles.count(text) == 1 for text in texts)
+
+
 @pytest.mark.integration
 async def test_tui_over_the_socket_loads_sends_and_survives_a_restart(server, app):
     async with app.run_test() as pilot:
@@ -145,16 +153,14 @@ async def test_tui_over_the_socket_loads_sends_and_survives_a_restart(server, ap
         # Open a chat: its message is shown once.
         mario = next(c for c in app.contacts if c.id == MARIO)
         app._select_contact(mario)
-        assert await _until(pilot, lambda: "ciao" in _bubbles(app))
-        assert _bubbles(app).count("ciao") == 1
+        assert await _until(pilot, lambda: _shown_once(app, "ciao"))
 
         # Send a message through the socket.
         input_box = app.query_one("#message-input")
         input_box.focus()
         await pilot.press(*"hello", "enter")
-        assert await _until(pilot, lambda: "hello" in _bubbles(app))
         assert await _until(pilot, lambda: server.sent == [(MARIO, "hello")])
-        assert _bubbles(app).count("hello") == 1
+        assert await _until(pilot, lambda: _shown_once(app, "hello"))
 
         # The server goes away: status message, no crash, no call spam.
         server.stop()
@@ -177,13 +183,9 @@ async def test_tui_over_the_socket_loads_sends_and_survives_a_restart(server, ap
         # Reconnected and resynced: the missed message appears, nothing doubles.
         assert await _until(pilot, lambda: MSG_RESTORED in app.statuses)
         assert await _until(pilot, lambda: MSG_RESYNCED in app.statuses)
-        assert await _until(pilot, lambda: "sei li?" in _bubbles(app))
+        assert await _until(pilot, lambda: _shown_once(app, "ciao", "hello", "sei li?"))
         assert app._server_lost is False
         assert len(app.contacts) == 2
-        bubbles = _bubbles(app)
-        assert bubbles.count("ciao") == 1
-        assert bubbles.count("hello") == 1
-        assert bubbles.count("sei li?") == 1
         assert app._unread_counts.get(mario.cache_key, 0) == 0  # the open chat
 
         # Still usable after the restart.
