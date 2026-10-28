@@ -12,6 +12,11 @@
   const ATTACHMENTS_OPEN_MAX = 4;
   const FOLDER_FALLBACK = "INBOX";
   const RENDER_KEY = "gmail-render-mode";
+  // Background delete: per-request timeout, pause before the single retry,
+  // and the server's bulk-delete cap.
+  const DELETE_TIMEOUT_MS = 30000;
+  const DELETE_RETRY_DELAY_MS = 1500;
+  const MAX_BULK_DELETE = 200;
 
   const elements = {
     tab: document.getElementById("gmail-tab"),
@@ -106,8 +111,10 @@
     addressBookLoadedAt: 0,
     addressBookLoading: false,
     sending: false,
-    deleting: false,
-    bulkDeleting: false,
+    // uidKey -> {message, index, folder, settledSeq} of optimistic deletes.
+    pendingDeletes: new Map(),
+    deleteQueue: [],
+    deleteWorker: false,
     archiving: false,
   };
 
@@ -294,7 +301,6 @@
   }
 
   function toggleSelectionMode() {
-    if (state.bulkDeleting) return;
     state.selectionMode = !state.selectionMode;
     if (!state.selectionMode) state.selectedUids.clear();
     renderList();
@@ -303,12 +309,12 @@
 
   function updateSelectionActions() {
     const count = state.selectedUids.size;
-    const busy = state.bulkDeleting || state.listLoading;
+    const busy = state.listLoading;
     const empty = state.messages.length === 0;
 
     elements.selectToggle.textContent = state.selectionMode ? "Annulla" : "Seleziona";
     elements.selectToggle.setAttribute("aria-pressed", state.selectionMode ? "true" : "false");
-    elements.selectToggle.disabled = state.bulkDeleting || state.listLoading || (!state.selectionMode && empty);
+    elements.selectToggle.disabled = state.listLoading || (!state.selectionMode && empty);
 
     elements.deleteSelected.hidden = !state.selectionMode;
     elements.deleteSelected.disabled = busy || count === 0;
@@ -316,7 +322,6 @@
       "aria-label",
       count === 1 ? "Elimina il messaggio selezionato" : `Elimina ${count} messaggi selezionati`,
     );
-    elements.deleteSelected.textContent = state.bulkDeleting ? "Eliminazione…" : "Elimina";
     elements.refresh.disabled = busy;
   }
 
@@ -334,7 +339,6 @@
       if (!checkbox) continue;
       const selected = state.selectedUids.has(checkbox.dataset.uid || "");
       checkbox.checked = selected;
-      checkbox.disabled = state.bulkDeleting;
       item.classList.toggle("selected", selected);
     }
   }
@@ -561,8 +565,8 @@
     clampPageIndex();
     const { start, end } = pageRange();
     elements.pageInfo.textContent = `${start + 1}–${end} di ${total}`;
-    elements.pageNewer.disabled = state.listLoading || state.bulkDeleting || state.pageIndex <= 0;
-    elements.pageOlder.disabled = state.listLoading || state.bulkDeleting || state.pageIndex >= pageCount() - 1;
+    elements.pageNewer.disabled = state.listLoading || state.pageIndex <= 0;
+    elements.pageOlder.disabled = state.listLoading || state.pageIndex >= pageCount() - 1;
   }
 
   function changePage(delta) {
@@ -598,7 +602,6 @@
       checkbox.type = "checkbox";
       checkbox.dataset.uid = key;
       checkbox.checked = state.selectedUids.has(key);
-      checkbox.disabled = state.bulkDeleting;
       checkbox.setAttribute(
         "aria-label",
         `Seleziona messaggio di ${senderLabel(message)}: ${subjectOf(message)}`,
@@ -635,7 +638,6 @@
 
     button.addEventListener("click", () => {
       if (state.selectionMode) {
-        if (state.bulkDeleting) return;
         const selected = !state.selectedUids.has(key);
         setMessageSelected(key, selected, wrapper, checkbox);
         button.setAttribute("aria-label", messageAriaLabel(message, selected));
@@ -1096,81 +1098,127 @@
     }
   }
 
-  async function deleteMessage() {
-    if (state.deleting) return;
-    const uid = state.selectedUid;
-    if (uid === null || uid === undefined) return;
-    if (!window.confirm("Spostare il messaggio nel cestino?")) return;
+  // Optimistic delete: messages leave the list at once, a single background
+  // worker moves them to the Trash (one bulk request per batch) and puts them
+  // back only if the server really refused.  Entries stay in pendingDeletes
+  // until a list load started after the delete confirms they are gone, so a
+  // reload already in flight cannot bring them back.
+  function trashMessages(uids) {
+    const keys = new Set(uids.map(uidKey));
+    const folder = state.folder;
+    const kept = [];
+    state.messages.forEach((message, index) => {
+      const key = uidKey(message.uid);
+      if (keys.has(key)) {
+        state.pendingDeletes.set(key, { message, index, folder, settledSeq: null });
+      } else {
+        kept.push(message);
+      }
+    });
+    for (const key of keys) {
+      // The reader can show a message the list no longer has.
+      if (!state.pendingDeletes.has(key)) {
+        state.pendingDeletes.set(key, { message: null, index: -1, folder, settledSeq: null });
+      }
+      state.selectedUids.delete(key);
+      state.deleteQueue.push(key);
+    }
+    state.messages = kept;
+    if (state.selectedUid !== null && keys.has(uidKey(state.selectedUid))) closeReader();
+    renderList();
+    showNotice(keys.size === 1 ? "Spostato nel cestino." : `${keys.size} messaggi spostati nel cestino.`);
+    void flushDeletes();
+  }
 
-    state.deleting = true;
-    // An icon-only button: never rewrite its content (that would drop the
-    // SVG); disabled + aria-busy show the pending state.
-    const button = elements.delete;
-    button.disabled = true;
-    button.setAttribute("aria-busy", "true");
-    try {
-      await request(
-        `api/gmail/messages/${encodeURIComponent(String(uid))}?folder=${encodeURIComponent(state.folder)}`,
-        { method: "DELETE" },
-      );
-      closeReader();
-      await loadMessages({ force: true });
-    } catch (error) {
-      if (error && error.name === "AbortError") return;
-      const message = error.status === 404
-        ? "Messaggio non trovato: potrebbe essere già stato eliminato."
-        : error.status === 502
-          ? "Gmail non ha risposto: riprova tra poco."
-          : error.status === 503
-            ? "Gmail non è configurato."
-            : error.message;
-      showError(message);
-    } finally {
-      state.deleting = false;
-      button.disabled = false;
-      button.removeAttribute("aria-busy");
+  function deleteErrorMessage(error) {
+    const status = error && error.status;
+    if (status === 503) return "Gmail non è configurato.";
+    if (status === 400 && error.message) return error.message;
+    return "Gmail non ha risposto: messaggi ripristinati, riprova tra poco.";
+  }
+
+  async function sendDeleteBatch(keys, folder) {
+    const body = JSON.stringify({ uids: keys.map(normalizeUid), folder });
+    for (let attempt = 0; ; attempt += 1) {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), DELETE_TIMEOUT_MS);
+      try {
+        // keepalive: the request survives closing or backgrounding the page.
+        await request("api/gmail/messages/bulk-delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          keepalive: true,
+          signal: controller.signal,
+        });
+        // UIDs reported as missing were already gone: nothing to undo.
+        return;
+      } catch (error) {
+        // Network errors, timeouts and 502 are retried once: a retry after a
+        // request that did land just reports the UIDs as missing.
+        const status = error && error.status;
+        if (attempt >= 1 || (status && status !== 502)) throw error;
+        await new Promise((resolve) => window.setTimeout(resolve, DELETE_RETRY_DELAY_MS));
+      } finally {
+        window.clearTimeout(timer);
+      }
     }
   }
 
-  async function deleteSelected() {
-    if (state.bulkDeleting) return;
+  function restoreDeleted(keys) {
+    const entries = keys
+      .map((key) => state.pendingDeletes.get(key))
+      .filter((entry) => entry && entry.message && entry.folder === state.folder)
+      .sort((first, second) => first.index - second.index);
+    for (const key of keys) state.pendingDeletes.delete(key);
+    for (const entry of entries) {
+      if (state.messages.some((message) => sameUid(message.uid, entry.message.uid))) continue;
+      state.messages.splice(Math.min(entry.index, state.messages.length), 0, entry.message);
+    }
+    if (entries.length) renderList();
+  }
+
+  async function flushDeletes() {
+    if (state.deleteWorker) return;
+    state.deleteWorker = true;
+    let trashed = false;
+    try {
+      while (state.deleteQueue.length) {
+        const folder = state.pendingDeletes.get(state.deleteQueue[0]).folder;
+        const batch = state.deleteQueue
+          .filter((key) => state.pendingDeletes.get(key).folder === folder)
+          .slice(0, MAX_BULK_DELETE);
+        state.deleteQueue = state.deleteQueue.filter((key) => !batch.includes(key));
+        try {
+          await sendDeleteBatch(batch, folder);
+          for (const key of batch) state.pendingDeletes.get(key).settledSeq = state.listSeq;
+          trashed = true;
+        } catch (error) {
+          hideNotice();
+          restoreDeleted(batch);
+          showError(deleteErrorMessage(error));
+        }
+      }
+    } finally {
+      state.deleteWorker = false;
+    }
+    // Reconcile with the server without spinners or a reset of the page.
+    if (trashed) void loadMessages({ force: true, background: true });
+  }
+
+  // No confirmation dialog: the message only moves to the Trash, and some
+  // mobile browsers silently answer "no" once dialogs are suppressed.
+  function deleteMessage() {
+    const uid = state.selectedUid;
+    if (uid === null || uid === undefined) return;
+    trashMessages([uid]);
+  }
+
+  function deleteSelected() {
     const uids = Array.from(state.selectedUids).map((key) => normalizeUid(key));
     if (!uids.length) return;
-    const count = uids.length;
-    if (!window.confirm(`Spostare ${count} messaggi nel cestino?`)) return;
-
-    state.bulkDeleting = true;
-    syncRowSelection();
-    updateSelectionActions();
-    renderPager();
-
-    try {
-      await request("api/gmail/messages/bulk-delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uids, folder: state.folder }),
-      });
-
-      state.selectedUids.clear();
-      await loadMessages({ force: true });
-    } catch (error) {
-      if (error && error.name === "AbortError") return;
-      const status = error && error.status;
-      const fallback = error && error.message ? error.message : "Errore imprevisto.";
-      const message = status === 400
-        ? fallback
-        : status === 502
-          ? "Gmail non ha risposto: riprova tra poco."
-          : status === 503
-            ? "Gmail non è configurato."
-            : fallback;
-      showError(message);
-    } finally {
-      state.bulkDeleting = false;
-      syncRowSelection();
-      updateSelectionActions();
-      renderPager();
-    }
+    state.selectionMode = false;
+    trashMessages(uids);
   }
 
   async function downloadAttachment(uid, index, fallbackName, button) {
@@ -1205,17 +1253,23 @@
     }
   }
 
-  async function loadMessages({ force = false } = {}) {
+  // background: a silent reconciliation that keeps the page, the selection
+  // and the current list on error.
+  async function loadMessages({ force = false, background = false } = {}) {
     if (!state.configured || !state.open) return;
 
-    state.selectedUids.clear();
-    state.selectionMode = false;
-    syncRowSelection();
-    updateSelectionActions();
+    if (!background) {
+      state.selectedUids.clear();
+      state.selectionMode = false;
+      syncRowSelection();
+      updateSelectionActions();
+    }
 
     const sequence = ++state.listSeq;
-    setListLoading(true);
-    elements.listSummary.textContent = "Caricamento…";
+    if (!background) {
+      setListLoading(true);
+      elements.listSummary.textContent = "Caricamento…";
+    }
 
     const params = new URLSearchParams({
       folder: state.folder,
@@ -1252,11 +1306,28 @@
           has_attachments: Boolean(message.has_attachments),
           seen: Boolean(message.seen),
         }));
+      // Confirmed deletes leave the filter once a load started after them
+      // returns (the server's list is authoritative), or when the UIDs were
+      // renumbered.
+      for (const [key, entry] of state.pendingDeletes) {
+        if (entry.settledSeq !== null && (sequence > entry.settledSeq || mailboxChanged)) {
+          state.pendingDeletes.delete(key);
+        }
+      }
+      // A reload that started before the delete landed must not bring the
+      // message back.
+      const visible = messages.filter((message) => !state.pendingDeletes.has(uidKey(message.uid)));
 
       if (typeof payload.folder === "string" && payload.folder) state.folder = payload.folder;
 
-      state.messages = messages;
-      state.pageIndex = 0;
+      state.messages = visible;
+      if (background) {
+        for (const key of state.selectedUids) {
+          if (!visible.some((message) => uidKey(message.uid) === key)) state.selectedUids.delete(key);
+        }
+      } else {
+        state.pageIndex = 0;
+      }
       renderList();
       renderAccountStatus();
       if (mailboxChanged) {
@@ -1270,6 +1341,10 @@
     } catch (error) {
       if (sequence !== state.listSeq) return;
       if (error && error.name === "AbortError") return;
+      if (background) {
+        console.debug("[gmail] background refresh failed", error.status || "network");
+        return;
+      }
       showError(error.message);
       state.messages = [];
       state.pageIndex = 0;
@@ -1853,13 +1928,13 @@
     }
   });
   elements.delete.addEventListener("click", () => {
-    void deleteMessage();
+    deleteMessage();
   });
   elements.selectToggle.addEventListener("click", () => {
     toggleSelectionMode();
   });
   elements.deleteSelected.addEventListener("click", () => {
-    void deleteSelected();
+    deleteSelected();
   });
   elements.readerBack.addEventListener("click", closeReader);
   elements.errorDismiss.addEventListener("click", hideError);
