@@ -71,6 +71,7 @@ class TestCoreStartGating:
     def _core(self, **kw):
         core, bus = _make_core(**kw)
         core._spawn = MagicMock()
+        core.start_wa_session_guard = MagicMock()  # no real guard thread here
         return core, bus
 
     def test_signal_enabled_spawns_worker(self):

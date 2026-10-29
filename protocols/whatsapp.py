@@ -739,6 +739,23 @@ class WhatsAppBackend(ChatBackend):
         s = str(status.get("status") or "").lower()
         return s == "working"
 
+    def session_info(self) -> dict | None:
+        """Raw WAHA session dict (``status``, ``me``...), or ``None`` if unreachable."""
+        if not self._rest:
+            return None
+        status = self._rest.get_session_status()
+        return status if isinstance(status, dict) else None
+
+    def restart_session(self) -> bool:
+        """Ask WAHA to restart the session engine (keeps auth); True if accepted."""
+        if not self._rest:
+            return False
+        return self._rest.restart_session() is not None or self._rest.last_status in (
+            200,
+            201,
+            204,
+        )
+
     async def get_pairing_qr(self) -> str | bytes | None:
         """Return the current pairing QR (text or PNG bytes), or ``None``."""
         if not self._rest:
