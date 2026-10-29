@@ -513,6 +513,86 @@ def is_sent_mirror_attachment_id(value: str | None) -> bool:
     return Path(str(value)).name.lower().startswith("sent-")
 
 
+# ─── Lazy WhatsApp media tokens ──────────────────────────────────────────────
+
+#: Prefisso del token di presentazione di un media WhatsApp non ancora
+#: scaricato (``messages.page`` lo espone come ``attachment_id`` "pending").
+LAZY_MEDIA_TOKEN_PREFIX = "lazy-wa-"
+#: Separatore fra le due parti base64url: ``~`` è URL-safe e non appartiene
+#: all'alfabeto base64url (``-``/``_``), quindi lo split è univoco.
+_LAZY_MEDIA_TOKEN_SEP = "~"
+_LAZY_MEDIA_ID_RE = re.compile(r"[A-Za-z0-9@._:+-]{1,256}")
+
+#: ``msg_type`` delle righe media (``models.msg_type_for_media_kind`` e i
+#: valori legacy più specifici).
+MEDIA_MSG_TYPES = frozenset(
+    {"image", "video", "audio", "voice", "document", "sticker", "gif", "attachment"}
+)
+
+
+def is_media_row(msg_type: str | None, media_kind: str | None) -> bool:
+    """True se la riga rappresenta un media (per tipo o per ``media_kind``)."""
+    return bool(media_kind) or str(msg_type or "").strip().lower() in MEDIA_MSG_TYPES
+
+
+def _b64url(value: str) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def _unb64url(value: str) -> str | None:
+    import base64
+    import binascii
+
+    if not value or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        return None
+    try:
+        return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+
+
+def lazy_media_token(contact_id: str, msg_id: str) -> str | None:
+    """Token di presentazione di un media WhatsApp da risolvere on demand.
+
+    Solo presentazione: mai scritto in SQLite né nel cache del backend.  Senza
+    ``/`` (il web costruisce ``api/media/<proto>/<segment>``).  ``None`` se gli
+    id non sono validi (meglio nessun token che uno irrisolvibile).
+    """
+    contact_id, msg_id = str(contact_id or ""), str(msg_id or "")
+    if not _LAZY_MEDIA_ID_RE.fullmatch(contact_id) or ".." in contact_id:
+        return None
+    if not _LAZY_MEDIA_ID_RE.fullmatch(msg_id) or ".." in msg_id:
+        return None
+    return (
+        f"{LAZY_MEDIA_TOKEN_PREFIX}{_b64url(contact_id)}"
+        f"{_LAZY_MEDIA_TOKEN_SEP}{_b64url(msg_id)}"
+    )
+
+
+def is_lazy_media_token(value: object) -> bool:
+    """True se *value* ha la forma di un token lazy (senza validarlo)."""
+    return isinstance(value, str) and value.startswith(LAZY_MEDIA_TOKEN_PREFIX)
+
+
+def parse_lazy_media_token(token: object) -> tuple[str, str] | None:
+    """``(contact_id, msg_id)`` di un token lazy valido, altrimenti ``None``."""
+    if not is_lazy_media_token(token):
+        return None
+    body = str(token)[len(LAZY_MEDIA_TOKEN_PREFIX) :]
+    parts = body.split(_LAZY_MEDIA_TOKEN_SEP)
+    if len(parts) != 2:
+        return None
+    contact_id, msg_id = (_unb64url(part) for part in parts)
+    if contact_id is None or msg_id is None:
+        return None
+    # Round-trip: rifiuta id fuori alfabeto e codifiche non canoniche.
+    if lazy_media_token(contact_id, msg_id) != token:
+        return None
+    return contact_id, msg_id
+
+
 # ─── Delivery status & twin merge helpers ────────────────────────────────────
 
 #: Rank di delivery status condiviso.  Le query SQL di ``protocols.db``

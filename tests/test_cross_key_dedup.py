@@ -522,7 +522,7 @@ class TestMergeBackendCache:
         contact = _wa_contact("39123@lid", phone="39123")
         backend = SimpleNamespace(
             find_contact=lambda _cid, contact=contact: contact,
-            fetch_history=lambda _cid, _limit: [],
+            fetch_history=lambda _cid, _limit, **_kw: [],
             cache={
                 "39123@lid": [
                     _d(
@@ -555,7 +555,7 @@ class TestMergeBackendCache:
         contact = _wa_contact("39123@lid", phone="39123")
         backend = SimpleNamespace(
             find_contact=lambda _cid, contact=contact: contact,
-            fetch_history=lambda _cid, _limit: [],
+            fetch_history=lambda _cid, _limit, **_kw: [],
             cache={
                 "39123@lid": [
                     _d(
@@ -586,7 +586,7 @@ class TestMergeBackendCache:
         contact = _wa_contact("39123@lid", phone="39123")
         backend = SimpleNamespace(
             find_contact=lambda _cid, contact=contact: contact,
-            fetch_history=lambda _cid, _limit: [],
+            fetch_history=lambda _cid, _limit, **_kw: [],
             cache={
                 "39123@lid": [
                     _d(
@@ -616,7 +616,7 @@ class TestMergeBackendCache:
         contact = _wa_contact("39123@lid", phone="39123")
         backend = SimpleNamespace(
             find_contact=lambda _cid, contact=contact: contact,
-            fetch_history=lambda _cid, _limit: [],
+            fetch_history=lambda _cid, _limit, **_kw: [],
             cache={
                 "39123@lid": [
                     _d(

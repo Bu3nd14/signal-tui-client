@@ -19,7 +19,9 @@ from models import (
     attachment_display_name,
     is_caption_like,
     is_media_quote_placeholder,
+    is_media_row,
     is_whatsapp_synthetic_media_text,
+    lazy_media_token,
     media_kind_from_mime,
 )
 from server.client import ApiError
@@ -1389,6 +1391,23 @@ class ChatViewMixin:
             ui_msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
         return added or changed
 
+    def _lazy_media_attachment_id(
+        self, protocol: str, msg: dict, kind: str | None
+    ) -> str | None:
+        """Lazy token (S1) for a WhatsApp media row of the open chat without file.
+
+        Widget-only: the token is never written to the UI cache.  Resolving it
+        (click, or the native thumbnail of a mounted widget) downloads that one
+        message on the server, serialised with every other lazy request.
+        """
+        if protocol != PROTOCOL_WHATSAPP or msg.get("attachment_id"):
+            return None
+        if not msg.get("id") or self.selected_contact is None:
+            return None
+        if not is_media_row(msg.get("msg_type"), kind):
+            return None
+        return lazy_media_token(self.selected_contact.id, str(msg["id"]))
+
     def _build_message_widgets(self, protocol: str, is_group: bool, msg: dict) -> list:
         """Build the widgets for a single cached message (quote + message).
 
@@ -1406,6 +1425,8 @@ class ChatViewMixin:
         status = msg.get("status", "sent" if is_mine else "read")
         ts = msg.get("timestamp", 0)
         message_id = msg.get("id")
+        # Id the widget resolves: the real attachment, else a lazy token.
+        media_ref = attachment_id or self._lazy_media_attachment_id(protocol, msg, kind)
 
         widgets: list = []
         if quote_text or msg.get("quote_timestamp"):
@@ -1439,9 +1460,9 @@ class ChatViewMixin:
                 display = f"🖼️ {display}"
             image_widget = ImageWidget(
                 attachment_path=None,
-                attachment_id=attachment_id or "",
+                attachment_id=media_ref or "",
                 fallback_text=self._native_placeholder(
-                    f"[{display}]", attachment_id=attachment_id
+                    f"[{display}]", attachment_id=media_ref
                 ),
                 timestamp=ts,
                 sender=sender,
@@ -1468,13 +1489,13 @@ class ChatViewMixin:
                         message_id=message_id,
                     )
                 )
-        elif kind == "sticker" and attachment_id:
+        elif kind == "sticker" and media_ref:
             sticker_widget = ImageWidget(
                 attachment_path=None,
-                attachment_id=attachment_id,
+                attachment_id=media_ref,
                 fallback_text=self._native_placeholder(
                     f"[🎨 Sticker: {attachment_info or 'Sticker'}]",
-                    attachment_id=attachment_id,
+                    attachment_id=media_ref,
                 ),
                 timestamp=ts,
                 sender=sender,
@@ -1504,8 +1525,8 @@ class ChatViewMixin:
                     is_group=is_group,
                     message_id=message_id,
                     edited=msg.get("edited", False),
-                    attachment_ref=(attachment_id, protocol)
-                    if kind in _OPENABLE_MEDIA_KINDS and attachment_id
+                    attachment_ref=(media_ref, protocol)
+                    if kind in _OPENABLE_MEDIA_KINDS and media_ref
                     else None,
                 )
             )

@@ -398,7 +398,7 @@ class TestLoadWorkerRemount:
 
         new_msg = _msg("new", is_mine=False, ts=1000, mid="m1")
 
-        def fetch_history(cid, limit=50):
+        def fetch_history(cid, limit=50, **_kwargs):
             backend.cache[contact.id] = [new_msg]
 
         backend.fetch_history = fetch_history

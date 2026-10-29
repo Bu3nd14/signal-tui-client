@@ -1709,6 +1709,14 @@ function buildMessageNode(item, protocol, stickToBottom) {
     bubble.append(videoThumbAttachment(item.attachment, protocol, item.direction, stickToBottom));
   } else if (item.attachment) {
     bubble.append(fileAttachment(item.attachment, protocol, item.direction));
+  } else if (item.media_placeholder) {
+    // Media senza file né token risolvibile: segnaposto visibile, mai una
+    // bolla vuota. Gli attachment "pending" (token lazy) passano invece dai
+    // rami sopra e si scaricano solo quando la bolla diventa visibile.
+    const placeholder = document.createElement("div");
+    placeholder.className = "attachment-error";
+    placeholder.textContent = `▧  ${item.media_placeholder} non disponibile`;
+    bubble.append(placeholder);
   }
   const safeText = window.SignalTuiReconcile.messageDisplayText(item);
   // Le immagini con caption reale (il server la espone in item.text) la
