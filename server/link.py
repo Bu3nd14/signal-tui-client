@@ -20,6 +20,7 @@ Textual, FastAPI, ``tui`` or ``web``.
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import os
@@ -65,6 +66,28 @@ Qr = dict[str, str]
 
 def _qr(kind: str, data: str) -> Qr:
     return {"kind": kind, "data": data}
+
+
+def qr_as_png(qr: Qr) -> Qr:
+    """Normalise a QR payload to a ready image for frontends without a QR renderer.
+
+    ``png`` / ``info`` / ``error`` are returned unchanged; ``url`` and ``text``
+    (the raw QR value, as older WAHA returns it: not ASCII art) are rendered to a
+    PNG (base64).  Pure: no I/O.
+    """
+    if qr.get("kind") not in ("url", "text"):
+        return qr
+    import qrcode
+    from qrcode.constants import ERROR_CORRECT_M
+
+    code = qrcode.QRCode(
+        version=None, error_correction=ERROR_CORRECT_M, box_size=8, border=2
+    )
+    code.add_data(qr["data"])
+    code.make(fit=True)
+    buf = io.BytesIO()
+    code.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
+    return _qr("png", base64.b64encode(buf.getvalue()).decode("ascii"))
 
 
 def _qr_from_png(png: bytes) -> Qr:

@@ -10,7 +10,7 @@
   <link rel="apple-touch-icon" href="icon.svg">
   <meta name="theme-color" content="#101720">
   <script>try{document.documentElement.dataset.skin=localStorage.getItem("signal-tui-web-skin")||"";}catch(e){}</script>
-  <link rel="stylesheet" href="style.css?v=72">
+  <link rel="stylesheet" href="style.css?v=73">
   <link rel="stylesheet" href="teams-skin.css?v=24">
   <link rel="stylesheet" href="gmail.css?v=26">
 </head>
@@ -27,6 +27,7 @@
           <div id="main-menu" class="main-menu" role="menu" hidden>
             <button id="open-settings" class="main-menu-item" type="button" role="menuitem">⚙ Impostazioni</button>
             <button id="open-token" class="main-menu-item" type="button" role="menuitem">🔗 Collega backend</button>
+            <button id="open-account-link" class="main-menu-item" type="button" role="menuitem">📱 Collega account</button>
           </div>
         </div>
       </header>
@@ -59,6 +60,13 @@
       <div id="error-banner" class="error-banner" role="alert" hidden>
         <span id="error-text"></span>
         <button id="dismiss-error" type="button" aria-label="Chiudi avviso">×</button>
+      </div>
+      <div id="link-required-banner" class="error-banner link-required-banner" role="status" hidden>
+        <span id="link-required-text"></span>
+        <span class="link-required-actions">
+          <button id="link-required-show" class="link-required-show" type="button">Mostra QR</button>
+          <button id="dismiss-link-required" type="button" aria-label="Chiudi avviso">×</button>
+        </span>
       </div>
       <section id="message-list" class="message-list" aria-live="polite">
         <div class="empty-state">
@@ -291,6 +299,27 @@
     </div>
   </dialog>
 
+  <dialog id="account-link-dialog" class="link-dialog">
+    <div class="link-dialog-content">
+      <div class="link-dialog-header">
+        <h2>Collega account</h2>
+        <button id="close-account-link-dialog" class="link-dialog-close" type="button" aria-label="Chiudi">×</button>
+      </div>
+      <div id="account-link-chooser" class="link-options"></div>
+      <div id="account-link-flow" class="account-link-flow" hidden>
+        <div id="account-link-spinner" class="account-link-spinner" role="progressbar" aria-label="Caricamento" hidden></div>
+        <img id="account-link-qr" class="account-link-qr" alt="Codice QR per il collegamento" hidden>
+        <p id="account-link-text" class="account-link-text" hidden></p>
+        <p id="account-link-hint" class="dialog-copy account-link-hint"></p>
+        <p id="account-link-status" class="account-link-status" role="status" aria-live="polite"></p>
+        <div class="account-link-actions">
+          <button id="account-link-retry" class="primary-button" type="button" hidden>Riprova</button>
+          <button id="account-link-cancel" class="link-cancel-button" type="button">Annulla</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="settings-dialog" class="link-dialog">
     <div class="link-dialog-content">
       <div class="link-dialog-header">
@@ -342,7 +371,7 @@
   <script src="reconcile.js?v=8" defer></script>
   <script src="outbox.js?v=1" defer></script>
   <script src="message_cache.js?v=1" defer></script>
-  <script src="app.js?v=134" defer></script>
+  <script src="app.js?v=135" defer></script>
   <script src="gmail.js?v=29" defer></script>
 </body>
 </html>

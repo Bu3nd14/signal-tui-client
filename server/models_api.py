@@ -352,6 +352,12 @@ class LinkStatusOut(BaseModel):
     protocols: dict[str, LinkProtocolStatus]
 
 
+class LinkRequiredOut(BaseModel):
+    """Per protocol: whether the backend needs a (re)pairing QR right now."""
+
+    protocols: dict[str, bool]
+
+
 class LinkStartRequest(BaseModel):
     protocol: LinkProtocol
     #: Signal only: the number the user typed (picks the account when

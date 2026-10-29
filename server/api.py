@@ -177,6 +177,22 @@ class ChatAPI:
             raise ApiError("not_supported", "This server cannot reconnect backends")
         reconnect(protocols)
 
+    @staticmethod
+    def qr_as_png(qr: dict[str, str]) -> dict[str, str]:
+        """A link QR payload as a ready PNG (:func:`server.link.qr_as_png`);
+        for adapters, which may only import this module."""
+        from server.link import qr_as_png
+
+        return qr_as_png(qr)
+
+    def link_required(self) -> dict[str, bool]:
+        """Per protocol: the session needs a new pairing QR (host watchdog state)."""
+        needs = getattr(self._host, "wa_session_needs_pairing", None)
+        try:
+            return {"whatsapp": bool(needs()) if needs is not None else False}
+        except Exception:  # noqa: BLE001 - best effort, a status read
+            return {"whatsapp": False}
+
     # -- core resources -----------------------------------------------------
 
     async def close_loop_resources(self, timeout: float = 2.0) -> None:

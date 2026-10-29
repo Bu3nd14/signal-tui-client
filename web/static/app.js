@@ -49,6 +49,10 @@ const state = {
   contacts: [],
   // Inbox unread count from the server's Gmail poller (gmail_unread events).
   gmailUnread: 0,
+  // Protocols whose session needs a new pairing QR (banner), and the ones the
+  // user dismissed the banner for.
+  linkRequired: new Set(),
+  linkRequiredDismissed: new Set(),
   searchResults: null,
   contactQuery: "",
   protocolFilter: (() => {
@@ -144,6 +148,18 @@ const elements = {
   errorText: document.querySelector("#error-text"),
   linkDialog: document.querySelector("#link-dialog"),
   settingsDialog: document.querySelector("#settings-dialog"),
+  accountLinkDialog: document.querySelector("#account-link-dialog"),
+  accountLinkChooser: document.querySelector("#account-link-chooser"),
+  accountLinkFlow: document.querySelector("#account-link-flow"),
+  accountLinkSpinner: document.querySelector("#account-link-spinner"),
+  accountLinkQr: document.querySelector("#account-link-qr"),
+  accountLinkText: document.querySelector("#account-link-text"),
+  accountLinkHint: document.querySelector("#account-link-hint"),
+  accountLinkStatus: document.querySelector("#account-link-status"),
+  accountLinkRetry: document.querySelector("#account-link-retry"),
+  accountLinkCancel: document.querySelector("#account-link-cancel"),
+  linkRequiredBanner: document.querySelector("#link-required-banner"),
+  linkRequiredText: document.querySelector("#link-required-text"),
   mainMenu: document.querySelector("#main-menu"),
   mainMenuButton: document.querySelector("#main-menu-button"),
   cacheSizeSelect: document.querySelector("#cache-size-select"),
@@ -3706,6 +3722,298 @@ function scheduleReconnect() {
   }, delay);
 }
 
+// --- account-link:begin (dialog "Collega account": flow sliceable in tests) ---
+// Per-protocol configuration.  Other protocols are added here (an entry plus,
+// when needed, its hooks) without touching the flow below:
+//   label / hint      text shown in the chooser / under the QR;
+//   beforeStart(ctx)  optional, async: returns the extra body fields of
+//                     `api/link/start`, or null to abort (Signal: device name);
+//   onPoll(ctx, res)  optional, async: sees every poll result and returns true
+//                     when it handled it (Signal: `finalize`, Telegram: 2FA).
+// ctx = { protocol, setStatus(text), showQr(qr), finish(message) }.
+const LINK_PROTOCOLS = {
+  whatsapp: {
+    label: "WhatsApp",
+    hint: "Apri WhatsApp → Dispositivi collegati → Collega un dispositivo e inquadra il codice.",
+  },
+};
+const LINK_POLL_MS = 2000;
+const LINK_TIMEOUT_MS = 5 * 60 * 1000;
+const LINK_DONE_CLOSE_MS = 1500;
+
+// One flow at a time.  `id` changes at every start/stop so late responses of an
+// abandoned flow are ignored; `started` = the server may hold a link session.
+const accountLink = {
+  id: 0, protocol: null, lastProtocol: null, started: false,
+  timer: null, deadline: 0, status: null,
+};
+
+async function linkPost(path, body) {
+  const response = await apiFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return response.json();
+}
+
+async function linkErrorMessage(error) {
+  let detail = "";
+  try {
+    detail = (await error.response?.json())?.detail || "";
+  } catch {
+    // body not JSON: fall back to the generic text
+  }
+  if (typeof detail === "string" && detail) return detail;
+  if (error.status === 503) return "Protocollo non configurato sul server.";
+  return "Impossibile avviare il collegamento. Riprova.";
+}
+
+function setLinkStatus(text) {
+  elements.accountLinkStatus.textContent = text;
+}
+
+function showLinkQr(qr) {
+  const isPng = qr?.kind === "png";
+  elements.accountLinkSpinner.hidden = true;
+  elements.accountLinkQr.hidden = !isPng;
+  if (isPng) elements.accountLinkQr.src = `data:image/png;base64,${qr.data}`;
+  elements.accountLinkText.hidden = isPng;
+  if (!isPng) elements.accountLinkText.textContent = qr?.data || "";
+}
+
+function showLinkLoading() {
+  elements.accountLinkQr.hidden = true;
+  elements.accountLinkText.hidden = true;
+  elements.accountLinkSpinner.hidden = false;
+}
+
+function clearLinkTimer() {
+  if (accountLink.timer !== null) clearTimeout(accountLink.timer);
+  accountLink.timer = null;
+}
+
+// Stops the current flow (polling off); `cancel` tells the server to drop the
+// link session (fire and forget) when one may be open.
+function stopLinkFlow({ cancel = true } = {}) {
+  const { protocol, started } = accountLink;
+  accountLink.id += 1;
+  accountLink.protocol = null;
+  accountLink.started = false;
+  clearLinkTimer();
+  if (cancel && started && protocol) {
+    linkPost("api/link/cancel", { protocol }).catch(() => {});
+  }
+}
+
+function renderLinkChooser() {
+  const chooser = elements.accountLinkChooser;
+  chooser.replaceChildren();
+  for (const [protocol, config] of Object.entries(LINK_PROTOCOLS)) {
+    const available = Boolean(accountLink.status?.[protocol]?.available);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "link-option link-option-button";
+    button.disabled = !available || accountLink.protocol !== null;
+    const name = document.createElement("span");
+    name.className = "link-option-name";
+    name.textContent = config.label;
+    const note = document.createElement("span");
+    note.className = "link-option-status";
+    note.textContent = available ? "Collega" : "non configurato";
+    button.append(name, note);
+    button.addEventListener("click", () => startLinkFlow(protocol));
+    chooser.append(button);
+  }
+}
+
+// Ends the flow with a final message (success or error).
+function endLinkFlow(message, { retry = false, cancel = true } = {}) {
+  stopLinkFlow({ cancel });
+  setLinkStatus(message);
+  elements.accountLinkRetry.hidden = !retry;
+  elements.accountLinkSpinner.hidden = true;
+  renderLinkChooser();
+}
+
+async function finishLinkFlow(id, protocol) {
+  clearLinkTimer();
+  setLinkStatus("✅ Collegato");
+  elements.accountLinkSpinner.hidden = true;
+  elements.accountLinkQr.hidden = true;
+  // The link session is over: free it (the session watchdog leaves a linking
+  // protocol alone), then reconnect the backend like the TUI does.
+  accountLink.started = false;
+  linkPost("api/link/cancel", { protocol }).catch(() => {});
+  try {
+    await linkPost("api/link/reconnect", { protocols: [protocol] });
+  } catch (error) {
+    console.debug("[web] link reconnect failed", error);
+  }
+  if (accountLink.id !== id) return;
+  setTimeout(() => {
+    if (accountLink.id !== id) return;
+    closeAccountLinkDialog();
+    loadContacts({ quiet: true });
+  }, LINK_DONE_CLOSE_MS);
+}
+
+function linkContext(protocol) {
+  return {
+    protocol,
+    setStatus: setLinkStatus,
+    showQr: showLinkQr,
+    finish: (message) => endLinkFlow(message),
+  };
+}
+
+function scheduleLinkPoll(id) {
+  accountLink.timer = setTimeout(() => pollLinkFlow(id), LINK_POLL_MS);
+}
+
+async function pollLinkFlow(id) {
+  if (accountLink.id !== id) return;
+  const protocol = accountLink.protocol;
+  if (Date.now() > accountLink.deadline) {
+    endLinkFlow("Tempo scaduto: il codice non è stato inquadrato.", { retry: true });
+    return;
+  }
+  let result = null;
+  try {
+    result = await linkPost("api/link/poll", { protocol });
+  } catch (error) {
+    if (accountLink.id !== id) return;
+    // 409: no link in progress any more.  Anything else counts as "still
+    // waiting", like the TUI (a network blip must not abort the pairing).
+    if (error.status === 409) {
+      endLinkFlow("Il collegamento non è più in corso. Riprova.", { retry: true, cancel: false });
+      return;
+    }
+  }
+  if (accountLink.id !== id) return;
+  if (result) {
+    if (result.qr) showLinkQr(result.qr);
+    const hook = LINK_PROTOCOLS[protocol]?.onPoll;
+    if (hook && (await hook(linkContext(protocol), result))) {
+      if (accountLink.id === id) scheduleLinkPoll(id);
+      return;
+    }
+    if (accountLink.id !== id) return;
+    if (result.state === "done") {
+      await finishLinkFlow(id, protocol);
+      return;
+    }
+  }
+  scheduleLinkPoll(id);
+}
+
+async function startLinkFlow(protocol) {
+  const config = LINK_PROTOCOLS[protocol];
+  if (!config || accountLink.protocol !== null) return;
+  stopLinkFlow({ cancel: false });
+  const id = accountLink.id;
+  accountLink.protocol = protocol;
+  accountLink.lastProtocol = protocol;
+  elements.accountLinkFlow.hidden = false;
+  elements.accountLinkRetry.hidden = true;
+  elements.accountLinkHint.textContent = config.hint;
+  showLinkLoading();
+  setLinkStatus("Avvio del collegamento…");
+  renderLinkChooser();
+  let body = { protocol };
+  if (config.beforeStart) {
+    const extra = await config.beforeStart(linkContext(protocol));
+    if (accountLink.id !== id) return;
+    if (extra === null) {
+      endLinkFlow("Annullato.", { cancel: false });
+      return;
+    }
+    body = { ...body, ...extra };
+  }
+  let result;
+  try {
+    accountLink.started = true; // the server may open a session from here on
+    result = await linkPost("api/link/start", body);
+  } catch (error) {
+    if (accountLink.id !== id) return;
+    const message = await linkErrorMessage(error);
+    if (accountLink.id !== id) return;
+    endLinkFlow(message, { retry: true, cancel: false });
+    return;
+  }
+  if (accountLink.id !== id) return;
+  const qr = result?.qr;
+  if (qr?.kind === "info") {
+    showLinkQr(qr);
+    endLinkFlow("✅ Già collegato.");
+    return;
+  }
+  if (qr?.kind === "error") {
+    showLinkQr(qr);
+    endLinkFlow("Collegamento non riuscito.", { retry: true });
+    return;
+  }
+  showLinkQr(qr);
+  setLinkStatus("In attesa della scansione…");
+  accountLink.deadline = Date.now() + LINK_TIMEOUT_MS;
+  scheduleLinkPoll(id);
+}
+
+async function openAccountLinkDialog(protocol = null) {
+  closeEmojiPicker({ focus: false });
+  if (!elements.accountLinkDialog.open) elements.accountLinkDialog.showModal();
+  if (accountLink.protocol !== null) return; // a flow is already running
+  elements.accountLinkFlow.hidden = true;
+  try {
+    accountLink.status = (await (await apiFetch("api/link/status")).json()).protocols;
+  } catch (error) {
+    accountLink.status = null;
+    elements.accountLinkFlow.hidden = false;
+    setLinkStatus("Impossibile leggere lo stato dei collegamenti.");
+  }
+  renderLinkChooser();
+  if (protocol && accountLink.status?.[protocol]?.available && LINK_PROTOCOLS[protocol]) {
+    await startLinkFlow(protocol);
+  }
+}
+
+function closeAccountLinkDialog() {
+  stopLinkFlow({ cancel: true });
+  if (elements.accountLinkDialog.open) elements.accountLinkDialog.close();
+}
+
+// Banner "serve un nuovo collegamento": protocols whose session waits for a QR.
+function renderLinkRequiredBanner() {
+  const pending = [...state.linkRequired].filter((p) => !state.linkRequiredDismissed.has(p));
+  elements.linkRequiredBanner.hidden = pending.length === 0;
+  if (!pending.length) return;
+  const names = pending.map((p) => LINK_PROTOCOLS[p]?.label || p).join(", ");
+  elements.linkRequiredText.textContent = `📱 ${names} richiede un nuovo collegamento (QR)`;
+  elements.linkRequiredBanner.dataset.protocol = pending[0];
+}
+
+function setLinkRequired(protocol, required) {
+  if (!protocol) return;
+  if (required) state.linkRequired.add(protocol);
+  else {
+    state.linkRequired.delete(protocol);
+    state.linkRequiredDismissed.delete(protocol);
+  }
+  renderLinkRequiredBanner();
+}
+
+async function loadLinkRequired() {
+  try {
+    const data = await (await apiFetch("api/link/required")).json();
+    for (const [protocol, required] of Object.entries(data.protocols || {})) {
+      setLinkRequired(protocol, Boolean(required));
+    }
+  } catch (error) {
+    if (error.message !== "unauthorized") console.debug("[web] link required failed", error);
+  }
+}
+// --- account-link:end ---
+
 function connectSocket() {
   disconnectSocket();
   if (!state.token) return;
@@ -3730,6 +4038,7 @@ function connectSocket() {
     scheduleBackgroundSync();
     // Initial value, and catch-up after a reconnect (events may have been lost).
     loadGmailUnread();
+    loadLinkRequired();
   };
   socket.onmessage = (event) => {
     state.lastWsActivity = Date.now();
@@ -3757,6 +4066,9 @@ function connectSocket() {
           }
           break;
         }
+        case "link_required":
+          setLinkRequired(update.payload.protocol, Boolean(update.payload.required));
+          break;
         case "gmail_unread":
           setGmailUnread(update.payload.unread);
           // New mail (not just a read count change): the open Gmail view
@@ -3861,6 +4173,25 @@ document.addEventListener("keydown", (event) => {
 document.querySelector("#open-token").addEventListener("click", () => {
   closeMainMenu();
   requestToken();
+});
+
+document.querySelector("#open-account-link").addEventListener("click", () => {
+  closeMainMenu();
+  openAccountLinkDialog();
+});
+document.querySelector("#close-account-link-dialog").addEventListener("click", closeAccountLinkDialog);
+elements.accountLinkCancel.addEventListener("click", closeAccountLinkDialog);
+// Esc (or any other way the dialog closes) also stops the flow.
+elements.accountLinkDialog.addEventListener("close", () => stopLinkFlow({ cancel: true }));
+elements.accountLinkRetry.addEventListener("click", () => {
+  if (accountLink.lastProtocol) startLinkFlow(accountLink.lastProtocol);
+});
+document.querySelector("#link-required-show").addEventListener("click", () => {
+  openAccountLinkDialog(elements.linkRequiredBanner.dataset.protocol || null);
+});
+document.querySelector("#dismiss-link-required").addEventListener("click", () => {
+  for (const protocol of state.linkRequired) state.linkRequiredDismissed.add(protocol);
+  renderLinkRequiredBanner();
 });
 
 function updateCacheStatus() {
