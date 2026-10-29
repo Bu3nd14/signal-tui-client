@@ -191,6 +191,41 @@ def test_t3_cap_and_tie_break_unread_then_ts_then_jid():
     ]
 
 
+def test_cache_last_ts_skips_invalid_rows_and_returns_max():
+    from protocols.whatsapp import _cache_last_ts
+
+    rows = [
+        "x",
+        {"timestamp": "bad"},
+        {"timestamp": 5},
+        {"timestamp": 9},
+    ]
+
+    assert _cache_last_ts(rows) == 9
+    assert _cache_last_ts([]) == 0
+
+
+def test_select_resync_targets_filters_non_string_and_broadcast_jids():
+    backend = _make_backend()
+    backend.cache = {
+        "status@broadcast": [{"id": "status", "timestamp": 1}],
+        "123@c.us": [{"id": "ok", "timestamp": 5}],
+    }
+    backend._discover_active_chats = MagicMock(
+        return_value=[
+            (None, 1, 1),
+            ("status@broadcast", 1, 2),
+            ("false_status@broadcast_123@c.us", 1, 3),
+            ("456@c.us", 0, 4),
+        ]
+    )
+
+    with patch("protocols.whatsapp._is_fetchable_jid", return_value=True):
+        targets = backend._select_resync_targets(20)
+
+    assert set(targets) == {"123@c.us", "456@c.us"}
+
+
 def test_t5_single_flag_rollback_restores_download_and_resolution():
     backend = _make_backend()
     backend.cache = {"123@c.us": [{"id": "a", "timestamp": 1}]}
