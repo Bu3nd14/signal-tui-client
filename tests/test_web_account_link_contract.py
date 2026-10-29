@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,14 @@ class FakeLink:
             raise NoLinkInProgress("No link in progress")
         return self.poll_result
 
+    def submit_2fa(self, password):
+        from server.link import LinkError
+
+        self.calls.append(("submit_2fa", password))
+        if password == "boom":
+            raise LinkError("Telegram unavailable")
+        return password == "right"
+
     def cancel(self, protocol):
         self.calls.append(("cancel", protocol))
         self.active = False
@@ -76,7 +85,7 @@ def test_auth_required():
     client, _, _ = make()
     assert client.get("/api/link/status").status_code == 401
     assert client.get("/api/link/required").status_code == 401
-    for path in ("start", "poll", "cancel", "reconnect"):
+    for path in ("start", "poll", "cancel", "reconnect", "submit_2fa"):
         response = client.post(f"/api/link/{path}", json={"protocol": "whatsapp"})
         assert response.status_code == 401
 
@@ -260,3 +269,41 @@ def test_finalize_error_maps_to_502_with_message():
     response = client.post("/api/link/finalize", json={}, headers=AUTH)
     assert response.status_code == 502
     assert "signal-cli: nessun account" in response.json()["detail"]
+
+
+# -- Telegram 2FA ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("password", ["right", "wrong"])
+def test_submit_2fa_equals_operation(password):
+    client, api, _ = make()
+    response = client.post(
+        "/api/link/submit_2fa", json={"password": password}, headers=AUTH
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": password == "right"}
+    assert response.json() == api.call_json("link.submit_2fa", {"password": password})
+
+
+def test_submit_2fa_error_mapping():
+    client, _, _ = make()
+    response = client.post("/api/link/submit_2fa", json={}, headers=AUTH)
+    assert response.status_code == 400
+    response = client.post("/api/link/submit_2fa", json={"password": 5}, headers=AUTH)
+    assert response.status_code == 400
+    assert "5" not in response.text.replace("400", "")
+    response = client.post(
+        "/api/link/submit_2fa", json={"password": "boom"}, headers=AUTH
+    )
+    assert response.status_code >= 400
+    assert "Telegram unavailable" in response.text
+
+
+def test_submit_2fa_password_is_never_logged(caplog):
+    client, _, _ = make()
+    secret = "hunter2-SECRET-pw"
+    with caplog.at_level(logging.DEBUG):
+        client.post("/api/link/submit_2fa", json={"password": secret}, headers=AUTH)
+        client.post("/api/link/submit_2fa", json={"password": "boom"}, headers=AUTH)
+    assert secret not in caplog.text
+    assert secret not in "".join(str(r.__dict__) for r in caplog.records)
