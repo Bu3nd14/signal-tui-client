@@ -227,3 +227,36 @@ def test_link_required_host_without_method_or_failing():
 
     host = SimpleNamespace(manager=None, bus=None, wa_session_needs_pairing=boom)
     assert ChatAPI(host).link_required() == {"whatsapp": False}
+
+
+def test_finalize_equals_operation_and_requires_auth():
+    client, api, _ = make()
+
+    def finalize_signal(phone=""):
+        api.link.calls.append(("finalize", phone))  # type: ignore[attr-defined]
+        return "+391234567890"
+
+    api.link.finalize_signal = finalize_signal  # type: ignore[attr-defined]
+    assert client.post("/api/link/finalize", json={}).status_code == 401
+    response = client.post("/api/link/finalize", json={"phone": "+39123"}, headers=AUTH)
+    assert response.status_code == 200
+    assert response.json() == {"account": "+391234567890"}
+    assert response.json() == api.call_json(
+        "link.finalize", {"protocol": "signal", "phone": "+39123"}
+    )
+    # no phone: empty string, as the TUI does
+    client.post("/api/link/finalize", json={}, headers=AUTH)
+    client.post("/api/link/finalize", json={"phone": None}, headers=AUTH)
+    assert api.link.calls[-2:] == [("finalize", ""), ("finalize", "")]  # type: ignore[attr-defined]
+
+
+def test_finalize_error_maps_to_502_with_message():
+    client, api, _ = make()
+
+    def boom(phone=""):
+        raise RuntimeError("signal-cli: nessun account")
+
+    api.link.finalize_signal = boom  # type: ignore[attr-defined]
+    response = client.post("/api/link/finalize", json={}, headers=AUTH)
+    assert response.status_code == 502
+    assert "signal-cli: nessun account" in response.json()["detail"]

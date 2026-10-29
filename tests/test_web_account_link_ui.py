@@ -34,7 +34,8 @@ function node(extra = {}) {
 const names = ["accountLinkDialog", "accountLinkChooser", "accountLinkFlow",
   "accountLinkSpinner", "accountLinkQr", "accountLinkText", "accountLinkHint",
   "accountLinkStatus", "accountLinkRetry", "accountLinkCancel",
-  "linkRequiredBanner", "linkRequiredText"]
+  "linkRequiredBanner", "linkRequiredText", "accountLinkForm", "accountLinkPhone",
+  "accountLinkDeviceName", "accountLinkFormOk", "accountLinkFormCancel"]
 const elements = Object.fromEntries(names.map((n) => [n, node()]))
 const state = { linkRequired: new Set(), linkRequiredDismissed: new Set() }
 const calls = []
@@ -75,7 +76,7 @@ vm.createContext(ctx)
 vm.runInContext(block + `
 this.api = { accountLink, LINK_PROTOCOLS, startLinkFlow, pollLinkFlow,
   closeAccountLinkDialog, openAccountLinkDialog, stopLinkFlow, setLinkRequired,
-  loadLinkRequired, renderLinkChooser }`, ctx)
+  loadLinkRequired, renderLinkChooser, submitLinkForm }`, ctx)
 const { api } = ctx
 const WA_STATUS = { protocols: { whatsapp: { available: true }, signal: { available: false } } };
 """
@@ -235,7 +236,7 @@ routes = {
   "api/link/start": { qr: png("AAA") },
 }
 await api.openAccountLinkDialog()
-assert.equal(elements.accountLinkChooser.children.length, 1)
+assert.equal(elements.accountLinkChooser.children.length, 2)  // whatsapp, signal
 assert.equal(elements.accountLinkChooser.children[0].disabled, false)
 await api.startLinkFlow("whatsapp")
 await api.startLinkFlow("whatsapp")

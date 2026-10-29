@@ -158,6 +158,11 @@ const elements = {
   accountLinkStatus: document.querySelector("#account-link-status"),
   accountLinkRetry: document.querySelector("#account-link-retry"),
   accountLinkCancel: document.querySelector("#account-link-cancel"),
+  accountLinkForm: document.querySelector("#account-link-form"),
+  accountLinkPhone: document.querySelector("#account-link-phone"),
+  accountLinkDeviceName: document.querySelector("#account-link-device-name"),
+  accountLinkFormOk: document.querySelector("#account-link-form-ok"),
+  accountLinkFormCancel: document.querySelector("#account-link-form-cancel"),
   linkRequiredBanner: document.querySelector("#link-required-banner"),
   linkRequiredText: document.querySelector("#link-required-text"),
   mainMenu: document.querySelector("#main-menu"),
@@ -3730,11 +3735,20 @@ function scheduleReconnect() {
 //                     `api/link/start`, or null to abort (Signal: device name);
 //   onPoll(ctx, res)  optional, async: sees every poll result and returns true
 //                     when it handled it (Signal: `finalize`, Telegram: 2FA).
-// ctx = { protocol, setStatus(text), showQr(qr), finish(message) }.
+// ctx = { protocol, setStatus(text), showQr(qr), finish(message),
+//         done(message) }: finish ends the flow with a (error) message, done
+// ends it as a success (cancel + reconnect + close) with a custom message.
+const SIGNAL_DEFAULT_DEVICE_NAME = "Signal-TUI-Client";
 const LINK_PROTOCOLS = {
   whatsapp: {
     label: "WhatsApp",
     hint: "Apri WhatsApp → Dispositivi collegati → Collega un dispositivo e inquadra il codice.",
+  },
+  signal: {
+    label: "Signal",
+    hint: "Apri Signal → Impostazioni → Dispositivi collegati → Collega nuovo dispositivo e inquadra il codice.",
+    beforeStart: signalLinkForm,
+    onPoll: signalLinkPoll,
   },
 };
 const LINK_POLL_MS = 2000;
@@ -3746,7 +3760,51 @@ const LINK_DONE_CLOSE_MS = 1500;
 const accountLink = {
   id: 0, protocol: null, lastProtocol: null, started: false,
   timer: null, deadline: 0, status: null,
+  done: false, formResolve: null, signalPhone: "",
 };
+
+// Signal: asks the optional phone number and the device name before starting.
+function signalLinkForm() {
+  elements.accountLinkPhone.value = "";
+  elements.accountLinkDeviceName.value = SIGNAL_DEFAULT_DEVICE_NAME;
+  elements.accountLinkSpinner.hidden = true;
+  elements.accountLinkForm.hidden = false;
+  setLinkStatus("");
+  return new Promise((resolve) => {
+    accountLink.formResolve = resolve;
+  });
+}
+
+function submitLinkForm(ok) {
+  const resolve = accountLink.formResolve;
+  if (!resolve) return;
+  accountLink.formResolve = null;
+  elements.accountLinkForm.hidden = true;
+  if (!ok) {
+    resolve(null);
+    return;
+  }
+  const phone = elements.accountLinkPhone.value.trim();
+  const deviceName = elements.accountLinkDeviceName.value.trim() || SIGNAL_DEFAULT_DEVICE_NAME;
+  accountLink.signalPhone = phone;
+  resolve({ phone, device_name: deviceName });
+}
+
+// Signal: the QR was scanned (`finalize`): save and activate the account.
+async function signalLinkPoll(ctx, result) {
+  if (result.state !== "finalize") return false;
+  ctx.setStatus("Finalizzazione dell'account…");
+  let account = "";
+  try {
+    const out = await linkPost("api/link/finalize", { phone: accountLink.signalPhone });
+    account = out?.account || "";
+  } catch (error) {
+    ctx.finish(await linkErrorMessage(error), { retry: true });
+    return true;
+  }
+  await ctx.done(account ? `✅ Collegato: ${account}` : "✅ Collegato");
+  return true;
+}
 
 async function linkPost(path, body) {
   const response = await apiFetch(path, {
@@ -3800,7 +3858,9 @@ function stopLinkFlow({ cancel = true } = {}) {
   accountLink.id += 1;
   accountLink.protocol = null;
   accountLink.started = false;
+  accountLink.done = false;
   clearLinkTimer();
+  submitLinkForm(false);
   if (cancel && started && protocol) {
     linkPost("api/link/cancel", { protocol }).catch(() => {});
   }
@@ -3836,9 +3896,10 @@ function endLinkFlow(message, { retry = false, cancel = true } = {}) {
   renderLinkChooser();
 }
 
-async function finishLinkFlow(id, protocol) {
+async function finishLinkFlow(id, protocol, message = "✅ Collegato") {
   clearLinkTimer();
-  setLinkStatus("✅ Collegato");
+  accountLink.done = true;
+  setLinkStatus(message);
   elements.accountLinkSpinner.hidden = true;
   elements.accountLinkQr.hidden = true;
   // The link session is over: free it (the session watchdog leaves a linking
@@ -3859,11 +3920,15 @@ async function finishLinkFlow(id, protocol) {
 }
 
 function linkContext(protocol) {
+  const id = accountLink.id;
   return {
     protocol,
     setStatus: setLinkStatus,
     showQr: showLinkQr,
-    finish: (message) => endLinkFlow(message),
+    finish: (message, options = {}) => {
+      if (accountLink.id === id) endLinkFlow(message, options);
+    },
+    done: (message) => (accountLink.id === id ? finishLinkFlow(id, protocol, message) : undefined),
   };
 }
 
@@ -3895,7 +3960,7 @@ async function pollLinkFlow(id) {
     if (result.qr) showLinkQr(result.qr);
     const hook = LINK_PROTOCOLS[protocol]?.onPoll;
     if (hook && (await hook(linkContext(protocol), result))) {
-      if (accountLink.id === id) scheduleLinkPoll(id);
+      if (accountLink.id === id && !accountLink.done) scheduleLinkPoll(id);
       return;
     }
     if (accountLink.id !== id) return;
@@ -3913,6 +3978,7 @@ async function startLinkFlow(protocol) {
   stopLinkFlow({ cancel: false });
   const id = accountLink.id;
   accountLink.protocol = protocol;
+  accountLink.done = false;
   accountLink.lastProtocol = protocol;
   elements.accountLinkFlow.hidden = false;
   elements.accountLinkRetry.hidden = true;
@@ -4183,6 +4249,8 @@ document.querySelector("#close-account-link-dialog").addEventListener("click", c
 elements.accountLinkCancel.addEventListener("click", closeAccountLinkDialog);
 // Esc (or any other way the dialog closes) also stops the flow.
 elements.accountLinkDialog.addEventListener("close", () => stopLinkFlow({ cancel: true }));
+elements.accountLinkFormOk.addEventListener("click", () => submitLinkForm(true));
+elements.accountLinkFormCancel.addEventListener("click", () => submitLinkForm(false));
 elements.accountLinkRetry.addEventListener("click", () => {
   if (accountLink.lastProtocol) startLinkFlow(accountLink.lastProtocol);
 });
