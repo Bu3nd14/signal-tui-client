@@ -5908,9 +5908,7 @@ class TestAddressBookNeverNoneAfterFirstBuild:
         backend.contacts = [target]
         backend._contacts_by_jid = {"228668437729356@lid": target}
 
-        backend._apply_contact_lid_resolution(
-            "228668437729356@lid", "393464997828"
-        )
+        backend._apply_contact_lid_resolution("228668437729356@lid", "393464997828")
 
         assert backend._address_book is not None
         assert entry in backend._address_book

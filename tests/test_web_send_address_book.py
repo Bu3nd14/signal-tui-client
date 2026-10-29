@@ -807,6 +807,7 @@ class TestBookSendRace:
 
 # ─── Design v2.2 §6.6 — T14 stress concorrente ─────────────────────────────
 
+
 class TestConcurrentSendWhileBookRebuilds:
     def test_t14_no_404_no_duplicate_no_exception(self):
         book = _wa_book_contact(_PHONE, name="Book")
@@ -861,7 +862,9 @@ class TestConcurrentSendWhileBookRebuilds:
             patch("time.sleep"),
             patch.object(backend, "_lid_cache_save"),
         ):
-            threads = [threading.Thread(target=send_one, args=(i,)) for i in range(total)]
+            threads = [
+                threading.Thread(target=send_one, args=(i,)) for i in range(total)
+            ]
             threads.append(threading.Thread(target=rebuild))
             for thread in threads:
                 thread.start()
