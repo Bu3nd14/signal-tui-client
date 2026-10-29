@@ -32,9 +32,11 @@ from models import (
     ChatEvent,
     contact_storage_keys,
     is_caption_like,
+    is_lazy_media_token,
     is_sent_mirror_attachment_id,
     media_kind_from_mime,
     msg_type_for_media_kind,
+    parse_lazy_media_token,
 )
 from protocols.db import _ECHO_MATCH_WINDOW_MS
 
@@ -46,6 +48,7 @@ from .base import (
 from .config import (
     WHATSAPP_WEBHOOK_EVENTS,
     get_address_book_ttl_s,
+    get_wa_lazy_media_negative_ttl_s,
     get_wa_lid_cache_ttl_days,
     get_wa_lid_retry_cooldown_s,
     get_wa_resync_download_media,
@@ -78,6 +81,11 @@ _FETCHABLE_JID_RE = re.compile(r"^[0-9][0-9-]*@(c\.us|lid|g\.us)$")
 
 #: Pausa tra ondate del bulk startup (patchabile nei test).
 _RESYNC_STAGGER_S = 0.5
+
+#: Attesa massima (s) di una richiesta lazy media: per lo slot seriale e per
+#: un'altra richiesta dello stesso media già in volo.  Copre i due timeout REST
+#: (messaggio 30s + download 60s) di chi la precede.
+_LAZY_MEDIA_WAIT_S = 120.0
 
 
 def _is_fetchable_jid(jid: str) -> bool:
@@ -358,6 +366,14 @@ class WhatsAppBackend(ChatBackend):
         self._media_lock = threading.Lock()
         self._media_resolver_thread: threading.Thread | None = None
         self._media_resolver_stop = False
+        #: Lazy media (S1, apertura chat): un solo download WAHA alla volta per
+        #: sessione (``_lazy_media_gate``), coalescing per ``(chat, msg_id)``
+        #: (``_lazy_media_inflight``) e negative cache con scadenza
+        #: (``_lazy_media_failed``).  Mai condivisi con ``_media_pending``.
+        self._lazy_media_gate = threading.Semaphore(1)
+        self._lazy_media_lock = threading.Lock()
+        self._lazy_media_inflight: dict[tuple[str, str], dict] = {}
+        self._lazy_media_failed: dict[tuple[str, str], float] = {}
         #: @lid mentioned in a message's text but neither a known contact
         #: nor in the persistent lid cache (e.g. a group member who has
         #: never sent a message we've processed): resolved in background so
@@ -892,6 +908,10 @@ class WhatsAppBackend(ChatBackend):
         self._polling_active = False
         self._connected = False
         self._media_resolver_stop = True
+        # Sblocca chi aspetta un media lazy in volo (nessun deadlock allo stop).
+        with self._lazy_media_lock:
+            for entry in self._lazy_media_inflight.values():
+                entry["done"].set()
         thread = self._media_resolver_thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2)
@@ -1979,6 +1999,7 @@ class WhatsAppBackend(ChatBackend):
         *,
         download_media: bool = True,
         resolve_media: bool = True,
+        ingest_pending_media: bool = False,
     ) -> list[dict]:
         """Scarica lo storico remoto di una chat da WAHA e lo salva nel cache.
 
@@ -2004,11 +2025,18 @@ class WhatsAppBackend(ChatBackend):
         La preview dell'ultimo messaggio mostra il testo precedente (o nulla)
         finché la chat non viene aperta.
 
-        Rischio residuo (fuori scope di questo fix): l'apertura chat continua a
-        usare ``download_media=True``.  Un media patologico può quindi ancora
-        bloccare la page WEBJS e portare a ``ProtocolError``/sessione
-        ``FAILED``; la mitigazione è solo lato WAHA (pin/limiti), non nel
-        client.
+        ``ingest_pending_media=True`` (apertura chat lazy, S1, con
+        ``download_media=False, resolve_media=False``): i media senza attachment
+        reale vengono INGERITI (msg_type/content_type/media_kind, niente
+        ``attachment_id``) così ``messages.page`` li espone come attachment
+        "pending", risolti uno alla volta da ``get_attachment_path`` quando la
+        UI li chiede.  Default ``False``: il bulk di avvio (#309) resta com'è.
+
+        Rischio residuo: la risoluzione del singolo messaggio
+        (``GET .../messages/{id}?downloadMedia=true``) scarica anche il media
+        QUOTATO, e il client non può escluderlo.  Un media quotato patologico
+        può ancora bloccare la page WEBJS; lo limitano concorrenza 1, timeout
+        REST e negative cache.
         """
         if not _is_fetchable_jid(contact_id) or not self._rest:
             return []
@@ -2082,6 +2110,7 @@ class WhatsAppBackend(ChatBackend):
                 # raccolta avviene PRIMA del ``continue``.
                 if (
                     not resolve_media
+                    and not ingest_pending_media
                     and payload.get("media_kind")
                     and not payload.get("attachment_id")
                 ):
@@ -2705,6 +2734,11 @@ class WhatsAppBackend(ChatBackend):
         """
         if not attachment_id:
             return None
+        if is_lazy_media_token(attachment_id):
+            parsed = parse_lazy_media_token(attachment_id)
+            if parsed is None or not _is_fetchable_jid(parsed[0]):
+                return None
+            return self._lazy_resolve_media(*parsed)
 
         base = self._ensure_media_dir()
         safe_name = Path(attachment_id).name or attachment_id
@@ -2744,6 +2778,206 @@ class WhatsAppBackend(ChatBackend):
 
         return candidate
 
+    def _lazy_local_path(self, attachment_id: str | None) -> Path | None:
+        """Local file of a real attachment id, only if it is already on disk."""
+        if not attachment_id:
+            return None
+        name = Path(str(attachment_id)).name
+        if not name or name in {".", ".."}:
+            return None
+        candidate = self._ensure_media_dir() / name
+        return candidate if candidate.is_file() else None
+
+    def _lazy_media_row(self, contact_id: str, msg_id: str) -> tuple[str, dict | None]:
+        """``(storage_key, row)`` of a message across the chat's storage keys.
+
+        The token carries the row's own key (web) or the canonical id (TUI);
+        a WhatsApp chat can keep rows under both ``@lid`` and ``@c.us``.
+        """
+        from protocols.db import _message_media_row
+
+        keys = [contact_id]
+        contact = self.find_contact(contact_id)
+        if contact is not None:
+            keys += [k for k in contact_storage_keys(contact) if k not in keys]
+        for key in keys:
+            row = _message_media_row(PROTOCOL_WHATSAPP, key, msg_id)
+            if row is not None:
+                return key, row
+        return contact_id, None
+
+    def _lazy_resolve_media(self, contact_id: str, msg_id: str) -> Path | None:
+        """Resolve ONE pending media (lazy token) to a local file, on demand.
+
+        Runs in the caller's worker thread (``media.attachment``).  Order:
+
+        1. fast path: the row already has a real attachment on disk → no WAHA;
+        2. negative cache: a recent failure is not retried before its TTL;
+        3. coalescing: a request for a media already in flight waits for it;
+        4. serialisation: ``_lazy_media_gate`` (one WAHA download at a time per
+           session) around ``get_message_media`` + ``download_media``.
+
+        Never touches ``_media_pending``/``_media_resolved_in`` with the token:
+        the token never leaves the presentation layer.
+        """
+        contact_id, row = self._lazy_media_row(contact_id, msg_id)
+        key = (contact_id, msg_id)
+        local = self._lazy_local_path(row.get("attachment_id") if row else None)
+        if local is not None:
+            return local
+        if self._media_resolver_stop:
+            return None
+        with self._lazy_media_lock:
+            expiry = self._lazy_media_failed.get(key)
+            if expiry is not None:
+                if expiry > time.monotonic():
+                    return None
+                self._lazy_media_failed.pop(key, None)
+            entry = self._lazy_media_inflight.get(key)
+            owner = entry is None
+            if owner:
+                entry = {"done": threading.Event(), "path": None}
+                self._lazy_media_inflight[key] = entry
+        assert entry is not None
+        if not owner:
+            entry["done"].wait(_LAZY_MEDIA_WAIT_S)
+            return entry["path"]
+
+        path: Path | None = None
+        try:
+            if self._lazy_media_gate.acquire(timeout=_LAZY_MEDIA_WAIT_S):
+                try:
+                    if not self._media_resolver_stop:
+                        path = self._lazy_fetch_media(contact_id, msg_id, row)
+                finally:
+                    self._lazy_media_gate.release()
+            if path is None:
+                ttl = get_wa_lazy_media_negative_ttl_s()
+                if ttl > 0:
+                    now = time.monotonic()
+                    with self._lazy_media_lock:
+                        for stale in [
+                            k
+                            for k, exp in self._lazy_media_failed.items()
+                            if exp <= now
+                        ]:
+                            del self._lazy_media_failed[stale]
+                        self._lazy_media_failed[key] = now + ttl
+        except Exception:
+            logger.debug(
+                "WhatsApp lazy media failed: chat=%s id=%s",
+                contact_id,
+                msg_id,
+                exc_info=True,
+            )
+            path = None
+        finally:
+            entry["path"] = path
+            with self._lazy_media_lock:
+                self._lazy_media_inflight.pop(key, None)
+            entry["done"].set()
+        return path
+
+    def _lazy_fetch_media(
+        self, contact_id: str, msg_id: str, row: dict | None
+    ) -> Path | None:
+        """Download one message's media from WAHA, save it and persist its id.
+
+        Called with ``_lazy_media_gate`` held.  On success the row gets its
+        real ``attachment_id`` (``_update_message_media_identity``), the
+        resolver's pending entry for the same message is dropped, and the
+        normalized message is enqueued so the core heals the cache row in place
+        (``changed=True`` → web/TUI update the open chat).
+        """
+        from protocols.db import _message_media_row, _update_message_media_identity
+
+        # Another request may have resolved it while we waited for the gate.
+        fresh = _message_media_row(PROTOCOL_WHATSAPP, contact_id, msg_id)
+        local = self._lazy_local_path(fresh.get("attachment_id") if fresh else None)
+        if local is not None:
+            return local
+        if not self._rest:
+            return None
+        message = self._rest.get_message_media(contact_id, msg_id)
+        media = message.get("media") if isinstance(message, dict) else None
+        url = media.get("url") if isinstance(media, dict) else None
+        if not isinstance(message, dict) or not url:
+            logger.debug(
+                "WhatsApp lazy media: no media url chat=%s id=%s", contact_id, msg_id
+            )
+            return None
+        # Ordering: the message timestamp (WAHA, else the row), never "now".
+        row_ts = int((row or {}).get("timestamp") or 0)
+        normalized = dict(message)
+        normalized.setdefault("chatId", contact_id)
+        normalized.setdefault("id", msg_id)
+        if not normalized.get("timestamp"):
+            normalized["timestamp"] = row_ts
+        events = _event_from_message(
+            normalized,
+            self._contacts_by_jid,
+            self._lid_lookup,
+            self._schedule_mention_lid_resolve,
+        )
+        payload = next(
+            (
+                event.payload
+                for event in events
+                if event.type == "message" and event.payload.get("attachment_id")
+            ),
+            None,
+        )
+        attachment_id = str(payload["attachment_id"]) if payload else str(url)
+        name = Path(attachment_id).name
+        if not name or name in {".", ".."}:
+            return None
+        raw = self._rest.download_media(str(url))
+        if not raw:
+            return None
+        base = self._ensure_media_dir()
+        target = base / name
+        tmp = base / f".{name}.{uuid.uuid4().hex}.part"
+        try:
+            tmp.write_bytes(raw)
+            os.replace(tmp, target)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            return None
+        kind = (payload or {}).get("media_kind") or (row or {}).get("media_kind")
+        if not kind:
+            mime = media.get("mimetype") if isinstance(media, dict) else None
+            kind = media_kind_from_mime(mime) or "document"
+        msg_type = (payload or {}).get("msg_type") or msg_type_for_media_kind(kind)
+        _update_message_media_identity(
+            PROTOCOL_WHATSAPP,
+            contact_id,
+            msg_id,
+            row_ts or _timestamp_ms(int(normalized.get("timestamp") or 0)),
+            attachment_id,
+            msg_type,
+            kind,
+        )
+        with self._media_lock:
+            self._media_pending.pop((contact_id, msg_id), None)
+        # Heal in place only a row the core already holds: re-ingesting one it
+        # does not know would add it as a new message (the DB is updated).
+        if any(
+            str(entry.get("id") or "") == msg_id
+            for entry in list(self.cache.get(contact_id, []))
+        ):
+            for event in events:
+                if event.type == "message":
+                    # Ingest under the row's own storage key (the token's chat).
+                    event.contact_id = contact_id
+                self._enqueue_event(event)
+        logger.debug(
+            "WhatsApp lazy media resolved: chat=%s id=%s file=%s",
+            contact_id,
+            msg_id,
+            name,
+        )
+        return target
+
     def get_attachment_chunk(
         self,
         attachment_id: str,
@@ -2753,6 +2987,17 @@ class WhatsAppBackend(ChatBackend):
         """Return a local or remote byte range without downloading all media."""
         if not attachment_id or length <= 0:
             return None
+        if is_lazy_media_token(attachment_id):
+            # Un media pending non ha ancora un URL: niente chunk remoti (il
+            # thumbnail ricade sulla risoluzione lazy seriale).
+            parsed = parse_lazy_media_token(attachment_id)
+            if parsed is None:
+                return None
+            _key, row = self._lazy_media_row(*parsed)
+            local = self._lazy_local_path(row.get("attachment_id") if row else None)
+            if local is None:
+                return None
+            attachment_id = str(row["attachment_id"]) if row else ""
         base = self._ensure_media_dir()
         candidate = base / (Path(attachment_id).name or attachment_id)
         if candidate.is_file():

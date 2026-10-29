@@ -133,7 +133,7 @@ class TestWindowOperation:
             PROTOCOL_WHATSAPP,
             cache,
             [contact],
-            fetch=lambda cid, limit: fetched.append((cid, limit)) or [],
+            fetch=lambda cid, limit, **_kw: fetched.append((cid, limit)) or [],
         )
         backend.find_contact = lambda cid: contact if cid.startswith("39123") else None
         client = _client(backend)
@@ -156,7 +156,7 @@ class TestWindowOperation:
         contact = _wa()
         cache: dict[str, list[dict]] = {"39123@lid": []}
 
-        def fetch(cid, limit):
+        def fetch(cid, limit, **_kw):
             cache["39123@lid"].append(_row("M1"))
             return cache["39123@lid"]
 
@@ -170,7 +170,7 @@ class TestWindowOperation:
     def test_failed_download_is_not_reported_as_refreshed(self):
         contact = _wa()
 
-        def boom(cid, limit):
+        def boom(cid, limit, **_kw):
             raise RuntimeError("waha down")
 
         client = _client(
@@ -351,7 +351,7 @@ class TestLoadWorkerThroughClient:
         contact = _wa()
         cache: dict[str, list[dict]] = {"39123@lid": [], "39123@c.us": []}
 
-        def fetch(cid, limit):
+        def fetch(cid, limit, **_kw):
             cache["39123@lid"].append(_row("M1", "one", ts=1))
             cache["39123@c.us"].append(_row("M1", "one", ts=1))  # twin
             cache["39123@c.us"].append(_row("M2", "two", ts=2))
@@ -371,7 +371,7 @@ class TestLoadWorkerThroughClient:
     def test_failed_download_stays_on_the_local_cache(self):
         contact = _wa()
 
-        def boom(cid, limit):
+        def boom(cid, limit, **_kw):
             raise RuntimeError("waha down")
 
         backend = _backend(
@@ -396,7 +396,7 @@ class TestLoadWorkerThroughClient:
             PROTOCOL_WHATSAPP,
             {},
             [contact],
-            fetch=lambda cid, limit: calls.append(1) or [],
+            fetch=lambda cid, limit, **_kw: calls.append(1) or [],
         )
         app = self._setup(backend, contact)
 

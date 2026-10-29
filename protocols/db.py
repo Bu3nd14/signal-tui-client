@@ -759,6 +759,34 @@ def _update_message_media_identity(
             conn.close()
 
 
+def _message_media_row(
+    protocol: str, contact_number: str, msg_id: str | None
+) -> dict | None:
+    """Media identity of a message row (``attachment_id``, ``timestamp``,
+    ``msg_type``, ``media_kind``, ``content_type``), or ``None`` if missing.
+
+    Read-only lookup used by the lazy WhatsApp media resolver (fast path and
+    message timestamp for ordering).
+    """
+    if not msg_id:
+        return None
+    _init_db()
+    with _DB_LOCK:
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT attachment_id, timestamp, msg_type, media_kind, content_type "
+                "FROM messages WHERE protocol = ? AND contact_number = ? "
+                "AND msg_id = ? ORDER BY (attachment_id IS NULL OR attachment_id = ''), "
+                "rowid ASC LIMIT 1",
+                (protocol, contact_number, str(msg_id)),
+            ).fetchone()
+        finally:
+            conn.close()
+    return dict(row) if row is not None else None
+
+
 def _fill_message_quote_fields(
     protocol: str,
     contact_number: str,

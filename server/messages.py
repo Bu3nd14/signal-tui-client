@@ -25,7 +25,9 @@ from models import (
     is_caption_like,
     is_duplicate_media_identity,
     is_media_quote_placeholder_composite,
+    is_media_row,
     is_whatsapp_synthetic_media_text,
+    lazy_media_token,
     pick_survivor_and_merge,
 )
 from server.api import ApiError
@@ -50,6 +52,67 @@ def _infer_attachment_type(attachment_id: str, content_type: str | None) -> str 
     if guessed_type and guessed_type.startswith("image/"):
         return guessed_type
     return f"image/{'jpeg' if suffix in {'.jpg', '.jpeg'} else suffix[1:]}"
+
+
+#: Etichetta di un media pending senza nome file (per ``media_kind``).
+_PENDING_MEDIA_LABELS = {
+    "image": "Immagine",
+    "gif": "GIF",
+    "video": "Video",
+    "audio": "Audio",
+    "voice": "Messaggio vocale",
+    "sticker": "Sticker",
+    "document": "Documento",
+}
+
+#: MIME generico di un media pending senza ``content_type`` (per ``media_kind``).
+_PENDING_MEDIA_TYPES = {
+    "image": "image/*",
+    "video": "video/*",
+    "audio": "audio/*",
+    "voice": "audio/*",
+}
+
+
+def _lazy_media_enabled() -> bool:
+    from protocols.config import get_wa_lazy_media
+
+    return get_wa_lazy_media()
+
+
+def _row_media_kind(row: sqlite3.Row) -> str | None:
+    kind = str(row["media_kind"] or "").strip().lower()
+    if kind:
+        return kind
+    msg_type = str(row["msg_type"] or "").strip().lower()
+    if msg_type in {"image", "video", "audio", "voice", "document", "sticker", "gif"}:
+        return msg_type
+    return None
+
+
+def _pending_attachment(row: sqlite3.Row) -> dict[str, Any] | None:
+    """Attachment "pending" (S1) di una riga media WhatsApp senza file.
+
+    Presentation-only: il token (``models.lazy_media_token``) non viene mai
+    persistito; ``media.attachment`` lo risolve on demand, un messaggio alla
+    volta.  ``None`` se la riga non ha un ``msg_id`` risolvibile su WAHA (il
+    chiamante mostra allora un segnaposto, mai una bolla vuota).
+    """
+    token = lazy_media_token(row["contact_number"], row["msg_id"] or "")
+    if token is None:
+        return None
+    kind = _row_media_kind(row)
+    info = str(row["attachment_info"] or "").strip()
+    name = attachment_display_name(info, None)
+    if name and name == info and is_caption_like(info):
+        name = None
+    return {
+        "attachment_id": token,
+        "name": name or _PENDING_MEDIA_LABELS.get(kind or "", "Allegato"),
+        "type": row["content_type"] or _PENDING_MEDIA_TYPES.get(kind or ""),
+        "media_kind": kind,
+        "pending": True,
+    }
 
 
 def _is_whatsapp_synthetic_text(
@@ -375,31 +438,45 @@ def _messages(
         if limit is not None:
             rows = rows[-limit:]
 
+    lazy_media = protocol == PROTOCOL_WHATSAPP and _lazy_media_enabled()
     messages = []
     for row in rows:
         attachment = None
+        media_placeholder = None
         text = row["text"] or ""
         suppress_attachment_info_caption = False
-        if row["attachment_id"]:
-            attachment_id = row["attachment_id"]
-            attachment_name = attachment_display_name(
-                row["attachment_info"], attachment_id
-            )
-            attachment = {
-                "attachment_id": attachment_id,
-                "name": attachment_name,
-                "type": (
-                    row["content_type"]
-                    or ("image/*" if row["msg_type"] == "image" else None)
-                    or _infer_attachment_type(attachment_id, None)
-                ),
-                "media_kind": row["media_kind"],
-            }
+        if (
+            lazy_media
+            and not row["attachment_id"]
+            and row["msg_type"] != MSG_TYPE_SYSTEM
+            and is_media_row(row["msg_type"], row["media_kind"])
+        ):
+            attachment = _pending_attachment(row)
+            if attachment is None:
+                media_placeholder = _PENDING_MEDIA_LABELS.get(
+                    _row_media_kind(row) or "", "Allegato"
+                )
+        if row["attachment_id"] or attachment is not None:
+            if attachment is None:
+                attachment_id = row["attachment_id"]
+                attachment_name = attachment_display_name(
+                    row["attachment_info"], attachment_id
+                )
+                attachment = {
+                    "attachment_id": attachment_id,
+                    "name": attachment_name,
+                    "type": (
+                        row["content_type"]
+                        or ("image/*" if row["msg_type"] == "image" else None)
+                        or _infer_attachment_type(attachment_id, None)
+                    ),
+                    "media_kind": row["media_kind"],
+                }
             logger.debug(
                 "web messages proto=%s id=%s attachment_id=%s content_type=%s type=%s",
                 row["protocol"],
                 row["msg_id"] or str(row["id"]),
-                attachment_id,
+                attachment["attachment_id"],
                 row["content_type"],
                 attachment["type"],
             )
@@ -500,6 +577,9 @@ def _messages(
                 "batch_index": row["batch_index"],
             }
         )
+        if media_placeholder is not None:
+            # Media senza attachment né token risolvibile: segnaposto visibile.
+            messages[-1]["media_placeholder"] = media_placeholder
         if row["msg_type"] == MSG_TYPE_SYSTEM:
             # Avviso di servizio (es. codice di sicurezza WhatsApp cambiato):
             # il client lo mostra centrato, fuori dalle bolle.
@@ -948,7 +1028,19 @@ def _refresh_history(
     if fetch is None or not canonical_id:
         return False
     try:
-        refreshed = fetch(canonical_id, limit)
+        if protocol == PROTOCOL_WHATSAPP and _lazy_media_enabled():
+            # S1: apertura chat solo metadati.  Nessun download WAHA della
+            # finestra (né dei media quotati): i media restano "pending" e
+            # vengono risolti uno alla volta quando la UI li mostra.
+            refreshed = fetch(
+                canonical_id,
+                limit,
+                download_media=False,
+                resolve_media=False,
+                ingest_pending_media=True,
+            )
+        else:
+            refreshed = fetch(canonical_id, limit)
     except Exception:
         logger.debug(
             "%s history refresh failed: %s", protocol, canonical_id, exc_info=True
