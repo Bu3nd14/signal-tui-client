@@ -371,7 +371,7 @@ def create_api_router() -> Any:
 
     # Device linking: the ``link.*`` operations, plus the QR as a ready PNG for
     # the browser.  Like the other POST routes they rely on the bearer auth.
-    # (``link.finalize`` / ``link.submit_2fa`` are not exposed yet.)
+    # (``link.submit_2fa`` is not exposed yet: that is the Telegram branch.)
 
     @router.get("/link/status")
     async def link_status(request: Request) -> dict[str, Any]:
@@ -394,6 +394,17 @@ def create_api_router() -> Any:
             request, "link.poll", {"protocol": payload.get("protocol")}
         )
         return await _with_png_qr(request, result)
+
+    @router.post("/link/finalize")
+    async def link_finalize(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        # Signal: after ``link.poll`` said ``finalize``.
+        return await call_op(
+            request,
+            "link.finalize",
+            {"protocol": "signal", "phone": payload.get("phone") or ""},
+        )
 
     @router.post("/link/cancel")
     async def link_cancel(request: Request, payload: dict[str, Any]) -> dict[str, Any]:

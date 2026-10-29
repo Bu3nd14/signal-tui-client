@@ -10,7 +10,7 @@
   <link rel="apple-touch-icon" href="icon.svg">
   <meta name="theme-color" content="#101720">
   <script>try{document.documentElement.dataset.skin=localStorage.getItem("signal-tui-web-skin")||"";}catch(e){}</script>
-  <link rel="stylesheet" href="style.css?v=73">
+  <link rel="stylesheet" href="style.css?v=74">
   <link rel="stylesheet" href="teams-skin.css?v=24">
   <link rel="stylesheet" href="gmail.css?v=26">
 </head>
@@ -308,6 +308,19 @@
       <div id="account-link-chooser" class="link-options"></div>
       <div id="account-link-flow" class="account-link-flow" hidden>
         <div id="account-link-spinner" class="account-link-spinner" role="progressbar" aria-label="Caricamento" hidden></div>
+        <div id="account-link-form" class="account-link-form" hidden>
+          <label class="account-link-field">Numero di telefono
+            <input id="account-link-phone" type="tel" inputmode="tel" autocomplete="off" placeholder="+39…">
+            <span class="dialog-copy">Facoltativo: serve solo se signal-cli ha più account</span>
+          </label>
+          <label class="account-link-field">Nome del dispositivo
+            <input id="account-link-device-name" type="text" autocomplete="off" value="Signal-TUI-Client">
+          </label>
+          <div class="account-link-actions">
+            <button id="account-link-form-ok" class="primary-button" type="button">Continua</button>
+            <button id="account-link-form-cancel" class="link-cancel-button" type="button">Annulla</button>
+          </div>
+        </div>
         <img id="account-link-qr" class="account-link-qr" alt="Codice QR per il collegamento" hidden>
         <p id="account-link-text" class="account-link-text" hidden></p>
         <p id="account-link-hint" class="dialog-copy account-link-hint"></p>
@@ -371,7 +384,7 @@
   <script src="reconcile.js?v=8" defer></script>
   <script src="outbox.js?v=1" defer></script>
   <script src="message_cache.js?v=1" defer></script>
-  <script src="app.js?v=135" defer></script>
+  <script src="app.js?v=136" defer></script>
   <script src="gmail.js?v=29" defer></script>
 </body>
 </html>
