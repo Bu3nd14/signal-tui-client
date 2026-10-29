@@ -76,7 +76,11 @@ def _load_config() -> dict:
 
 
 def _get(key: str, env_name: str, default: str = "") -> str:
-    """Return the env var if set, else the config.json value, else default."""
+    """Return the env var if set, else the config.json value, else default.
+
+    Reads ONLY ``os.environ`` and ``config.json`` — the project ``.env`` is NOT
+    parsed here (unlike ``_load_dotenv`` used by a few legacy settings).
+    """
     env = os.environ.get(env_name)
     if env:
         return env
@@ -88,7 +92,11 @@ def _get(key: str, env_name: str, default: str = "") -> str:
 def _get_int(key: str, env_name: str, default: int) -> int:
     """Return an int setting: env var, else config.json, else *default*.
 
-    Invalid values fall back to *default*.
+    Invalid values fall back to *default*.  This helper (like ``_get`` and
+    ``_get_bool``) reads ONLY ``os.environ`` and ``config.json``: it does NOT
+    parse the project ``.env``.  Export the variable in the Python process or
+    put it in ``config.json``; ``WAHA_*`` variables live in the WAHA container
+    (separate namespace) and are not visible here.
     """
     raw = os.environ.get(env_name)
     if not raw:
@@ -97,6 +105,23 @@ def _get_int(key: str, env_name: str, default: int) -> int:
         return int(raw)
     except (ValueError, TypeError):
         return default
+
+
+def _get_bool(key: str, env_name: str, default: bool) -> bool:
+    """Return a bool setting: env var, else config.json, else *default*.
+
+    Truthy values are ``1``/``true``/``yes``/``on`` (case-insensitive, trimmed);
+    anything else (including unrecognised values) falls back to *default*.
+
+    Reads ONLY ``os.environ`` and ``config.json`` (like ``_get``/
+    ``_get_int``): the project ``.env`` is NOT parsed here.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None or str(raw).strip() == "":
+        raw = _load_config().get(key, default)
+    if str(raw).strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return default
 
 
 def get_whatsapp_api_url() -> str:
@@ -352,6 +377,50 @@ def get_wa_lid_cache_ttl_days() -> int:
 def get_wa_lid_retry_cooldown_s() -> int:
     """Cooldown di ri-armo per lid non risolti (default 300s)."""
     return _get_int("wa_lid_retry_cooldown_s", "WA_LID_RETRY_COOLDOWN_S", 300)
+
+
+def get_wa_resync_download_media() -> bool:
+    """Download+resolve media during the startup bulk resync (default False).
+
+    This is the functional rollback switch: ``true`` restores
+    ``downloadMedia=true`` and the media resolver for the bulk fetch (S2
+    disabled).  Reads ``WA_RESYNC_DOWNLOAD_MEDIA`` (case-insensitive, trimmed)
+    or ``config.json`` ``wa_resync_download_media`` — never ``.env``.
+    """
+    return _get_bool("wa_resync_download_media", "WA_RESYNC_DOWNLOAD_MEDIA", False)
+
+
+def get_wa_resync_max_chats() -> int:
+    """Max chats fetched by the startup bulk resync (default ``20``).
+
+    ``0`` (exactly zero) means unlimited.  Negative values fall back to the
+    default ``20``.  Reads ``WA_RESYNC_MAX_CHATS`` or ``config.json``
+    ``wa_resync_max_chats`` — never ``.env``.
+    """
+    value = _get_int("wa_resync_max_chats", "WA_RESYNC_MAX_CHATS", 20)
+    if value < 0:
+        return 20
+    return value
+
+
+def get_wa_resync_limit() -> int:
+    """Per-chat message limit of the startup bulk resync (default ``30``).
+
+    Values ``<= 0`` fall back to ``30``.  Reads ``WA_RESYNC_LIMIT`` or
+    ``config.json`` ``wa_resync_limit`` — never ``.env``.
+    """
+    value = _get_int("wa_resync_limit", "WA_RESYNC_LIMIT", 30)
+    return value if value > 0 else 30
+
+
+def get_wa_resync_workers() -> int:
+    """Concurrent fetch workers of the startup bulk resync (default ``2``).
+
+    Values ``<= 0`` fall back to ``2``.  Reads ``WA_RESYNC_WORKERS`` or
+    ``config.json`` ``wa_resync_workers`` — never ``.env``.
+    """
+    value = _get_int("wa_resync_workers", "WA_RESYNC_WORKERS", 2)
+    return value if value > 0 else 2
 
 
 def get_picker_max_results() -> int:

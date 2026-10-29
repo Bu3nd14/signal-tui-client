@@ -48,6 +48,10 @@ from .config import (
     get_address_book_ttl_s,
     get_wa_lid_cache_ttl_days,
     get_wa_lid_retry_cooldown_s,
+    get_wa_resync_download_media,
+    get_wa_resync_limit,
+    get_wa_resync_max_chats,
+    get_wa_resync_workers,
     get_whatsapp_api_key,  # noqa: F401  re-export (whatsapp_rest reads it via protocols.whatsapp)
     get_whatsapp_media_dir,
     get_whatsapp_session_name,
@@ -72,9 +76,35 @@ logger = logging.getLogger(__name__)
 
 _FETCHABLE_JID_RE = re.compile(r"^[0-9][0-9-]*@(c\.us|lid|g\.us)$")
 
+#: Pausa tra ondate del bulk startup (patchabile nei test).
+_RESYNC_STAGGER_S = 0.5
+
 
 def _is_fetchable_jid(jid: str) -> bool:
     return bool(_FETCHABLE_JID_RE.fullmatch(jid))
+
+
+def _is_broadcast_jid(jid: str) -> bool:
+    """True for status/broadcast/newsletter JIDs (never resynced)."""
+    return "@broadcast" in jid or "@newsletter" in jid
+
+
+def _cache_last_ts(rows: list[dict]) -> int:
+    """Return the newest ``timestamp`` (ms) of a cache partition, or ``0``."""
+    latest = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            latest = max(latest, int(row.get("timestamp") or 0))
+        except (TypeError, ValueError):
+            continue
+    return latest
+
+
+def _timestamp_ms(value: int) -> int:
+    """Normalize WAHA seconds to the millisecond scale used by the cache."""
+    return value * 1000 if 0 < value < 10**12 else value
 
 
 def _norm(text: object) -> str:
@@ -1925,7 +1955,14 @@ class WhatsAppBackend(ChatBackend):
             return lid
         return None
 
-    def fetch_history(self, contact_id: str, limit: int = 20) -> list[dict]:
+    def fetch_history(
+        self,
+        contact_id: str,
+        limit: int = 20,
+        *,
+        download_media: bool = True,
+        resolve_media: bool = True,
+    ) -> list[dict]:
         """Scarica lo storico remoto di una chat da WAHA e lo salva nel cache.
 
         Usato quando l'utente apre un contatto: WAHA CORE espone
@@ -1939,6 +1976,22 @@ class WhatsAppBackend(ChatBackend):
 
         Ritorna la lista (già ordinata) dei messaggi normalizzati per il
         contatto, oppure ``[]`` se l'API non risponde (fallback non distruttivo).
+
+        ``download_media`` è inoltrato a ``list_messages`` (WAHA
+        ``downloadMedia``).  Con ``resolve_media=False`` (bulk di avvio) i media
+        senza attachment reale non vengono ingeriti (niente bolle vuote), ma i
+        messaggi MIEI contribuiscono comunque ai receipt read/delivered.
+
+        Nota: i media saltati con caption perdono la caption fino all'apertura
+        chat; se sono fuori dalla finestra di refresh la perdono per sempre.
+        La preview dell'ultimo messaggio mostra il testo precedente (o nulla)
+        finché la chat non viene aperta.
+
+        Rischio residuo (fuori scope di questo fix): l'apertura chat continua a
+        usare ``download_media=True``.  Un media patologico può quindi ancora
+        bloccare la page WEBJS e portare a ``ProtocolError``/sessione
+        ``FAILED``; la mitigazione è solo lato WAHA (pin/limiti), non nel
+        client.
         """
         if not _is_fetchable_jid(contact_id) or not self._rest:
             return []
@@ -1953,7 +2006,9 @@ class WhatsAppBackend(ChatBackend):
         for index, chat_id in enumerate(candidates):
             if chat_id in self._history_unfetchable:
                 continue
-            raw = self._rest.list_messages(chat_id, limit=limit)
+            raw = self._rest.list_messages(
+                chat_id, limit=limit, download_media=download_media
+            )
             if isinstance(raw, list) and raw:
                 break
             no_lid = self._rest.last_status == 500 and "No LID" in (
@@ -1984,7 +2039,11 @@ class WhatsAppBackend(ChatBackend):
         delivered_ids: set[str] = set()
         for m in msgs:
             media = m.get("media")
-            if m.get("hasMedia") and not (isinstance(media, dict) and media.get("url")):
+            if (
+                resolve_media
+                and m.get("hasMedia")
+                and not (isinstance(media, dict) and media.get("url"))
+            ):
                 msg_id = m.get("id") or (m.get("key") or {}).get("id")
                 if msg_id:
                     self._schedule_media_resolve(contact_id, str(msg_id))
@@ -2000,6 +2059,28 @@ class WhatsAppBackend(ChatBackend):
                 payload = event.payload
 
                 is_mine = payload.get("is_mine", False)
+                # S2 (scope B): nel bulk (resolve_media=False) i media senza
+                # attachment reale non vengono ingeriti → niente bolle vuote.
+                # I media saltati contribuiscono COMUNQUE ai receipt: la
+                # raccolta avviene PRIMA del ``continue``.
+                if (
+                    not resolve_media
+                    and payload.get("media_kind")
+                    and not payload.get("attachment_id")
+                ):
+                    ack = payload.get("ack")
+                    mid = payload.get("id")
+                    if (
+                        is_mine
+                        and isinstance(ack, int)
+                        and ack >= WAHA_ACK_DEVICE
+                        and mid
+                    ):
+                        (read_ids if ack >= WAHA_ACK_READ else delivered_ids).add(
+                            str(mid)
+                        )
+                    continue
+
                 # Uno storico WAHA riporta il testo GIÀ editato con id/ts
                 # originali: se il messaggio è già in cache con testo diverso,
                 # aggiorna la riga esistente invece di ingerire un duplicato.
@@ -2073,58 +2154,112 @@ class WhatsAppBackend(ChatBackend):
         self._sort_contact_cache(contact_id)
         return msgs
 
-    def resync_history(self, limit: int = 50) -> int:
+    def _select_resync_targets(self, max_chats: int) -> list[str]:
+        """Chat da ri-sincronizzare all'avvio, in ordine deterministico.
+
+        Candidate = chat non lette da WAHA ∪ chat già nel DB locale.  Si
+        escludono JID non fetchable, ``@broadcast`` e ``@newsletter``.  L'ordine
+        è: non lette prima, poi ``timestamp`` più recente, tie-break ``jid``
+        lessicografico.  ``max_chats == 0`` significa illimitato; un valore
+        positivo è un cap sul totale (i negativi sono già normalizzati a 20 dal
+        getter di config).
+        """
+        meta: dict[str, tuple[bool, int]] = {}
+        try:
+            # Un solo GET /chats (non un polling periodico): serve a scoprire le
+            # chat non lette da ri-sincronizzare all'avvio.  La ricezione live è
+            # comunque tutta su webhook (handle_webhook).
+            discovered = self._discover_active_chats()
+        except Exception:  # /chats fallito → restiamo sulle sole chat-DB
+            logger.debug(
+                "/chats discovery failed, staying on DB-only chats", exc_info=True
+            )
+            discovered = []
+        for jid, unread, ts in discovered:
+            if not isinstance(jid, str) or not _is_fetchable_jid(jid):
+                continue
+            if _is_broadcast_jid(jid):
+                continue
+            prev_unread, prev_ts = meta.get(jid, (False, 0))
+            meta[jid] = (
+                prev_unread or unread > 0,
+                max(prev_ts, _timestamp_ms(int(ts or 0))),
+            )
+        for jid, rows in self.cache.items():
+            if not isinstance(jid, str) or not _is_fetchable_jid(jid):
+                continue
+            if _is_broadcast_jid(jid):
+                continue
+            prev_unread, prev_ts = meta.get(jid, (False, 0))
+            meta[jid] = (prev_unread, max(prev_ts, _cache_last_ts(rows)))
+        ordered = sorted(
+            meta,
+            key=lambda jid: (0 if meta[jid][0] else 1, -meta[jid][1], jid),
+        )
+        if max_chats > 0:
+            return ordered[:max_chats]
+        return ordered
+
+    def resync_history(self, limit: int | None = None) -> int:
         """Re-sync lo storico delle chat rilevanti da WAHA, best-effort.
 
         Al rilevamento dell'avvio il backend parte con il cache seminato dal DB
         (``_load_protocol_cache``): i messaggi persistiti nelle sessioni passate
         ci sono, ma lo stato può essere incompleto/corrotto (entry senza id,
         gap, invii da un altro client).  Questo metodo scarica di nuovo lo
-        storico (via ``fetch_history``) per l'UNIONE di due insiemi:
+        storico (via ``fetch_history``) per l'unione deterministica di:
 
-        - le chat che hanno GIÀ messaggi nel DB locale (chiavi di ``self.cache``)
-          — così un DB compromesso dai vecchi bug di dedup viene riparato anche
-          se non apri la chat, e i messaggi arrivati da un altro client
-          compaiono fin da subito;
-        - le chat NON LETTE dichiarate da WAHA (``_discover_active_chats()`` con
-          ``unread > 0`` via ``GET /chats``) — copre i nuovi arrivi mai visti
-          dalla TUI.
+        - le chat NON LETTE dichiarate da WAHA (``_discover_active_chats()``);
+        - le chat che hanno GIÀ messaggi nel DB locale (``self.cache``), con cap
+          ``WA_RESYNC_MAX_CHATS`` (default 20; ``0`` = illimitato).
 
-        Le chat già lette e senza storico locale NON vengono toccate (si
-        caricano all'apertura, come prima), così l'avvio resta veloce.
+        Il bulk di avvio usa ``downloadMedia=false`` e ``resolve_media=false``:
+        solo testo/metadati, nessun download media e nessuna bolla vuota (S2).
+        Ogni ondata di ``WA_RESYNC_WORKERS`` chat è separata da uno stagger
+        costante di ``_RESYNC_STAGGER_S`` secondi.
+
+        Rollback funzionale (non bit-esatto): ``WA_RESYNC_DOWNLOAD_MEDIA=true``
+        ripristina download+risoluzione; il rollback completo richiede i 4 env
+        ``WA_RESYNC_DOWNLOAD_MEDIA=true``, ``WA_RESYNC_LIMIT=50``,
+        ``WA_RESYNC_WORKERS=4``, ``WA_RESYNC_MAX_CHATS=0``.  Lo stagger resta
+        attivo anche in rollback.
+
         Fallisce in modo non distruttivo: ogni errore per chat viene ignorato,
-        e il metodo non solleva eccezioni.
-
-        Ritorna il numero di chat effettivamente interrogate.
+        e il metodo non solleva eccezioni.  Ritorna il numero di chat
+        effettivamente interrogate.
         """
         if not self._rest or not self._connected:
             return 0
-        targets: set[str] = set(self.cache.keys())
-        try:
-            # Un solo GET /chats (non un polling periodico): serve a scoprire le
-            # chat non lette da ri-sincronizzare all'avvio.  La ricezione live è
-            # comunque tutta su webhook (handle_webhook).
-            chats = self._discover_active_chats()
-            targets.update(jid for jid, unread, _ts in chats if unread > 0)
-        except Exception as _e:  # se /chats fallisce restiamo sulle sole chat-DB
-            logger.debug(
-                "/chats discovery failed, staying on DB-only chats", exc_info=True
-            )
+        if limit is None:
+            limit = get_wa_resync_limit()
+        limit = max(1, int(limit))
+        download_media = resolve_media = get_wa_resync_download_media()
+        workers = get_wa_resync_workers()
+        max_chats = get_wa_resync_max_chats()
+        targets = self._select_resync_targets(max_chats)
 
-        # Fetch parallelo: WAHA serve le richieste /api/messages concorrenti in
-        # parallelo (verificato: 8 chat in ~7.6s totali vs ~34s sommati).  Ogni
-        # worker tocca una chat diversa → nessuna contesa sullo stesso dato; le
-        # scritture SQLite sono già serializzate da _DB_LOCK in protocols/db.py.
+        # Fetch a ondate: ogni worker tocca una chat diversa → nessuna contesa
+        # sullo stesso dato; le scritture SQLite sono già serializzate da
+        # _DB_LOCK in protocols/db.py.
         def _fetch_one(jid: str) -> None:
             try:
-                self.fetch_history(jid, limit=limit)
+                self.fetch_history(
+                    jid,
+                    limit=limit,
+                    download_media=download_media,
+                    resolve_media=resolve_media,
+                )
             except (
                 Exception
             ) as _e:  # best-effort: mai far fallire l'avvio per una singola chat
                 logger.debug("History fetch failed for a single chat", exc_info=True)
 
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            list(pool.map(_fetch_one, targets))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for i in range(0, len(targets), workers):
+                chunk = targets[i : i + workers]
+                list(pool.map(_fetch_one, chunk))
+                if i + workers < len(targets):
+                    time.sleep(_RESYNC_STAGGER_S)
         return len(targets)
 
     # ─── Messaging ────────────────────────────────────────────────────
