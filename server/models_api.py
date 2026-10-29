@@ -62,6 +62,9 @@ class ServerConfigOut(BaseModel):
     picker_max_results: int = 50
     #: Protocol the picker prefers for a person on several, ``""`` = most recent.
     picker_preferred_backend: str = ""
+    #: Lazy WhatsApp media on chat open (``WA_LAZY_MEDIA``): one switch for
+    #: every frontend (web pending attachments, TUI lazy tokens).
+    wa_lazy_media: bool = True
 
 
 # ``server.status`` returns ``dict[str, bool]`` (protocol -> connected).

@@ -348,9 +348,14 @@ def test_t7_limit_workers_and_constant_stagger():
     assert sleep.call_count == 2
 
 
-def test_t8_chat_open_refresh_keeps_positional_call_without_kwargs():
+def test_t8_chat_open_refresh_keeps_positional_call_when_lazy_media_off(
+    monkeypatch,
+):
+    # S1 (#310) made the chat open lazy; WA_LAZY_MEDIA=false is the rollback
+    # to the pre-S1 positional call (backend defaults, downloadMedia=true).
     from server.messages import _refresh_history
 
+    monkeypatch.setenv("WA_LAZY_MEDIA", "false")
     backend = MagicMock()
     backend.fetch_history = MagicMock(return_value=[])
 
@@ -358,7 +363,12 @@ def test_t8_chat_open_refresh_keeps_positional_call_without_kwargs():
     backend.fetch_history.assert_called_once_with("123@c.us", 20)
 
 
-def test_t9_out_of_window_media_are_absent_not_empty_bubbles(tmp_path: Path):
+def test_t9_out_of_window_media_are_absent_not_empty_bubbles(
+    tmp_path: Path, monkeypatch
+):
+    # Eager chat open (WA_LAZY_MEDIA=false rollback): the lazy S1 counterpart
+    # lives in tests/test_media_lazy_open.py.
+    monkeypatch.setenv("WA_LAZY_MEDIA", "false")
     db_file = tmp_path / "messages.db"
     with (
         patch.object(backend_mod, "DB_FILE", db_file),

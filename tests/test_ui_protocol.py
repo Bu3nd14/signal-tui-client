@@ -678,7 +678,13 @@ class TestWhatsAppHistoryLoad:
         app._load_messages_worker()
 
         # fetch_history è stato chiamato con il jid del contatto
-        backend.fetch_history.assert_called_once_with("16660245291231@lid", 50)
+        backend.fetch_history.assert_called_once_with(
+            "16660245291231@lid",
+            50,
+            download_media=False,
+            resolve_media=False,
+            ingest_pending_media=True,
+        )
 
         # il cache UI è stato popolato dallo specchio del backend
         assert len(app._cache[c.cache_key]) == 2
@@ -729,7 +735,13 @@ class TestWhatsAppHistoryLoad:
         app._load_messages_worker()
 
         # Nonostante il cache non vuoto, viene riscaricato lo storico remoto
-        backend.fetch_history.assert_called_once_with("16660245291231@lid", 50)
+        backend.fetch_history.assert_called_once_with(
+            "16660245291231@lid",
+            50,
+            download_media=False,
+            resolve_media=False,
+            ingest_pending_media=True,
+        )
 
         # il cache UI ora include anche il messaggio "da altro client"
         texts = [m["text"] for m in app._cache[c.cache_key]]
@@ -1072,7 +1084,7 @@ class TestWhatsAppLoadRetry:
         # la prima fetch lascia la cache vuota; la seconda la riempie
         calls = {"n": 0}
 
-        def fake_fetch(cid, limit=50):
+        def fake_fetch(cid, limit=50, **_kw):
             calls["n"] += 1
             if calls["n"] == 1:
                 backend.cache = {}
@@ -1243,7 +1255,13 @@ class TestWhatsAppRenderFirst:
         # il cache è stato renderizzato PRIMA del fetch (paint istantaneo)
         assert order[0] == "gia in cache"
         # il fetch remoto è comunque avvenuto con limit=50
-        fetch.assert_called_once_with(c.id, 50)
+        fetch.assert_called_once_with(
+            c.id,
+            50,
+            download_media=False,
+            resolve_media=False,
+            ingest_pending_media=True,
+        )
         # fase 2 (cache cambiato): full re-render ordinato con il nuovo messaggio
         assert order[-2:] == ["gia in cache", "nuovo"]
 

@@ -205,7 +205,7 @@ def test_whatsapp_ghost_id_is_canonicalized_and_unioned():
 
     backend = Backend(
         find_contact=find_contact,
-        fetch_history=lambda cid, n: fetched.append((cid, n)) or [],
+        fetch_history=lambda cid, n, **_kw: fetched.append((cid, n)) or [],
     )
     client, api = make(Manager({"whatsapp": backend}))
     response = get(client, "whatsapp", alias, refresh="true")
@@ -240,7 +240,7 @@ def test_whatsapp_ghost_id_is_canonicalized_and_unioned():
 )
 def test_history_refresh_policy(protocol, params, calls):
     seen = []
-    backend = Backend(fetch_history=lambda cid, n: seen.append((cid, n)) or [])
+    backend = Backend(fetch_history=lambda cid, n, **_kw: seen.append((cid, n)) or [])
     client, api = make(Manager({protocol: backend}))
     response = get(client, protocol, "42", **params)
     assert response.status_code == 200

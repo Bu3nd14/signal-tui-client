@@ -79,6 +79,9 @@ class ClientCallsMixin:
     _open_contact_token: int = 0
     _owns_core: bool = True
     _thumbnail_limits_cache: tuple[int, int] | None = None
+    #: ``server.config`` ``wa_lazy_media``: off until the server says so (an
+    #: older server without the field cannot resolve lazy tokens).
+    _wa_lazy_media: bool = False
 
     def _init_client_state(self) -> None:
         """Per-instance state (called from ``SignalTUI.__init__``)."""
@@ -197,7 +200,11 @@ class ClientCallsMixin:
         self._ui(self._apply_server_config, config)
 
     def _apply_server_config(self, config: dict[str, Any]) -> None:
-        """UI thread: thumbnail limits and picker options from ``server.config``."""
+        """UI thread: thumbnail limits, picker options and the lazy media switch
+        from ``server.config``."""
+        self._wa_lazy_media = (
+            isinstance(config, dict) and config.get("wa_lazy_media") is True
+        )
         try:
             self._thumbnail_limits_cache = (
                 int(config["thumbnail_max_lines"]),

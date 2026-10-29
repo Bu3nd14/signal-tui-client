@@ -263,6 +263,12 @@ class EventHandlingMixin:
                 self._contact_list_dirty = True
                 self._dirty_contact_keys.add(cache_key)
 
+        # Media risolto in place (lazy media S1 / media race): il core ha
+        # aggiornato la riga esistente (changed=True, added=False).  Allinea la
+        # voce della cache UI e rimonta la chat aperta: niente bolla nuova.
+        if p.get("changed") and not added and msg.get("attachment_id"):
+            self._apply_resolved_media(contact, msg)
+
         # Mirror into the UI's protocol-aware cache only when actually new.
         if added:
             if cache_key not in self._cache:
@@ -342,6 +348,38 @@ class EventHandlingMixin:
             self._dirty_contact_keys.add(cache_key)
 
         return True
+
+    def _apply_resolved_media(self, contact: ChatContact, msg: dict[str, Any]) -> None:
+        """Copy a resolved media identity onto the UI cache entry (same id).
+
+        Only an entry still WITHOUT an attachment is updated (never swap one
+        real attachment for another); if the chat is open its window is
+        remounted so the placeholder becomes the media bubble.
+        """
+        mid = msg.get("id")
+        if not mid:
+            return
+        entries = self._cache.get(contact.cache_key) or []
+        target = next(
+            (
+                m
+                for m in entries
+                if m.get("id") is not None
+                and str(m["id"]) == str(mid)
+                and not m.get("attachment_id")
+            ),
+            None,
+        )
+        if target is None:
+            return
+        for field in ("attachment_id", "msg_type", "media_kind", "content_type"):
+            if msg.get(field):
+                target[field] = msg[field]
+        if (
+            self.selected_contact
+            and self.selected_contact.cache_key == contact.cache_key
+        ):
+            self.call_from_thread(self._rerender_open_chat, contact)
 
     def _view_edit(self, ev: Event) -> bool:
         """Riflette un edit già applicato dal core: cache UI, identity sets e

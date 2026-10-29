@@ -110,8 +110,9 @@ def _get_int(key: str, env_name: str, default: int) -> int:
 def _get_bool(key: str, env_name: str, default: bool) -> bool:
     """Return a bool setting: env var, else config.json, else *default*.
 
-    Truthy values are ``1``/``true``/``yes``/``on`` (case-insensitive, trimmed);
-    anything else (including unrecognised values) falls back to *default*.
+    Truthy values are ``1``/``true``/``yes``/``on`` and falsy values are
+    ``0``/``false``/``no``/``off`` (case-insensitive, trimmed); anything else
+    (including unrecognised values) falls back to *default*.
 
     Reads ONLY ``os.environ`` and ``config.json`` (like ``_get``/
     ``_get_int``): the project ``.env`` is NOT parsed here.
@@ -119,8 +120,11 @@ def _get_bool(key: str, env_name: str, default: bool) -> bool:
     raw = os.environ.get(env_name)
     if raw is None or str(raw).strip() == "":
         raw = _load_config().get(key, default)
-    if str(raw).strip().lower() in ("1", "true", "yes", "on"):
+    value = str(raw).strip().lower()
+    if value in ("1", "true", "yes", "on"):
         return True
+    if value in ("0", "false", "no", "off"):
+        return False
     return default
 
 
@@ -388,6 +392,31 @@ def get_wa_resync_download_media() -> bool:
     or ``config.json`` ``wa_resync_download_media`` — never ``.env``.
     """
     return _get_bool("wa_resync_download_media", "WA_RESYNC_DOWNLOAD_MEDIA", False)
+
+
+def get_wa_lazy_media() -> bool:
+    """Lazy WhatsApp media on chat open (default True).
+
+    ``true``: opening a chat fetches the history with ``downloadMedia=false``
+    and media rows without a local file are exposed as "pending" attachments,
+    resolved one message at a time when the UI asks for them.  ``false`` is
+    the operational rollback (chat open downloads every media of the window,
+    no pending tokens).  One switch for every frontend: the web reads it
+    through ``messages.page``, the TUI through ``server.config``.  Reads ``WA_LAZY_MEDIA`` or ``config.json``
+    ``wa_lazy_media`` — never ``.env``.
+    """
+    return _get_bool("wa_lazy_media", "WA_LAZY_MEDIA", True)
+
+
+def get_wa_lazy_media_negative_ttl_s() -> int:
+    """Seconds a failed lazy media resolution is not retried (default ``30``).
+
+    Values ``< 0`` fall back to ``30``; ``0`` disables the negative cache.
+    Reads ``WA_LAZY_MEDIA_NEGATIVE_TTL_S`` or ``config.json``
+    ``wa_lazy_media_negative_ttl_s`` — never ``.env``.
+    """
+    value = _get_int("wa_lazy_media_negative_ttl_s", "WA_LAZY_MEDIA_NEGATIVE_TTL_S", 30)
+    return value if value >= 0 else 30
 
 
 def get_wa_resync_max_chats() -> int:

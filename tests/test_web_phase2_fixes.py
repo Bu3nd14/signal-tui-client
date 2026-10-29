@@ -84,7 +84,13 @@ def test_messages_refreshes_whatsapp_history_when_refresh_requested():
         )
 
     assert response.status_code == 200
-    whatsapp.fetch_history.assert_called_once_with("42", 20)
+    whatsapp.fetch_history.assert_called_once_with(
+        "42",
+        20,
+        download_media=False,
+        resolve_media=False,
+        ingest_pending_media=True,
+    )
 
 
 def test_messages_refresh_without_fetch_history_is_safe():
