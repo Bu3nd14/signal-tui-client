@@ -82,7 +82,9 @@ Permettere l'invio a contatti in rubrica (non solo chat attive) **senza**:
 3. se non trovato → 404.
 
 **Limiti:**
+- La cache rubrica (`_address_book`) è **per-processo** (in-memory): dopo il primo build non torna mai `None`, ma un riavvio del core la azzera.
 - Se la cache non è mai stata popolata (`_address_book is None`), un invio via API diretta (senza ricerca preventiva) dà 404. **Accettabile:** il flusso UI normale passa sempre dalla ricerca.
+- **Limite noto:** la cache rubrica è per-processo; dopo un riavvio del core il retry dell'outbox web verso un contatto solo-rubrica riceve un **404 terminale**. **Follow-up:** errore macchina-leggibile (`contact_not_indexed`) + retry dell'outbox con refresh rubrica e `client_msg_id` idempotente.
 - Cache stale (TTL scaduto, `get_address_book_ttl_s` default 300s, `config.py:287-289`) è utilizzabile (§3.2).
 
 ---
