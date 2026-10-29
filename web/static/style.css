@@ -697,6 +697,10 @@ h2 { font-size: 1.05rem; }
 .account-link-status { min-height: 1.3em; margin: 0; font-size: .86rem; }
 .account-link-spinner { width: 34px; height: 34px; margin: 20px 0; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: account-link-spin .9s linear infinite; }
 @keyframes account-link-spin { to { transform: rotate(360deg); } }
+.account-link-2fa { display: grid; gap: 6px; justify-items: stretch; width: 100%; margin-top: 10px; text-align: left; }
+.account-link-2fa[hidden] { display: none; }
+.account-link-2fa label { font-size: .84rem; color: var(--muted); }
+.account-link-2fa input { padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-raised); color: var(--text); font: inherit; }
 .account-link-actions { display: flex; gap: 8px; margin-top: 12px; }
 .account-link-form { display: grid; gap: 10px; width: 100%; text-align: left; }
 .account-link-form[hidden] { display: none; }

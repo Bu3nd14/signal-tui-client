@@ -371,7 +371,8 @@ def create_api_router() -> Any:
 
     # Device linking: the ``link.*`` operations, plus the QR as a ready PNG for
     # the browser.  Like the other POST routes they rely on the bearer auth.
-    # (``link.submit_2fa`` is not exposed yet: that is the Telegram branch.)
+    # ``/link/submit_2fa`` carries the Telegram 2FA password: it is forwarded as
+    # is and never logged.
 
     @router.get("/link/status")
     async def link_status(request: Request) -> dict[str, Any]:
@@ -411,6 +412,13 @@ def create_api_router() -> Any:
         return await call_op(
             request, "link.cancel", {"protocol": payload.get("protocol")}
         )
+
+    @router.post("/link/submit_2fa")
+    async def link_submit_2fa(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        data = {k: payload[k] for k in ("password",) if k in payload}
+        return await call_op(request, "link.submit_2fa", data)
 
     @router.post("/link/reconnect")
     async def link_reconnect(

@@ -163,6 +163,9 @@ const elements = {
   accountLinkDeviceName: document.querySelector("#account-link-device-name"),
   accountLinkFormOk: document.querySelector("#account-link-form-ok"),
   accountLinkFormCancel: document.querySelector("#account-link-form-cancel"),
+  accountLink2fa: document.querySelector("#account-link-2fa"),
+  accountLink2faInput: document.querySelector("#account-link-2fa-input"),
+  accountLink2faCancel: document.querySelector("#account-link-2fa-cancel"),
   linkRequiredBanner: document.querySelector("#link-required-banner"),
   linkRequiredText: document.querySelector("#link-required-text"),
   mainMenu: document.querySelector("#main-menu"),
@@ -3738,6 +3741,7 @@ function scheduleReconnect() {
 // ctx = { protocol, setStatus(text), showQr(qr), finish(message),
 //         done(message) }: finish ends the flow with a (error) message, done
 // ends it as a success (cancel + reconnect + close) with a custom message.
+// While `accountLink.twoFa` is true the 2FA form is shown and QR updates ignored.
 const SIGNAL_DEFAULT_DEVICE_NAME = "Signal-TUI-Client";
 const LINK_PROTOCOLS = {
   whatsapp: {
@@ -3750,6 +3754,18 @@ const LINK_PROTOCOLS = {
     beforeStart: signalLinkForm,
     onPoll: signalLinkPoll,
   },
+  telegram: {
+    label: "Telegram",
+    hint: "Apri Telegram → Impostazioni → Dispositivi → Collega dispositivo desktop e inquadra il codice.",
+    // `needs_2fa` arrives once per QR: the password form takes over the dialog
+    // (the generic poll keeps running to keep the server session alive; QR
+    // refreshes are ignored while the form is open, see showLinkQr).
+    async onPoll(ctx, result) {
+      if (!result.needs_2fa || accountLink.twoFa) return false;
+      showLink2fa(ctx);
+      return true;
+    },
+  },
 };
 const LINK_POLL_MS = 2000;
 const LINK_TIMEOUT_MS = 5 * 60 * 1000;
@@ -3759,7 +3775,7 @@ const LINK_DONE_CLOSE_MS = 1500;
 // abandoned flow are ignored; `started` = the server may hold a link session.
 const accountLink = {
   id: 0, protocol: null, lastProtocol: null, started: false,
-  timer: null, deadline: 0, status: null,
+  timer: null, deadline: 0, status: null, twoFa: false,
   done: false, formResolve: null, signalPhone: "",
 };
 
@@ -3832,12 +3848,60 @@ function setLinkStatus(text) {
 }
 
 function showLinkQr(qr) {
+  if (accountLink.twoFa) return; // the password form owns the dialog
   const isPng = qr?.kind === "png";
   elements.accountLinkSpinner.hidden = true;
   elements.accountLinkQr.hidden = !isPng;
   if (isPng) elements.accountLinkQr.src = `data:image/png;base64,${qr.data}`;
   elements.accountLinkText.hidden = isPng;
   if (!isPng) elements.accountLinkText.textContent = qr?.data || "";
+}
+
+function hideLink2fa() {
+  accountLink.twoFa = false;
+  elements.accountLink2fa.hidden = true;
+  elements.accountLink2faInput.value = "";
+}
+
+function showLink2fa(ctx) {
+  accountLink.twoFa = true;
+  elements.accountLinkSpinner.hidden = true;
+  elements.accountLinkQr.hidden = true;
+  elements.accountLinkText.hidden = true;
+  elements.accountLink2fa.hidden = false;
+  elements.accountLink2faInput.value = "";
+  ctx.setStatus("Telegram richiede la password di verifica in due passaggi.");
+  elements.accountLink2faInput.focus?.();
+}
+
+// Sends the password (never kept anywhere: the field is cleared right away).
+async function submitLink2fa() {
+  if (!accountLink.twoFa || accountLink.protocol === null) return;
+  if (elements.accountLink2fa.dataset.busy) return;
+  const id = accountLink.id;
+  const password = elements.accountLink2faInput.value;
+  elements.accountLink2faInput.value = "";
+  if (!password) return;
+  elements.accountLink2fa.dataset.busy = "1";
+  try {
+    const result = await linkPost("api/link/submit_2fa", { password });
+    if (accountLink.id !== id) return;
+    if (result?.ok) {
+      hideLink2fa();
+      showLinkLoading();
+      setLinkStatus("Verifica completata, attendo Telegram…");
+    } else {
+      setLinkStatus("Password errata, riprova.");
+      elements.accountLink2faInput.focus?.();
+    }
+  } catch (error) {
+    if (accountLink.id !== id) return;
+    const message = await linkErrorMessage(error);
+    if (accountLink.id !== id) return;
+    endLinkFlow(message, { retry: true });
+  } finally {
+    delete elements.accountLink2fa.dataset.busy;
+  }
 }
 
 function showLinkLoading() {
@@ -3861,6 +3925,7 @@ function stopLinkFlow({ cancel = true } = {}) {
   accountLink.done = false;
   clearLinkTimer();
   submitLinkForm(false);
+  hideLink2fa();
   if (cancel && started && protocol) {
     linkPost("api/link/cancel", { protocol }).catch(() => {});
   }
@@ -4247,6 +4312,12 @@ document.querySelector("#open-account-link").addEventListener("click", () => {
 });
 document.querySelector("#close-account-link-dialog").addEventListener("click", closeAccountLinkDialog);
 elements.accountLinkCancel.addEventListener("click", closeAccountLinkDialog);
+elements.accountLink2fa.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitLink2fa();
+});
+// Annulla in the password form = generic cancel (cancels the server session).
+elements.accountLink2faCancel.addEventListener("click", closeAccountLinkDialog);
 // Esc (or any other way the dialog closes) also stops the flow.
 elements.accountLinkDialog.addEventListener("close", () => stopLinkFlow({ cancel: true }));
 elements.accountLinkFormOk.addEventListener("click", () => submitLinkForm(true));

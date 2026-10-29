@@ -34,9 +34,12 @@ function node(extra = {}) {
 const names = ["accountLinkDialog", "accountLinkChooser", "accountLinkFlow",
   "accountLinkSpinner", "accountLinkQr", "accountLinkText", "accountLinkHint",
   "accountLinkStatus", "accountLinkRetry", "accountLinkCancel",
+  "accountLink2fa", "accountLink2faInput", "accountLink2faCancel",
   "linkRequiredBanner", "linkRequiredText", "accountLinkForm", "accountLinkPhone",
   "accountLinkDeviceName", "accountLinkFormOk", "accountLinkFormCancel"]
 const elements = Object.fromEntries(names.map((n) => [n, node()]))
+elements.accountLink2fa.hidden = true
+elements.accountLink2faInput.value = ""
 const state = { linkRequired: new Set(), linkRequiredDismissed: new Set() }
 const calls = []
 const timers = []
@@ -76,7 +79,7 @@ vm.createContext(ctx)
 vm.runInContext(block + `
 this.api = { accountLink, LINK_PROTOCOLS, startLinkFlow, pollLinkFlow,
   closeAccountLinkDialog, openAccountLinkDialog, stopLinkFlow, setLinkRequired,
-  loadLinkRequired, renderLinkChooser, submitLinkForm }`, ctx)
+  loadLinkRequired, renderLinkChooser, submitLinkForm, submitLink2fa }`, ctx)
 const { api } = ctx
 const WA_STATUS = { protocols: { whatsapp: { available: true }, signal: { available: false } } };
 """
@@ -236,7 +239,7 @@ routes = {
   "api/link/start": { qr: png("AAA") },
 }
 await api.openAccountLinkDialog()
-assert.equal(elements.accountLinkChooser.children.length, 2)  // whatsapp, signal
+assert.equal(elements.accountLinkChooser.children.length, 3)  // whatsapp, signal, telegram
 assert.equal(elements.accountLinkChooser.children[0].disabled, false)
 await api.startLinkFlow("whatsapp")
 await api.startLinkFlow("whatsapp")
@@ -287,3 +290,145 @@ def test_app_wires_socket_frame_and_startup_fetch():
     assert 'case "link_required":' in app
     onopen = app.index("socket.onopen")
     assert "loadLinkRequired();" in app[onopen : onopen + 700]
+
+
+TG_ROUTES = r"""
+routes = {
+  "api/link/start": { qr: png("TGQR") },
+  "api/link/poll": { state: "waiting", needs_2fa: false, qr: null },
+  "api/link/cancel": { ok: true },
+  "api/link/reconnect": { ok: true },
+}
+"""
+
+
+def test_telegram_registered_with_hint():
+    _run_node(r"""
+const tg = api.LINK_PROTOCOLS.telegram
+assert.equal(tg.label, "Telegram")
+assert.match(tg.hint, /Collega dispositivo desktop/)
+""")
+
+
+def test_telegram_needs_2fa_shows_form_and_hides_qr():
+    _run_node(
+        TG_ROUTES
+        + r"""
+await api.startLinkFlow("telegram")
+assert.equal(elements.accountLinkQr.hidden, false)
+routes["api/link/poll"] = { state: "waiting", needs_2fa: true, qr: null }
+await runTimer()
+assert.equal(elements.accountLink2fa.hidden, false)
+assert.equal(elements.accountLinkQr.hidden, true)
+assert.equal(elements.accountLinkSpinner.hidden, true)
+assert.ok(timers.some((t) => t.live), "poll keeps the server session alive")
+// needs_2fa is reported once; a later QR refresh must not replace the form
+routes["api/link/poll"] = { state: "waiting", needs_2fa: false, qr: png("NEW") }
+await runTimer()
+assert.equal(elements.accountLink2fa.hidden, false)
+assert.equal(elements.accountLinkQr.hidden, true)
+assert.notEqual(elements.accountLinkQr.src, "data:image/png;base64,NEW")
+"""
+    )
+
+
+def test_telegram_wrong_password_keeps_form_and_clears_field():
+    _run_node(
+        TG_ROUTES
+        + r"""
+await api.startLinkFlow("telegram")
+routes["api/link/poll"] = { state: "waiting", needs_2fa: true, qr: null }
+await runTimer()
+routes["api/link/submit_2fa"] = { ok: false }
+elements.accountLink2faInput.value = "wrong"
+await api.submitLink2fa()
+assert.deepEqual(calls.find((c) => c[0] === "api/link/submit_2fa")[1], { password: "wrong" })
+assert.equal(elements.accountLink2faInput.value, "")
+assert.equal(elements.accountLink2fa.hidden, false)
+assert.equal(elements.accountLinkStatus.textContent, "Password errata, riprova.")
+assert.equal(api.accountLink.protocol, "telegram")
+assert.ok(!JSON.stringify(api.accountLink).includes("wrong"))
+"""
+    )
+
+
+def test_telegram_correct_password_continues_until_done():
+    _run_node(
+        TG_ROUTES
+        + r"""
+elements.accountLinkDialog.open = true
+await api.startLinkFlow("telegram")
+routes["api/link/poll"] = { state: "waiting", needs_2fa: true, qr: null }
+await runTimer()
+routes["api/link/submit_2fa"] = { ok: true }
+elements.accountLink2faInput.value = "secret"
+await api.submitLink2fa()
+assert.equal(elements.accountLink2fa.hidden, true)
+assert.equal(elements.accountLink2faInput.value, "")
+assert.equal(elements.accountLinkStatus.textContent, "Verifica completata, attendo Telegram…")
+assert.ok(timers.some((t) => t.live), "polling continues")
+routes["api/link/poll"] = { state: "done", needs_2fa: false, qr: null }
+await runTimer()
+assert.equal(elements.accountLinkStatus.textContent, "✅ Collegato")
+assert.deepEqual(calls.find((c) => c[0] === "api/link/reconnect")[1], { protocols: ["telegram"] })
+"""
+    )
+
+
+def test_telegram_submit_error_ends_flow_with_retry():
+    _run_node(
+        TG_ROUTES
+        + r"""
+await api.startLinkFlow("telegram")
+routes["api/link/poll"] = { state: "waiting", needs_2fa: true, qr: null }
+await runTimer()
+routes["api/link/submit_2fa"] = () => Object.assign(new Error("HTTP 502"), {
+  status: 502, response: { json: async () => ({ detail: "Telegram non risponde" }) } })
+elements.accountLink2faInput.value = "pw"
+await api.submitLink2fa()
+assert.equal(elements.accountLinkStatus.textContent, "Telegram non risponde")
+assert.equal(elements.accountLinkRetry.hidden, false)
+assert.equal(elements.accountLink2fa.hidden, true)
+assert.equal(api.accountLink.protocol, null)
+assert.equal(timers.filter((t) => t.live).length, 0)
+"""
+    )
+
+
+def test_telegram_annulla_cancels_and_hides_form():
+    _run_node(
+        TG_ROUTES
+        + r"""
+elements.accountLinkDialog.open = true
+await api.startLinkFlow("telegram")
+routes["api/link/poll"] = { state: "waiting", needs_2fa: true, qr: null }
+await runTimer()
+api.closeAccountLinkDialog()  // what the form's Annulla is wired to
+await flush()
+assert.deepEqual(calls.find((c) => c[0] === "api/link/cancel")[1], { protocol: "telegram" })
+assert.equal(elements.accountLink2fa.hidden, true)
+assert.equal(timers.filter((t) => t.live).length, 0)
+assert.equal(api.accountLink.protocol, null)
+"""
+    )
+
+
+def test_whatsapp_ignores_needs_2fa_flag():
+    _run_node(
+        TG_ROUTES
+        + r"""
+await api.startLinkFlow("whatsapp")
+routes["api/link/poll"] = { state: "waiting", needs_2fa: true, qr: png("W2") }
+await runTimer()
+assert.equal(elements.accountLink2fa.hidden, true)
+assert.equal(elements.accountLinkQr.src, "data:image/png;base64,W2")
+"""
+    )
+
+
+def test_app_wires_2fa_form():
+    app = Path("web/static/app.js").read_text(encoding="utf-8")
+    assert 'elements.accountLink2fa.addEventListener("submit"' in app
+    assert "elements.accountLink2faCancel.addEventListener" in app
+    index = Path("web/static/index.html").read_text(encoding="utf-8")
+    assert 'id="account-link-2fa-input" type="password"' in index

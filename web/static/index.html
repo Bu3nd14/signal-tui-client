@@ -325,6 +325,14 @@
         <p id="account-link-text" class="account-link-text" hidden></p>
         <p id="account-link-hint" class="dialog-copy account-link-hint"></p>
         <p id="account-link-status" class="account-link-status" role="status" aria-live="polite"></p>
+        <form id="account-link-2fa" class="account-link-2fa" autocomplete="off" hidden>
+          <label for="account-link-2fa-input">Password di verifica in due passaggi</label>
+          <input id="account-link-2fa-input" type="password" autocomplete="current-password">
+          <div class="account-link-actions">
+            <button id="account-link-2fa-submit" class="primary-button" type="submit">Conferma</button>
+            <button id="account-link-2fa-cancel" class="link-cancel-button" type="button">Annulla</button>
+          </div>
+        </form>
         <div class="account-link-actions">
           <button id="account-link-retry" class="primary-button" type="button" hidden>Riprova</button>
           <button id="account-link-cancel" class="link-cancel-button" type="button">Annulla</button>
