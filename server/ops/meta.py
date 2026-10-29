@@ -89,10 +89,11 @@ def server_status(api: ChatAPI, req: EmptyRequest) -> dict[str, bool]:
 
 @operation("server.config", request=EmptyRequest, response=ServerConfigOut)
 def server_config(api: ChatAPI, req: EmptyRequest) -> ServerConfigOut:
-    """Client-relevant settings (image thumbnail size limits, picker options)."""
+    """Client-relevant settings (thumbnail limits, picker options, lazy media)."""
     from protocols.config import (
         get_picker_max_results,
         get_picker_preferred_backend,
+        get_wa_lazy_media,
         thumbnail_max_cols,
         thumbnail_max_lines,
     )
@@ -102,6 +103,7 @@ def server_config(api: ChatAPI, req: EmptyRequest) -> ServerConfigOut:
         thumbnail_max_cols=thumbnail_max_cols(),
         picker_max_results=get_picker_max_results(),
         picker_preferred_backend=get_picker_preferred_backend(),
+        wa_lazy_media=get_wa_lazy_media(),
     )
 
 

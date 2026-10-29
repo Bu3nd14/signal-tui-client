@@ -1399,7 +1399,11 @@ class ChatViewMixin:
         Widget-only: the token is never written to the UI cache.  Resolving it
         (click, or the native thumbnail of a mounted widget) downloads that one
         message on the server, serialised with every other lazy request.
+        Follows the server's ``WA_LAZY_MEDIA`` switch (``server.config``), the
+        same one that gates the web's pending attachments.
         """
+        if not self._wa_lazy_media:
+            return None
         if protocol != PROTOCOL_WHATSAPP or msg.get("attachment_id"):
             return None
         if not msg.get("id") or self.selected_contact is None:

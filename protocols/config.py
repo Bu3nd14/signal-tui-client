@@ -401,7 +401,8 @@ def get_wa_lazy_media() -> bool:
     and media rows without a local file are exposed as "pending" attachments,
     resolved one message at a time when the UI asks for them.  ``false`` is
     the operational rollback (chat open downloads every media of the window,
-    no pending tokens).  Reads ``WA_LAZY_MEDIA`` or ``config.json``
+    no pending tokens).  One switch for every frontend: the web reads it
+    through ``messages.page``, the TUI through ``server.config``.  Reads ``WA_LAZY_MEDIA`` or ``config.json``
     ``wa_lazy_media`` — never ``.env``.
     """
     return _get_bool("wa_lazy_media", "WA_LAZY_MEDIA", True)

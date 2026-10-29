@@ -723,8 +723,9 @@ assert.equal(placeholder.textContent, "▧  Video non disponibile")
 class _FakeTui:
     """Just the state ``_apply_resolved_media`` and the widget builder use."""
 
-    def __init__(self, selected: ChatContact | None):
+    def __init__(self, selected: ChatContact | None, *, lazy: bool = True):
         self.selected_contact = selected
+        self._wa_lazy_media = lazy
         self._cache: dict[str, list[dict]] = {}
         self.calls: list[tuple] = []
 
@@ -814,3 +815,60 @@ def test_tui_pending_media_widget_gets_a_lazy_token_not_stored_in_cache():
             )
             is None
         )
+
+
+def test_tui_follows_the_server_lazy_media_switch():
+    from tui.chat_view import ChatViewMixin
+
+    tui = _FakeTui(_contact(), lazy=False)
+    msg = {"id": "ABC", "msg_type": "image", "attachment_id": None}
+
+    assert (
+        ChatViewMixin._lazy_media_attachment_id(
+            tui,  # type: ignore[arg-type]
+            PROTOCOL_WHATSAPP,
+            msg,
+            "image",
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"), [(None, True), ("false", False), ("true", True)]
+)
+def test_server_config_exposes_the_lazy_media_switch(monkeypatch, env, expected):
+    from client_harness import client_for
+
+    if env is not None:
+        monkeypatch.setenv("WA_LAZY_MEDIA", env)
+    out = client_for(MagicMock()).call("server.config")
+
+    assert out["wa_lazy_media"] is expected
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({"wa_lazy_media": True}, True),
+        ({"wa_lazy_media": False}, False),
+        ({}, False),  # older server without the field: no tokens
+        ({"wa_lazy_media": "yes"}, False),
+    ],
+)
+def test_tui_applies_the_lazy_media_switch_from_server_config(config, expected):
+    from tui.client_calls import ClientCallsMixin
+
+    class _View(ClientCallsMixin):
+        pass
+
+    view = _View()
+    base = {
+        "thumbnail_max_lines": 3,
+        "thumbnail_max_cols": 4,
+        "picker_max_results": 50,
+        "picker_preferred_backend": "",
+    }
+    view._apply_server_config({**base, **config})
+
+    assert view._wa_lazy_media is expected
