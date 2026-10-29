@@ -66,6 +66,7 @@ from server.domain import (
 )
 from server.events_api import to_wire
 from server.gmail_unread import GmailUnreadWatcher
+from server.wa_session_guard import WhatsAppSessionGuardMixin
 
 logger = logging.getLogger("signal_tui")
 
@@ -92,7 +93,7 @@ def _run_startup_maintenance() -> None:
         logger.debug("Startup DB maintenance failed", exc_info=True)
 
 
-class ChatCore(DynamicAddressBookMixin):
+class ChatCore(DynamicAddressBookMixin, WhatsAppSessionGuardMixin):
     """Owns the backends and runs their connection workers on daemon threads."""
 
     def __init__(self, bus: EventBus) -> None:
@@ -147,6 +148,9 @@ class ChatCore(DynamicAddressBookMixin):
         self._address_book_pending_protocols: set[str] = set()
         self._address_book_refresh_thread: threading.Thread | None = None
 
+        # WAHA session guard (#311), see ``server.wa_session_guard``.
+        self._init_wa_session_guard()
+
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
@@ -170,6 +174,7 @@ class ChatCore(DynamicAddressBookMixin):
         # the UI empty until a manual restart.
         if self.whatsapp_backend is not None:
             self._spawn(self.connect_whatsapp_boot, "core-connect-whatsapp-boot")
+            self.start_wa_session_guard()
         if (
             self.telegram_backend is not None
             and not self.telegram_backend.needs_pairing
@@ -181,6 +186,7 @@ class ChatCore(DynamicAddressBookMixin):
     def stop(self) -> None:
         """Stop the event pump; the thread exits within one 0.1s slice."""
         self.stop_address_book_refresh()
+        self.stop_wa_session_guard()
         self.gmail_unread.stop()
         self._pump_stop.set()
         thread = self._pump_thread
@@ -245,6 +251,7 @@ class ChatCore(DynamicAddressBookMixin):
         if self.signal_backend and "signal" in protocols:
             self._spawn(self.connect_signal, "core-connect-signal")
         if self.whatsapp_backend and "whatsapp" in protocols:
+            self.note_wa_session_manual()
             self._spawn(self.connect_whatsapp, "core-connect-whatsapp")
         if self.telegram_backend and "telegram" in protocols:
             self._spawn(self.connect_telegram, "core-connect-telegram")

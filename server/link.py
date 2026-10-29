@@ -202,6 +202,11 @@ class LinkService:
         self._lock = threading.Lock()
         self._sessions: dict[str, _Session] = {}
 
+    def is_active(self, protocol: str) -> bool:
+        """Whether a link flow is open for *protocol* (in memory, no I/O)."""
+        with self._lock:
+            return protocol in self._sessions
+
     # -- status -------------------------------------------------------------
 
     def status(self) -> dict[str, dict[str, Any]]:

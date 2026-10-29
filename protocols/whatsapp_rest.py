@@ -193,6 +193,14 @@ class WhatsAppRESTClient:
         """
         return self._request("PUT", f"/api/sessions/{self.session_name}", config)
 
+    def restart_session(self) -> dict | None:
+        """POST /api/sessions/{name}/restart: WAHA restarts the engine, keeping auth.
+
+        The session goes STARTING → WORKING | SCAN_QR_CODE | FAILED.  Never use
+        logout/reset here: they drop the linked device and force a QR.
+        """
+        return self._request("POST", f"/api/sessions/{self.session_name}/restart")
+
     def start_session(self) -> dict | None:
         """Create (if needed) and start the session via WAHA ``/api/sessions/start``."""
         return self._request(

@@ -110,8 +110,9 @@ def _get_int(key: str, env_name: str, default: int) -> int:
 def _get_bool(key: str, env_name: str, default: bool) -> bool:
     """Return a bool setting: env var, else config.json, else *default*.
 
-    Truthy values are ``1``/``true``/``yes``/``on`` (case-insensitive, trimmed);
-    anything else (including unrecognised values) falls back to *default*.
+    Truthy values are ``1``/``true``/``yes``/``on`` and falsy values are
+    ``0``/``false``/``no``/``off`` (case-insensitive, trimmed); anything else
+    (including unrecognised values) falls back to *default*.
 
     Reads ONLY ``os.environ`` and ``config.json`` (like ``_get``/
     ``_get_int``): the project ``.env`` is NOT parsed here.
@@ -121,6 +122,8 @@ def _get_bool(key: str, env_name: str, default: bool) -> bool:
         raw = _load_config().get(key, default)
     if str(raw).strip().lower() in ("1", "true", "yes", "on"):
         return True
+    if str(raw).strip().lower() in ("0", "false", "no", "off"):
+        return False
     return default
 
 
@@ -421,6 +424,103 @@ def get_wa_resync_workers() -> int:
     """
     value = _get_int("wa_resync_workers", "WA_RESYNC_WORKERS", 2)
     return value if value > 0 else 2
+
+
+def get_wa_session_guard() -> bool:
+    """Whether the WAHA session guard runs (default ``True``).
+
+    Reads ``WA_SESSION_GUARD`` (``0``/``false``/``no``/``off`` disable it) or
+    ``config.json`` ``wa_session_guard`` — never ``.env``.
+    """
+    return _get_bool("wa_session_guard", "WA_SESSION_GUARD", True)
+
+
+def get_wa_session_poll_s() -> int:
+    """Session guard poll interval in seconds (default ``60``).
+
+    Values ``<= 0`` fall back to ``60``.  Reads ``WA_SESSION_POLL_S`` or
+    ``config.json`` ``wa_session_poll_s`` — never ``.env``.
+    """
+    value = _get_int("wa_session_poll_s", "WA_SESSION_POLL_S", 60)
+    return value if value > 0 else 60
+
+
+def get_wa_session_restart_timeout_s() -> int:
+    """Max seconds to wait for a restarted session to leave STARTING (default ``120``).
+
+    Values ``<= 0`` fall back to ``120``.  Reads ``WA_SESSION_RESTART_TIMEOUT_S``
+    or ``config.json`` ``wa_session_restart_timeout_s`` — never ``.env``.
+    """
+    value = _get_int(
+        "wa_session_restart_timeout_s", "WA_SESSION_RESTART_TIMEOUT_S", 120
+    )
+    return value if value > 0 else 120
+
+
+def get_wa_session_max_restarts_per_hour() -> int:
+    """Max automatic session restarts per hour (default ``3``).
+
+    ``0`` (exactly zero) means never restart.  Negative values fall back to
+    ``3``.  Reads ``WA_SESSION_MAX_RESTARTS_PER_HOUR`` or ``config.json``
+    ``wa_session_max_restarts_per_hour`` — never ``.env``.
+    """
+    value = _get_int(
+        "wa_session_max_restarts_per_hour", "WA_SESSION_MAX_RESTARTS_PER_HOUR", 3
+    )
+    return value if value >= 0 else 3
+
+
+_WA_SESSION_BACKOFF_DEFAULT = [5, 30, 120, 300]
+
+
+def get_wa_session_backoff_s() -> list[int]:
+    """Backoff (seconds) between consecutive restarts (default ``5,30,120,300``).
+
+    Comma-separated positive ints; if empty, any part is not an int or any
+    value is ``<= 0`` the default is used.  Reads ``WA_SESSION_BACKOFF_S`` or
+    ``config.json`` ``wa_session_backoff_s`` — never ``.env``.
+    """
+    raw = str(_get("wa_session_backoff_s", "WA_SESSION_BACKOFF_S", "")).strip()
+    if not raw:
+        return list(_WA_SESSION_BACKOFF_DEFAULT)
+    try:
+        values = [int(part.strip()) for part in raw.split(",")]
+    except ValueError:
+        return list(_WA_SESSION_BACKOFF_DEFAULT)
+    if any(v <= 0 for v in values):
+        return list(_WA_SESSION_BACKOFF_DEFAULT)
+    return values
+
+
+def get_wa_session_stable_reset_s() -> int:
+    """Seconds of continuous WORKING before the restart backoff resets (default ``600``).
+
+    Values ``<= 0`` fall back to ``600``.  Reads ``WA_SESSION_STABLE_RESET_S``
+    or ``config.json`` ``wa_session_stable_reset_s`` — never ``.env``.
+    """
+    value = _get_int("wa_session_stable_reset_s", "WA_SESSION_STABLE_RESET_S", 600)
+    return value if value > 0 else 600
+
+
+def get_wa_session_failed_grace_s() -> int:
+    """Seconds FAILED must persist before a restart (default ``10``).
+
+    ``0`` is allowed (restart on first observation).  Negative values fall back
+    to ``10``.  Reads ``WA_SESSION_FAILED_GRACE_S`` or ``config.json``
+    ``wa_session_failed_grace_s`` — never ``.env``.
+    """
+    value = _get_int("wa_session_failed_grace_s", "WA_SESSION_FAILED_GRACE_S", 10)
+    return value if value >= 0 else 10
+
+
+def get_wa_session_unreachable_after() -> int:
+    """Consecutive failed polls before WAHA is reported unreachable (default ``5``).
+
+    Values ``<= 0`` fall back to ``5``.  Reads ``WA_SESSION_UNREACHABLE_AFTER``
+    or ``config.json`` ``wa_session_unreachable_after`` — never ``.env``.
+    """
+    value = _get_int("wa_session_unreachable_after", "WA_SESSION_UNREACHABLE_AFTER", 5)
+    return value if value > 0 else 5
 
 
 def get_picker_max_results() -> int:
