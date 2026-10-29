@@ -3222,7 +3222,10 @@ class TestWhatsAppWebhook:
             msgs = client.list_messages("X@lid", limit=3)
         assert len(msgs) == 1
         assert seen[0][0] == "GET"
-        assert "/api/messages?session=default&chatId=X@lid&limit=3" in seen[0][1]
+        assert (
+            "/api/messages?session=default&chatId=X@lid&limit=3&downloadMedia=true"
+            in seen[0][1]
+        )
 
     def test_fetch_history_normalizes_and_ingests(self):
         """fetch_history normalizza lo storico remoto e lo ingerisce nel cache."""
@@ -3262,7 +3265,7 @@ class TestWhatsAppWebhook:
         result = backend.fetch_history("15771304468671@lid", limit=20)
         # la versione REST è stata chiamata col jid e limit
         backend._rest.list_messages.assert_called_once_with(
-            "15771304468671@lid", limit=20
+            "15771304468671@lid", limit=20, download_media=True
         )
         # i 3 messaggi sono stati ingeriti, inclusi i miei (is_mine=True)
         assert len(ingested) == 3
@@ -4753,7 +4756,9 @@ def test_fetch_history_negative_caches_no_lid_500_for_session():
     assert backend.fetch_history("123@c.us") == []
     assert backend.fetch_history("123@c.us") == []
 
-    backend._rest.list_messages.assert_called_once_with("123@c.us", limit=20)
+    backend._rest.list_messages.assert_called_once_with(
+        "123@c.us", limit=20, download_media=True
+    )
 
 
 def _book_contact_cus(phone: str, lid: str | None = None) -> ChatContact:
@@ -4794,8 +4799,8 @@ def test_fetch_history_falls_back_to_lid_when_cus_empty():
     result = backend.fetch_history(cus, limit=20)
 
     assert backend._rest.list_messages.call_args_list == [
-        call(cus, limit=20),
-        call(lid, limit=20),
+        call(cus, limit=20, download_media=True),
+        call(lid, limit=20, download_media=True),
     ]
     assert len(result) == 1
     assert backend.cache[cus][0]["text"] == "ciao dal lid"
@@ -4812,7 +4817,9 @@ def test_fetch_history_no_lid_fallback_when_cus_has_data():
 
     result = backend.fetch_history(cus, limit=20)
 
-    backend._rest.list_messages.assert_called_once_with(cus, limit=20)
+    backend._rest.list_messages.assert_called_once_with(
+        cus, limit=20, download_media=True
+    )
     assert len(result) == 1
     assert backend.cache[cus][0]["text"] == "ciao"
 
@@ -4826,7 +4833,7 @@ def test_fetch_history_cus_not_blacklisted_when_lid_fallback_exists():
     backend._contacts_by_jid[cus] = _book_contact_cus(phone, lid)
     backend._rest = MagicMock()
 
-    def stub(chat_id, limit=20):
+    def stub(chat_id, limit=20, download_media=True):
         if chat_id == cus:
             backend._rest.last_status = 500
             backend._rest.last_error = "No LID for user 15771304468671"
@@ -4842,7 +4849,12 @@ def test_fetch_history_cus_not_blacklisted_when_lid_fallback_exists():
 
     # Una seconda fetch ritenta ancora il ``@c.us`` (nessuna blacklist).
     assert backend.fetch_history(cus, limit=20)
-    assert backend._rest.list_messages.call_args_list.count(call(cus, limit=20)) == 2
+    assert (
+        backend._rest.list_messages.call_args_list.count(
+            call(cus, limit=20, download_media=True)
+        )
+        == 2
+    )
 
 
 def test_fetch_history_blacklists_lid_when_both_no_lid():
@@ -4854,7 +4866,7 @@ def test_fetch_history_blacklists_lid_when_both_no_lid():
     backend._contacts_by_jid[cus] = _book_contact_cus(phone, lid)
     backend._rest = MagicMock()
 
-    def stub(chat_id, limit=20):
+    def stub(chat_id, limit=20, download_media=True):
         backend._rest.last_status = 500
         backend._rest.last_error = "No LID for user 15771304468671"
         return []
@@ -4883,8 +4895,8 @@ def test_resolve_fetch_lid_prefers_contact_extras_over_phone_cache():
 
     backend._phone_to_lid.assert_not_called()
     assert backend._rest.list_messages.call_args_list == [
-        call(cus, limit=20),
-        call(extras_lid, limit=20),
+        call(cus, limit=20, download_media=True),
+        call(extras_lid, limit=20, download_media=True),
     ]
 
 
@@ -4904,8 +4916,8 @@ def test_resolve_fetch_lid_falls_back_to_phone_cache():
 
     backend._phone_to_lid.assert_called_once_with(phone)
     assert backend._rest.list_messages.call_args_list == [
-        call(cus, limit=20),
-        call(cache_lid, limit=20),
+        call(cus, limit=20, download_media=True),
+        call(cache_lid, limit=20, download_media=True),
     ]
 
 

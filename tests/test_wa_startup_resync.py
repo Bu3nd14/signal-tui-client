@@ -49,7 +49,7 @@ class TestResyncHistory:
             {"id": "222@lid", "isGroup": False, "unreadCount": 3, "timestamp": now},
         ]
 
-        def fake_list(cid, limit=1):
+        def fake_list(cid, limit=1, download_media=False):
             return [
                 {
                     "id": f"m_{cid}",
@@ -87,7 +87,7 @@ class TestResyncHistory:
         backend._active_chats = {"222@lid": (1, 0)}
         backend._rest._request.return_value = []  # nessuna unread da /chats
 
-        def boom(cid, limit=1):
+        def boom(cid, limit=1, download_media=False):
             raise RuntimeError("wa down")
 
         backend._rest.list_messages.side_effect = boom

@@ -681,12 +681,18 @@ class WhatsAppRESTClient:
         )
         return result if isinstance(result, dict) else None
 
-    def list_messages(self, chat_id: str, limit: int = 1) -> list[dict]:
+    def list_messages(
+        self, chat_id: str, limit: int = 1, *, download_media: bool = True
+    ) -> list[dict]:
         """Fetch recent messages of a chat via ``GET /api/messages``.
 
         WAHA returns a list of message objects (``body`` holds the text, ``from``
         the JID, ``fromMe`` a bool, ``timestamp`` in seconds).  Returns ``[]`` on
         any error so callers can treat a slow/unreachable API as non-fatal.
+
+        ``download_media`` maps to WAHA's ``downloadMedia`` query flag.  The
+        startup bulk resync passes ``False`` to fetch metadata/text only; the
+        default ``True`` keeps the chat-open behavior unchanged.
 
         Usato SOLO per il caricamento dello storico di una chat all'apertura
         (``fetch_history``) — NON più per un polling periodico: la ricezione live
@@ -697,7 +703,9 @@ class WhatsAppRESTClient:
         """
         result = self._request(
             "GET",
-            f"/api/messages?session={self.session_name}&chatId={chat_id}&limit={int(limit)}",
+            f"/api/messages?session={self.session_name}&chatId={chat_id}"
+            f"&limit={int(limit)}"
+            f"&downloadMedia={'true' if download_media else 'false'}",
             timeout=30,
         )
         if not isinstance(result, list):
