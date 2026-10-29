@@ -2096,3 +2096,188 @@ class TestRefreshNotConnectedGuards:
 
         assert result.errors == "daemon not running"
         backend._load_contacts_subprocess.assert_not_called()
+
+
+# ─── Design v2.2 — resolver force/rebuild + guardia B3 (stale-usable) ──────
+
+
+_WA_PHONE = "393464997828"
+_WA_LID = "228668437729356@lid"
+
+
+def _wa_book_contact(phone: str, name: str = "Book") -> ChatContact:
+    return ChatContact(
+        id=f"{phone}@c.us",
+        display_name=name,
+        protocol=PROTOCOL_WHATSAPP,
+        extras={
+            "phone": phone,
+            "jid": f"{phone}@c.us",
+            "address_book": True,
+            "source": "wa_book",
+        },
+    )
+
+
+class TestWALidResolverForceAndB3:
+    def _ready(self) -> WhatsAppBackend:
+        backend = _wa_backend()
+        backend.start_lid_resolver = MagicMock()
+        backend._lid_map = {}
+        backend._rest.list_contacts.return_value = None
+        return backend
+
+    def test_t7_candidates_branch_uses_force_and_replaces_stale(
+        self, monkeypatch, tmp_path
+    ):
+        import protocols.db as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        backend = self._ready()
+        backend.contacts = [_chat("111@lid")]
+        backend._rest.resolve_contact.return_value = {
+            "id": "393331112222@c.us",
+            "name": "Luca",
+        }
+        backend._rest.list_all_contacts.return_value = []
+        backend._address_book = ["stale"]
+
+        with (
+            patch("time.sleep"),
+            patch.object(backend, "_lid_cache_save"),
+            patch.object(
+                backend, "list_address_book_sync", wraps=backend.list_address_book_sync
+            ) as spy,
+        ):
+            backend._lid_resolver_run()
+
+        spy.assert_called_once_with(force=True, start_resolver=False)
+        assert backend._address_book is not None
+        assert "stale" not in backend._address_book
+
+    def test_t7_bulk_only_branch_uses_force_and_replaces_stale(
+        self, monkeypatch, tmp_path
+    ):
+        import protocols.db as backend_mod
+
+        monkeypatch.setattr(backend_mod, "CACHE_DIR", tmp_path)
+        backend = self._ready()
+        backend.contacts = []
+        backend._rest.list_lids.return_value = [{"lid": "111@lid", "pn": "39333@c.us"}]
+        backend._rest.list_all_contacts.return_value = []
+        backend._address_book = ["stale"]
+
+        with (
+            patch("time.sleep"),
+            patch.object(backend, "_lid_cache_save"),
+            patch.object(
+                backend, "list_address_book_sync", wraps=backend.list_address_book_sync
+            ) as spy,
+        ):
+            backend._lid_resolver_run()
+
+        spy.assert_called_once_with(force=True, start_resolver=False)
+        assert backend._address_book is not None
+        assert "stale" not in backend._address_book
+
+    def test_t11_interamente_vuoto_conserva_entry_wa_book(self):
+        backend = self._ready()
+        backend._rest.list_all_contacts.return_value = [
+            {"id": f"{_WA_PHONE}@c.us", "name": "Rudy", "pushname": None}
+        ]
+
+        first = backend.list_address_book_sync(force=True)
+        assert [str(c.id) for c in first] == [f"{_WA_PHONE}@c.us"]
+
+        backend._rest.list_all_contacts.return_value = []
+        second = backend.list_address_book_sync(force=True)
+
+        assert [str(c.id) for c in second] == [f"{_WA_PHONE}@c.us"]
+        assert backend.find_contact(f"{_WA_PHONE}@c.us") is not None
+
+    def test_t11b_stale_string_fixture_is_defensive(self):
+        backend = self._ready()
+        backend._rest.list_all_contacts.return_value = []
+        backend._address_book = ["stale"]  # type: ignore[list-item]
+
+        result = backend.list_address_book_sync(force=True)
+
+        assert result == []
+        assert backend._address_book is not None
+        assert "stale" not in backend._address_book
+
+    def test_t11c_gen1_entry_not_mutated_and_not_reused(self):
+        backend = self._ready()
+        backend._rest.list_all_contacts.return_value = [
+            {"id": f"{_WA_PHONE}@c.us", "name": "Rudy", "pushname": None}
+        ]
+
+        gen1 = backend.list_address_book_sync(force=True)
+        gen1_entry = gen1[0]
+        gen1_id = gen1_entry.id
+        gen1_extras = dict(gen1_entry.extras)
+
+        backend._lid_map = {
+            _WA_LID: {"phone": _WA_PHONE, "name": None, "resolved_at": int(time.time())}
+        }
+        backend.contacts = [_chat(_WA_LID, "Chat")]
+        backend._rest.list_all_contacts.return_value = []
+
+        gen2 = backend.list_address_book_sync(force=True)
+
+        assert gen1_entry is not gen2[0]
+        assert gen1_entry.id == gen1_id
+        assert gen1_entry.extras == gen1_extras
+        assert str(gen2[0].id) == _WA_LID
+
+    def test_t11d_published_list_has_no_duplicate_ids(self):
+        backend = self._ready()
+        previous = ChatContact(
+            id=_WA_LID,
+            display_name="Prev",
+            protocol=PROTOCOL_WHATSAPP,
+            extras={"phone": _WA_PHONE, "source": "wa_book"},
+        )
+        backend._address_book = [previous]
+        backend.contacts = [_chat(_WA_LID, "Chat")]
+        backend._rest.list_all_contacts.return_value = []
+
+        result = backend.list_address_book_sync(force=True)
+
+        ids = [str(c.id) for c in result]
+        assert ids.count(_WA_LID) == 1
+        assert len(ids) == len(set(ids))
+
+    def test_t12_primo_build_vuoto_committa_lista_vuota(self):
+        backend = self._ready()
+        backend._rest.list_all_contacts.return_value = []
+        backend._address_book = None
+
+        result = backend.list_address_book_sync(force=True)
+
+        assert result == []
+        assert backend._address_book == []
+        assert backend._address_book is not None
+
+    def test_t13_resolved_name_reapplied_on_refresh(self):
+        backend = self._ready()
+        backend._lid_map = {
+            _WA_LID: {"phone": _WA_PHONE, "name": None, "resolved_at": int(time.time())}
+        }
+        backend._address_book = [_wa_book_contact(_WA_PHONE, name="Rubrica")]
+        backend._rest.list_all_contacts.return_value = [
+            {"id": f"{_WA_PHONE}@c.us", "name": "Rubrica", "pushname": None}
+        ]
+        target = _chat(_WA_LID, "Chat")
+        backend.contacts = [target]
+        backend._contacts_by_jid = {_WA_LID: target}
+        backend._mention_lid_resolver_stop = True
+
+        backend._apply_contact_lid_resolution(_WA_LID, _WA_PHONE)
+        assert backend._address_book is not None
+
+        refreshed = backend.list_address_book_sync(force=True)
+        entry = next(c for c in refreshed if c.extras.get("phone") == _WA_PHONE)
+
+        assert str(entry.id) == _WA_LID
+        assert entry.display_name == "Rubrica"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import socket
 import urllib.request
 
@@ -66,15 +67,19 @@ def test_listens_on_every_host(monkeypatch):
     monkeypatch.setattr("web.uploads.prepare_upload_directory", lambda: None)
     port = _free_port()
     handle = start_web_server(
-        _API(), port, "tok", host="127.0.0.1,127.0.0.2", require_auth=True
+        _API(), port, "tok", host="127.0.0.1,::1", require_auth=True
     )
     try:
         assert handle is not None and handle.status == "up"
         assert _health("127.0.0.1", port) == 200
-        assert _health("127.0.0.2", port) == 200
-        # Not bound on the wildcard: another loopback address is refused.
-        with pytest.raises(OSError):
-            _health("127.0.0.3", port)
+        assert _health("[::1]", port) == 200
+        # Bound exactly on the requested hosts, never on the wildcard.
+        bound = {
+            (sock.getsockname()[0], sock.getsockname()[1])
+            for srv in handle.server.servers
+            for sock in srv.sockets
+        }
+        assert bound == {("127.0.0.1", port), ("::1", port)}
     finally:
         stop_web_server(handle)
 
@@ -82,17 +87,21 @@ def test_listens_on_every_host(monkeypatch):
 def test_one_unbindable_host_brings_the_web_down(monkeypatch):
     monkeypatch.setattr("web.uploads.prepare_upload_directory", lambda: None)
     port = _free_port()
-    with socket.socket() as busy:
-        busy.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        busy.bind(("127.0.0.2", port))
-        busy.listen()
-        handle = start_web_server(
-            _API(), port, "tok", host="127.0.0.1,127.0.0.2", require_auth=True
-        )
-        try:
-            assert handle is not None and handle.status == "down"
-        finally:
-            stop_web_server(handle)
-    # The socket bound for 127.0.0.1 was released.
+    real_bind = socket.socket.bind
+
+    def fake_bind(sock, address):
+        if address[0] == "::1":
+            raise OSError(errno.EADDRINUSE, "Address already in use")
+        return real_bind(sock, address)
+
+    monkeypatch.setattr(socket.socket, "bind", fake_bind)
+    handle = start_web_server(
+        _API(), port, "tok", host="127.0.0.1,::1", require_auth=True
+    )
+    try:
+        assert handle is not None and handle.status == "down"
+    finally:
+        stop_web_server(handle)
+    # The socket bound for 127.0.0.1 was released (the fake leaves it alone).
     with socket.socket() as again:
         again.bind(("127.0.0.1", port))
