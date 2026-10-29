@@ -345,11 +345,13 @@ class WhatsAppBackend(ChatBackend):
         self._lid_attempt_cooldown: dict[str, float] = {}
 
         # ── Address book (rubrica completa) ────────────────────────────
+        #: Parte ``None`` e dopo il primo build non torna mai ``None``: un fetch
+        #: interamente vuoto non rimuove mai le entry wa_book, una risposta non
+        #: vuota ri-sincronizza completamente (la guardia B3 ignora ``force``).
         self._address_book: list[ChatContact] | None = None
         self._address_book_ts: float = 0.0
         #: Gruppi (@g.us) noti dalla /chats paginata: registry DUREVOLE in
-        #: memoria, mai azzerato dai ``self._address_book = None`` (resolver
-        #: LID ecc.). Popolato in ``list_address_book_sync``; consultato da
+        #: memoria. Popolato in ``list_address_book_sync``; consultato da
         #: ``find_contact`` come ultimo fallback zero-rete. Ricostruito a ogni
         #: connect via ``_load_contacts`` (non serve persistenza su disco).
         #: Read-mostly: le scritture/letture single-key sono atomiche sotto GIL.
@@ -1419,6 +1421,28 @@ class WhatsAppBackend(ChatBackend):
                     extras=extras,
                 )
 
+            # B3 (stale-usable): un fetch riuscito ma INTERAMENTE vuoto (book == [])
+            # non rimuove MAI le entry wa_book già presenti; qualsiasi risposta NON
+            # vuota ri-sincronizza completamente. La guardia IGNORA `force`.
+            # N1: difesa su elementi non-ChatContact (fixture "stale" = str in lista).
+            # N2: pubblica COPIE (replace), mai gli oggetti della generazione
+            #     precedente (il merge successivo muta in place e non deve toccare
+            #     gen1).
+            if not by_phone and self._address_book is not None:
+                for prev in self._address_book:
+                    prev_extras = getattr(prev, "extras", None)
+                    if not isinstance(prev_extras, dict):
+                        continue
+                    if (
+                        prev_extras.get("source") != "wa_book"
+                        or prev_extras.get("phone") is None
+                    ):
+                        continue
+                    phone = str(prev_extras["phone"])
+                    if phone in by_phone:
+                        continue
+                    by_phone[phone] = replace(prev, extras=dict(prev_extras))
+
             out_extra: list[ChatContact] = []
             for chat in chats:
                 cid = chat.id
@@ -1485,7 +1509,16 @@ class WhatsAppBackend(ChatBackend):
                         )
                     )
 
-            self._address_book = list(by_phone.values()) + out_extra
+            final = list(by_phone.values()) + out_extra
+            seen: set[str] = set()
+            deduped: list[ChatContact] = []
+            for contact in final:
+                cid = str(contact.id)
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                deduped.append(contact)
+            self._address_book = deduped
             self._address_book_ts = now
         except Exception:
             logger.warning("WhatsApp address book build failed", exc_info=True)
@@ -1532,10 +1565,10 @@ class WhatsAppBackend(ChatBackend):
     def find_address_book_contact(self, contact_id: str) -> ChatContact | None:
         """Cerca un contatto nella cache rubrica in-memory (zero rete).
 
-        Ritorna il contatto con l'id del client (es. ``@c.us``), NON riscrive
-        l'id: la risoluzione ``@c.us`` → ``@lid`` avviene tramite alias in
-        ``_contacts_by_jid`` (``register_contact``).  Snapshot locale per
-        evitare TOCTOU: il resolver background può azzerare ``_address_book``.
+        Ritorna l'entry così com'è (l'id può essere ``@lid`` dopo il merge di
+        ``list_address_book_sync``); l'invio resta comunque sul ``contact_id``
+        del client.  Snapshot locale per evitare TOCTOU: ``_address_book`` può
+        essere sostituita in modo asincrono, ma mai azzerata dopo il primo build.
         """
         book = self._address_book
         if book is None:
@@ -1543,7 +1576,23 @@ class WhatsAppBackend(ChatBackend):
         for contact in book:
             if str(contact.id) == contact_id:
                 return contact
-        return None
+        # B1 fallback: solo id canonico "{digits}@c.us" (NON "+393…@c.us" né altri
+        # prefissi), dopo il miss esatto. Un rebuild può aver riscritto l'id
+        # @c.us → @lid (merge in list_address_book_sync); ritrova per telefono.
+        # Unicità del telefono garantita da by_phone.
+        digits = _jid_digits(contact_id)
+        if not digits or contact_id != f"{digits}@c.us":
+            return None
+        matches = [
+            c
+            for c in book
+            if not (c.extras or {}).get("lid_unresolved")
+            and str((c.extras or {}).get("phone")) == digits
+        ]
+        for c in matches:
+            if str(c.id).endswith("@c.us"):
+                return c
+        return matches[0] if matches else None
 
     def _phone_to_lid(self, phone: str) -> str | None:
         """Reverse lookup: phone → ``@lid`` dalla cache LID (zero rete).
@@ -1728,10 +1777,9 @@ class WhatsAppBackend(ChatBackend):
             ]
             if not candidates:
                 if bulk:
-                    self._address_book = None
                     try:
                         book = self.list_address_book_sync(
-                            force=False, start_resolver=False
+                            force=True, start_resolver=False
                         )
                         _apply_address_book_names(
                             self.contacts, _build_address_book_name_map(book)
@@ -1746,9 +1794,8 @@ class WhatsAppBackend(ChatBackend):
                     logger.debug("lid resolve failed for %s", jid, exc_info=True)
                 time.sleep(0.3)
             self._lid_cache_save()
-            self._address_book = None
             try:
-                book = self.list_address_book_sync(force=False, start_resolver=False)
+                book = self.list_address_book_sync(force=True, start_resolver=False)
                 _apply_address_book_names(
                     self.contacts, _build_address_book_name_map(book)
                 )
@@ -2868,7 +2915,6 @@ class WhatsAppBackend(ChatBackend):
             if _is_placeholder_display_name(target.display_name, jid, phone):
                 target.display_name = new_name or target.display_name
 
-        self._address_book = None
         self._enqueue_event(
             ChatEvent(
                 type="contact_update",

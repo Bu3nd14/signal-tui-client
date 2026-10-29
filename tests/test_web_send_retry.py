@@ -825,6 +825,9 @@ assert.equal(outbox.classifyHttpFailure({ status: 422 }), "terminal");
 assert.equal(outbox.classifyHttpFailure({ status: 501 }), "terminal");
 assert.equal(outbox.classifyHttpFailure({ status: 502 }), "retryable");
 assert.equal(outbox.classifyHttpFailure({ status: 400 }), "terminal");
+// PINNING (Design v2.2 §6.4, T10): cache rubrica mai popolata (es. outbox
+// dopo riavvio core) ⇒ 404 terminale. Limite noto, Follow-up §9.1.
+assert.equal(outbox.classifyHttpFailure({ status: 404 }), "terminal");
 
 assert.equal(outbox.computeClientDelay(1, () => 0), 1000);
 assert.equal(outbox.computeClientDelay(1, () => 1), 2000);

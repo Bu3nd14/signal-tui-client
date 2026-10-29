@@ -5872,3 +5872,62 @@ class TestWhatsAppWebhookConfig:
         with patch.object(client, "update_session_config", return_value=None):
             client.last_status = 500
             assert client.configure_webhook() is False
+
+
+# ─── Design v2.2 — cache mai None dopo il primo build (T6) + M3 (T8) ────────
+
+
+class TestAddressBookNeverNoneAfterFirstBuild:
+    @staticmethod
+    def _book(phone: str = "393464997828") -> ChatContact:
+        return ChatContact(
+            id=f"{phone}@c.us",
+            display_name="Book",
+            protocol=PROTOCOL_WHATSAPP,
+            extras={
+                "phone": phone,
+                "jid": f"{phone}@c.us",
+                "address_book": True,
+                "source": "wa_book",
+            },
+        )
+
+    def test_t6_apply_contact_lid_resolution_keeps_populated_book(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._lid_map = {}
+        entry = self._book()
+        backend._address_book = [entry]
+        backend._mention_lid_resolver_stop = True
+        target = ChatContact(
+            id="228668437729356@lid",
+            display_name="Chat",
+            protocol=PROTOCOL_WHATSAPP,
+            extras={"jid": "228668437729356@lid"},
+        )
+        backend.contacts = [target]
+        backend._contacts_by_jid = {"228668437729356@lid": target}
+
+        backend._apply_contact_lid_resolution(
+            "228668437729356@lid", "393464997828"
+        )
+
+        assert backend._address_book is not None
+        assert entry in backend._address_book
+
+    def test_t8_transport_error_keeps_cache_and_does_not_bump_ts(self):
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._lid_map = {}
+        backend.start_lid_resolver = MagicMock()
+        entry = self._book()
+        backend._address_book = [entry]
+        backend._address_book_ts = 123.0
+        backend._rest.list_all_contacts.return_value = None
+
+        result = backend.list_address_book_sync(force=True)
+
+        assert result == [entry]
+        assert backend._address_book == [entry]
+        assert backend._address_book_ts == 123.0
+        assert backend.find_contact("393464997828@c.us") is entry

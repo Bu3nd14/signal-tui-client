@@ -105,6 +105,18 @@ def _wa_backend(*, book=None, contacts=None, lid_map=None):
     return backend
 
 
+def _mock_wa_rest(backend, *, book=None, chats_raw=None, bulk=None):
+    backend._rest = MagicMock()
+    backend._rest.list_all_contacts.return_value = list(book or [])
+    backend._rest.list_contacts.return_value = chats_raw
+    backend._rest.list_lids.return_value = list(bulk or [])
+    return backend._rest
+
+
+def _book_row(phone: str, name: str = "Book") -> dict:
+    return {"id": f"{phone}@c.us", "name": name, "pushname": None}
+
+
 class _RecordingManager:
     """Minimal manager that records the send surface used by ``/api/send``."""
 
@@ -626,6 +638,9 @@ class TestCacheSemantics:
         assert backend.find_contact("393@c.us") is book
 
     def test_missing_cache_returns_none_and_404(self):
+        # PINNING (Design v2.2 §6.4, T9): documenta il limite noto B2 — cache
+        # mai popolata (es. outbox che ritenta dopo un riavvio del core) ⇒ 404
+        # terminale. Non prova il fix; risoluzione tracciata nel Follow-up §9.1.
         backend = _wa_backend(book=None)
         assert backend.find_address_book_contact("393@c.us") is None
         manager = _RecordingManager(backend)
@@ -692,3 +707,169 @@ class TestRegisterContactContract:
         other = _wa_book_contact("393", name="Other")
         assert backend.register_contact(other) is False
         assert backend._contacts_by_jid["393@c.us"] is contact
+
+
+# ─── Design v2.2 — race target (B1/B3) ───────────────────────────────────────
+
+
+_PHONE = "393464997828"
+_LID = "228668437729356@lid"
+
+
+def _lid_entry(phone: str = _PHONE) -> dict:
+    return {"phone": phone, "name": None, "resolved_at": int(time.time())}
+
+
+class TestBookSendRace:
+    def test_t1_resolve_does_not_drop_book_then_send_succeeds(self):
+        book = _wa_book_contact(_PHONE, name="Book")
+        backend = _wa_backend(book=[book], lid_map={_LID: _lid_entry()})
+        backend._mention_lid_resolver_stop = True
+        manager = _RecordingManager(backend)
+
+        backend._apply_contact_lid_resolution(_LID, _PHONE)
+        assert backend._address_book is not None
+
+        with (
+            patch("server.api.ChatAPI.publish_web_push") as pushed,
+            TestClient(_app(manager)) as client,
+        ):
+            response = client.post(
+                "/api/send",
+                json={
+                    "protocol": "whatsapp",
+                    "contact_id": f"{_PHONE}@c.us",
+                    "text": "Ciao",
+                },
+            )
+
+        assert response.status_code == 200
+        assert len(manager.send_calls) == 1
+        assert manager.send_calls[0][1] == f"{_PHONE}@c.us"
+        assert pushed.call_args.args[0]["payload"]["contact_id"] == f"{_PHONE}@c.us"
+        assert book.extras["ghost"] is True
+
+    def test_t2_rebuild_rewrites_id_and_fallback_finds_by_phone(self):
+        book = _wa_book_contact(_PHONE, name="Book")
+        backend = _wa_backend(book=[book], lid_map={_LID: _lid_entry()})
+        backend._mention_lid_resolver_stop = True
+        _mock_wa_rest(backend, book=[_book_row(_PHONE)], chats_raw=[])
+
+        backend._apply_contact_lid_resolution(_LID, _PHONE)
+        result = backend.list_address_book_sync(force=True)
+
+        assert [str(c.id) for c in result] == [_LID]
+        found = backend.find_contact(f"{_PHONE}@c.us")
+        assert found is not None
+        assert found.extras["phone"] == _PHONE
+        assert backend.find_address_book_contact(f"{_PHONE}@c.us") is found
+
+    def test_t3_paginated_lid_chat_fallback_finds_by_phone(self):
+        book = _wa_book_contact(_PHONE, name="Book")
+        backend = _wa_backend(book=[book], lid_map={_LID: _lid_entry()})
+        _mock_wa_rest(
+            backend,
+            book=[_book_row(_PHONE)],
+            chats_raw=[{"id": _LID, "name": "Paged"}],
+        )
+
+        result = backend.list_address_book_sync(force=True)
+
+        assert [str(c.id) for c in result] == [_LID]
+        found = backend.find_contact(f"{_PHONE}@c.us")
+        assert found is not None
+        assert found.extras["phone"] == _PHONE
+
+    def test_t4_tie_break_discards_lid_unresolved(self):
+        """Difensivo: due entry dello stesso telefono costruite a mano nel book."""
+        resolved = _wa_book_contact(_PHONE, jid=_LID, name="Resolved")
+        unresolved = _wa_book_contact(
+            _PHONE, jid="111222333444555@lid", name="Unresolved"
+        )
+        unresolved.extras["lid_unresolved"] = True
+        backend = _wa_backend(book=[unresolved, resolved])
+
+        found = backend.find_address_book_contact(f"{_PHONE}@c.us")
+
+        assert found is resolved
+        assert not (found.extras or {}).get("lid_unresolved")
+
+    def test_t5_unknown_phone_stays_none(self):
+        backend = _wa_backend(book=[_wa_book_contact(_PHONE)])
+
+        assert backend.find_address_book_contact("399999999999@c.us") is None
+
+    def test_t5b_malformed_plus_id_does_not_use_fallback(self):
+        backend = _wa_backend(book=[_wa_book_contact(_PHONE)])
+
+        assert backend.find_address_book_contact(f"+{_PHONE}@c.us") is None
+
+
+# ─── Design v2.2 §6.6 — T14 stress concorrente ─────────────────────────────
+
+class TestConcurrentSendWhileBookRebuilds:
+    def test_t14_no_404_no_duplicate_no_exception(self):
+        book = _wa_book_contact(_PHONE, name="Book")
+        backend = _wa_backend(book=[book], lid_map={_LID: _lid_entry()})
+        backend._mention_lid_resolver_stop = True
+        rest = _mock_wa_rest(
+            backend,
+            book=[_book_row(_PHONE)],
+            chats_raw=[],
+            bulk=[{"lid": "999888777666555@lid", "pn": "39111@c.us"}],
+        )
+        manager = _RecordingManager(backend)
+        app = _app(manager)
+
+        total = 8
+        barrier = threading.Barrier(total + 1)
+        errors: list[BaseException] = []
+        statuses: list[int] = []
+        guard = threading.Lock()
+
+        def send_one(index: int) -> None:
+            try:
+                barrier.wait(timeout=5)
+                with TestClient(app) as client:
+                    response = client.post(
+                        "/api/send",
+                        json={
+                            "protocol": "whatsapp",
+                            "contact_id": f"{_PHONE}@c.us",
+                            "text": f"msg-{index}",
+                            "client_msg_id": f"race-{index}",
+                        },
+                    )
+                with guard:
+                    statuses.append(response.status_code)
+            except BaseException as exc:  # noqa: BLE001 - pragma: no cover, failure path
+                with guard:
+                    errors.append(exc)
+
+        def rebuild() -> None:
+            try:
+                barrier.wait(timeout=5)
+                for _ in range(10):
+                    backend._apply_contact_lid_resolution(_LID, _PHONE)
+                    backend._lid_resolver_run()
+            except BaseException as exc:  # noqa: BLE001 - pragma: no cover, failure path
+                with guard:
+                    errors.append(exc)
+
+        with (
+            patch("server.api.ChatAPI.publish_web_push"),
+            patch("time.sleep"),
+            patch.object(backend, "_lid_cache_save"),
+        ):
+            threads = [threading.Thread(target=send_one, args=(i,)) for i in range(total)]
+            threads.append(threading.Thread(target=rebuild))
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert errors == []
+        assert statuses == [200] * total
+        assert len(manager.send_calls) == total
+        assert rest.list_all_contacts.call_count >= 1
