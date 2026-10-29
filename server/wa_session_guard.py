@@ -110,13 +110,35 @@ class WhatsAppSessionGuardMixin:
                 delay = float(get_wa_session_poll_s())
             self._wa_guard_stop.wait(delay)
 
+    def wa_session_needs_pairing(self) -> bool:
+        """Whether the session waits for a QR scan (drives the web banner)."""
+        return self._wa_guard_state == NEEDS_PAIRING
+
+    def _wa_publish_link_required(self, required: bool) -> None:
+        """Tell the web clients the "needs QR" state changed (best effort)."""
+        try:
+            self.api.publish_web_push(
+                {
+                    "type": "link_required",
+                    "payload": {"protocol": "whatsapp", "required": required},
+                }
+            )
+        except Exception:
+            logger.debug(
+                "WA session guard: link_required publish failed", exc_info=True
+            )
+
     def note_wa_session_manual(self) -> None:
         """A user link/reconnect happened: pause restarts, clear sticky states."""
+        was_pairing = False
         with self._wa_guard_lock:
             self._wa_guard_next_attempt_at = self._wa_guard_clock() + MANUAL_COOLDOWN_S
             if self._wa_guard_state in (GAVE_UP, NEEDS_PAIRING):
+                was_pairing = self._wa_guard_state == NEEDS_PAIRING
                 self._wa_guard_state = UNKNOWN
                 self._wa_guard_failed_since = None
+        if was_pairing:
+            self._wa_publish_link_required(False)
 
     # -- decision step -----------------------------------------------------
 
@@ -134,6 +156,16 @@ class WhatsAppSessionGuardMixin:
         return RECOVERY_POLL_S if self._wa_guard_state == RECOVERING else poll
 
     def _wa_guard_step(self, poll: float) -> float:
+        """Run one decision and publish a NEEDS_PAIRING enter/leave transition."""
+        before = self._wa_guard_state == NEEDS_PAIRING
+        try:
+            return self._wa_guard_decide(poll)
+        finally:
+            after = self._wa_guard_state == NEEDS_PAIRING
+            if after != before:
+                self._wa_publish_link_required(after)
+
+    def _wa_guard_decide(self, poll: float) -> float:
         backend = self.whatsapp_backend
         if backend is None:
             return poll

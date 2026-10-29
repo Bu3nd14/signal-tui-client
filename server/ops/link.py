@@ -21,6 +21,7 @@ from server.models_api import (
     LinkPollOut,
     LinkProtocolRequest,
     LinkReconnectRequest,
+    LinkRequiredOut,
     LinkStartOut,
     LinkStartRequest,
     LinkStatusOut,
@@ -47,6 +48,12 @@ def _link_errors() -> Iterator[None]:
 def link_status(api: ChatAPI, req: EmptyRequest) -> LinkStatusOut:
     """Which protocols can be linked, the linked Signal number (no I/O)."""
     return LinkStatusOut.model_validate({"protocols": api.link.status()})
+
+
+@operation("link.required", request=EmptyRequest, response=LinkRequiredOut)
+def link_required(api: ChatAPI, req: EmptyRequest) -> LinkRequiredOut:
+    """Protocols whose session needs a new pairing QR (no I/O)."""
+    return LinkRequiredOut(protocols=api.link_required())
 
 
 @operation("link.start", request=LinkStartRequest, response=LinkStartOut)

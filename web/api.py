@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 from server.models_api import AttachmentIn
 from server.uploads import MAX_ATTACHMENTS, UploadValidationError
 from web import uploads as uploads_module
-from web.ops import call_op
+from web.ops import call_op, get_api
 from web.uploads import TempUpload, store_temp_upload
 
 logger = logging.getLogger(__name__)
@@ -358,6 +358,56 @@ def create_api_router() -> Any:
         request: Request, payload: dict[str, Any]
     ) -> dict[str, Any]:
         return await call_op(request, "reactions.set", payload)
+
+    async def _with_png_qr(request: Request, result: dict[str, Any]) -> dict[str, Any]:
+        """Render a ``url`` / ``text`` QR of an operation result to a PNG."""
+        qr = result.get("qr")
+        if qr:
+            result = {
+                **result,
+                "qr": await asyncio.to_thread(get_api(request.app).qr_as_png, qr),
+            }
+        return result
+
+    # Device linking: the ``link.*`` operations, plus the QR as a ready PNG for
+    # the browser.  Like the other POST routes they rely on the bearer auth.
+    # (``link.finalize`` / ``link.submit_2fa`` are not exposed yet.)
+
+    @router.get("/link/status")
+    async def link_status(request: Request) -> dict[str, Any]:
+        return await call_op(request, "link.status")
+
+    @router.get("/link/required")
+    async def link_required(request: Request) -> dict[str, Any]:
+        return await call_op(request, "link.required")
+
+    @router.post("/link/start")
+    async def link_start(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+        data = {
+            k: payload[k] for k in ("protocol", "phone", "device_name") if k in payload
+        }
+        return await _with_png_qr(request, await call_op(request, "link.start", data))
+
+    @router.post("/link/poll")
+    async def link_poll(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+        result = await call_op(
+            request, "link.poll", {"protocol": payload.get("protocol")}
+        )
+        return await _with_png_qr(request, result)
+
+    @router.post("/link/cancel")
+    async def link_cancel(request: Request, payload: dict[str, Any]) -> dict[str, Any]:
+        return await call_op(
+            request, "link.cancel", {"protocol": payload.get("protocol")}
+        )
+
+    @router.post("/link/reconnect")
+    async def link_reconnect(
+        request: Request, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await call_op(
+            request, "link.reconnect", {"protocols": payload.get("protocols")}
+        )
 
     @router.get("/media/{proto}/{attachment_id:path}")
     async def media(

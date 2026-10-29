@@ -446,3 +446,55 @@ class TestRestSurface:
         assert svc.is_active("whatsapp") is False
         svc._sessions["whatsapp"] = MagicMock()
         assert svc.is_active("whatsapp") is True
+
+
+class TestLinkRequiredFrame:
+    """``link_required`` legacy frames for the web banner."""
+
+    @staticmethod
+    def frames(env: Env) -> list[dict]:
+        return [e.payload["event"] for e in env.sub.drain() if e.type == "web_push"]
+
+    @staticmethod
+    def frame(required: bool) -> dict:
+        return {
+            "type": "link_required",
+            "payload": {"protocol": "whatsapp", "required": required},
+        }
+
+    def test_enter_publishes_once_and_state_flag(self, env):
+        assert env.core.wa_session_needs_pairing() is False
+        env.tick(QR)
+        env.tick(QR, 60)
+        env.tick(QR, 60)
+        assert env.core.wa_session_needs_pairing() is True
+        assert self.frames(env) == [self.frame(True)]
+
+    def test_leaving_via_working_publishes_false(self, env):
+        env.tick(QR)
+        self.frames(env)
+        env.tick(WORKING, 5)
+        assert env.core.wa_session_needs_pairing() is False
+        assert self.frames(env) == [self.frame(False)]
+        env.tick(WORKING, 5)
+        assert self.frames(env) == []
+
+    def test_leaving_via_stopped_publishes_false(self, env):
+        env.tick(QR)
+        self.frames(env)
+        env.tick({"status": "STOPPED"}, 5)
+        assert self.frames(env) == [self.frame(False)]
+
+    def test_manual_note_publishes_false_only_when_pairing(self, env):
+        env.core.note_wa_session_manual()
+        assert self.frames(env) == []
+        env.tick(QR)
+        self.frames(env)
+        env.core.note_wa_session_manual()
+        assert env.core.wa_session_needs_pairing() is False
+        assert self.frames(env) == [self.frame(False)]
+
+    def test_publish_failure_is_swallowed(self, env):
+        env.core.api.publish_web_push = MagicMock(side_effect=RuntimeError)  # type: ignore[method-assign]
+        env.tick(QR)
+        assert env.core.wa_session_needs_pairing() is True

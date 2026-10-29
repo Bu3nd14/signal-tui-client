@@ -610,8 +610,8 @@ h2 { font-size: 1.05rem; }
 .primary-button { padding: 9px 14px; border: 1px solid var(--accent); border-radius: 9px; background: var(--accent); color: white; cursor: pointer; }
 .primary-button[hidden] { display: none; }
 
-#link-dialog, #settings-dialog { width: min(92vw, 520px); padding: 0; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--text); box-shadow: 0 24px 80px #000b; }
-#link-dialog::backdrop, #settings-dialog::backdrop { background: #05080dcf; backdrop-filter: blur(3px); }
+#link-dialog, #settings-dialog, #account-link-dialog { width: min(92vw, 520px); padding: 0; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--text); box-shadow: 0 24px 80px #000b; }
+#link-dialog::backdrop, #settings-dialog::backdrop, #account-link-dialog::backdrop { background: #05080dcf; backdrop-filter: blur(3px); }
 .link-dialog-content { padding: 24px; }
 .link-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .link-dialog-close { width: 34px; height: 34px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--muted); font-size: 1.5rem; cursor: pointer; }
@@ -681,3 +681,21 @@ h2 { font-size: 1.05rem; }
 }
 
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }
+
+/* Dialog "Collega account" e banner "serve un nuovo collegamento" */
+.link-required-banner { background: #3b3320; color: #ffe9b0; }
+.link-required-actions { display: flex; align-items: center; gap: 10px; }
+.link-required-banner .link-required-show { padding: 5px 10px; border: 1px solid currentColor; border-radius: 8px; font-size: .8rem; color: inherit; }
+.link-option-button { cursor: pointer; color: var(--text); font: inherit; text-align: left; }
+.link-option-button:disabled { opacity: .55; cursor: not-allowed; }
+.link-option-button:not(:disabled):hover, .link-option-button:not(:disabled):focus-visible { outline: none; border-color: var(--accent); }
+.account-link-flow { display: grid; justify-items: center; gap: 4px; margin-top: 18px; text-align: center; }
+.account-link-flow[hidden], .account-link-qr[hidden], .account-link-text[hidden], .account-link-spinner[hidden] { display: none; }
+.account-link-qr { width: min(100%, 280px); height: auto; border-radius: 10px; background: white; image-rendering: pixelated; }
+.account-link-text { margin: 8px 0; white-space: pre-line; line-height: 1.45; }
+.account-link-hint { margin: 6px 0 0; font-size: .84rem; }
+.account-link-status { min-height: 1.3em; margin: 0; font-size: .86rem; }
+.account-link-spinner { width: 34px; height: 34px; margin: 20px 0; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: account-link-spin .9s linear infinite; }
+@keyframes account-link-spin { to { transform: rotate(360deg); } }
+.account-link-actions { display: flex; gap: 8px; margin-top: 12px; }
+.link-cancel-button { padding: 9px 14px; border: 1px solid var(--line); border-radius: 9px; background: transparent; color: var(--text); cursor: pointer; }
