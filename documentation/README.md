@@ -57,7 +57,7 @@ documentation/
 
 | Documento | Descrizione | Fonti principali |
 |---|---|---|
-| [TEST_OVERVIEW.md](test-suite/TEST_OVERVIEW.md) | Come eseguire i test (Makefile, pytest, venv `.venv-test`, test live gated `make live-test`, script legacy, CI con matrice 3.12/3.13) e mappa completa dei 66 file di test organizzati per area. | `pyproject.toml`, `Makefile`, `.github/workflows/ci.yml`, `tests/run_regression_tests.sh`, `tests/*.py`, `Telegram/*.py` |
+| [TEST_OVERVIEW.md](test-suite/TEST_OVERVIEW.md) | Come eseguire i test (Makefile, pytest, venv `.venv-test`, test live gated `make live-test`, script legacy, CI con matrice 3.13/3.14/3.15) e mappa completa dei 66 file di test organizzati per area. | `pyproject.toml`, `Makefile`, `.github/workflows/ci.yml`, `tests/run_regression_tests.sh`, `tests/*.py`, `Telegram/*.py` |
 | [TEST_COVERAGE.md](test-suite/TEST_COVERAGE.md) | Analisi qualitativa di copertura per area funzionale: aree robuste, coperte, parziali e lacune concrete. | `tests/*`, `docs/TEST_REPORT.md` (solo metriche registrate) |
 | [TEST_GUIDELINES.md](test-suite/TEST_GUIDELINES.md) | Convenzioni per scrivere test: fixture di `conftest.py`, naming, pattern ricorrenti (DB temporaneo, app headless, minimal backend), configurazione pytest. | `tests/conftest.py`, `Telegram/conftest.py`, `pyproject.toml` |
 

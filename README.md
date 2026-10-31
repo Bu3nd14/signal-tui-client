@@ -76,7 +76,7 @@ A terminal-based (TUI) multi-protocol messaging client built with [Textual](http
 
 | Requirement | Needed for | Notes |
 |---|---|---|
-| **Python 3.10+** | Everything | |
+| **Python 3.13+** | Everything | |
 | **Java 25 (JRE)** | Signal | Required by the `signal-cli` JVM build. Without it, Signal will not start. |
 | **signal-cli** (JVM build) in `./bin/` | Signal | Downloaded automatically by `install.sh`; see [Installation](#installation). |
 | **requirements-web.txt** | Web UI (optional) | Installed by default by install.sh (skip with --no-web). Never in requirements.txt by design. |
@@ -983,7 +983,7 @@ make lint                                   # ruff check
 make coverage                               # test + coverage (gate 68%)
 ```
 
-This suite also runs in CI (`.github/workflows/ci.yml`, Python 3.12/3.13).
+This suite also runs in CI (`.github/workflows/ci.yml`, Python 3.13/3.14/3.15).
 
 ### Verifica end-to-end
 
@@ -1140,7 +1140,7 @@ signal-tui-client/
 ├── launcher/                  # launcher.py's command implementations
 ├── Makefile                   # Shared commands: make test / lint / coverage / live-test
 ├── pyproject.toml             # Shared pytest / coverage / ruff config
-├── .github/workflows/ci.yml   # CI: lint + test (3.12/3.13 matrix) + coverage gate + Codecov
+├── .github/workflows/ci.yml   # CI: lint + test (3.13/3.14/3.15 matrix) + coverage gate + Codecov
 ├── requirements.txt           # Python dependencies (textual, telethon, qrcode, ...)
 ├── requirements-dev.txt       # Development dependencies (pytest, pytest-cov, coverage, ruff)
 ├── config.json                # Local configuration (not committed)

@@ -42,8 +42,8 @@ Note:
 
 ### CI (`.github/workflows/ci.yml`)
 
-- Job `lint`: `ruff check` + `ruff format --check` su Python 3.12, fail-fast per il job `test`.
-- Job `test`: matrice Python **3.12/3.13** (`fail-fast: false`) — la gamba 3.12 è quella "canonica" (`make coverage` con gate `fail_under = 68` + upload `coverage.xml` su Codecov via OIDC), la gamba 3.13 esegue solo `make test` (verifica cross-versione senza overhead di coverage).
+- Job `lint`: `ruff check` + `ruff format --check` su Python 3.13, fail-fast per il job `test`.
+- Job `test`: matrice Python **3.13/3.14/3.15** (`fail-fast: false`) — la gamba 3.13 è quella "canonica" (`make coverage` con gate `fail_under = 68` + upload `coverage.xml` su Codecov via OIDC), le gambe 3.14 e 3.15 eseguono solo `make test` (verifica cross-versione senza overhead di coverage).
 - Trigger: push su `master` + ogni pull request; concorrenza con cancel-in-progress.
 
 ## 2. Mappa dei test per area
