@@ -129,7 +129,18 @@ class TestDownloadSignalCli:
 
 class TestPrerequisites:
     def test_check_python_ok_for_current_interpreter(self, project: Path):
+        """Assunzione: l'interprete che esegue i test soddisfa il floor del repo (≥3.13)."""
         install.check_python()  # running interpreter satisfies the repo's own floor
+
+    def test_check_python_too_old_dies(self, monkeypatch, capsys):
+        """Floor non soddisfatto → die con messaggio e hint."""
+        monkeypatch.setattr(install, "REQUIRED_PYTHON", (99, 0))
+        with pytest.raises(SystemExit):
+            install.check_python()
+        captured = capsys.readouterr()
+        assert "Python 99.0+ richiesto" in captured.err
+        assert "trovato" in captured.err
+        assert "brew install python@99.0" in captured.err
 
     def test_check_java_missing(self, project: Path, monkeypatch):
         monkeypatch.setattr(install, "command_exists", lambda name: False)

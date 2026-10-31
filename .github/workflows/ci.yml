@@ -2,9 +2,10 @@
 # CI — Signal TUI Client (TYPE CHECK + LINT + TEST con coverage gate + Codecov)
 #
 # Trigger : push su `master` + `pull_request` (le feature branch NON triggerano).
-# Matrice : Python 3.12 + 3.13 — runner ubuntu-latest.
-#   · 3.12 (coverage) → `make coverage` (gate fail_under=68) + upload Codecov (OIDC)
-#   · 3.13 (test)     → `make test` (verifica cross-versione, senza overhead coverage)
+# Matrice : Python 3.13 + 3.14 + 3.15 — runner ubuntu-latest.
+#   · 3.13 (coverage) → `make coverage` (gate fail_under=68) + upload Codecov (OIDC)
+#   · 3.14 (test)     → `make test` (verifica cross-versione, senza overhead coverage)
+#   · 3.15 (test)     → `make test` (verifica cross-versione, senza overhead coverage)
 #
 # Fonte di verità: `pyproject.toml` (pytest/coverage/ruff/basedpyright) e `Makefile`
 # (comandi condivisi locale/CI — decisione C). Il workflow resta "minimo".
@@ -46,7 +47,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.12"          # il lint non è sensibile alla versione
+          python-version: "3.13"          # il lint non è sensibile alla versione
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
@@ -70,7 +71,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: pip
           cache-dependency-path: requirements-dev.txt
 
@@ -96,9 +97,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - python-version: "3.12"
-            coverage: true     # gamba "canonica": gate coverage + upload Codecov
           - python-version: "3.13"
+            coverage: true     # gamba "canonica": gate coverage + upload Codecov
+          - python-version: "3.14"
+            coverage: false    # solo test: copre i bug cross-versione
+          - python-version: "3.15"
             coverage: false    # solo test: copre i bug cross-versione
 
     steps:
@@ -120,14 +123,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt -r requirements-web.txt
 
-      # Gamba coverage (3.12): `make coverage` = pytest --cov --cov-report=term-missing
+      # Gamba coverage (3.13): `make coverage` = pytest --cov --cov-report=term-missing
       # --cov-report=xml. Applica il gate `fail_under = 68` (pyproject.toml) e genera
       # coverage.xml. Fallisce il job se la coverage scende sotto la baseline.
       - name: Test con coverage e gate (soglia 68%)
         if: matrix.coverage
         run: make coverage
 
-      # Gamba solo-test (3.13): stessa suite, senza overhead di coverage.
+      # Gambe solo-test (3.14 + 3.15): stessa suite, senza overhead di coverage.
       - name: Esegui la suite di test
         if: ${{ ! matrix.coverage }}
         run: make test
@@ -156,7 +159,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: pip
           cache-dependency-path: |
             requirements.txt

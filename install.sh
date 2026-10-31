@@ -42,7 +42,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$PROJECT_DIR/bin"
 REPO="AsamK/signal-cli"
 REQUIRED_PYTHON_MAJOR=3
-REQUIRED_PYTHON_MINOR=10
+REQUIRED_PYTHON_MINOR=13
 REQUIRED_JAVA_MAJOR=25
 
 # Flag di default
@@ -542,7 +542,7 @@ check_python() {
     local minor="${ver#*.}"; minor="${minor%%.*}"
     if [ "$major" -lt "$REQUIRED_PYTHON_MAJOR" ] || \
        { [ "$major" -eq "$REQUIRED_PYTHON_MAJOR" ] && [ "$minor" -lt "$REQUIRED_PYTHON_MINOR" ]; }; then
-        die "Python ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}+ richiesto, trovato $ver."
+        die "Python ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}+ richiesto, trovato $ver. Installa Python ${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR} o superiore e riprova (macOS/Homebrew: 'brew install python@${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}' | Debian/Ubuntu: 'sudo apt install python${REQUIRED_PYTHON_MAJOR}.${REQUIRED_PYTHON_MINOR}')."
     fi
     ok "Python $ver trovato."
 }

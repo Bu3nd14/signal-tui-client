@@ -43,8 +43,14 @@ omit = [
 fail_under = 68
 show_missing = true
 
+# Floor Python dichiarato: 3.13 — scelta di policy (allineamento alla matrice CI
+# 3.13/3.14/3.15 e ai target tooling sotto), non un requisito di linguaggio: il
+# minimo tecnico reale del codice è 3.11 (`from datetime import UTC`). Enforced a
+# runtime da install.sh `REQUIRED_PYTHON_MINOR` e launcher/install.py
+# `REQUIRED_PYTHON`. Nessuna tabella `[project]`: il progetto non è un pacchetto installabile.
+
 [tool.ruff]
-target-version = "py312"
+target-version = "py313"
 line-length = 88
 exclude = ["profiling", ".opencode"]
 # Ruff 0.16 formatta anche i blocchi Python dentro il markdown: i documenti di
@@ -61,7 +67,7 @@ typeCheckingMode = "off"
 # protocols/whatsapp.py (771), protocols/whatsapp_events.py (350),
 # protocols/whatsapp_rest.py (158).
 strict = ["protocols/base.py", "models.py"]
-pythonVersion = "3.12"
+pythonVersion = "3.13"
 exclude = [".venv", ".venv-test", "__pycache__"]
 
 [tool.ruff.lint]
