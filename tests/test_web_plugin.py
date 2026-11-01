@@ -20,6 +20,7 @@ import pytest
 from client_harness import api_for
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from send_response import strip_ids
 
 from models import ChatContact
 from protocols.base import ChatBackend
@@ -2672,9 +2673,9 @@ def test_web_send_text_dedup_but_attachments_stay_legacy(web_client):
     second = client.post("/api/send", json=payload, headers=AUTH)
 
     assert first.status_code == 200
-    assert first.json() == {"ok": True}
+    assert strip_ids(first.json()) == {"ok": True}
     assert second.status_code == 200
-    assert second.json() == {"ok": True, "duplicate": True}
+    assert strip_ids(second.json()) == {"ok": True, "duplicate": True}
     assert len(manager.send_calls) == 1
 
     for _ in range(2):

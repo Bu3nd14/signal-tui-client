@@ -70,6 +70,7 @@ from .whatsapp_events import (
     _event_from_reaction,  # noqa: F401  re-export for tests
     _event_from_receipt,  # noqa: F401  re-export for tests
     _event_from_typing,  # noqa: F401  re-export for tests
+    _is_hd_child,
     _jid_string,
     canonical_msg_id,
 )
@@ -480,10 +481,17 @@ class WhatsAppBackend(ChatBackend):
                     ack_text = content.get("body") or content.get("text") or ""
                     ack_has_media = bool(content.get("hasMedia"))
                     ack_media = content.get("media")
+                    hd_child = _is_hd_child(content)
                     skip_ack_message = (
-                        ack_has_media
-                        and not (isinstance(ack_media, dict) and ack_media.get("url"))
-                    ) or (not ack_has_media and not str(ack_text).strip())
+                        hd_child
+                        or (
+                            ack_has_media
+                            and not (
+                                isinstance(ack_media, dict) and ack_media.get("url")
+                            )
+                        )
+                        or (not ack_has_media and not str(ack_text).strip())
+                    )
 
                     # ── Edit detection (message.ack with a new body) ──────
                     # An outgoing edit arrives as message.ack with the SAME id
@@ -491,7 +499,7 @@ class WhatsAppBackend(ChatBackend):
                     # message_edit event instead of a synthetic "message" (which
                     # would mount a duplicate bubble).
                     if skip_ack_message:
-                        if ack_has_media:
+                        if ack_has_media and not hd_child:
                             self._schedule_media_resolve(ack_contact, str(ack_id))
                         logger.debug(
                             "Skipping empty synthetic WhatsApp ack: id=%s hasMedia=%s",
@@ -2069,6 +2077,19 @@ class WhatsAppBackend(ChatBackend):
         # cronologicamente, poi li ingeriamo nel cache.
         msgs = [m for m in raw if isinstance(m, dict)]
         msgs.sort(key=lambda m: int(m.get("timestamp") or 0))
+        # Id canonici di TUTTI i messaggi della pagina remota: una riga locale
+        # il cui id compare qui è un messaggio remoto distinto, mai il "ghost"
+        # di un altro messaggio con lo stesso testo (history reconcile).
+        remote_ids = frozenset(
+            cid
+            for cid in (
+                canonical_msg_id(
+                    str(m.get("id") or (m.get("key") or {}).get("id") or "")
+                )
+                for m in msgs
+            )
+            if cid
+        )
         # Snapshot della cache PRIMA di questa ingestione: il confronto
         # per l'edit-detection sotto deve avvenire solo contro messaggi già
         # noti da una fetch/sessione precedente, mai contro "fratelli" dello
@@ -2083,6 +2104,10 @@ class WhatsAppBackend(ChatBackend):
         read_ids: set[str] = set()
         delivered_ids: set[str] = set()
         for m in msgs:
+            # HD dual upload: il child HD duplica il parent SD (vedi
+            # ``_is_hd_child``); saltarlo qui evita anche il download inutile.
+            if _is_hd_child(m):
+                continue
             media = m.get("media")
             if (
                 resolve_media
@@ -2165,6 +2190,7 @@ class WhatsAppBackend(ChatBackend):
                     },
                     payload.get("timestamp", 0),
                     reconcile=True,
+                    remote_ids=remote_ids,
                 )
 
                 ack = payload.get("ack")
@@ -3486,6 +3512,7 @@ class WhatsAppBackend(ChatBackend):
         *,
         msg_type: str = "text",
         reconcile: bool = False,
+        remote_ids: frozenset[str] | None = None,
     ) -> dict | None:
         """Return the cached message matching the same identity, or ``None``.
 
@@ -3578,17 +3605,40 @@ class WhatsAppBackend(ChatBackend):
             and not attachment_id
             and msg_type == "text"
         ):
-            candidates = [
-                msg
-                for msg in entries
-                if msg.get("is_mine")
-                and msg.get("text") == text
-                and msg.get("msg_type") == "text"
-                and not msg.get("attachment_id")
-            ]
+            candidates = self._reconcile_text_candidates(
+                contact_id, text, ts, remote_ids
+            )
             if len(candidates) == 1:
                 return candidates[0]
         return None
+
+    def _reconcile_text_candidates(
+        self,
+        contact_id: str,
+        text: str,
+        ts: int,
+        remote_ids: frozenset[str] | None,
+    ) -> list[dict]:
+        """Righe outgoing di testo che possono essere il "ghost" di *text*.
+
+        History reconcile: lo stesso invio può tornare dal REST con un id
+        diverso da quello del webhook (#198).  Un candidato è plausibile solo
+        se è VICINO nel tempo (``_ECHO_MATCH_WINDOW_MS``) e se il suo id NON è
+        tra quelli della pagina remota (altrimenti è un messaggio remoto
+        distinto).  Senza questi vincoli un "Grazie mille" di oggi veniva fuso
+        con quello di un mese prima e spariva.
+        """
+        remote = remote_ids or frozenset()
+        return [
+            msg
+            for msg in self.cache.get(contact_id, [])
+            if msg.get("is_mine")
+            and msg.get("text") == text
+            and msg.get("msg_type") == "text"
+            and not msg.get("attachment_id")
+            and abs(int(msg.get("timestamp") or 0) - ts) <= _ECHO_MATCH_WINDOW_MS
+            and not (msg.get("id") and canonical_msg_id(str(msg.get("id"))) in remote)
+        ]
 
     def _persist_message(self, contact_id: str, data: dict, ts: int) -> None:
         """Persist a message to the SQLite cache (WhatsApp protocol)."""
@@ -3836,6 +3886,7 @@ class WhatsAppBackend(ChatBackend):
         persist: bool = True,
         *,
         reconcile: bool = False,
+        remote_ids: frozenset[str] | None = None,
     ) -> bool | str:
         """Save an incoming/outgoing message to the DB cache and in-memory cache.
 
@@ -3867,6 +3918,7 @@ class WhatsAppBackend(ChatBackend):
             data.get("attachment_id"),
             msg_type=data.get("msg_type", "text"),
             reconcile=reconcile,
+            remote_ids=remote_ids,
         )
         if existing is not None:
             # R12 (follow-up, non bloccante): un edit INCOMING con lo stesso
@@ -3998,14 +4050,9 @@ class WhatsAppBackend(ChatBackend):
             and not data.get("attachment_id")
             and data.get("msg_type", "text") == "text"
         ):
-            candidates = [
-                msg
-                for msg in self.cache.get(contact_id, [])
-                if msg.get("is_mine")
-                and msg.get("text") == text
-                and msg.get("msg_type") == "text"
-                and not msg.get("attachment_id")
-            ]
+            candidates = self._reconcile_text_candidates(
+                contact_id, text, ts, remote_ids
+            )
             if len(candidates) >= 2:
                 logger.warning(
                     "history reconcile skipped ambiguous outgoing text "

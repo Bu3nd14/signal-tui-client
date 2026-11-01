@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from client_harness import api_for
 from pydantic import BaseModel
+from send_response import strip_ids
 
 import protocols.db as backend_db
 import server.api as server_api
@@ -268,7 +269,7 @@ def test_async_operation_messages_send(env):
             "client_msg_id": "c1",
         },
     )
-    assert reply["result"] == {"ok": True}
+    assert strip_ids(reply["result"]) == {"ok": True}
     assert env.manager.send_calls[0][:3] == ("signal", "alice", "Ciao")
 
 
@@ -396,7 +397,7 @@ def test_large_response_and_large_request_round_trip(env):
         "messages.send",
         {"protocol": "signal", "contact_id": "alice", "text": big[:4000]},
     )
-    assert reply["result"] == {"ok": True}
+    assert strip_ids(reply["result"]) == {"ok": True}
     client = env.connect()
     client.send(
         {"jsonrpc": "2.0", "id": 9, "method": "server.ping", "params": {"pad": big}}
@@ -820,7 +821,7 @@ def png(tmp_path):
 
 def test_attachment_is_copied_and_the_copy_cleaned_up(env, png):
     reply = _send(env.connect(), png)
-    assert reply["result"] == {"ok": True}
+    assert strip_ids(reply["result"]) == {"ok": True}
     (call,) = env.manager.attachment_calls
     (staged,) = call["paths"]
     assert staged != png and staged.parent == env.uploads  # the op saw our copy
@@ -839,7 +840,7 @@ def test_staged_copy_is_private_and_removed_when_the_send_fails(env, png):
 
 def test_missing_filename_defaults_to_the_basename(env, png):
     reply = _send(env.connect(), {"path": str(png)})
-    assert reply["result"] == {"ok": True}
+    assert strip_ids(reply["result"]) == {"ok": True}
 
 
 def test_wrong_extension_still_rejected(env, tmp_path):
@@ -868,9 +869,9 @@ def test_symlink_is_refused(env, png, tmp_path):
     real.mkdir()
     (real / "p.png").write_bytes(_PNG)
     (tmp_path / "dirlink").symlink_to(real)
-    assert _send(env.connect(), tmp_path / "dirlink" / "p.png")["result"] == {
-        "ok": True
-    }
+    assert strip_ids(
+        _send(env.connect(), tmp_path / "dirlink" / "p.png")["result"]
+    ) == {"ok": True}
 
 
 def test_special_files_and_directories_are_refused(env, tmp_path):
@@ -959,7 +960,7 @@ def test_check_operation_never_sees_client_paths(env, png):
             "attachments": [{"path": "/etc/passwd"}],
         },
     )
-    assert reply["result"] == {"ok": True}
+    assert strip_ids(reply["result"]) == {"ok": True}
 
 
 def test_attachment_policy_covers_every_operation_with_attachments(env):

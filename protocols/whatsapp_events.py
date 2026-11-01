@@ -527,6 +527,26 @@ def _wa_security_notice_text(
     return "Il codice di sicurezza di un contatto è cambiato."
 
 
+def _is_hd_child(raw: dict | None) -> bool:
+    """True se *raw* è il messaggio figlio HD di un "HD dual upload".
+
+    Una foto/video HD su WhatsApp viaggia come DUE messaggi distinti: il
+    parent SD (``pairedMediaType: SD_IMAGE_PARENT``, visibile, con caption)
+    e, ~1 s dopo, il child HD (``associationType: HD_IMAGE_DUAL_UPLOAD``,
+    ``pairedMediaType: HD_IMAGE_CHILD``, ``viewMode: HIDDEN``, ``parentMsgKey``
+    che punta al parent).  I client ufficiali mostrano solo il parent: il
+    child va scartato, altrimenti la chat mostra la stessa foto due volte.
+
+    Accetta sia il messaggio WAHA intero (legge ``_data``) sia ``_data``.
+    """
+    if not isinstance(raw, dict):
+        return False
+    data = raw.get("_data") if isinstance(raw.get("_data"), dict) else raw
+    association = str(data.get("associationType") or "").upper()
+    paired = str(data.get("pairedMediaType") or "").upper()
+    return "DUAL_UPLOAD" in association or paired.endswith("_CHILD")
+
+
 def _event_from_message(
     raw: dict,
     contacts_by_jid: dict | None = None,
@@ -592,6 +612,10 @@ def _event_from_message(
     # Gli status (storie) arrivano con JID "status@broadcast": non sono
     # messaggi di chat, li ignoriamo del tutto (niente ingestione in cache/DB).
     if "@broadcast" in chat_jid:
+        return []
+
+    # HD dual upload: il child HD nascosto duplica il parent SD già mostrato.
+    if _is_hd_child(raw):
         return []
 
     data_type = str(

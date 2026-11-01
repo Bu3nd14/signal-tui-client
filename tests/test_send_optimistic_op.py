@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from client_harness import client_for
 from event_harness import legacy_frames
+from send_response import strip_ids
 
 import protocols.db as backend_mod
 from models import PROTOCOL_SIGNAL, PROTOCOL_TELEGRAM, ChatContact
@@ -289,7 +290,7 @@ def test_client_msg_id_makes_a_replayed_call_a_duplicate(env):
     again = env.call(ts=1_000_001, client_msg_id="c-1")
 
     assert first["status"] == "sent"
-    assert again == {"ok": True, "duplicate": True}
+    assert strip_ids(again) == {"ok": True, "duplicate": True}
     assert env.send.call_count == 1
 
 
