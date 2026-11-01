@@ -334,6 +334,8 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, Any
         if outcome == "sent":
             if value.get("fingerprint") != fingerprint:
                 raise ApiError("unprocessable", "Client message id conflict")
+            # Design §8.3: la risposta duplicate omette gli id (niente
+            # ``message_ids``), la bolla è già riconciliata dal primo invio.
             return {"ok": True, "duplicate": True}
         if outcome == "inflight":
             # Un altro handler sta inviando: retryable lato client.  Nessuna
@@ -343,6 +345,9 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, Any
 
     succeeded = False
     message_id: str | None = None
+    # Id reali creati dal backend, restituiti al client web per accoppiare in
+    # modo deterministico la bolla optimistic alla riga reale.
+    sent_ids: list[str] = []
     failure: ApiError | None = None
     last_error: str | None = None
     # Optimistic flavour: True once the sender's row is ``pending`` (seeded or
@@ -362,7 +367,7 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, Any
             batch_id = req.batch_id
             if not isinstance(batch_id, str) or not batch_id.strip():
                 batch_id = None
-            await asyncio.to_thread(
+            attachment_ids = await asyncio.to_thread(
                 manager.send_attachments_sync,
                 protocol,
                 contact_id,
@@ -376,6 +381,7 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, Any
                 filenames=[upload.filename for upload in uploads],
                 **kwargs,
             )
+            sent_ids = [str(mid) for mid in (attachment_ids or []) if mid]
             succeeded = True
         else:
             # Ramo TESTO: retry con backoff esponenziale + jitter.
@@ -402,6 +408,7 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, Any
                     _log_send_duration(protocol, contact_id, started)
                     if result is not None:
                         message_id = str(result)
+                        sent_ids = [message_id]
                     succeeded = True
                     break
                 except Exception as exc:
@@ -504,7 +511,7 @@ async def messages_send(api: ChatAPI, req: MessagesSendRequest) -> dict[str, Any
             },
         }
     )
-    return {"ok": True}
+    return {"ok": True, "message_ids": sent_ids}
 
 
 def _log_send_duration(protocol: str, contact_id: str, started: float) -> None:

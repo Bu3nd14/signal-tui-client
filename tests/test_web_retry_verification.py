@@ -15,6 +15,8 @@ from base64 import b64decode
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from send_response import strip_ids
+
 try:  # CI installa httpx2 (requirements-web); il modulo httpx può mancare
     import httpx2 as httpx
 except ModuleNotFoundError:  # pragma: no cover - ambiente locale con httpx
@@ -92,7 +94,7 @@ def test_indep_duplicate_same_payload_single_send():
     with patch("server.api.ChatAPI.publish_web_push"), TestClient(app) as client:
         first = _send(client, client_msg_id="cid-x")
         second = _send(client, client_msg_id="cid-x")
-    assert first.status_code == 200 and first.json() == {"ok": True}
+    assert first.status_code == 200 and strip_ids(first.json()) == {"ok": True}
     assert second.status_code == 200 and second.json() == {
         "ok": True,
         "duplicate": True,
@@ -141,8 +143,8 @@ def test_indep_different_contact_is_separate_key_not_conflict():
         first = _send(client, contact_id="alice", client_msg_id="cid-shared")
         second = _send(client, contact_id="bob", client_msg_id="cid-shared")
     assert first.status_code == 200 and second.status_code == 200
-    assert first.json() == {"ok": True}
-    assert second.json() == {"ok": True}
+    assert strip_ids(first.json()) == {"ok": True}
+    assert strip_ids(second.json()) == {"ok": True}
     assert len(manager.send_calls) == 2
 
 
@@ -174,7 +176,7 @@ def test_indep_502_releases_inflight_and_allows_later_retry():
         state["fail"] = False
         second = _send(client, client_msg_id="cid-502")
     assert second.status_code == 200
-    assert second.json() == {"ok": True}
+    assert strip_ids(second.json()) == {"ok": True}
     assert len(manager.send_calls) == 1 + 3  # 3 tentativi falliti + 1 riuscito
 
 
@@ -205,7 +207,7 @@ def test_indep_inflight_409_then_release_allows_retry():
         registry.release(key, token)
         allowed = _send(client, client_msg_id="cid-inflight")
     assert allowed.status_code == 200
-    assert allowed.json() == {"ok": True}
+    assert strip_ids(allowed.json()) == {"ok": True}
     assert registry.snapshot(key)["status"] == "sent"
     assert calls.count("Ciao") == 1
 
@@ -841,10 +843,10 @@ async def test_indep_concurrent_same_id_produces_single_send():
             response1 = await first
 
     assert response1.status_code == 200
-    assert response1.json() == {"ok": True}
+    assert strip_ids(response1.json()) == {"ok": True}
     assert response2.status_code in (409, 200)
     if response2.status_code == 200:
-        assert response2.json() == {"ok": True, "duplicate": True}
+        assert strip_ids(response2.json()) == {"ok": True, "duplicate": True}
     else:
         assert response2.json() == {"detail": "Send in progress"}
     assert calls == ["Ciao"], f"invii multipli: {calls}"

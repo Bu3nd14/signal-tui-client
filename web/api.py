@@ -116,7 +116,7 @@ def create_api_router() -> Any:
         return await call_op(request, "reactions.available", {"protocol": protocol})
 
     @router.post("/send")
-    async def send(request: Request) -> dict[str, bool]:
+    async def send(request: Request) -> dict[str, Any]:
         """Transport only: CSRF/size checks, body parsing, uploads -> temp files.
 
         Everything else (validation, idempotency, retry, the backend calls and

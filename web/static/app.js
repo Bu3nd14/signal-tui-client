@@ -3314,7 +3314,7 @@ function sendOutboxRecord(record) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
-  });
+  }).then(readSendResult);
 }
 
 function onOutboxUpdate(record) {
@@ -3327,6 +3327,7 @@ function onOutboxUpdate(record) {
     item.outbox_id = record.id;
     if (status === "sending") item.optimisticStatus = "sending";
     else item.optimisticStatus = status;
+    if (status === "sent" && record.result) applyServerMessageIds([item], record.result);
     changed = true;
   }
   if (changed && state.active) {
@@ -3541,6 +3542,7 @@ async function submitMessage() {
   }
   console.debug("[web] optimistic", { protocol: active.protocol, optimistic_ids: optimisticItems.map((item) => item.optimistic_id), attachments: attachments.length, hasPreview: optimisticItems.some((item) => item.localPreviewUrl) });
   state.optimistic.push(...optimisticItems);
+  let sendResult = {};
   if (useOutbox) {
     const record = {
       id: `out-${clientMsgId}`,
@@ -3608,14 +3610,15 @@ async function submitMessage() {
       for (const [key, value] of Object.entries(quotePayload)) body.set(key, String(value));
       // append (non set): il campo "file" e' ripetuto per ciascun allegato.
       for (const attachment of attachments) body.append("file", attachment.file, attachment.filename);
-      await apiFetch("api/send", { method: "POST", body });
+      sendResult = await readSendResult(await apiFetch("api/send", { method: "POST", body }));
     } else {
-      await apiFetch("api/send", {
+      sendResult = await readSendResult(await apiFetch("api/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ protocol: active.protocol, contact_id: active.id, text, client_msg_id: clientMsgId, ...quotePayload }),
-      });
+      }));
     }
+    applyServerMessageIds(optimisticItems, sendResult);
     for (const optimistic of optimisticItems) optimistic.optimisticStatus = "sent";
     // R2: lo staging viene svuotato solo a invio riuscito; su errore gli
     // allegati restano disponibili per il retry manuale.
@@ -3635,6 +3638,26 @@ async function submitMessage() {
       elements.messageInput.focus();
     }
   }
+}
+
+// Corpo JSON di /api/send ({ok, message_ids}); mai un errore: una risposta
+// illeggibile lascia solo l'accoppiamento per signature.
+async function readSendResult(response) {
+  try {
+    const body = await response.json();
+    return body && typeof body === "object" ? body : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+// Id reale assegnato dal backend a un invio a bolla singola: permette alla
+// reconciliation di accoppiare la bolla optimistic senza signature. Con N
+// bolle (multi-allegato) decide il pairing per slot batch_id/batch_index.
+function applyServerMessageIds(items, result) {
+  const ids = Array.isArray(result?.message_ids) ? result.message_ids.filter(Boolean) : [];
+  if (items.length !== 1 || ids.length !== 1) return;
+  items[0].server_message_id = String(ids[0]);
 }
 
 function encodeToken(token) {

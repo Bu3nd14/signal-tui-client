@@ -80,7 +80,11 @@ function messageMediaType(message) {
     const category = mimeType.toLowerCase().split("/", 1)[0];
     if (["image", "video", "audio"].includes(category)) return category;
   }
-  return "attachment";
+  // Mime assente (file senza type dal browser): l'estensione del nome evita
+  // che la bolla optimistic risulti "attachment" e la riga reale "image".
+  const byName = mediaTypeFromFilename(message.attachment.name)
+    || mediaTypeFromFilename(message.attachment.attachment_id);
+  return byName && byName !== "attachment" ? byName : "attachment";
 }
 
 function signatureText(message) {
@@ -219,6 +223,7 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
     }
   });
 
+  const identities = new Set(messages.map((message, index) => messageIdentity(message, index)));
   const local = optimistic.filter((item) => item.protocol === protocol && item.contactId === contactId);
   const consumed = new Set(local
     .filter((item) => !item.optimistic_id && item.confirmed_message_id)
@@ -272,7 +277,23 @@ function reconcileOptimisticMessages(messages, optimistic, protocol, contactId) 
     .sort((a, b) => b.timestamp - a.timestamp);
   const candidates = [...singleCandidates, ...multiFallbacks];
 
+  // Id reale restituito da /api/send: accoppiamento deterministico, prima di
+  // qualunque signature (che diverge ad esempio su immagine+caption).
+  const pending = [];
   for (const item of candidates) {
+    const serverId = item.server_message_id == null ? null : String(item.server_message_id);
+    if (serverId && identities.has(serverId) && !consumed.has(serverId)) {
+      const { optimistic_id: ignored, ...confirmed } = item;
+      void ignored;
+      confirmed.confirmed_message_id = serverId;
+      reconciled.set(item.optimistic_id, confirmed);
+      consumed.add(serverId);
+      continue;
+    }
+    pending.push(item);
+  }
+
+  for (const item of pending) {
     const known = new Set(item.known_message_ids || []);
     const exactMatches = realBySignature.get(messageSignature(item)) || [];
     const looseMatches = realByLooseSignature.get(messageLooseSignature(item)) || [];

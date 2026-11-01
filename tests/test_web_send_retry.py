@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from send_response import strip_ids
 
 from models import ChatContact
 from server.retry import (
@@ -263,7 +264,7 @@ def test_send_success_first_attempt_no_retry():
     ):
         response = _send_text(client, client_msg_id="cid-1")
     assert response.status_code == 200
-    assert response.json() == {"ok": True}
+    assert strip_ids(response.json()) == {"ok": True}
     assert len(calls) == 1
     assert _retry_payloads(pushed) == []
     assert delay_mock.call_count == 0
@@ -684,9 +685,9 @@ def test_send_duplicate_client_msg_id_is_idempotent():
         first = _send_text(client, client_msg_id="cid-dup")
         second = _send_text(client, client_msg_id="cid-dup")
     assert first.status_code == 200
-    assert first.json() == {"ok": True}
+    assert strip_ids(first.json()) == {"ok": True}
     assert second.status_code == 200
-    assert second.json() == {"ok": True, "duplicate": True}
+    assert strip_ids(second.json()) == {"ok": True, "duplicate": True}
     assert len(calls) == 1
 
 
@@ -719,8 +720,8 @@ def test_send_registry_is_scoped_per_contact():
     ):
         first = _send_text(client, contact_id="alice", client_msg_id="cid-shared")
         second = _send_text(client, contact_id="bob", client_msg_id="cid-shared")
-    assert first.json() == {"ok": True}
-    assert second.json() == {"ok": True}
+    assert strip_ids(first.json()) == {"ok": True}
+    assert strip_ids(second.json()) == {"ok": True}
     assert len(calls) == 2
 
 

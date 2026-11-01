@@ -18,6 +18,7 @@ from client_harness import api_for
 from event_harness import legacy_frames
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from send_response import strip_ids
 
 import protocols.db as backend_db
 from models import ChatContact
@@ -139,7 +140,7 @@ def test_json_text_send_matches_operation_and_publishes_message_frame(env):
     )
     assert response.status_code == 200
     expected = env.api.call_json("messages.send", _text(client_msg_id="op-1"))
-    assert response.json() == expected == {"ok": True}
+    assert strip_ids(response.json()) == strip_ids(expected) == {"ok": True}
     assert [call[:3] for call in env.manager.send_calls] == [
         ("signal", "alice", "Ciao")
     ] * 2
@@ -160,9 +161,9 @@ def test_request_body_cannot_select_local_frontend_modes(env):
     )
 
     assert json_response.status_code == 200
-    assert json_response.json() == {"ok": True}
+    assert strip_ids(json_response.json()) == {"ok": True}
     assert form_response.status_code == 200
-    assert form_response.json() == {"ok": True}
+    assert strip_ids(form_response.json()) == {"ok": True}
     # Plain web flavour: manager send (mirror path) + the web's own frame only.
     assert [call[:3] for call in env.manager.send_calls] == [
         ("signal", "alice", "Ciao")
@@ -174,9 +175,11 @@ def test_duplicate_client_msg_id_is_idempotent_like_the_operation(env):
     first = env.client.post("/api/send", json=_text(client_msg_id="dup"), headers=AUTH)
     second = env.client.post("/api/send", json=_text(client_msg_id="dup"), headers=AUTH)
     via_op = env.api.call_json("messages.send", _text(client_msg_id="dup"))
-    assert first.json() == {"ok": True}
+    assert strip_ids(first.json()) == {"ok": True}
     assert second.status_code == 200
-    assert second.json() == via_op == {"ok": True, "duplicate": True}
+    assert (
+        strip_ids(second.json()) == strip_ids(via_op) == {"ok": True, "duplicate": True}
+    )
     assert len(env.manager.send_calls) == 1
     assert _frames(env) == [_MESSAGE_FRAME]
 
@@ -258,7 +261,7 @@ def test_backend_failure_retries_then_502_like_the_operation(env):
     again = env.client.post(
         "/api/send", json=_text(client_msg_id="retry-1"), headers=AUTH
     )
-    assert again.json() == {"ok": True}
+    assert strip_ids(again.json()) == {"ok": True}
 
 
 def test_terminal_backend_failure_is_502_without_retry_frames(env):
@@ -335,7 +338,7 @@ def test_json_body_cannot_inject_attachment_paths(env):
         json=_text(attachments=[{"path": str(secret), "filename": "secret.png"}]),
         headers=AUTH,
     )
-    assert response.json() == {"ok": True}
+    assert strip_ids(response.json()) == {"ok": True}
     assert env.manager.attachments_calls == []
     assert len(env.manager.send_calls) == 1
     assert secret.exists()
@@ -382,7 +385,7 @@ def test_multipart_attachments_match_operation_and_temp_files_are_removed(env):
         },
     )
     assert response.status_code == 200
-    assert response.json() == via_op == {"ok": True}
+    assert strip_ids(response.json()) == strip_ids(via_op) == {"ok": True}
     route_call, op_call = env.manager.attachments_calls
     assert route_call == op_call
     assert route_call["existed"] == [True, True]
@@ -398,7 +401,7 @@ def test_multipart_attachments_match_operation_and_temp_files_are_removed(env):
 def test_attachments_are_not_deduplicated_or_retried(env):
     for _ in range(2):
         response = _multipart(env, [("a.png", _PNG, "image/png")], client_msg_id="x")
-        assert response.json() == {"ok": True}
+        assert strip_ids(response.json()) == {"ok": True}
     assert len(env.manager.attachments_calls) == 2
 
 
@@ -575,7 +578,10 @@ def test_multipart_quote_timestamp_form_conversion(env):
         files={"unrelated": ("x.txt", b"x", "text/plain")},
         headers=AUTH,
     )
-    assert (ok.json(), empty.json()) == ({"ok": True}, {"ok": True})
+    assert (strip_ids(ok.json()), strip_ids(empty.json())) == (
+        {"ok": True},
+        {"ok": True},
+    )
     assert env.manager.send_calls[0][3]["quote_timestamp"] == 123
     assert env.manager.send_calls[1][3]["quote_timestamp"] is None
     assert (bad.status_code, bad.json()) == (400, {"detail": "Invalid request"})
@@ -702,7 +708,7 @@ def test_duplicate_and_inflight_text_sends_store_nothing(env, store_spy):
     # or an in-flight duplicate; the route must not touch the upload dir.
     first = env.client.post("/api/send", json=_text(client_msg_id="k"), headers=AUTH)
     replay = env.client.post("/api/send", json=_text(client_msg_id="k"), headers=AUTH)
-    assert (first.json(), replay.json()) == (
+    assert (strip_ids(first.json()), strip_ids(replay.json())) == (
         {"ok": True},
         {"ok": True, "duplicate": True},
     )
@@ -729,7 +735,7 @@ def test_failed_upload_store_takes_no_claim_and_sends_nothing(env, monkeypatch):
     assert env.manager.attachments_calls == []
     # No registry entry was left behind: the same id is free for a text send.
     retry = env.client.post("/api/send", json=_text(client_msg_id="same"), headers=AUTH)
-    assert retry.json() == {"ok": True}
+    assert strip_ids(retry.json()) == {"ok": True}
 
 
 def test_check_operation_is_registered_and_sends_nothing(env):

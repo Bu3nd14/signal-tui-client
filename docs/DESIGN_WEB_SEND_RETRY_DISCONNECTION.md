@@ -614,6 +614,13 @@ La risposta `{"ok": true, "duplicate": true}` **omette** `message_id` e
 `timestamp`: il client non ne ha bisogno (la bolla è già riconciliata via echo)
 e ometterli evita di esporre identità interne/inceppare la riconciliazione.
 
+Aggiornamento (fix dedup bolla doppia): la risposta di un invio **riuscito**
+(non duplicate) porta `message_ids`, gli id reali creati dal backend.  Il
+client li salva come `server_message_id` sulla bolla optimistic quando
+l'invio produce una sola bolla e una sola riga; `reconcileOptimisticMessages`
+accoppia per quell'id prima di qualunque signature.  Le signature restano il
+fallback (outbox ripristinato, multi-allegato, id assente).
+
 ---
 
 ## 9. Riconciliazione e test

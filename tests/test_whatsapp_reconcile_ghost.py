@@ -257,3 +257,83 @@ def test_fetch_history_reconciles_remote_id_without_ghost(tmp_db):
     assert len(backend.cache[CID]) == 1
     assert backend.cache[CID][0]["id"] == "local-id"
     assert [row[0] for row in _rows(tmp_db)] == ["local-id"]
+
+
+# ── Bug "Grazie mille": il reconcile non deve fondere invii lontani nel tempo ──
+
+_WEEK_MS = 7 * 24 * 3600 * 1000
+
+
+def test_reconcile_same_text_weeks_apart_is_a_new_message(tmp_db):
+    backend = _backend()
+    assert backend.ingest_message(CID, _message("OLD", "Grazie mille"), TS)
+
+    assert backend.ingest_message(
+        CID, _message("NEW", "Grazie mille"), TS + 4 * _WEEK_MS, reconcile=True
+    )
+
+    assert [m["id"] for m in backend.cache[CID]] == ["OLD", "NEW"]
+    assert [row[0] for row in _rows(tmp_db)] == ["OLD", "NEW"]
+
+
+def test_reconcile_old_ambiguous_candidates_do_not_skip(tmp_db, caplog):
+    backend = _backend()
+    backend.ingest_message(CID, _message("X", "OK"), TS)
+    backend.ingest_message(CID, _message("Y", "OK"), TS + 1000)
+
+    with caplog.at_level(logging.WARNING, logger="protocols.whatsapp"):
+        assert backend.ingest_message(
+            CID, _message("Z", "OK"), TS + _WEEK_MS, reconcile=True
+        )
+
+    assert [m["id"] for m in backend.cache[CID]] == ["X", "Y", "Z"]
+    assert "ambiguous outgoing text" not in caplog.text
+
+
+def test_reconcile_candidate_present_in_remote_page_is_distinct(tmp_db):
+    backend = _backend()
+    assert backend.ingest_message(CID, _message("X", "OK"), TS)
+
+    # X è nella stessa pagina remota: è un messaggio distinto, non il ghost di Z.
+    assert backend.ingest_message(
+        CID,
+        _message("Z", "OK"),
+        TS + 2000,
+        reconcile=True,
+        remote_ids=frozenset({"X", "Z"}),
+    )
+
+    assert [m["id"] for m in backend.cache[CID]] == ["X", "Z"]
+
+
+def test_fetch_history_keeps_repeated_text_sent_from_phone(tmp_db):
+    backend = _backend()
+    backend._rest = MagicMock()
+    backend._presence_subscribe_lazy = MagicMock()
+    old_id = "true_391234567890@c.us_3A000000000000000001"
+    new_id = "true_391234567890@c.us_3A000000000000000002"
+    new_ts = TS + 4 * _WEEK_MS
+    backend.ingest_message(CID, _message(old_id, "Grazie mille"), TS)
+    backend._rest.list_messages.return_value = [
+        {
+            "id": old_id,
+            "to": CID,
+            "fromMe": True,
+            "timestamp": TS // 1000,
+            "body": "Grazie mille",
+            "ack": 3,
+        },
+        {
+            "id": new_id,
+            "to": CID,
+            "fromMe": True,
+            "timestamp": new_ts // 1000,
+            "body": "Grazie mille",
+            "ack": 3,
+        },
+    ]
+
+    backend.fetch_history(CID)
+
+    assert [m["id"] for m in backend.cache[CID]] == [old_id, new_id]
+    assert len(_rows(tmp_db)) == 2

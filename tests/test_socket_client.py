@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from pydantic import BaseModel
+from send_response import strip_ids
 from test_socket_adapter import _Manager
 
 import protocols.db as backend_db
@@ -316,7 +317,7 @@ def test_send_with_an_attachment_path(server, client, tmp_path):
             "attachments": [{"path": str(pic), "filename": "pic.png"}],
         },
     )
-    assert reply == {"ok": True}
+    assert strip_ids(reply) == {"ok": True}
     (call,) = server.manager.attachment_calls
     assert call["bytes"] == [_PNG]
     assert pic.read_bytes() == _PNG
