@@ -146,7 +146,6 @@ const elements = {
   connection: document.querySelector("#connection-state"),
   errorBanner: document.querySelector("#error-banner"),
   errorText: document.querySelector("#error-text"),
-  linkDialog: document.querySelector("#link-dialog"),
   settingsDialog: document.querySelector("#settings-dialog"),
   accountLinkDialog: document.querySelector("#account-link-dialog"),
   accountLinkChooser: document.querySelector("#account-link-chooser"),
@@ -173,9 +172,6 @@ const elements = {
   cacheSizeSelect: document.querySelector("#cache-size-select"),
   backgroundSyncSelect: document.querySelector("#background-sync-select"),
   cacheStatus: document.querySelector("#cache-status"),
-  linkStatusSignal: document.querySelector("#link-status-signal"),
-  linkStatusWhatsapp: document.querySelector("#link-status-whatsapp"),
-  linkStatusTelegram: document.querySelector("#link-status-telegram"),
   openaiKeyInput: document.querySelector("#openai-key-input"),
   saveOpenaiKey: document.querySelector("#save-openai-key"),
   changeOpenaiKey: document.querySelector("#change-openai-key"),
@@ -223,7 +219,7 @@ function requestToken(invalid = false) {
   updateBackendStatuses();
   elements.tokenError.hidden = !invalid;
   elements.tokenInput.value = state.token;
-  if (!elements.linkDialog.open) elements.linkDialog.showModal();
+  if (!elements.settingsDialog.open) elements.settingsDialog.showModal();
   if (!invalid) loadTranscriptionConfig();
   window.setTimeout(() => elements.tokenInput.focus(), 0);
 }
@@ -594,13 +590,7 @@ function syncProtocolTabs() {
 }
 
 async function updateBackendStatuses() {
-  const statuses = {
-    signal: elements.linkStatusSignal,
-    whatsapp: elements.linkStatusWhatsapp,
-    telegram: elements.linkStatusTelegram,
-  };
   if (!state.token) {
-    for (const protocol of PROTOCOLS) statuses[protocol].textContent = "Non collegato";
     state.backendStatuses = null;
     syncProtocolTabs();
     return;
@@ -611,9 +601,6 @@ async function updateBackendStatuses() {
   try {
     const response = await apiFetch("api/status");
     const data = await response.json();
-    for (const protocol of PROTOCOLS) {
-      statuses[protocol].textContent = data[protocol] ? "Collegato" : "Non collegato";
-    }
     state.backendStatuses = {
       signal: data.signal === true,
       whatsapp: data.whatsapp === true,
@@ -2750,7 +2737,7 @@ async function toggleEmojiPicker() {
   }
   renderEmojiTabs();
   renderEmojiGrid();
-  if (elements.linkDialog.open) elements.linkDialog.close();
+  if (elements.settingsDialog.open) elements.settingsDialog.close();
   elements.emojiPicker.hidden = false;
   elements.emojiToggle.setAttribute("aria-expanded", "true");
   elements.emojiToggle.setAttribute("aria-label", "Chiudi selettore emoji");
@@ -4327,11 +4314,6 @@ document.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeMainMenu();
 });
-document.querySelector("#open-token").addEventListener("click", () => {
-  closeMainMenu();
-  requestToken();
-});
-
 document.querySelector("#open-account-link").addEventListener("click", () => {
   closeMainMenu();
   openAccountLinkDialog();
@@ -4365,6 +4347,9 @@ function updateCacheStatus() {
 document.querySelector("#open-settings").addEventListener("click", () => {
   closeMainMenu();
   updateCacheStatus();
+  void loadTranscriptionConfig();
+  elements.tokenInput.value = state.token;
+  elements.tokenError.hidden = true;
   if (!elements.settingsDialog.open) elements.settingsDialog.showModal();
 });
 document.querySelector("#close-settings-dialog").addEventListener("click", () => elements.settingsDialog.close());
@@ -4386,7 +4371,6 @@ document.querySelector("#clear-message-cache").addEventListener("click", async (
   elements.cacheStatus.textContent = "Cache svuotata";
   scheduleBackgroundSync();
 });
-document.querySelector("#close-link-dialog").addEventListener("click", () => elements.linkDialog.close());
 elements.stealthToggle.checked = state.stealth;
 elements.stealthToggle.addEventListener("change", () => {
   state.stealth = elements.stealthToggle.checked;
@@ -4812,7 +4796,7 @@ elements.saveToken.addEventListener("click", () => {
   state.token = token;
   localStorage.setItem(TOKEN_KEY, token);
   elements.tokenError.hidden = true;
-  elements.linkDialog.close();
+  elements.settingsDialog.close();
   updateTelegramRefreshTimer();
   // Rotazione token deliberata → clear dell'outbox (D6). Il login iniziale
   // (nessun token precedente) non cancella nulla perché la coda è vuota.

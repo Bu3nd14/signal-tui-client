@@ -610,8 +610,8 @@ h2 { font-size: 1.05rem; }
 .primary-button { padding: 9px 14px; border: 1px solid var(--accent); border-radius: 9px; background: var(--accent); color: white; cursor: pointer; }
 .primary-button[hidden] { display: none; }
 
-#link-dialog, #settings-dialog, #account-link-dialog { width: min(92vw, 520px); padding: 0; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--text); box-shadow: 0 24px 80px #000b; }
-#link-dialog::backdrop, #settings-dialog::backdrop, #account-link-dialog::backdrop { background: #05080dcf; backdrop-filter: blur(3px); }
+#settings-dialog, #account-link-dialog { width: min(92vw, 520px); padding: 0; border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--text); box-shadow: 0 24px 80px #000b; }
+#settings-dialog::backdrop, #account-link-dialog::backdrop { background: #05080dcf; backdrop-filter: blur(3px); }
 .link-dialog-content { padding: 24px; }
 .link-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .link-dialog-close { width: 34px; height: 34px; padding: 0; border: 1px solid transparent; border-radius: 9px; background: transparent; color: var(--muted); font-size: 1.5rem; cursor: pointer; }
