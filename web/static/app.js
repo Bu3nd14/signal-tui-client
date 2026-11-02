@@ -582,6 +582,9 @@ function syncProtocolTabs() {
     const next = connected[0] ?? null;
     if (next !== state.protocolFilter) {
       state.protocolFilter = next;
+      // Stesso motivo del click sui tab: la sotto-vista "Archiviate" non si
+      // eredita passando a un altro backend.
+      state.showArchived = false;
       if (next) localStorage.setItem(PROTOCOL_KEY, next);
       else localStorage.removeItem(PROTOCOL_KEY);
       changed = true;
@@ -4711,8 +4714,12 @@ if (elements.protocolTabs) {
     const tab = event.target.closest("[data-protocol]");
     if (!tab) return;
     const protocol = tab.dataset.protocol;
+    const switchingBackend = state.protocolFilter !== protocol;
     state.protocolFilter = protocol;
     localStorage.setItem(PROTOCOL_KEY, protocol);
+    // La sotto-vista "Archiviate" è un flag globale, non per backend: al
+    // cambio backend si riparte sempre dalla lista chat normale.
+    if (switchingBackend) state.showArchived = false;
     if (state.active && state.active.protocol !== protocol) {
       // Cambio backend con un thread aperto: si torna alla lista chat del
       // nuovo backend senza aprirne automaticamente la prima conversazione.
