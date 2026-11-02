@@ -4696,6 +4696,23 @@ if (elements.protocolTabs) {
     renderContacts();
   });
 }
+// Dedup ricerca contatti: lo stesso numero può comparire sia come chat @lid sia
+// come @c.us (rubrica), quindi la chiave normalizza il telefono/numero dal JID.
+const contactDedupKey = (contact) => {
+  const phone = String(contact.extras?.phone || "").replace(/\D/g, "");
+  const lid = String(contact.extras?.lid || contact.extras?.jid || "").replace(/\D/g, "");
+  return `${contact.protocol}:${phone || lid || contact.id}`;
+};
+const dedupeContacts = (contacts, seen = new Set()) => {
+  const output = [];
+  for (const contact of contacts) {
+    const key = contactDedupKey(contact);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(contact);
+  }
+  return output;
+};
 if (elements.contactSearch) {
   let searchTimer = null;
   let searchSeq = 0;
@@ -4720,7 +4737,7 @@ if (elements.contactSearch) {
       let chatResults = [];
       try {
         const response = await apiFetch(`api/contacts?q=${encodeURIComponent(trimmed)}`);
-        chatResults = await response.json();
+        chatResults = dedupeContacts(await response.json());
       } catch (error) {
         if (error.name !== "AbortError" && error.message !== "unauthorized") {
           console.debug("[web] contact search failed", error);
@@ -4737,8 +4754,13 @@ if (elements.contactSearch) {
         const bookResponse = await apiFetch(`api/contacts/book?q=${encodeURIComponent(trimmed)}`);
         const bookResults = await bookResponse.json();
         if (seq !== searchSeq || state.contactQuery !== query) return;
-        const seen = new Set(chatResults.map((contact) => `${contact.protocol}:${contact.id}`));
-        render([...chatResults, ...bookResults.filter((contact) => !seen.has(`${contact.protocol}:${contact.id}`))]);
+        const seen = new Set(chatResults.map(contactDedupKey));
+        render([...chatResults, ...bookResults.filter((contact) => {
+          const key = contactDedupKey(contact);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })]);
       } catch (error) {
         if (error.name !== "AbortError" && error.message !== "unauthorized") {
           console.debug("[web] address book search failed", error);
