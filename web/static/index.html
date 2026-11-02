@@ -25,9 +25,8 @@
           <button id="refresh-contacts" class="icon-button" type="button" aria-label="Ricarica conversazioni" title="Ricarica">↻</button>
           <button id="main-menu-button" class="icon-button" type="button" aria-label="Menu" title="Menu" aria-haspopup="menu" aria-expanded="false" aria-controls="main-menu"><span class="skin-default">☰</span><span class="skin-teams">⋯</span></button>
           <div id="main-menu" class="main-menu" role="menu" hidden>
-            <button id="open-settings" class="main-menu-item" type="button" role="menuitem">⚙ Impostazioni</button>
-            <button id="open-token" class="main-menu-item" type="button" role="menuitem">🔗 Collega backend</button>
-            <button id="open-account-link" class="main-menu-item" type="button" role="menuitem">📱 Collega account</button>
+            <button id="open-settings" class="main-menu-item" type="button" role="menuitem">Impostazioni</button>
+            <button id="open-account-link" class="main-menu-item" type="button" role="menuitem">Collega account</button>
           </div>
         </div>
       </header>
@@ -258,47 +257,6 @@
     </section>
   </div>
 
-  <dialog id="link-dialog" class="link-dialog">
-    <div class="link-dialog-content">
-      <div class="link-dialog-header">
-        <h2>Collega backend</h2>
-        <button id="close-link-dialog" class="link-dialog-close" type="button" aria-label="Chiudi">×</button>
-      </div>
-      <div class="link-options">
-        <div class="link-option">
-          <span class="link-option-name">Signal</span>
-          <span id="link-status-signal" class="link-option-status">Non collegato</span>
-        </div>
-        <div class="link-option">
-          <span class="link-option-name">WhatsApp</span>
-          <span id="link-status-whatsapp" class="link-option-status">Non collegato</span>
-        </div>
-        <div class="link-option">
-          <span class="link-option-name">Telegram</span>
-          <span id="link-status-telegram" class="link-option-status">Non collegato</span>
-        </div>
-        <div class="link-option link-option-openai">
-          <label class="link-option-name" for="openai-key-input">OpenAI Key</label>
-          <div class="link-key-controls">
-            <input id="openai-key-input" type="password" placeholder="sk-..." autocomplete="new-password">
-            <button id="save-openai-key" class="primary-button" type="button">Salva</button>
-            <button id="change-openai-key" class="primary-button" type="button" hidden>Cambia</button>
-          </div>
-          <span id="openai-key-status" class="link-option-status" aria-live="polite">Non configurata</span>
-        </div>
-        <div class="link-option link-option-token">
-          <label class="link-option-name" for="token-input">Token web</label>
-          <div class="link-key-controls">
-            <input id="token-input" type="password" placeholder="Bearer token" autocomplete="current-password">
-            <button id="save-token" class="primary-button" type="button">Salva</button>
-          </div>
-          <span id="token-error" class="link-option-status field-error" aria-live="polite" hidden>Token non valido. Riprova.</span>
-        </div>
-      </div>
-      <p class="dialog-copy link-dialog-note">Signal, WhatsApp e Telegram si collegano dalla TUI (Ctrl+L).</p>
-    </div>
-  </dialog>
-
   <dialog id="account-link-dialog" class="link-dialog">
     <div class="link-dialog-content">
       <div class="link-dialog-header">
@@ -384,15 +342,32 @@
             <button id="clear-message-cache" class="primary-button" type="button">Svuota</button>
           </div>
         </div>
+        <div class="link-option link-option-openai">
+          <label class="link-option-name" for="openai-key-input">OpenAI Key</label>
+          <div class="link-key-controls">
+            <input id="openai-key-input" type="password" placeholder="sk-..." autocomplete="new-password">
+            <button id="save-openai-key" class="primary-button" type="button">Salva</button>
+            <button id="change-openai-key" class="primary-button" type="button" hidden>Cambia</button>
+          </div>
+          <span id="openai-key-status" class="link-option-status" aria-live="polite">Non configurata</span>
+        </div>
+        <div class="link-option link-option-token">
+          <label class="link-option-name" for="token-input">Token web</label>
+          <div class="link-key-controls">
+            <input id="token-input" type="password" placeholder="Bearer token" autocomplete="current-password">
+            <button id="save-token" class="primary-button" type="button">Salva</button>
+          </div>
+          <span id="token-error" class="link-option-status field-error" aria-live="polite" hidden>Token non valido. Riprova.</span>
+        </div>
       </div>
-      <p class="dialog-copy link-dialog-note">I messaggi salvati restano su questo dispositivo: le chat si aprono subito e si leggono anche offline.</p>
+      <p class="dialog-copy link-dialog-note">I messaggi salvati restano su questo dispositivo: le chat si aprono subito e si leggono anche offline. Signal, WhatsApp e Telegram si collegano dalla TUI (Ctrl+L).</p>
     </div>
   </dialog>
 
   <script src="reconcile.js?v=9" defer></script>
   <script src="outbox.js?v=1" defer></script>
   <script src="message_cache.js?v=1" defer></script>
-  <script src="app.js?v=140" defer></script>
+  <script src="app.js?v=142" defer></script>
   <script src="gmail.js?v=29" defer></script>
 </body>
 </html>

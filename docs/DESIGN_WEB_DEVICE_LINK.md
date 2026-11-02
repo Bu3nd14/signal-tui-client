@@ -34,6 +34,10 @@ La Web UI ha già un modal `#link-dialog` "Collega backend"
 "si collegano dalla TUI (Ctrl+L)" (`index.html:128`). **Il modal va esteso,
 non creato da zero.**
 
+> Nota: il modal `#link-dialog` "Collega backend" non esiste più; il
+> collegamento account è in "Collega account", mentre OpenAI Key e Token web
+> sono in "Impostazioni" (`#settings-dialog`).
+
 ## 2. Obiettivi
 
 1. Collegare un nuovo account dai 3 protocolli interamente dal browser
