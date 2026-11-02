@@ -2344,7 +2344,25 @@ class WhatsAppBackend(ChatBackend):
             raise RuntimeError(
                 f"WhatsApp: chat {cid} non risolvibile a numero — impossibile inviare"
             )
+        self._register_send_alias(cid, phone)
         return f"{phone}@c.us"
+
+    def _register_send_alias(self, lid: str, phone: str) -> None:
+        """Alias ``{phone}@c.us → contatto @lid`` registrato subito dopo l'invio.
+
+        L'echo/ack del webhook torna con remoteJid ``@c.us``: senza alias il
+        core creerebbe un placeholder gemello e ingerirebbe la riga sotto
+        ``@c.us``, lasciando orfane le ricevute scoped ``@lid``.  ``setdefault``
+        rende la registrazione idempotente tra send concorrenti; il telefono è
+        già risolto fuori dai lock (nessuna rete qui dentro).
+        """
+        with ChatBackend._register_lock, self._contacts_lock:
+            contact = self._identify_contact(lid)
+            if contact is None:
+                return
+            if not contact.extras.get("phone"):
+                contact.extras["phone"] = phone
+            self._contacts_by_jid.setdefault(f"{phone}@c.us", contact)
 
     async def send_message(
         self,

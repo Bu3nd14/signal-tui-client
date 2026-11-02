@@ -26,7 +26,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models import PROTOCOL_WHATSAPP, ChatContact, contact_cache_key
+from models import PROTOCOL_WHATSAPP, ChatContact, ChatEvent, contact_cache_key
 from protocols.config import WHATSAPP_WEBHOOK_EVENTS, get_whatsapp_webhook_url
 from protocols.whatsapp import (
     WhatsAppBackend,
@@ -1510,6 +1510,138 @@ class TestWhatsAppBackend:
         with patch.object(backend, "_lid_resolve_remote") as resolve_remote:
             assert backend._resolve_send_chat_id("139153@lid") == "393331234567@c.us"
         resolve_remote.assert_not_called()
+
+    def _lid_contact(self, backend, lid="139153@lid", phone=None):
+        extras = {"jid": lid}
+        if phone:
+            extras["phone"] = phone
+        contact = ChatContact(
+            id=lid,
+            display_name="Bob",
+            protocol=PROTOCOL_WHATSAPP,
+            extras=extras,
+        )
+        backend.contacts = [contact]
+        backend._contacts_by_jid = {lid: contact}
+        return contact
+
+    def test_resolve_send_chat_id_registers_reverse_alias_from_cache(self):
+        backend = _make_backend()
+        backend._lid_map = {
+            "139153@lid": {"phone": "393331234567", "resolved_at": int(time.time())}
+        }
+        contact = self._lid_contact(backend)
+
+        assert backend._resolve_send_chat_id("139153@lid") == "393331234567@c.us"
+        assert contact.extras["phone"] == "393331234567"
+        assert backend._contacts_by_jid["393331234567@c.us"] is contact
+
+    def test_resolve_send_chat_id_registers_reverse_alias_from_remote(self):
+        backend = _make_backend()
+        contact = self._lid_contact(backend)
+        with (
+            patch.object(backend, "_lid_lookup", return_value=None),
+            patch.object(
+                backend, "_lid_resolve_remote", return_value="393331234567"
+            ) as resolve_remote,
+        ):
+            assert backend._resolve_send_chat_id("139153@lid") == "393331234567@c.us"
+        resolve_remote.assert_called_once_with("139153@lid")
+        assert contact.extras["phone"] == "393331234567"
+        assert backend._contacts_by_jid["393331234567@c.us"] is contact
+
+    def test_resolve_send_chat_id_leaves_c_us_chats_untouched(self):
+        backend = _make_backend()
+        contact = self._lid_contact(backend, lid="393331234567@c.us")
+
+        assert backend._resolve_send_chat_id("393331234567@c.us") == "393331234567@c.us"
+        assert "phone" not in contact.extras
+        assert backend._contacts_by_jid == {"393331234567@c.us": contact}
+
+    def test_resolve_send_chat_id_unresolvable_lid_raises_without_alias(self):
+        backend = _make_backend()
+        with (
+            patch.object(backend, "_lid_lookup", return_value=None),
+            patch.object(backend, "_lid_resolve_remote", return_value=None),
+            pytest.raises(RuntimeError, match="non risolvibile a numero"),
+        ):
+            backend._resolve_send_chat_id("139153@lid")
+        assert backend._contacts_by_jid == {}
+
+    def test_webhook_echo_c_us_after_send_resolves_to_lid_contact(self):
+        from server.bus import EventBus
+        from server.core import ChatCore
+
+        backend = _make_backend()
+        backend._rest = MagicMock()
+        backend._lid_map = {
+            "139153@lid": {"phone": "393331234567", "resolved_at": int(time.time())}
+        }
+        contact = self._lid_contact(backend)
+        backend.ingest_message = MagicMock(return_value=True)
+
+        assert backend._resolve_send_chat_id("139153@lid") == "393331234567@c.us"
+
+        core = ChatCore(EventBus())
+        core.manager = MagicMock()
+        core.manager.get.return_value = backend
+        event = ChatEvent(
+            type="message",
+            protocol=PROTOCOL_WHATSAPP,
+            contact_id="393331234567@c.us",
+            payload={
+                "id": "true_139153@lid_abc",
+                "text": "ciao",
+                "timestamp": 1,
+                "is_mine": True,
+            },
+        )
+        core.process(event)
+
+        backend.ingest_message.assert_called_once()
+        assert backend.ingest_message.call_args[0][0] == contact.id
+        assert backend.ingest_message.call_args[0][0] == "139153@lid"
+
+    def test_receipt_scoped_lid_matches_outgoing_row_after_send(self):
+        import protocols.db as db_module
+
+        backend = _make_backend()
+        backend._lid_map = {
+            "139153@lid": {"phone": "393331234567", "resolved_at": int(time.time())}
+        }
+        contact = self._lid_contact(backend)
+
+        assert backend._resolve_send_chat_id("139153@lid") == "393331234567@c.us"
+        echo_contact = backend._identify_contact("393331234567@c.us")
+        assert echo_contact is contact
+
+        with (
+            patch.object(backend, "_persist_message"),
+            patch.object(db_module, "_update_message_status_by_id"),
+        ):
+            assert (
+                backend.ingest_message(
+                    echo_contact.id,
+                    {
+                        "id": "true_139153@lid_abc",
+                        "text": "ciao",
+                        "is_mine": True,
+                        "timestamp": 1,
+                    },
+                    1,
+                )
+                is True
+            )
+            updated = backend.process_receipt(
+                {
+                    "contact_id": "139153@lid",
+                    "message_ids": ["abc"],
+                    "is_read": True,
+                }
+            )
+
+        assert [entry["status"] for entry in updated] == ["read"]
+        assert updated[0]["id"] == "true_139153@lid_abc"
 
     def test_unresolved_lid_never_reaches_send_request(self, tmp_path):
         backend = _make_backend()
