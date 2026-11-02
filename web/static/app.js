@@ -582,6 +582,9 @@ function syncProtocolTabs() {
     const next = connected[0] ?? null;
     if (next !== state.protocolFilter) {
       state.protocolFilter = next;
+      // Stesso motivo del click sui tab: la sotto-vista "Archiviate" non si
+      // eredita passando a un altro backend.
+      state.showArchived = false;
       if (next) localStorage.setItem(PROTOCOL_KEY, next);
       else localStorage.removeItem(PROTOCOL_KEY);
       changed = true;
@@ -4470,10 +4473,44 @@ if (vv) {
 elements.saveOpenaiKey.addEventListener("click", saveOpenaiKey);
 elements.changeOpenaiKey.addEventListener("click", enableOpenaiKeyEdit);
 
+// Ripristina lo stato statico della message-list (web/static/index.html):
+// il pannello thread torna a mostrare il placeholder "scegli una chat".
+function restoreEmptyThreadState() {
+  const empty = document.createElement("div");
+  empty.className = "empty-state";
+  const icon = document.createElement("span");
+  icon.className = "empty-icon";
+  icon.textContent = "◫";
+  const title = document.createElement("strong");
+  title.textContent = "Archivio in sola lettura";
+  const hint = document.createElement("p");
+  hint.textContent = "Scegli una chat per consultarne i messaggi e gli allegati.";
+  empty.append(icon, title, hint);
+  elements.messages.replaceChildren(empty);
+}
+
 function closeThreadView() {
   clearTelegramRefreshTimer();
-  elements.app.classList.remove("thread-open");
+  if (state.active) stashComposerDraft(state.active);
+  if (state.editing) cancelEdit();
+  cancelReply();
+  state.messageRequest?.abort();
+  state.messageRequest = null;
+  abortMediaRequests();
+  state.active = null;
+  state.messages = [];
+  state.messageNodes = new Map();
+  state.userScrolledUp = false;
   state.threadHistoryPushed = false;
+  elements.app.classList.remove("thread-open");
+  elements.composerShell.hidden = true;
+  elements.messageInput.value = "";
+  clearStagedAttachments();
+  renderThreadAvatar(null);
+  updateArchiveButton();
+  elements.threadName.textContent = "Reader web";
+  elements.threadMeta.textContent = "Seleziona una conversazione";
+  restoreEmptyThreadState();
 }
 
 document.querySelector("#back-button").addEventListener("click", () => {
@@ -4677,21 +4714,17 @@ if (elements.protocolTabs) {
     const tab = event.target.closest("[data-protocol]");
     if (!tab) return;
     const protocol = tab.dataset.protocol;
+    const switchingBackend = state.protocolFilter !== protocol;
     state.protocolFilter = protocol;
     localStorage.setItem(PROTOCOL_KEY, protocol);
-    if (state.active?.protocol !== protocol) {
-      // Primo contatto come appare nella lista (ordinata per last_message_ts),
-      // non il primo nell'ordine di inserimento dell'array. Le archiviate
-      // stanno dietro la riga "Archiviate", quindi si parte dalle altre.
-      state.showArchived = false;
-      const candidates = state.contacts
-        .filter((contact) => contact.protocol === protocol && !isArchived(contact))
-        .sort((a, b) => Number(b.last_message_ts || 0) - Number(a.last_message_ts || 0));
-      const firstContact = candidates[0];
-      if (firstContact) {
-        openThread(firstContact);
-        return;
-      }
+    // La sotto-vista "Archiviate" è un flag globale, non per backend: al
+    // cambio backend si riparte sempre dalla lista chat normale.
+    if (switchingBackend) state.showArchived = false;
+    if (state.active && state.active.protocol !== protocol) {
+      // Cambio backend con un thread aperto: si torna alla lista chat del
+      // nuovo backend senza aprirne automaticamente la prima conversazione.
+      if (state.threadHistoryPushed) history.back(); // popstate → closeThreadView()
+      else closeThreadView();
     }
     renderContacts();
   });

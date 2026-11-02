@@ -292,8 +292,11 @@ globalThis.markRead = () => {};
 globalThis.abortMediaRequests = () => {};
 globalThis.updateTelegramRefreshTimer = () => {};
 globalThis.clearTelegramRefreshTimer = () => {};
+globalThis.clearStagedAttachments = () => {};
+globalThis.updateArchiveButton = () => {};
+globalThis.restoreEmptyThreadState = () => {};
 globalThis.document = {
-  createElement: () => ({ className: "", textContent: "" }),
+  createElement: () => ({ className: "", textContent: "", append() {} }),
   querySelector: () => ({ addEventListener() {} }),
 };
 let threadOpenClass = false;
@@ -304,6 +307,7 @@ const appClasses = {
 };
 globalThis.elements = {
   threadName: {}, threadMeta: {}, app: { classList: appClasses }, composerShell: {},
+  messageInput: { value: "" },
   messages: { replaceChildren() {}, append() {} },
 };
 vm.runInThisContext(app.slice(openStart, openEnd));
