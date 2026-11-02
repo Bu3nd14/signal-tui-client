@@ -1554,9 +1554,7 @@ class TestWhatsAppBackend:
         backend = _make_backend()
         contact = self._lid_contact(backend, lid="393331234567@c.us")
 
-        assert (
-            backend._resolve_send_chat_id("393331234567@c.us") == "393331234567@c.us"
-        )
+        assert backend._resolve_send_chat_id("393331234567@c.us") == "393331234567@c.us"
         assert "phone" not in contact.extras
         assert backend._contacts_by_jid == {"393331234567@c.us": contact}
 
